@@ -68,8 +68,9 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, permissions, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent }) {
+  constructor({ config, permissions, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks }) {
     this.config = config;
+    this.hooks = hooks;
     this.permissions = permissions;
     this.tools = tools;
     this.systemPrompt = systemPrompt; // string or () => string
@@ -123,8 +124,19 @@ export class Agent {
   async run(userContent, { signal } = {}) {
     let content = toBlocks(userContent);
     if (this.permissions.mode === 'plan' && !this.isSubagent) content = [...content, { type: 'text', text: PLAN_MODE_REMINDER }];
+    if (this.hooks?.has('UserPromptSubmit') && !this.isSubagent) {
+      const prompt = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      const h = await this.hooks.run('UserPromptSubmit', { prompt }, { cwd: this.cwd, signal });
+      for (const w of h.warnings) this.io.notice?.(w, 'warn');
+      if (h.blocked) {
+        this.io.notice?.(`Prompt blocked by hook: ${h.message}`, 'warn');
+        return { text: '', interrupted: false, rejected: true };
+      }
+      if (h.context.length) content = [...content, { type: 'text', text: `<system-reminder>${h.context.join('\n')}</system-reminder>` }];
+    }
     this.pushMessage({ role: 'user', content });
 
+    let stopHookRounds = 0;
     let continuations = 0;
     let compactedForError = false;
     let finalText = '';
@@ -171,6 +183,15 @@ export class Agent {
         if (queued.length) {
           this.pushMessage({ role: 'user', content: toQueuedBlocks(queued) });
           continue;
+        }
+        if (this.hooks?.has('Stop') && !this.isSubagent && stopHookRounds < 3) {
+          const h = await this.hooks.run('Stop', { stop_reason: stopReason }, { cwd: this.cwd, signal });
+          for (const w of h.warnings) this.io.notice?.(w, 'warn');
+          if (h.blocked) {
+            stopHookRounds++;
+            this.pushMessage({ role: 'user', content: [{ type: 'text', text: `<system-reminder>A Stop hook asked you to keep working:\n${h.message}</system-reminder>` }] });
+            continue;
+          }
         }
         return { text: finalText, interrupted: false };
       }
@@ -324,6 +345,16 @@ export class Agent {
       if (answer.mode) this.permissions.setMode(answer.mode);
     }
 
+    if (this.hooks?.has('PreToolUse')) {
+      const h = await this.hooks.run('PreToolUse', { tool_name: tool.name, tool_input: input }, { cwd: this.cwd, signal });
+      for (const w of h.warnings) this.io.notice?.(w, 'warn');
+      if (signal?.aborted) throw abortError();
+      if (h.blocked) {
+        this.io.toolRejected?.(tu, tool, h.message, this);
+        return fail(`Blocked by PreToolUse hook: ${h.message}`);
+      }
+    }
+
     this.toolUseCount++;
     const handle = this.io.toolStart?.(tu, tool, input, this) || {};
     ctx.onProgress = (p) => handle.progress?.(p);
@@ -338,7 +369,13 @@ export class Agent {
       result = { isError: true, content: `Error: ${err.message}` };
     }
     handle.done?.(result);
-    const content = typeof result.content === 'string' ? (result.content || '(no output)') : result.content;
+    let content = typeof result.content === 'string' ? (result.content || '(no output)') : result.content;
+    if (this.hooks?.has('PostToolUse')) {
+      const h = await this.hooks.run('PostToolUse', { tool_name: tool.name, tool_input: input, tool_response: typeof content === 'string' ? content.slice(0, 20_000) : '[non-text result]' }, { cwd: this.cwd, signal });
+      for (const w of h.warnings) this.io.notice?.(w, 'warn');
+      const extra = [...(h.blocked ? [h.message] : []), ...h.context].join('\n');
+      if (extra && typeof content === 'string') content += `\n\n<system-reminder>PostToolUse hook:\n${extra}</system-reminder>`;
+    }
     return {
       block: { type: 'tool_result', tool_use_id: tu.id, content, ...(result.isError ? { is_error: true } : {}) },
       stop: !!result.stopTurn,

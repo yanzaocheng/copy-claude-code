@@ -99,7 +99,7 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   if (fs.existsSync(dotEnvFile)) set(parseDotEnv(fs.readFileSync(dotEnvFile, 'utf8')), dotEnvFile);
 
   const files = settingsFiles(cwd);
-  const settings = { permissions: { allow: [], deny: [] }, mcpServers: {} };
+  const settings = { permissions: { allow: [], deny: [] }, mcpServers: {}, hooks: {} };
   for (const [scope, file] of Object.entries(files)) {
     const json = readJson(file);
     if (!json) continue;
@@ -110,6 +110,9 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
       if (json.permissions.defaultMode) settings.defaultMode = json.permissions.defaultMode;
     }
     if (json.mcpServers) Object.assign(settings.mcpServers, json.mcpServers);
+    for (const [event, entries] of Object.entries(json.hooks || {})) {
+      if (Array.isArray(entries)) (settings.hooks[event] ||= []).push(...entries);
+    }
     if (json.model) { env.ANTHROPIC_MODEL = json.model; sources.ANTHROPIC_MODEL = `${file} (model)`; }
     settings[scope] = json;
   }

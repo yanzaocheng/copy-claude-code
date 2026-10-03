@@ -4,6 +4,7 @@ import { GlobTool, GrepTool } from './search.js';
 import { makeWebFetchTool, WebSearchTool } from './web.js';
 import { TodoWriteTool, ExitPlanModeTool, AskUserQuestionTool } from './interaction.js';
 import { makeTaskTool } from './task.js';
+import { NotebookEditTool } from './notebook.js';
 
 // Build the full tool set for the main agent.
 export function buildTools(config, { agents, mcpTools = [] }) {
@@ -15,6 +16,7 @@ export function buildTools(config, { agents, mcpTools = [] }) {
     ReadTool,
     EditTool,
     WriteTool,
+    NotebookEditTool,
     makeWebFetchTool(config),
     WebSearchTool,
     TodoWriteTool,

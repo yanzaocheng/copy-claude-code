@@ -11,7 +11,7 @@ const MAX_LINE_CHARS = 2000;
 const MAX_OUTPUT_CHARS = 120_000;
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 
-function mtime(file) {
+export function mtime(file) {
   try { return fs.statSync(file).mtimeMs; } catch { return null; }
 }
 
@@ -130,7 +130,7 @@ Usage:
 };
 
 // Validate that a file may be written: it must have been read (fully) and be unchanged since.
-function checkFreshness(file, ctx) {
+export function checkFreshness(file, ctx) {
   const state = ctx.fileState.get(file);
   if (!state) return 'File has not been read yet. Read it first before writing to it.';
   const now = mtime(file);

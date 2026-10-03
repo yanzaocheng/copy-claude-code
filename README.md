@@ -69,7 +69,7 @@ ccc config set ANTHROPIC_MODEL deepseek-pro --project
 
 ## 功能
 
-**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`Glob`、`Grep`（有 ripgrep 用 rg，否则 JS 实现）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`ExitPlanMode`、`AskUserQuestion`，以及 MCP 工具。
+**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`Glob`、`Grep`（有 ripgrep 用 rg，否则 JS 实现）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`NotebookEdit`、`TodoWrite`、`Task`（子 agent）、`ExitPlanMode`、`AskUserQuestion`，以及 MCP 工具。
 
 **交互**
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
@@ -114,6 +114,32 @@ ccc --dangerously-skip-permissions        # 本次会话；加 -c 可接着上�
 
 以 bypass 模式启动后，`shift+tab` 可以在 default → acceptEdits → plan → bypass 之间来回切换。
 
+## claude-pro：用本地订阅登录的官方 CLI
+
+`claude-pro` 是一个启动器：它运行官方 `claude` 命令，由官方 CLI 自己使用本机已登录的订阅账号（在 `claude` 里 `/login` 过一次即可），本项目**不读取、不保存**任何登录凭据。在此之上加了 pro 默认值：
+
+- 默认 `--dangerously-skip-permissions`（不再逐个确认；加 `--safe` 恢复确认）
+- 追加一段偏自主执行、先验证再汇报的系统提示（`src/pro-prompt.js`；个人补充写在 `~/.ccc/claude-pro.md`）
+- 从子进程环境里去掉 `ANTHROPIC_BASE_URL` / 密钥 / 模型覆盖等变量，避免误走第三方端点（`--keep-env` 可保留）
+
+```bash
+npm link                      # 同时注册 ccc 和 claude-pro
+claude-pro                    # 交互模式
+claude-pro -c                 # 继续上一次会话
+claude-pro -p "解释一下 src/agent.js"
+claude-pro --which            # 查看实际调用的 claude 可执行文件
+```
+
+其余参数原样传给 `claude`。`ccc` 仍然是走 `.env` 里 API 配置（如 DeepSeek）的独立实现。
+
+## Hooks
+
+`settings.json` 里的 `hooks` 与 Claude Code 同形：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`。事件内容以 JSON 放在环境变量 `CCC_HOOK_INPUT`；退出码 0 = 通过（stdout 作为附加上下文），2 = 拦截（stderr 反馈给模型；`Stop` 则让模型继续干活），其他 = 仅警告。
+
+```json
+{ "hooks": { "PostToolUse": [ { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "npm test --silent" } ] } ] } }
+```
+
 ## 非交互模式
 
 ```bash
@@ -151,6 +177,7 @@ npm test                     # 单元测试（node:test）
 
 ```
 bin/ccc.js            入口
+bin/claude-pro.js     官方 claude CLI 启动器（本地订阅登录）
 src/main.js           参数解析、config 子命令
 src/config.js         配置加载（.env / settings.json / 环境变量）与模型解析
 src/api.js            Anthropic SDK 封装：流式、重试、effort/thinking 参数
@@ -158,6 +185,7 @@ src/agent.js          Agent 循环：工具调度、并行只读工具、中断�
 src/permissions.js    权限模式与规则
 src/prompts.js        系统提示词、压缩提示词
 src/tools/*           各工具实现
+src/hooks.js          Hooks 运行器
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
 src/commands.js       斜杠命令
@@ -165,6 +193,6 @@ src/commands.js       斜杠命令
 
 ## 与 Claude Code 的差异
 
-未实现：hooks、IDE 集成、`/login` 等账号功能、NotebookEdit。
+未实现：IDE 集成、`/login` 等账号功能。
 
 提示：选中文字自动复制是终端的功能。Windows Terminal 在设置里打开“选择时自动复制”（settings.json 里的 `"copyOnSelect": true`）即可。WebSearch 通过抓取 DuckDuckGo/Bing 实现（DeepSeek 没有服务端搜索工具）。

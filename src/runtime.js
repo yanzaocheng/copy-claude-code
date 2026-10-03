@@ -8,6 +8,7 @@ import { findShell } from './utils/shell.js';
 import { mainSystemPrompt, subagentSystemPrompt } from './prompts.js';
 import { Agent } from './agent.js';
 import { McpManager } from './mcp.js';
+import { HookRunner } from './hooks.js';
 
 export async function createRuntime({ cwd, flags = {}, io }) {
   const config = loadConfig({ cwd, flags });
@@ -22,7 +23,8 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   if (!flags.noMcp) await mcp.start((msg) => io.notice?.(msg, 'warn'));
   const shell = findShell(config);
 
-  const runtime = { config, permissions, agents, mcp, shell, io, cwd };
+  const hooks = new HookRunner(config);
+  const runtime = { config, permissions, agents, mcp, shell, io, cwd, hooks };
   runtime.tools = buildTools(config, { agents, mcpTools: mcp.tools() });
 
   let promptCache = null;
@@ -47,6 +49,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       isSubagent: true,
       cwd: ctx.cwd,
       name: def.name,
+      hooks,
     });
     const result = await sub.run(prompt, { signal: ctx.signal });
     if (result.interrupted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
@@ -62,6 +65,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     model: () => config.mainModel,
     cwd,
     spawnSubagent: runtime.spawnSubagent,
+    hooks,
   });
   return runtime;
 }
