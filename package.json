@@ -1,7 +1,7 @@
 {
   "name": "copy-claude-code",
-  "version": "0.3.0",
-  "description": "claude-pro: runs the official claude CLI with local subscription login and pro defaults (no permission prompts, autonomous system prompt).",
+  "version": "0.4.0",
+  "description": "claude-pro: a self-implemented Claude Code style coding agent for any Anthropic-compatible API. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
   "bin": {
     "claude-pro": "bin/claude-pro.js"
@@ -11,8 +11,14 @@
     "test": "node --test \"test/**/*.test.js\""
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "license": "UNLICENSED",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0"
+  },
+  "devDependencies": {
+    "@xterm/headless": "^6.0.0"
+  },
   "private": true
 }

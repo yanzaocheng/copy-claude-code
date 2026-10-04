@@ -1,0 +1,94 @@
+// Gathers the environment context that goes into the system prompt: platform, git
+// status and memory files (CLAUDE.md / AGENTS.md), like Claude Code.
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { run } from './utils/shell.js';
+import { CONFIG_DIR } from './config.js';
+
+export function gitInfo(cwd) {
+  const inside = run('git', ['rev-parse', '--is-inside-work-tree'], { cwd });
+  if (inside !== 'true') return null;
+  const branch = run('git', ['branch', '--show-current'], { cwd }) || '(detached)';
+  let main = null;
+  for (const b of ['main', 'master']) if (run('git', ['rev-parse', '--verify', '--quiet', b], { cwd }) !== null) { main = b; break; }
+  let status = run('git', ['status', '--short'], { cwd }) || '';
+  const statusLines = status.split('\n');
+  if (statusLines.length > 40) status = statusLines.slice(0, 40).join('\n') + `\n... (${statusLines.length - 40} more lines, run "git status" for the rest)`;
+  const log = run('git', ['log', '--oneline', '-n', '5'], { cwd }) || '';
+  const user = run('git', ['config', 'user.name'], { cwd });
+  return { branch, main, status, log, user };
+}
+
+// Memory files, lowest priority first: user memory, then project files from the
+// filesystem root down to cwd, then local (untracked) files.
+export function memoryFiles(cwd) {
+  const files = [];
+  const add = (file, scope) => {
+    try {
+      const text = fs.readFileSync(file, 'utf8').trim();
+      if (text) files.push({ file, scope, text });
+    } catch { /* missing */ }
+  };
+  add(path.join(CONFIG_DIR, 'CLAUDE.md'), 'user');
+  const dirs = [];
+  let dir = path.resolve(cwd);
+  for (;;) {
+    dirs.unshift(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  for (const d of dirs) {
+    if (d === os.homedir()) continue; // home is covered by the user memory
+    add(path.join(d, 'CLAUDE.md'), 'project');
+    add(path.join(d, '.claude', 'CLAUDE.md'), 'project');
+    add(path.join(d, 'AGENTS.md'), 'project');
+    add(path.join(d, 'CLAUDE.local.md'), 'local');
+  }
+  return files;
+}
+
+const MEMORY_INDEX_MAX_LINES = 200;
+
+// The auto-memory index (MEMORY.md) that is loaded into every session's system prompt.
+export function loadAutoMemoryIndex(dir) {
+  let text = '';
+  try { text = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8').trim(); } catch { return ''; }
+  const lines = text.split(/\r?\n/);
+  if (lines.length <= MEMORY_INDEX_MAX_LINES) return text;
+  return `${lines.slice(0, MEMORY_INDEX_MAX_LINES).join('\n')}\n(… ${lines.length - MEMORY_INDEX_MAX_LINES} more lines not loaded; MEMORY.md should stay under ${MEMORY_INDEX_MAX_LINES} lines — consolidate it.)`;
+}
+
+// Memory files (excluding the index) in the auto-memory directory.
+export function listAutoMemories(dir) {
+  try { return fs.readdirSync(dir).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md'); } catch { return []; }
+}
+
+export function projectMemoryFile(cwd) {
+  return path.join(cwd, 'CLAUDE.md');
+}
+
+export function environmentBlock(cwd, { model, shellName }) {
+  const git = gitInfo(cwd);
+  const lines = [
+    '<env>',
+    `Working directory: ${cwd}`,
+    `Is directory a git repo: ${git ? 'Yes' : 'No'}`,
+    `Platform: ${process.platform}`,
+    `Shell: ${shellName}`,
+    `OS Version: ${os.type()} ${os.release()}`,
+    `Today's date: ${new Date().toISOString().slice(0, 10)}`,
+    '</env>',
+    `You are powered by the model ${model.id}.`,
+  ];
+  if (git) {
+    lines.push('', 'gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.');
+    lines.push(`Current branch: ${git.branch}`);
+    if (git.main) lines.push(`Main branch (you will usually use this for PRs): ${git.main}`);
+    if (git.user) lines.push(`Git user: ${git.user}`);
+    lines.push('', `Status:\n${git.status || '(clean)'}`, '', `Recent commits:\n${git.log || '(none)'}`);
+  }
+  return lines.join('\n');
+}

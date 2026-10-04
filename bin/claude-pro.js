@@ -1,13 +1,16 @@
 #!/usr/bin/env node
-// Entry point for the claude-pro command; see src/launcher.js.
+import { main } from '../src/main.js';
 
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { main } from '../src/launcher.js';
-
-if (parseInt(process.versions.node, 10) < 18) {
-  process.stderr.write(`claude-pro requires Node.js 18 or newer (found ${process.versions.node}).\n`);
+const major = parseInt(process.versions.node, 10);
+if (major < 22) {
+  process.stderr.write(`claude-pro requires Node.js 22 or newer (found ${process.versions.node}).\n`);
   process.exit(1);
 }
 
-main(process.argv.slice(2), { self: fs.realpathSync(fileURLToPath(import.meta.url)) });
+main(process.argv.slice(2)).then(
+  (code) => { process.exitCode = code ?? 0; },
+  (err) => {
+    process.stderr.write(`Fatal: ${err?.stack || err}\n`);
+    process.exit(1);
+  },
+);
