@@ -1,25 +1,18 @@
 {
   "name": "copy-claude-code",
-  "version": "0.2.0",
-  "description": "ccc: a Claude Code style agentic coding CLI for any Anthropic-compatible API (e.g. DeepSeek), plus claude-pro: a launcher that runs the official claude CLI with local subscription login and pro defaults.",
+  "version": "0.3.0",
+  "description": "claude-pro: runs the official claude CLI with local subscription login and pro defaults (no permission prompts, autonomous system prompt).",
   "type": "module",
   "bin": {
-    "ccc": "bin/ccc.js",
     "claude-pro": "bin/claude-pro.js"
   },
   "scripts": {
-    "start": "node bin/ccc.js",
+    "start": "node bin/claude-pro.js",
     "test": "node --test \"test/**/*.test.js\""
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=18"
   },
   "license": "UNLICENSED",
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.128.0"
-  },
-  "devDependencies": {
-    "@xterm/headless": "^6.0.0"
-  },
   "private": true
 }
