@@ -19,6 +19,7 @@ Options:
   --allowedTools <rules...>        Allow rules, e.g. "Bash(git:*)" "Edit"
   --disallowedTools <rules...>     Deny rules
   --output-format <format>         text | json | stream-json (with --print)
+  --verify <command>               After the agent edits files, run this (e.g. "npm test") and send failures back to fix
   --append-system-prompt <text>    Append text to the system prompt
   --system-prompt <text>           Replace the system prompt
   --verbose                        Show thinking and full tool output
@@ -59,6 +60,7 @@ function parseArgs(argv) {
       case '--allowedTools': case '--allowed-tools': list('allowedTools'); break;
       case '--disallowedTools': case '--disallowed-tools': list('disallowedTools'); break;
       case '--output-format': flags.outputFormat = next(); break;
+      case '--verify': flags.verify = next(); break;
       case '--append-system-prompt': flags.appendSystemPrompt = next(); break;
       case '--system-prompt': flags.systemPrompt = next(); break;
       case '--verbose': flags.verbose = true; break;

@@ -148,6 +148,7 @@ export class PermissionManager {
     this.allow = [...config.settings.permissions.allow];
     this.deny = [...config.settings.permissions.deny];
     this.listeners = new Set();
+    this.autoAllowDirs = []; // file edits inside these never ask (e.g. the auto-memory directory)
   }
 
   setMode(mode) {
@@ -219,6 +220,7 @@ export class PermissionManager {
     if (this.allow.some((r) => this.ruleMatches(r, tool, input, ctx))) return { behavior: 'allow' };
     if (tool.editsFiles) {
       const file = tool.filePath?.(input, ctx);
+      if (file && this.autoAllowDirs.some((d) => isInside(file, d))) return { behavior: 'allow' };
       if (this.mode === 'acceptEdits' && file && isInside(file, this.root)) return { behavior: 'allow' };
       return { behavior: 'ask' };
     }

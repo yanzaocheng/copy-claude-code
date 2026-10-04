@@ -7,7 +7,7 @@ import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { SessionStore } from './session.js';
-import { memoryFiles } from './context.js';
+import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
 import { loadCustomCommands } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
@@ -262,10 +262,47 @@ export function buildCommands(app) {
 
   add({
     name: 'memory',
-    description: 'Show memory files (CLAUDE.md); use # to add memories',
+    description: 'Show memory files (CLAUDE.md and auto memory); use # to add memories',
     run() {
       const mem = memoryFiles(app.cwd);
-      out(mem.length ? mem.map((m) => `${m.file} ${c.dim(`(${m.scope}, ${m.text.split('\n').length} lines)`)}`) : [c.dim('No memory files. Start a message with # to save a memory, or run /init.')]);
+      const lines = mem.length ? mem.map((m) => `${m.file} ${c.dim(`(${m.scope}, ${m.text.split('\n').length} lines)`)}`) : [c.dim('No CLAUDE.md files. Start a message with # to save one, or run /init.')];
+      if (app.runtime.config.autoMemoryEnabled) {
+        const files = listAutoMemories(app.runtime.memoryDir);
+        lines.push('', `Auto memory: ${app.runtime.memoryDir} ${c.dim(`(${files.length} memor${files.length === 1 ? 'y' : 'ies'}; the agent maintains these itself)`)}`);
+        lines.push(...files.slice(0, 30).map((f) => c.dim(`  ${f}`)));
+        if (files.length > 30) lines.push(c.dim(`  … +${files.length - 30} more`));
+      } else {
+        lines.push('', c.dim('Auto memory is off (CCC_DISABLE_AUTO_MEMORY).'));
+      }
+      out(lines);
+    },
+  });
+
+  add({
+    name: 'verify',
+    argHint: '[command|off]',
+    description: 'Run a command (e.g. npm test) after turns that edit files; failures go back to the agent',
+    run(args) {
+      const cfg = app.runtime.config;
+      if (args.trim()) cfg.verifyOverride = args.trim();
+      out(cfg.verifyCommand
+        ? `Verify command: ${c.bold(cfg.verifyCommand)} ${c.dim(`(up to ${cfg.verifyMaxRounds} fix rounds; /verify off to disable)`)}`
+        : c.dim('Verification is off. Turn it on with /verify <command>, --verify <command> or CCC_VERIFY_COMMAND.'));
+    },
+  });
+
+  add({
+    name: 'tasks',
+    argHint: '[kill ID]',
+    description: 'List background agents, or stop one',
+    run(args) {
+      const tasks = app.runtime.tasks;
+      const [action, id] = args.split(/\s+/).filter(Boolean);
+      if (action === 'kill' && id) { out(tasks.kill(id) ? `Stopping ${c.bold(id)}` : c.red(`${id} is not running`)); return; }
+      const list = tasks.list();
+      out(list.length
+        ? list.map((t) => `${c.bold(t.id)} ${t.status === 'running' ? c.yellow(t.status) : t.status === 'completed' ? c.green(t.status) : c.red(t.status)} ${c.dim(`${t.subagentType} · ${formatDuration((t.ended || Date.now()) - t.started)}`)} ${truncate(t.description, 60)}`)
+        : [c.dim('No background agents. The agent starts them with Task run_in_background.')]);
     },
   });
 

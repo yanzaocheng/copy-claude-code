@@ -82,11 +82,19 @@ ccc config set ANTHROPIC_MODEL deepseek-pro --project
 - 上下文用量接近阈值时自动压缩（`CLAUDE_CODE_AUTO_COMPACT_WINDOW`），也可手动 `/compact`
 - 会话自动保存到 `~/.ccc/projects/`，`ccc -c` 继续上次，`ccc -r` 选择历史会话
 
-**斜杠命令**：`/help` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/permissions` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.ccc/commands/*.md`、`~/.ccc/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/permissions` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.ccc/commands/*.md`、`~/.ccc/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.ccc/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `AGENTS.md` / `CLAUDE.local.md`。
 
+**自动记忆（跨会话）**：每个项目有一个由 agent 自己维护的记忆目录 `~/.ccc/projects/<项目>/memory/`。它会把你的偏好、纠正过的做法、项目约束等写成一条条小文件，并在 `MEMORY.md` 里建索引；每次新会话开始时索引自动载入。直接说"记住……"或"忘掉……"即可。写这个目录永远不弹确认；`/memory` 查看；`CCC_DISABLE_AUTO_MEMORY=1` 关闭。
+
 **子 agent**：内置 `general-purpose`、`Explore`、`Plan`；自定义 agent 放在 `.claude/agents/*.md` 或 `~/.ccc/agents/*.md`（frontmatter：`name`、`description`、`tools`、`model`）。
+
+**后台子 agent**：模型可以用 `Task` 的 `run_in_background: true` 把子 agent 放到后台，自己继续干别的。子 agent 完成后，结果会作为 `<task-notification>` 自动送回；如果当时主 agent 空闲，会自动开启新的一轮来处理结果。`TaskOutput` 用于提前等待结果，`TaskStop` 用于取消；`/tasks` 列出所有后台 agent，`/tasks kill agent_1` 停止其中一个。`-p` 模式会等所有后台 agent 结束后再退出。
+
+**自动验证循环**：设置一条验证命令（`--verify "npm test"`、会话中 `/verify npm test`，或 `CCC_VERIFY_COMMAND`）后，只要某一轮改过文件，模型结束前就会自动运行这条命令。失败的输出会发回给模型继续修复，直到通过，最多 `CCC_VERIFY_MAX_ROUNDS` 轮（默认 3）。没有改文件的轮次不会触发验证。
+
+**大输出落盘**：工具结果超过 `CCC_MAX_TOOL_RESULT_CHARS`（默认 50000 字符）时，全文会保存到 `~/.ccc/projects/<项目>/tool-results/`，只把预览和文件路径发给模型，模型可以再用 `Read`/`Grep` 按需查看。Bash 输出被截断时同样会保存全文。超过 7 天的旧文件在启动时自动清理。
 
 **MCP**：项目 `.mcp.json` 或 settings 中的 `mcpServers`，支持 stdio 和 streamable HTTP：
 
@@ -186,6 +194,7 @@ src/permissions.js    权限模式与规则
 src/prompts.js        系统提示词、压缩提示词
 src/tools/*           各工具实现
 src/hooks.js          Hooks 运行器
+src/tasks.js          后台子 agent 注册表与完成通知
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
 src/commands.js       斜杠命令

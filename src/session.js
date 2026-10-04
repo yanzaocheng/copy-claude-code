@@ -12,6 +12,28 @@ export function projectDir(cwd) {
   return path.join(CONFIG_DIR, 'projects', name);
 }
 
+// Where oversized tool output is saved (see persistLargeOutput in agent.js).
+export function toolResultsDir(cwd) {
+  return path.join(projectDir(cwd), 'tool-results');
+}
+
+// Delete saved tool output older than maxAgeMs (best effort, run at startup).
+export function pruneToolResults(cwd, maxAgeMs = 7 * 24 * 3600_000) {
+  const dir = toolResultsDir(cwd);
+  let entries = [];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const name of entries) {
+    const file = path.join(dir, name);
+    try { if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+  }
+}
+
+// Persistent, model-maintained memory for this project (MEMORY.md + topic files).
+export function autoMemoryDir(cwd) {
+  return path.join(projectDir(cwd), 'memory');
+}
+
 export class SessionStore {
   constructor(cwd, id = crypto.randomUUID()) {
     this.cwd = cwd;

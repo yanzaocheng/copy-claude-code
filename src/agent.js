@@ -1,8 +1,11 @@
 // The agent loop: send the conversation, stream the reply, run requested tools,
 // feed results back, repeat until the model stops asking for tools.
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
 import { compactPrompt, continuationMessage, PLAN_MODE_REMINDER } from './prompts.js';
+import { toolResultsDir } from './session.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -22,6 +25,26 @@ export function estimateTokens(value) {
   for (let i = 0; i < (s || '').length; i++) (s.charCodeAt(i) < 128 ? ascii++ : other++);
   return Math.ceil(ascii / 4 + other * 0.8) + images * IMAGE_TOKENS;
 }
+
+const PREVIEW_CHARS = 2000;
+
+// A tool result too large to send in full is saved to a file; the model gets a preview and the
+// path, and can page through the file with Read/Grep. Returns the text to send instead.
+export function persistLargeOutput(root, id, text) {
+  let file = null;
+  try {
+    const dir = toolResultsDir(root);
+    fs.mkdirSync(dir, { recursive: true });
+    file = path.join(dir, `${String(id).replace(/[^\w-]/g, '_')}.txt`);
+    fs.writeFileSync(file, text);
+  } catch { file = null; }
+  const kb = (text.length / 1024).toFixed(1);
+  const preview = text.slice(0, PREVIEW_CHARS);
+  if (!file) return `${text.slice(0, 20_000)}\n\n[Output truncated: ${kb}KB total; it could not be saved to a file.]`;
+  return `<persisted-output>\nOutput too large (${kb}KB). Full output saved to: ${file}\nUse Read with offset/limit, or Grep, on that file to see what you need.\n\nPreview (first ${PREVIEW_CHARS / 1000}KB):\n${preview}\n...\n</persisted-output>`;
+}
+
+const notificationBlocks = (notes) => notes.map((n) => ({ type: 'text', text: n.text }));
 
 // Queued input may arrive as plain strings or as ready-made content blocks (text + images).
 const toQueuedBlocks = (items) => items.map((q) => (typeof q === 'string' ? { type: 'text', text: q } : q));
@@ -68,9 +91,12 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, permissions, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks }) {
+  constructor({ config, permissions, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks }) {
     this.config = config;
     this.hooks = hooks;
+    this.tasks = tasks; // background tasks (sub-agents started with run_in_background)
+    this.notifications = []; // {taskId, text} waiting to be shown to the model
+    this.editsThisRun = 0; // successful file edits since the last verification
     this.permissions = permissions;
     this.tools = tools;
     this.systemPrompt = systemPrompt; // string or () => string
@@ -111,6 +137,11 @@ export class Agent {
     this.io.messagesReplaced?.(messages, this);
   }
 
+  // Take pending background-task notifications as content blocks.
+  drainNotifications() {
+    return notificationBlocks(this.notifications.splice(0));
+  }
+
   resetConversation() {
     this.replaceMessages([]);
     this.todos = [];
@@ -134,8 +165,11 @@ export class Agent {
       }
       if (h.context.length) content = [...content, { type: 'text', text: `<system-reminder>${h.context.join('\n')}</system-reminder>` }];
     }
+    if (!this.isSubagent) content = [...content, ...this.drainNotifications()];
     this.pushMessage({ role: 'user', content });
 
+    this.editsThisRun = 0;
+    let verifyRounds = 0;
     let stopHookRounds = 0;
     let continuations = 0;
     let compactedForError = false;
@@ -179,10 +213,24 @@ export class Agent {
           this.pushMessage({ role: 'user', content: [{ type: 'text', text: '<system-reminder>Your previous response was cut off because it reached the maximum output length. Continue exactly where you left off, without repeating what you already wrote.</system-reminder>' }] });
           continue;
         }
-        const queued = this.io.takeQueued?.() || [];
+        const queued = [...toQueuedBlocks(this.io.takeQueued?.() || []), ...(this.isSubagent ? [] : this.drainNotifications())];
         if (queued.length) {
-          this.pushMessage({ role: 'user', content: toQueuedBlocks(queued) });
+          this.pushMessage({ role: 'user', content: queued });
           continue;
+        }
+        const verify = this.config.verifyCommand;
+        if (verify && !this.isSubagent && this.editsThisRun > 0) {
+          this.editsThisRun = 0;
+          const v = await this.runVerify(verify, signal);
+          if (signal?.aborted) return this.handleInterrupt(null);
+          if (!v.ok) {
+            if (verifyRounds < this.config.verifyMaxRounds) {
+              verifyRounds++;
+              this.pushMessage({ role: 'user', content: [{ type: 'text', text: `<system-reminder>You edited files, so the verification command \`${verify}\` was run automatically, and it failed (attempt ${verifyRounds} of ${this.config.verifyMaxRounds}). Fix the cause and do not stop until it passes; if the failure is unrelated to your change or cannot be fixed, explain why.\n\n${v.output}</system-reminder>` }] });
+              continue;
+            }
+            this.io.notice?.(`Verification still failing after ${verifyRounds} fix attempts: ${verify}`, 'warn');
+          }
         }
         if (this.hooks?.has('Stop') && !this.isSubagent && stopHookRounds < 3) {
           const h = await this.hooks.run('Stop', { stop_reason: stopReason }, { cwd: this.cwd, signal });
@@ -200,6 +248,7 @@ export class Agent {
       const resultContent = [...outcome.results];
       const queued = this.io.takeQueued?.() || [];
       resultContent.push(...toQueuedBlocks(queued));
+      if (!this.isSubagent) resultContent.push(...this.drainNotifications());
       if (outcome.interrupted) {
         resultContent.push({ type: 'text', text: INTERRUPT_TOOL_MESSAGE });
         this.pushMessage({ role: 'user', content: resultContent });
@@ -223,6 +272,29 @@ export class Agent {
   handleInterrupt() {
     this.pushMessage({ role: 'user', content: [{ type: 'text', text: INTERRUPT_MESSAGE }] });
     return { text: '', interrupted: true };
+  }
+
+  // Run the verification command in the project root with the Bash tool. Returns {ok, output}.
+  async runVerify(command, signal) {
+    const bash = this.tools.find((t) => t.name === 'Bash');
+    if (!bash) return { ok: true, output: '' };
+    const tool = { name: 'Verify', summarize: () => command };
+    const input = { command, timeout: this.config.bashMaxTimeout };
+    const handle = this.io.toolStart?.({ id: `verify_${Date.now()}`, name: 'Verify', input }, tool, input, this) || {};
+    const ctx = { ...this.makeCtx(signal), cwd: this.projectRoot, setCwd() {} };
+    ctx.onProgress = (p) => handle.progress?.(p);
+    let result;
+    try {
+      result = await bash.call(input, ctx);
+    } catch (err) {
+      handle.done?.({ isError: true, content: 'Interrupted', interrupted: true });
+      if (isAbort(err) || signal?.aborted) return { ok: true, output: '' };
+      return { ok: false, output: `Error: ${err.message}` };
+    }
+    const output = typeof result.content === 'string' ? result.content : '';
+    const ok = !result.isError;
+    handle.done?.({ ...result, display: { summary: ok ? 'Verification passed' : undefined } });
+    return { ok, output: output.length > 15_000 ? `${output.slice(0, 3000)}\n...\n${output.slice(-12_000)}` : output };
   }
 
   async callModel(signal) {
@@ -260,6 +332,7 @@ export class Agent {
       io: this.io,
       onProgress,
       spawnSubagent: this.spawnSubagent,
+      tasks: this.tasks,
     };
   }
 
@@ -376,6 +449,10 @@ export class Agent {
       const extra = [...(h.blocked ? [h.message] : []), ...h.context].join('\n');
       if (extra && typeof content === 'string') content += `\n\n<system-reminder>PostToolUse hook:\n${extra}</system-reminder>`;
     }
+    if (typeof content === 'string' && tool.name !== 'Read' && content.length > this.config.maxToolResultChars) {
+      content = persistLargeOutput(this.projectRoot, tu.id, content);
+    }
+    if (tool.editsFiles && !result.isError) this.editsThisRun++;
     return {
       block: { type: 'tool_result', tool_use_id: tu.id, content, ...(result.isError ? { is_error: true } : {}) },
       stop: !!result.stopTurn,

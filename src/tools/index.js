@@ -3,13 +3,15 @@ import { makeBashTool, BashOutputTool, KillShellTool } from './bash.js';
 import { GlobTool, GrepTool } from './search.js';
 import { makeWebFetchTool, WebSearchTool } from './web.js';
 import { TodoWriteTool, ExitPlanModeTool, AskUserQuestionTool } from './interaction.js';
-import { makeTaskTool } from './task.js';
+import { makeTaskTool, TaskOutputTool, TaskStopTool } from './task.js';
 import { NotebookEditTool } from './notebook.js';
 
 // Build the full tool set for the main agent.
 export function buildTools(config, { agents, mcpTools = [] }) {
   return [
     makeTaskTool(agents),
+    TaskOutputTool,
+    TaskStopTool,
     makeBashTool(config),
     GlobTool,
     GrepTool,
@@ -28,7 +30,7 @@ export function buildTools(config, { agents, mcpTools = [] }) {
   ];
 }
 
-const NEVER_FOR_SUBAGENTS = new Set(['Task', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion']);
+const NEVER_FOR_SUBAGENTS = new Set(['Task', 'TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion']);
 
 export function toolsForSubagent(allTools, def) {
   const base = allTools.filter((t) => !NEVER_FOR_SUBAGENTS.has(t.name));

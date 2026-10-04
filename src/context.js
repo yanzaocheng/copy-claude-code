@@ -50,6 +50,22 @@ export function memoryFiles(cwd) {
   return files;
 }
 
+const MEMORY_INDEX_MAX_LINES = 200;
+
+// The auto-memory index (MEMORY.md) that is loaded into every session's system prompt.
+export function loadAutoMemoryIndex(dir) {
+  let text = '';
+  try { text = fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8').trim(); } catch { return ''; }
+  const lines = text.split(/\r?\n/);
+  if (lines.length <= MEMORY_INDEX_MAX_LINES) return text;
+  return `${lines.slice(0, MEMORY_INDEX_MAX_LINES).join('\n')}\n(… ${lines.length - MEMORY_INDEX_MAX_LINES} more lines not loaded; MEMORY.md should stay under ${MEMORY_INDEX_MAX_LINES} lines — consolidate it.)`;
+}
+
+// Memory files (excluding the index) in the auto-memory directory.
+export function listAutoMemories(dir) {
+  try { return fs.readdirSync(dir).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md'); } catch { return []; }
+}
+
 export function projectMemoryFile(cwd) {
   return path.join(cwd, 'CLAUDE.md');
 }

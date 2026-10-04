@@ -189,6 +189,7 @@ export class App {
     this.controller?.abort();
     clearInterval(this.spinnerTimer);
     shutdownBackgroundShells();
+    this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
     const u = this.agent?.usage;
     if (u && u.requests) {
@@ -442,7 +443,20 @@ export class App {
     if (this.queue.length && !this.exiting) {
       const next = this.queue.splice(0);
       this.startTurn(next.map((q) => q.text).join('\n\n'), { images: next.flatMap((q) => q.images) });
+    } else if (this.agent.notifications.length && !this.exiting) {
+      // A background agent finished after the turn's last check: report it now.
+      this.runAgent(this.agent.drainNotifications());
     }
+  }
+
+  // A background agent ended. If nothing is running, start a turn so the model sees its
+  // report right away; otherwise the running turn picks it up at its next step.
+  backgroundTaskDone(task) {
+    const secs = Math.round((task.ended - task.started) / 1000);
+    const color = task.status === 'completed' ? c.green : c.red;
+    this.screen.log(`${color(DOT)} ${c.bold('Background agent')} ${task.id} ${c.dim(`"${task.description}"`)} ${task.status} ${c.dim(`(${formatDuration(secs * 1000)})`)}`, '');
+    if (!this.busy && !this.exiting && this.agent.notifications.length) this.runAgent(this.agent.drainNotifications());
+    else this.screen.schedule();
   }
 
   async runBashMode(command) {
@@ -932,6 +946,7 @@ export class App {
     let right = '';
     const pctLeft = Math.max(0, Math.round((1 - used / threshold) * 100));
     if (pctLeft <= 30 && cfg.autoCompactEnabled) right = c.yellow(`Context left until auto-compact: ${pctLeft}%`);
+    else if (this.runtime.tasks.running().length) right = c.dim(`${this.runtime.tasks.running().length} background agent${this.runtime.tasks.running().length === 1 ? '' : 's'} running · /tasks`);
     else if (this.verbose) right = c.dim('verbose');
     const gap = w - stringWidth(left) - stringWidth(right) - 1;
     return gap > 0 ? left + ' '.repeat(gap) + right : left;

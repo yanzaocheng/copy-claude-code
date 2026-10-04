@@ -9,9 +9,14 @@ import { mainSystemPrompt, subagentSystemPrompt } from './prompts.js';
 import { Agent } from './agent.js';
 import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
+import { BackgroundTasks, taskNotification } from './tasks.js';
+import { autoMemoryDir, pruneToolResults } from './session.js';
+import { loadAutoMemoryIndex } from './context.js';
 
 export async function createRuntime({ cwd, flags = {}, io }) {
   const config = loadConfig({ cwd, flags });
+  if (flags.verify) config.verifyOverride = flags.verify;
+  pruneToolResults(cwd);
   let mode = flags.permissionMode;
   if (flags.dangerouslySkipPermissions) mode = 'bypassPermissions';
   const permissions = new PermissionManager(config, { mode });
@@ -24,13 +29,18 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   const shell = findShell(config);
 
   const hooks = new HookRunner(config);
-  const runtime = { config, permissions, agents, mcp, shell, io, cwd, hooks };
+  const tasks = new BackgroundTasks();
+  const memoryDir = autoMemoryDir(cwd);
+  // The model maintains its memory itself, so writes there never need a prompt.
+  if (config.autoMemoryEnabled) permissions.autoAllowDirs.push(memoryDir);
+  const runtime = { config, permissions, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir };
   runtime.tools = buildTools(config, { agents, mcpTools: mcp.tools() });
 
   let promptCache = null;
   runtime.systemPrompt = () => {
     if (!promptCache) {
-      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '' });
+      const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
+      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory });
     }
     return promptCache;
   };
@@ -66,6 +76,14 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     cwd,
     spawnSubagent: runtime.spawnSubagent,
     hooks,
+    tasks,
+  });
+
+  // A finished background agent's report is queued for the main agent; the UI decides
+  // whether to start a new turn for it (when idle) or let the running turn pick it up.
+  tasks.onDone((task) => {
+    runtime.agent.notifications.push({ taskId: task.id, text: taskNotification(task) });
+    io.backgroundTaskDone?.(task);
   });
   return runtime;
 }

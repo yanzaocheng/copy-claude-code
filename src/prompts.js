@@ -3,7 +3,29 @@
 import { environmentBlock, memoryFiles } from './context.js';
 import { APP_NAME } from './config.js';
 
-export function mainSystemPrompt({ cwd, model, shellName, extra = '' }) {
+export function autoMemorySection({ dir, index }) {
+  return `# Auto memory
+You have a persistent, file-based memory for this project at \`${dir}\`. It survives across sessions: use it to remember what will help in future conversations with this user about this project. Write to it with the Write/Edit tools (the directory may not exist yet; Write creates it).
+
+- Each memory is one markdown file in that directory holding one fact, with frontmatter:
+  ---
+  name: short-kebab-case-slug
+  description: one-line summary, used to decide relevance later
+  type: user | feedback | project | reference
+  ---
+  followed by the fact. For feedback and project memories add a **Why:** line and a **How to apply:** line.
+- After writing a memory file, add a one-line pointer to \`MEMORY.md\` in the same directory: \`- [Title](file.md) — hook\`. MEMORY.md is the index loaded into your context at the start of every session; keep it under 200 lines and never put memory content in it.
+- Worth saving: who the user is and how they like to work (user); corrections and approaches the user confirmed, with the reason (feedback); goals, constraints and deadlines that are not visible in the code, with absolute dates (project); pointers to external resources (reference).
+- Not worth saving: anything the code, git history or CLAUDE.md already records, and details that only matter to the current conversation.
+- Before saving, look for an existing memory about the same thing and update it instead of adding a duplicate. Delete memories that turn out to be wrong.
+- When the user asks you to remember or forget something, do it right away.
+- A memory reflects what was true when it was written. Before relying on a remembered file, function or flag, check that it still exists.
+
+## Current MEMORY.md
+${index || '(empty: no memories saved yet)'}`;
+}
+
+export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null }) {
   const memory = memoryFiles(cwd);
   const memoryText = memory.length
     ? `\n\n# Memory\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\n${memory
@@ -54,7 +76,7 @@ Use the TodoWrite tool VERY frequently for multi-step work so that you track you
 # Code references
 When referencing specific functions or pieces of code include the pattern \`file_path:line_number\` so the user can navigate to the source.
 
-${environmentBlock(cwd, { model, shellName })}${memoryText}${extra ? `\n\n${extra}` : ''}`;
+${environmentBlock(cwd, { model, shellName })}${memoryText}${autoMemory ? `\n\n${autoMemorySection(autoMemory)}` : ''}${extra ? `\n\n${extra}` : ''}`;
 }
 
 export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt }) {

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findShell, killTree, spawnShell } from '../utils/shell.js';
 import { stripAnsi } from '../ui/ansi.js';
+import { toolResultsDir } from '../session.js';
 
 const background = new Map(); // id -> {child, command, output, readPos, status, exitCode, startedAt}
 let bgCounter = 0;
@@ -15,6 +16,19 @@ function truncateOutput(text, max) {
   const tail = text.slice(-Math.floor(max * 0.6));
   const dropped = text.slice(head.length, text.length - tail.length).split('\n').length;
   return `${head}\n\n... [${dropped} lines truncated] ...\n\n${tail}`;
+}
+
+// Keep the full text of truncated output so the model can still get at it.
+function saveFullOutput(root, text) {
+  try {
+    const dir = toolResultsDir(root);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `bash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
+    fs.writeFileSync(file, text);
+    return file;
+  } catch {
+    return null;
+  }
 }
 
 function childEnv() {
@@ -127,7 +141,12 @@ Only create commits when requested by the user. When asked to commit: run git st
             return;
           }
           let text = stripAnsi(output).replace(/\r\n/g, '\n').replace(/\s+$/, '');
-          text = truncateOutput(text, config.bashMaxOutput);
+          if (text.length > config.bashMaxOutput) {
+            const saved = saveFullOutput(ctx.projectRoot, text);
+            const size = text.length;
+            text = truncateOutput(text, config.bashMaxOutput);
+            if (saved) text += `\n\n(Output was ${size} characters and has been truncated. The full output is saved at ${saved}; use Read with offset/limit or Grep on that file to see the rest.)`;
+          }
           if (err) text += `${text ? '\n' : ''}${err.message}`;
           if (timedOut) text += `${text ? '\n' : ''}Command timed out after ${timeout}ms`;
           const isError = timedOut || !!err || (code !== 0 && code !== null);

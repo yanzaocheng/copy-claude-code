@@ -42,6 +42,10 @@ export const KNOWN_KEYS = {
   BASH_MAX_TIMEOUT_MS: 'Maximum timeout the model may request for Bash commands',
   BASH_MAX_OUTPUT_LENGTH: 'Max characters of Bash output returned to the model',
   CLAUDE_CODE_GIT_BASH_PATH: 'Windows: path to bash.exe (Git Bash)',
+  CCC_MAX_TOOL_RESULT_CHARS: 'Tool results longer than this are saved to a file and only a preview is sent (default 50000)',
+  CCC_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
+  CCC_VERIFY_MAX_ROUNDS: 'How many times a failing verify command is sent back before giving up (default 3)',
+  CCC_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
 };
 
 const SECRET_KEYS = new Set(['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS']);
@@ -143,6 +147,7 @@ export class Config {
     this.cwd = cwd;
     this.modelOverride = null; // set by /model during a session
     this.effortOverride = null; // set by /effort during a session
+    this.verifyOverride = null; // set by /verify or --verify during a session
   }
 
   get baseURL() { return this.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'; }
@@ -215,6 +220,15 @@ export class Config {
   get bashDefaultTimeout() { return int(this.env.BASH_DEFAULT_TIMEOUT_MS, 120_000); }
   get bashMaxTimeout() { return int(this.env.BASH_MAX_TIMEOUT_MS, 600_000); }
   get bashMaxOutput() { return int(this.env.BASH_MAX_OUTPUT_LENGTH, 30_000); }
+  get maxToolResultChars() { return int(this.env.CCC_MAX_TOOL_RESULT_CHARS, 50_000); }
+
+  // Verification after edits: session override (/verify, --verify) wins over the env setting.
+  get verifyCommand() {
+    const v = this.verifyOverride ?? this.env.CCC_VERIFY_COMMAND ?? '';
+    return v.trim() && v.trim() !== 'off' ? v.trim() : null;
+  }
+  get verifyMaxRounds() { return Math.max(1, int(this.env.CCC_VERIFY_MAX_ROUNDS, 3)); }
+  get autoMemoryEnabled() { return !/^(1|true|yes)$/i.test(this.env.CCC_DISABLE_AUTO_MEMORY || ''); }
 
   display(key) {
     const v = this.env[key];

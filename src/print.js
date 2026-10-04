@@ -40,10 +40,19 @@ export async function runPrint({ prompt, flags, cwd }) {
   let result;
   try {
     result = await runtime.agent.run(prompt, { signal: ctrl.signal });
+    // Background agents report back before we exit, so their work is part of the answer.
+    while (!result.interrupted && !ctrl.signal.aborted && (runtime.tasks.running().length || runtime.agent.notifications.length)) {
+      if (!runtime.agent.notifications.length) {
+        if (flags.verbose) err(c.gray(`… waiting for ${runtime.tasks.running().length} background agent(s)`));
+        await Promise.race([runtime.tasks.waitAny(), new Promise((r) => ctrl.signal.addEventListener('abort', r, { once: true }))]);
+        continue;
+      }
+      result = await runtime.agent.run(runtime.agent.drainNotifications(), { signal: ctrl.signal });
+    }
   } catch (e) {
     if (format === 'json') emit({ type: 'result', is_error: true, error: e.message });
     else err(c.red(`Error: ${e.message}`));
-    runtime.mcp.close();
+    runtime.tasks.killAll(); runtime.mcp.close();
     return 1;
   }
   const a = runtime.agent;
@@ -60,6 +69,6 @@ export async function runPrint({ prompt, flags, cwd }) {
   } else {
     process.stdout.write(result.text + '\n');
   }
-  runtime.mcp.close();
+  runtime.tasks.killAll(); runtime.mcp.close();
   return result.interrupted ? 130 : 0;
 }
