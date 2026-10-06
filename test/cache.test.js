@@ -956,7 +956,7 @@ test('back after more than 65 minutes, the next request goes out without the old
   assert.equal(replaced.length, 1, 'right after a turn there is nothing to clear');
 });
 
-test('clearing after a pause: not before 65 minutes, not for a sub-agent, not after an unfinished tool call with thinking, and only where it is on', () => {
+test('clearing after a pause: not before 65 minutes, not for a sub-agent, not after an unfinished tool call with manual thinking, and only where it is on', () => {
   const idleAgent = (cfg, extra = {}, minutes = 66) => {
     const agent = makeAgent(cfg, extra);
     agent.messages = longConversation();
@@ -970,13 +970,16 @@ test('clearing after a pause: not before 65 minutes, not for a sub-agent, not af
   const unknown = idleAgent(on);
   unknown.lastActivityAt = 0;
   assert.equal(unknown.clearAfterIdle(), null, 'no idea when the last message came');
-  const interrupted = idleAgent(on);
-  interrupted.messages.splice(-1, 1, { role: 'assistant', content: [{ type: 'thinking', thinking: 'hm', signature: 'sig' }, { type: 'tool_use', id: 'tx', name: 'Bash', input: {} }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tx', content: 'Interrupted by user', is_error: true }] });
-  assert.equal(interrupted.clearAfterIdle(), null, 'the thinking of an unfinished tool call has to stay as it was');
-  const noThinking = (m) => (m.role === 'assistant' ? { ...m, content: m.content.filter((b) => b.type !== 'thinking') } : m);
-  interrupted.messages = interrupted.messages.map(noThinking);
-  assert.equal(interrupted.clearAfterIdle()?.results, 4, 'without thinking there is nothing to keep as it was (and the call that stopped moves the last 5 on by one)');
-  assert.equal(resultOf(interrupted.messages, 'tx').content, 'Interrupted by user');
+  // the turn before stopped after a tool result (the next request failed, or was interrupted)
+  const interrupted = (cfg) => {
+    const agent = idleAgent(cfg);
+    agent.messages.splice(-1, 1, { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'sig' }, { type: 'tool_use', id: 'tx', name: 'Edit', input: {} }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tx', content: 'The file has been updated successfully.' }] });
+    return agent;
+  };
+  const adaptive = interrupted(on);
+  assert.equal(adaptive.clearAfterIdle()?.results, 4, 'adaptive thinking: all thinking may go, the unfinished call\'s too (and that call moves the last 5 on by one)');
+  assert.ok(adaptive.messages.every((m) => !Array.isArray(m.content) || m.content.every((b) => b.type !== 'thinking')));
+  assert.equal(interrupted(makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '1', MAX_THINKING_TOKENS: '8000' })).clearAfterIdle(), null, 'manual thinking: that message has to start with its thinking');
   assert.equal(idleAgent(on).clearAfterIdle()?.results, 3);
   // out of the box: on for the subscription login and Anthropic's own endpoint; off for the others
   const configWith = (env) => new Config(env, {}, { hooks: {}, mcpServers: {} }, process.cwd());

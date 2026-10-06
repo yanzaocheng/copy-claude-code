@@ -13,6 +13,7 @@
 //   node scripts/measure-context.mjs                       all sessions in <config dir>/projects
 //   node scripts/measure-context.mjs path/to/session.jsonl  some sessions (files or directories)
 //   options: --write=2 --idle=65 (minutes) --keep=5 --at-least=20000 (tokens) --top=5
+//            --manual-thinking (sessions run with MAX_THINKING_TOKENS: no clearing after a turn that stopped at a tool call)
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -25,6 +26,7 @@ const IDLE_MS = option('idle', 65) * 60_000;
 const KEEP = option('keep', 5);
 const AT_LEAST = option('at-least', 20_000);
 const TOP = option('top', 5);
+const MANUAL_THINKING = args.includes('--manual-thinking');
 const PREFIX = 13_000; // the system prompt and the tools, cached like the rest of the request
 const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
 const CLEARABLE = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'Write']);
@@ -164,9 +166,10 @@ function analyse(file) {
         }
       }
       const last = conversation.findLast(({ message }) => message.role === 'assistant')?.message;
-      // the turn before stopped at a tool call, and there is thinking to send back as it was: not cleared (see clearAfterIdle)
-      const unfinished = thinkingBlocks > 0 && last && blocksOf(last).find((b) => b.type === 'tool_use')?.name;
-      const qualifies = clearable >= AT_LEAST && !unfinished;
+      // the turn before stopped at a tool call: cleared all the same with adaptive thinking (the default), not with
+      // manual thinking (MAX_THINKING_TOKENS; --manual-thinking here), see clearAfterIdle
+      const unfinished = last && blocksOf(last).find((b) => b.type === 'tool_use')?.name;
+      const qualifies = clearable >= AT_LEAST && !(unfinished && MANUAL_THINKING);
       idleLog.push({ file, minutes: Math.round((e.at - lastAt) / 60_000), history, clearable, kept, others, thinking, thinkingBlocks, unfinished, qualifies });
       if (qualifies) {
         for (const b of clear) gone.add(b);
@@ -221,7 +224,8 @@ if (idleLog.length) {
   console.log(`   Each return after more than ${IDLE_MS / 60_000} minutes (results of Read/Bash/Grep/Glob/Web*/Edit/Write past the last ${KEEP}; other tools' results are never cleared):`);
   for (const r of idleLog.slice(0, 30)) {
     const others = Object.entries(r.others).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, t]) => `${name} ${k(t)}`).join(', ') || 'none';
-    const verdict = r.qualifies ? 'cleared' : r.unfinished ? `not cleared: the turn before stopped at a ${r.unfinished} call, and there is thinking` : `not cleared: under ${k(AT_LEAST)}`;
+    const after = r.unfinished ? ` (the turn before stopped at a ${r.unfinished} call)` : '';
+    const verdict = r.qualifies ? `cleared${after}` : r.clearable < AT_LEAST ? `not cleared: under ${k(AT_LEAST)}` : `not cleared${after}: manual thinking`;
     console.log(`   ${path.basename(r.file).slice(0, 8)} after ${r.minutes} min, history ${k(r.history)}: clearable ${k(r.clearable)}, last ${KEEP} ${k(r.kept)}, other tools ${others}, thinking ${k(r.thinking)} in ${r.thinkingBlocks} blocks -> ${verdict}`);
   }
   if (idleLog.length > 30) console.log(`   … and ${idleLog.length - 30} more`);
