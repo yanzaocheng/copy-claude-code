@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node bin/claude-pro.js",
     "check": "node bin/claude-pro.js --self-check",
-    "test": "node --test --test-force-exit --test-timeout=60000 \"test/**/*.test.js\""
+    "test": "node --test --test-force-exit --test-timeout=60000 --test-reporter=dot \"test/**/*.test.js\""
   },
   "engines": {
     "node": ">=22"

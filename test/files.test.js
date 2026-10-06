@@ -115,3 +115,26 @@ test('Read loads the file once and Edit computes its plan once per call', async 
   assert.equal(plans, 1);
   assert.match(fs.readFileSync(file, 'utf8'), /\nseven\n/);
 });
+
+test('Edit answers with the changed lines, not a snippet of the file (the snippet only repeated new_string, to be re-read every turn)', async () => {
+  const dir = tmp();
+  const file = path.join(dir, 'f.txt');
+  fs.writeFileSync(file, lines(30));
+  const ctx = ctxFor(dir);
+  await ReadTool.call({ file_path: file }, ctx);
+  const one = await EditTool.call({ file_path: file, old_string: 'line 12\n', new_string: 'twelve\n' }, ctx);
+  assert.equal(one.content, `The file ${file} has been updated successfully (line 12).`);
+  const many = await EditTool.call({ file_path: file, old_string: 'line 20\n', new_string: 'a\nb\nc\n' }, ctx);
+  assert.equal(many.content, `The file ${file} has been updated successfully (lines 20-22).`);
+  const inline = await EditTool.call({ file_path: file, old_string: 'line 5', new_string: 'x\ny' }, ctx);
+  assert.match(inline.content, /\(lines 5-6\)\.$/);
+  const removed = await EditTool.call({ file_path: file, old_string: 'line 3\n', new_string: '' }, ctx);
+  assert.match(removed.content, /\(text removed at line 3\)\.$/);
+  const all = await EditTool.call({ file_path: file, old_string: 'line', new_string: 'row', replace_all: true }, ctx);
+  assert.match(all.content, /has been updated successfully\. All \d+ occurrences were replaced\.$/);
+  for (const r of [one, many, inline, removed, all]) {
+    assert.ok(!r.isError);
+    assert.doesNotMatch(r.content, /cat -n|\n/, 'one line, no file content');
+  }
+  assert.match(fs.readFileSync(file, 'utf8'), /^row 1\nrow 2\nrow 4\nx\ny\n/);
+});

@@ -167,11 +167,14 @@ function writeText(file, text, { crlf, bom }) {
   fs.writeFileSync(file, out, 'utf8');
 }
 
-function snippet(content, focusLine, count) {
-  const lines = splitLines(content);
-  const from = Math.max(0, focusLine - 5);
-  const to = Math.min(lines.length, focusLine + count + 4);
-  return numberLines(lines.slice(from, to), from + 1);
+// Where the new text of an edit is, for its result: "lines 12-18", "line 12", or "text removed at line 12".
+// The result used to show a snippet of the file around the change; it repeated new_string, which the model has
+// just written, and stayed in the conversation to be re-read by every later request. The line numbers are what
+// it still needs (for a Read with offset/limit); Claude Code's Edit also answers with a short confirmation.
+function changedLines(line, newStr) {
+  if (!newStr) return `text removed at line ${line}`;
+  const count = newStr.split('\n').length - (newStr.endsWith('\n') ? 1 : 0);
+  return count > 1 ? `lines ${line}-${line + count - 1}` : `line ${line}`;
 }
 
 export const WriteTool = {
@@ -339,8 +342,8 @@ Usage:
     }
     const line = p.before.slice(0, p.index).split('\n').length;
     const text = input.replace_all
-      ? `The file ${p.file} has been updated. All ${p.count} occurrences were replaced.`
-      : `The file ${p.file} has been updated. Here's the result of running \`cat -n\` on a snippet of the edited file:\n${snippet(p.after, line, splitLines(p.newStr).length)}`;
+      ? `The file ${p.file} has been updated successfully. All ${p.count} occurrences were replaced.`
+      : `The file ${p.file} has been updated successfully (${changedLines(line, p.newStr)}).`;
     return { content: text, display: { summary: changeSummary(preview), preview } };
   },
 };

@@ -14,6 +14,10 @@ export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use
 
 const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
 
+// Automatic compactions that may fail in a row before it is left off for the conversation (until a /compact
+// succeeds or /clear): one that cannot succeed would otherwise cost its requests again on every prompt.
+const MAX_COMPACT_FAILURES = 3;
+
 const IMAGE_TOKENS = 1600; // roughly what a 1568px image costs; its base64 is not text
 
 export function estimateTokens(value) {
@@ -126,6 +130,7 @@ export class Agent {
     this.reminders = []; // texts for the next user message, as <system-reminder>s (the main agent's only)
     this.toolUseCount = 0;
     this.postCompactTokens = undefined; // undefined: never compacted; null: compacted, awaiting measurement
+    this.compactFailures = 0; // automatic compactions that failed in a row
   }
 
   get model() { return this.modelFn(); }
@@ -229,6 +234,7 @@ export class Agent {
     this.postCompactTokens = undefined;
     this.cache.newConversation();
     this.reminders = [];
+    this.compactFailures = 0;
     this.recordedSystem = null; // the next conversation's session file has to get the system prompt too, even if it is the same text
     this.checkpoints?.reset();
   }
@@ -264,8 +270,9 @@ export class Agent {
     for (;;) {
       if (signal?.aborted) return this.handleInterrupt(null);
       if (this.shouldAutoCompact()) {
-        const interrupted = await this.compactOnTheWay(signal);
-        if (interrupted) return interrupted;
+        const outcome = await this.compactOnTheWay(signal);
+        if (outcome?.interrupted) return outcome;
+        if (outcome?.failed) compactedForError = true; // it has just failed: a too-long prompt in this turn is not tried again
       }
 
       let res;
@@ -280,8 +287,8 @@ export class Agent {
         if (err.promptTooLong && !compactedForError && this.messages.length > 2) {
           compactedForError = true;
           this.io.notice?.('Context limit reached; compacting conversation…', 'warn');
-          const interrupted = await this.compactOnTheWay(signal);
-          if (interrupted) return interrupted;
+          const outcome = await this.compactOnTheWay(signal, { required: true });
+          if (outcome?.interrupted) return outcome;
           continue;
         }
         throw err;
@@ -350,6 +357,7 @@ export class Agent {
 
   shouldAutoCompact() {
     if (!this.config.autoCompactEnabled || this.messages.length <= 2) return false;
+    if (this.compactFailures >= MAX_COMPACT_FAILURES) return false;
     const threshold = this.config.autoCompactThreshold(this.model);
     if (this.contextEstimate < threshold) return false;
     // Right after a compaction the base context (system prompt, tools, summary) may itself be
@@ -366,13 +374,22 @@ export class Agent {
   // Compact in the middle of a turn. The user can interrupt this like any other request (Esc during a
   // pause for a rate limit, say), and that ends the turn as an interruption rather than an error: the
   // result to return from run() is given back, or null when the compaction went through.
-  async compactOnTheWay(signal) {
+  // A compaction that fails does not fail the turn when the request still fits (the threshold leaves room
+  // below the model's limit): the turn goes on without it, and {failed: true} is returned. After
+  // MAX_COMPACT_FAILURES in a row it is left off (see shouldAutoCompact). `required`: the request is already
+  // too long, so there is nothing to go on with, and the error is thrown.
+  async compactOnTheWay(signal, { required = false } = {}) {
     try {
       await this.compact({ signal, auto: true });
       return null;
     } catch (err) {
       if (isAbort(err) || signal?.aborted) return this.handleInterrupt();
-      throw err;
+      this.compactFailures++;
+      if (required) throw err;
+      this.io.notice?.(this.compactFailures >= MAX_COMPACT_FAILURES
+        ? `Auto-compaction failed ${this.compactFailures} times in a row (${err.message}). It is off for this conversation until /compact succeeds or /clear.`
+        : `Auto-compaction failed (${err.message}); continuing without it.`, 'warn');
+      return { failed: true };
     }
   }
 
@@ -613,6 +630,7 @@ export class Agent {
     this.lastContextTokens = estimateTokens(summary) + estimateTokens(this.toolSchemas()) + 2000;
     this.tokensSinceUsage = 0;
     this.postCompactTokens = null; // measured on the next request
+    this.compactFailures = 0;
     this.io.compactEnd?.(summary, this);
     return summary;
   }

@@ -828,3 +828,38 @@ test('through createRuntime: sub-agents share the snapshot, and their usage is t
   await assert.rejects(() => run('four'), /boom/);
   assert.equal(rt.agent.subUsage.runs, 4);
 });
+
+test('an automatic compaction that keeps failing does not fail the turns, and stops after 3 failures in a row', async (t) => {
+  let summaries = 0;
+  let turns = 0;
+  mockFetch(t, async (url, init) => {
+    if (init.body.includes('detailed summary of the conversation')) { summaries++; return rejected('the summary endpoint is broken'); }
+    turns++;
+    return replyWith({ usage: { input_tokens: 50_000 } }); // the context stays above the threshold
+  });
+  const notices = [];
+  const cfg = makeConfig({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '1' }); // compact from 2,000 tokens on
+  const agent = makeAgent(cfg, { io: { notice: (text) => notices.push(text) } });
+  agent.messages = [{ role: 'user', content: 'a' }, { role: 'assistant', content: [{ type: 'text', text: 'b' }] }, { role: 'user', content: 'c' }];
+  agent.lastContextTokens = 50_000;
+  for (let i = 0; i < 5; i++) {
+    const r = await agent.run(`question ${i}`);
+    assert.equal(r.text, 'ok', 'the turn goes on without the summary');
+  }
+  assert.equal(summaries, 3, 'three attempts, then no more');
+  assert.equal(turns, 5);
+  assert.equal(notices.filter((n) => /continuing without it/.test(n)).length, 2);
+  assert.equal(notices.filter((n) => /off for this conversation/.test(n)).length, 1);
+  // a /compact that succeeds turns it back on, and so does a new conversation
+  mockFetch(t, async (url, init) => (init.body.includes('detailed summary of the conversation') ? replyWith({ text: '<summary>S</summary>' }) : replyWith({ usage: { input_tokens: 50_000 } })));
+  await agent.compact();
+  assert.equal(agent.compactFailures, 0);
+  agent.compactFailures = 3;
+  agent.resetConversation();
+  assert.equal(agent.compactFailures, 0);
+  // a prompt that is already too long has nothing to go on with: the compaction's error ends the turn, as before
+  const tooLong = makeAgent(makeConfig());
+  tooLong.messages = [{ role: 'user', content: 'a' }, { role: 'assistant', content: [{ type: 'text', text: 'b' }] }, { role: 'user', content: 'c' }];
+  mockFetch(t, async (url, init) => (init.body.includes('detailed summary of the conversation') ? rejected('the summary endpoint is broken') : rejected('prompt is too long: 210000 tokens > 200000 maximum')));
+  await assert.rejects(() => tooLong.run('more'), /the summary endpoint is broken/);
+});
