@@ -63,6 +63,8 @@ function sessionFiles(inputs) {
   return out;
 }
 
+const idleLog = []; // every return after a long pause, with what B found there
+
 function analyse(file) {
   const events = [];
   for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
@@ -70,7 +72,7 @@ function analyse(file) {
     try {
       const e = JSON.parse(line);
       if (e.type === 'message' && e.message) events.push({ kind: 'message', message: e.message, at: e.at || 0 });
-      else if (e.type === 'reset' && Array.isArray(e.messages)) events.push({ kind: 'reset', messages: e.messages });
+      else if (e.type === 'reset' && Array.isArray(e.messages)) events.push({ kind: 'reset', messages: e.messages, at: e.at || 0 });
     } catch { /* a half-written line */ }
   }
   const s = { file, requests: 0, cost: 0, dupReads: 0, dupTokens: 0, savedA: 0, idleReturns: 0, cleared: 0, savedB: 0, largestHistory: 0 };
@@ -83,6 +85,8 @@ function analyse(file) {
   let alive = []; // savings that are in every later request: {kind, tokens, fresh}
   let reads = new Map(); // file|offset|limit -> text of the latest Read result in the conversation
   const toolUses = new Map(); // tool_use id -> {name, input}
+  const gone = new WeakSet(); // result and thinking blocks an earlier idle return has cleared already
+  const noteUses = (m) => { for (const b of blocksOf(m)) if (b.type === 'tool_use') toolUses.set(b.id, { name: b.name, input: b.input || {} }); };
 
   const request = (at) => {
     s.requests++;
@@ -112,14 +116,15 @@ function analyse(file) {
       added = 0;
       alive = [];
       reads = new Map();
-      for (const m of e.messages) push(m);
+      for (const m of e.messages) { if (m.role === 'assistant') noteUses(m); push(m); }
       rewritten = true;
+      lastAt = e.at || lastAt;
       continue;
     }
     const m = e.message;
     if (m.role === 'assistant') {
       request(e.at);
-      for (const b of blocksOf(m)) if (b.type === 'tool_use') toolUses.set(b.id, { name: b.name, input: b.input || {} });
+      noteUses(m);
       push(m);
       lastAt = e.at || lastAt;
       continue;
@@ -131,17 +136,31 @@ function analyse(file) {
       pendingIdle = true;
       // B: what clearing would take out of the conversation at this point
       const results = [];
-      for (const { message } of conversation) for (const b of blocksOf(message)) if (b.type === 'tool_result' && CLEARABLE.has(toolUses.get(b.tool_use_id)?.name)) results.push(b);
-      let clearable = 0;
-      for (const b of results.slice(0, Math.max(0, results.length - KEEP))) {
-        const t = blockTokens(b);
-        if (t >= 100 && !resultText(b).startsWith(CLEARED) && !resultText(b).startsWith('<persisted-output>')) clearable += t - 15;
+      const others = {}; // tool name -> tokens of its results, for the tools that are not cleared
+      for (const { message } of conversation) {
+        for (const b of blocksOf(message)) {
+          if (b.type !== 'tool_result') continue;
+          const name = toolUses.get(b.tool_use_id)?.name || '(unknown tool)';
+          if (CLEARABLE.has(name)) results.push(b);
+          else others[name] = (others[name] || 0) + blockTokens(b);
+        }
       }
+      let clearable = 0;
+      let kept = 0;
+      const clear = [];
+      results.forEach((b, i) => {
+        const t = blockTokens(b);
+        if (i >= results.length - KEEP) kept += t;
+        else if (t >= 100 && !gone.has(b) && !resultText(b).startsWith(CLEARED) && !resultText(b).startsWith('<persisted-output>')) { clearable += t - 15; clear.push(b); }
+      });
       let thinking = 0;
-      for (const { message } of conversation) if (message.role === 'assistant') for (const b of blocksOf(message)) if (b.type === 'thinking' || b.type === 'redacted_thinking') thinking += blockTokens(b);
+      for (const { message } of conversation) if (message.role === 'assistant') for (const b of blocksOf(message)) if ((b.type === 'thinking' || b.type === 'redacted_thinking') && !gone.has(b)) { thinking += blockTokens(b); clear.push(b); }
       const last = conversation.findLast(({ message }) => message.role === 'assistant')?.message;
-      const unfinished = last && blocksOf(last).some((b) => b.type === 'tool_use'); // not cleared then: see clearAfterIdle
-      if (clearable >= AT_LEAST && !unfinished) {
+      const unfinished = last && blocksOf(last).find((b) => b.type === 'tool_use')?.name; // not cleared then: see clearAfterIdle
+      const qualifies = clearable >= AT_LEAST && !unfinished;
+      idleLog.push({ file, minutes: Math.round((e.at - lastAt) / 60_000), history, clearable, kept, others, thinking, unfinished, qualifies });
+      if (qualifies) {
+        for (const b of clear) gone.add(b);
         s.idleReturns++;
         s.cleared += clearable + thinking;
         alive.push({ kind: 'B', tokens: clearable + thinking, fresh: false });
@@ -187,6 +206,17 @@ console.log('');
 console.log(`B. Clearing old tool results and thinking after more than ${IDLE_MS / 60_000} minutes idle (keep the last ${KEEP} results, at least ${AT_LEAST} tokens of them)`);
 console.log(`   idle returns that qualify: ${sum('idleReturns')} · tokens cleared in all: ${M(sum('cleared'))}`);
 console.log(`   saving: ${M(sum('savedB'))} = ${pct(sum('savedB'), total)} of the input cost (before the cost of reading files again)`);
+if (idleLog.length) {
+  const k = (n) => `${Math.round(n / 1000)}k`;
+  console.log('');
+  console.log(`   Each return after more than ${IDLE_MS / 60_000} minutes (results of Read/Bash/Grep/Glob/Web*/Edit/Write past the last ${KEEP}; other tools' results are never cleared):`);
+  for (const r of idleLog.slice(0, 30)) {
+    const others = Object.entries(r.others).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, t]) => `${name} ${k(t)}`).join(', ') || 'none';
+    const verdict = r.qualifies ? 'cleared' : r.unfinished ? `not cleared: the turn before stopped at a ${r.unfinished} call` : `not cleared: under ${k(AT_LEAST)}`;
+    console.log(`   ${path.basename(r.file).slice(0, 8)} after ${r.minutes} min, history ${k(r.history)}: clearable ${k(r.clearable)}, last ${KEEP} ${k(r.kept)}, other tools ${others}, thinking ${k(r.thinking)} -> ${verdict}`);
+  }
+  if (idleLog.length > 30) console.log(`   … and ${idleLog.length - 30} more`);
+}
 const top = [...sessions].sort((a, b) => b.savedA + b.savedB - (a.savedA + a.savedB)).slice(0, TOP).filter((s) => s.savedA + s.savedB > 0);
 if (top.length) {
   console.log('');
