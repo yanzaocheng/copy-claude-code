@@ -15,7 +15,7 @@ import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
 import { autoMemoryDir, pruneToolResults, pruneCheckpoints, projectDir } from './session.js';
-import { loadAutoMemoryIndex } from './context.js';
+import { loadAutoMemoryIndex, takeEnvSnapshot, localDate } from './context.js';
 import { canRestart } from './restart.js';
 
 export async function createRuntime({ cwd, flags = {}, io }) {
@@ -43,15 +43,46 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
   runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools(), restart: restartable });
 
+  // The system prompt is built once and kept for the conversation: a prompt that changes in the middle of it
+  // cannot be read from the prompt cache. So a change to what it is built from (memory, configuration) waits
+  // for the next place where the conversation starts over anyway, /clear or a compaction, which is how Claude
+  // Code treats edits to CLAUDE.md. The date and git state in it are a snapshot, shared with the sub-agents.
   let promptCache = null;
+  let promptStale = false; // what the prompt is built from has changed since it was built
+  const snapshots = new Map(); // directory -> {date, git}
+  const snapshotFor = (dir) => {
+    const key = path.resolve(dir);
+    if (!snapshots.has(key)) snapshots.set(key, takeEnvSnapshot(key));
+    return snapshots.get(key);
+  };
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
-      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: restartable });
+      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: restartable, snapshot: snapshotFor(cwd) });
+      promptStale = false;
     }
     return promptCache;
   };
-  runtime.invalidateSystemPrompt = () => { promptCache = null; };
+  // Build the prompt again at the next request: for a new conversation (/clear), another model, a compaction.
+  runtime.invalidateSystemPrompt = () => { promptCache = null; promptStale = false; snapshots.clear(); };
+  // Something it is built from changed in the middle of a conversation: note it, and leave the prompt as it is.
+  runtime.deferSystemPromptRefresh = () => { if (promptCache) promptStale = true; };
+  Object.defineProperty(runtime, 'systemPromptStale', { get: () => promptStale });
+  // A resumed conversation continues behind the system prompt it started with (as in Claude Code): its history
+  // was cached behind that one, and nothing is gained from building the prompt again. Not when the prompt was
+  // built for another model (it names the model, and each model's cache is its own anyway). The date in it is
+  // brought up to date by a note to the model, which comes after everything that is cached.
+  runtime.resumeSystemPrompt = (saved) => {
+    if (flags.systemPrompt || typeof saved !== 'string' || !saved.trim()) return false;
+    const modelIn = (text) => /^You are powered by the model (.+)\.$/m.exec(text)?.[1];
+    if (modelIn(saved) !== config.mainModel.id) return false;
+    promptCache = saved;
+    promptStale = false;
+    const then = /^Today's date: (\d{4}-\d{2}-\d{2})$/m.exec(saved)?.[1];
+    const today = localDate();
+    if (then && then !== today) runtime.agent.addReminder(`Today's date is ${today}. This conversation was resumed from an earlier session, so the date in the environment block of your instructions (${then}) is out of date.`);
+    return true;
+  };
 
   runtime.spawnSubagent = async ({ def, prompt, description, ctx }) => {
     const model = def.model ? config.resolveModel(def.model) : config.subagentModel;
@@ -65,7 +96,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       depth,
       spawnSubagent: runtime.spawnSubagent,
       tools: toolsForSubagent(runtime.tools, def, { allowTask: depth < config.maxSubagentDepth }),
-      systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt }),
+      systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt, snapshot: snapshotFor(ctx.cwd) }),
       io: subIo,
       model,
       isSubagent: true,
@@ -81,6 +112,8 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       const partial = isAbort(err) || ctx.signal?.aborted ? '' : sub.assistantText();
       if (partial) err.message += `\n\nThe agent failed before finishing (${sub.toolUseCount} tool uses). What it had written so far:\n${partial}`;
       throw err;
+    } finally {
+      runtime.agent.addSubUsage(sub.usage); // whatever became of it, it was billed
     }
     if (result.interrupted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     return { text: result.text, toolUses: sub.toolUseCount, tokens: sub.usage.output + sub.lastContextTokens };
@@ -98,6 +131,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     spawnSubagent: runtime.spawnSubagent,
     hooks,
     tasks,
+    refreshSystemPrompt: () => runtime.invalidateSystemPrompt(), // a compaction starts the conversation over
   });
 
   // A finished background agent's report is queued for the main agent; the UI decides

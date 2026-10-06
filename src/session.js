@@ -75,6 +75,14 @@ export class SessionStore {
   // What the conversation is about now (the tab title); the newest one wins when the session is loaded.
   setTopic(topic) { this.append({ type: 'meta', topic, at: Date.now() }); }
   reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
+  // The system prompt this conversation runs behind, kept so that a resumed one continues behind the same prompt
+  // and so with the prompt cache it already has (see runtime.resumeSystemPrompt). Written when it first appears
+  // and whenever it changes (after a compaction); the newest one wins when the session is loaded.
+  setSystemPrompt(text) {
+    if (!text || text === this.systemPrompt) return;
+    this.systemPrompt = text;
+    this.append({ type: 'meta', systemPrompt: text, at: Date.now() });
+  }
 
   static load(file) {
     const messages = [];
@@ -97,7 +105,11 @@ export class SessionStore {
         times.splice(0, times.length, ...e.messages.map(() => 0));
       }
     }
-    return { messages, times, meta, title, topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null };
+    return {
+      messages, times, meta, title,
+      topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,
+      systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,
+    };
   }
 
   static list(cwd) {

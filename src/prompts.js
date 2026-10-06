@@ -25,7 +25,7 @@ You have a persistent, file-based memory for this project at \`${dir}\`. It surv
 ${index || '(empty: no memories saved yet)'}`;
 }
 
-export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, selfRestart = false }) {
+export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, selfRestart = false, snapshot = null }) {
   const memory = memoryFiles(cwd);
   const memoryText = memory.length
     ? `\n\n# Memory\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\n${memory
@@ -90,10 +90,10 @@ You are ${APP_NAME}, running from the source code in ${INSTALL_DIR}. Changing fi
 ` : ''}# Code references
 When referencing specific functions or pieces of code include the pattern \`file_path:line_number\` so the user can navigate to the source.
 
-${environmentBlock(cwd, { model, shellName })}${memoryText}${autoMemory ? `\n\n${autoMemorySection(autoMemory)}` : ''}${extra ? `\n\n${extra}` : ''}`;
+${environmentBlock(cwd, { model, shellName, snapshot })}${memoryText}${autoMemory ? `\n\n${autoMemorySection(autoMemory)}` : ''}${extra ? `\n\n${extra}` : ''}`;
 }
 
-export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt }) {
+export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt, snapshot = null }) {
   return `${agentPrompt}
 
 Notes:
@@ -102,7 +102,7 @@ Notes:
 - In your final response, share relevant file paths (always absolute) and code snippets. Include code snippets only when the exact text is load-bearing.
 - Do not use emojis.
 
-${environmentBlock(cwd, { model, shellName })}`;
+${environmentBlock(cwd, { model, shellName, snapshot })}`;
 }
 
 // The terminal tab's title follows the topic of the conversation: after each message the user sends, the
@@ -125,8 +125,13 @@ Plan mode is active. The user indicated that they do not want you to execute yet
 Research the codebase with read-only tools, then present a concise implementation plan by calling the ExitPlanMode tool. Do not ask for approval in plain text; use ExitPlanMode.
 </system-reminder>`;
 
+// The system prompt of the plain summary request (see Agent.requestSummary).
+export const SUMMARY_SYSTEM = 'You are a helpful AI assistant tasked with summarizing conversations.';
+
 export function compactPrompt(instructions) {
-  return `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
+  return `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools: the conversation above is complete, and the only thing wanted now is the summary below.
+
+Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
 Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts. Then write the summary in <summary> tags with these sections:

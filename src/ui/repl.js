@@ -303,9 +303,9 @@ export class App {
     shutdownBackgroundShells();
     this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
-    const u = this.agent?.usage;
+    const u = this.agent?.totalUsage();
     if (!restart && u && u.requests) {
-      this.screen.log(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests} requests`));
+      this.screen.log(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
     }
     if (!restart && this.agent?.messages.length) this.screen.log(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
     this.restoreTerminal({ handOver: restart });
@@ -813,8 +813,10 @@ export class App {
         let existing = '';
         try { existing = fs.readFileSync(file, 'utf8'); } catch { /* new */ }
         fs.appendFileSync(file, `${existing && !existing.endsWith('\n') ? '\n' : ''}- ${text}\n`);
-        this.runtime.invalidateSystemPrompt();
-        this.screen.log(resultLines([c.dim(`Saved to ${displayPath(file, this.cwd)}`)]));
+        // The system prompt stays as it is until the conversation starts over (/clear or a compaction): a prompt
+        // that changes in the middle of it cannot be read from the prompt cache.
+        this.runtime.deferSystemPromptRefresh();
+        this.screen.log(resultLines([c.dim(`Saved to ${displayPath(file, this.cwd)} · the model sees it from the next /clear or /compact`)]));
       } catch (e) {
         this.notice(`Could not save the memory to ${displayPath(file, this.cwd)}: ${e.message}`, 'error');
       }
@@ -830,6 +832,9 @@ export class App {
     this.agent.messages = loaded.messages;
     this.agent.restoreFileState(loaded.messages, loaded.times);
     this.agent.lastContextTokens = estimateTokens(loaded.messages);
+    // Continue behind the system prompt the conversation had (and its cache), not a freshly built one.
+    this.store.systemPrompt = loaded.systemPrompt;
+    this.runtime.resumeSystemPrompt(loaded.systemPrompt);
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
     if (quiet) return;
     this.screen.log(c.dim(`Resumed session ${id} (${loaded.messages.length} messages)`), '');
@@ -1104,6 +1109,7 @@ export class App {
   }
 
   messageAdded(msg, agent) { if (this.isMain(agent)) this.store.message(msg); }
+  systemPrompt(text, agent) { if (this.isMain(agent)) this.store.setSystemPrompt(text); }
   messagesReplaced(msgs, agent) { if (this.isMain(agent)) this.store.reset(msgs); }
   usage() { this.screen.schedule(); }
 

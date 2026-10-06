@@ -5,6 +5,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { readClaudeCodeLogin, claudeCodeHeaders, CLAUDE_CODE_API_URL, CLAUDE_CODE_SYSTEM } from './claude-code.js';
 import { refreshClaudeCodeLogin, canRenewLogin } from './oauth.js';
 import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
+import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 
 let cached = null;
 
@@ -94,10 +95,12 @@ export function getClient(config, login = null) {
   return client;
 }
 
-// Mark the last block of the system prompt, tools and the latest user message as cacheable.
-// Endpoints that don't support prompt caching (e.g. DeepSeek, which caches automatically) ignore it.
-function withCacheControl(messages) {
-  if (!messages.length) return messages;
+// Mark the last block of the latest user message as cacheable (`mark` is the cache_control to put there; null
+// leaves the messages alone). With the markers on the system prompt and the last tool this makes three of the
+// four breakpoints a request may have. Endpoints that don't support prompt caching (e.g. DeepSeek, which caches
+// automatically) ignore them.
+function withCacheControl(messages, mark) {
+  if (!mark || !messages.length) return messages;
   const out = messages.slice();
   const idx = out.length - 1;
   const last = out[idx];
@@ -105,9 +108,49 @@ function withCacheControl(messages) {
   const content = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : last.content.slice();
   if (!content.length) return out;
   const tail = content.length - 1;
-  content[tail] = { ...content[tail], cache_control: { type: 'ephemeral' } };
+  content[tail] = { ...content[tail], cache_control: mark };
   out[idx] = { ...last, content };
   return out;
+}
+
+// What an endpoint refused (a gateway that does not know cache_control, say), by endpoint and model: the
+// places (system, tools, messages) it was refused on, and "ttl" when the 1-hour TTL was. Learned from its 400
+// errors. Claude Code carries on without the marker instead of failing the request, and so does this: the
+// marker is left off from then on, so the endpoint is not asked the same thing again.
+const cacheRefused = new Map();
+const cacheKey = (config, modelId, login) => `${login ? 'claude-code' : config.baseURL}|${modelId}`;
+
+const PLACES = ['system', 'tools', 'messages'];
+const blocksAt = (params, place) => {
+  if (place === 'system') return params.system || [];
+  if (place === 'tools') return params.tools || [];
+  return (params.messages || []).flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+};
+const hasMark = (params, place) => blocksAt(params, place).some((b) => b.cache_control);
+
+// Take cache_control (or only its ttl) off a request after the endpoint refused it. Returns whether anything
+// changed: a request without markers has nothing left to take off, so the caller must give up on it.
+function refuseCache(config, params, message, login) {
+  const key = cacheKey(config, params.model, login);
+  const refused = cacheRefused.get(key) || new Set();
+  const text = String(message || '').toLowerCase();
+  let changed = false;
+  if (/\bttl\b/.test(text) && cachePlanOf(params).ttl === '1h') {
+    // "a ttl='1h' cache_control block must occur before ...", "ttl: Extra inputs are not permitted": the 5-minute default
+    for (const place of PLACES) for (const b of blocksAt(params, place)) if (b.cache_control?.ttl) b.cache_control = { type: 'ephemeral' };
+    refused.add('ttl');
+    changed = true;
+  } else {
+    const marked = PLACES.filter((p) => hasMark(params, p));
+    const named = marked.filter((p) => new RegExp(`\\b${p}\\b`).test(text));
+    for (const place of named.length ? named : marked) {
+      for (const b of blocksAt(params, place)) delete b.cache_control;
+      refused.add(place);
+      changed = true;
+    }
+  }
+  if (changed) cacheRefused.set(key, refused);
+  return changed;
 }
 
 // Output ceilings the API has told us about, by model id (learned from "max_tokens too large" errors).
@@ -129,14 +172,21 @@ export function parseMaxTokensLimit(message) {
   return n >= 256 ? n : null;
 }
 
-export function buildParams(config, { model, system, messages, tools, maxTokens, effort }, login = null) {
+// `cacheBucket` says which prompt cache TTL applies: "main" for the conversation itself (the default), "other"
+// for sub-agents, compaction and side queries (see Config.cacheTtl).
+export function buildParams(config, { model, system, messages, tools, maxTokens, effort, cacheBucket = 'main' }, login = null) {
   if (config.usesClaudeCode) login ||= readClaudeCodeLogin(config);
   const wanted = maxTokens || config.maxOutputTokens;
+  const refused = cacheRefused.get(cacheKey(config, model.id, login));
+  const caching = !config.promptCachingDisabled(model.id);
+  const ttl = refused?.has('ttl') ? '5m' : config.cacheTtl(cacheBucket);
+  const mark = (place) => (caching && !refused?.has(place) ? { ...cacheControl(ttl) } : null);
+  const systemMark = mark('system');
   const params = {
     model: model.id,
     max_tokens: outputCaps.has(model.id) ? Math.min(wanted, outputCaps.get(model.id)) : wanted,
-    system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-    messages: withCacheControl(messages),
+    system: [{ type: 'text', text: system, ...(systemMark ? { cache_control: systemMark } : {}) }],
+    messages: withCacheControl(messages, mark('messages')),
     stream: true,
   };
   if (login) {
@@ -144,7 +194,8 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
     params.metadata = { user_id: login.userId };
   }
   if (tools?.length) {
-    params.tools = tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t));
+    const toolMark = mark('tools');
+    params.tools = tools.map((t, i) => (i === tools.length - 1 && toolMark ? { ...t, cache_control: toolMark } : t));
   }
   const eff = effort === undefined ? config.effort : effort;
   if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
@@ -209,6 +260,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   let paused = false;
   for (;;) {
     let emitted = false;
+    const startedAt = Date.now(); // the cache TTL counts from the start of the request, not from the end of the reply
     try {
       const stream = await client.messages.create(params, { signal });
       if (paused) {
@@ -279,7 +331,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       }
       if (!stopped && !stopReason) throw Object.assign(new Error('The response stream ended unexpectedly'), { status: 503 });
       const content = blocks.filter(Boolean).filter((b) => !(b.type === 'text' && !b.text));
-      return { message: { role: 'assistant', content }, usage, stopReason, model };
+      return { message: { role: 'assistant', content }, usage, stopReason, model, cache: { ...cachePlanOf(params), fingerprint: fingerprint(params), at: startedAt } };
     } catch (raw) {
       if (signal?.aborted || isAbort(raw)) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
       const err = describeError(raw, config);
@@ -309,6 +361,9 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         delete params.output_config;
         continue;
       }
+      // The endpoint does not take cache_control (or the 1-hour ttl) where it was sent: carry on without it
+      // instead of failing the request, and do not send it there again (see refuseCache).
+      if (err.status === 400 && /cache_control|\bttl\b/i.test(err.message) && refuseCache(config, params, err.message, login)) continue;
       // The default max_tokens is generous: if this API allows less, learn its limit and retry at once.
       const limit = err.status === 400 ? parseMaxTokensLimit(err.message) : null;
       if (limit && limit < params.max_tokens) {
@@ -357,6 +412,7 @@ export async function quickQuery(config, { model, system, prompt, maxTokens = 40
     messages: [{ role: 'user', content: prompt }],
     maxTokens,
     effort: null,
+    cacheBucket: 'other',
   }, { signal, waitForRateLimit });
   return res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
 }

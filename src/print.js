@@ -37,6 +37,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     assistantMessage: (msg) => { if (format === 'stream-json') emit({ type: 'assistant', message: msg }); },
     messageAdded: (msg) => { store.message(msg); if (format === 'stream-json' && msg.role === 'user') emit({ type: 'user', message: msg }); },
     messagesReplaced: (msgs) => store.reset(msgs),
+    systemPrompt: (text) => store.setSystemPrompt(text),
     compactStart: (auto) => { if (flags.verbose) err(c.gray(`✻ ${auto ? 'Auto-compacting' : 'Compacting'} conversation…`)); },
     streamEvent: (ev) => {
       if (ev.type === 'retry' && flags.verbose) err(c.yellow(`API error (${ev.error.message}), retrying in ${Math.round(ev.delayMs / 1000)}s…`));
@@ -57,6 +58,8 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     runtime.agent.messages = loaded.messages;
     runtime.agent.restoreFileState(loaded.messages, loaded.times);
     store = new SessionStore(cwd, flags.resumeId);
+    store.systemPrompt = loaded.systemPrompt;
+    runtime.resumeSystemPrompt(loaded.systemPrompt); // continue behind the prompt (and the cache) the conversation had
   }
   const ctrl = new AbortController();
   const onSigint = () => ctrl.abort();
@@ -83,6 +86,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     process.off('SIGINT', onSigint);
   }
   const a = runtime.agent;
+  const used = a.totalUsage(); // sub-agents and compactions are billed too
   if (format === 'json' || format === 'stream-json') {
     emit({
       type: 'result',
@@ -91,7 +95,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
       session_id: store.id,
       duration_ms: Date.now() - started,
       num_turns: a.usage.requests,
-      usage: { input_tokens: a.usage.input, output_tokens: a.usage.output, cache_read_input_tokens: a.usage.cacheRead },
+      usage: { input_tokens: used.input, output_tokens: used.output, cache_read_input_tokens: used.cacheRead, cache_creation_input_tokens: used.cacheWrite },
     });
   } else {
     stdout.write(result.text + '\n');

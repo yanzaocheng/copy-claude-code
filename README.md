@@ -81,7 +81,7 @@ CLAUDE_CODE_EFFORT_LEVEL=max                 # 以 output_config.effort 发送
 CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432       # 自动压缩按这个窗口大小计算
 ```
 
-其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`、`CLAUDE_PRO_RATE_LIMIT_POLL_MS`（见下文“限流”）、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_RIPGREP_PATH`（rg 的路径；`off` 强制使用内置 JS 搜索）、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
+其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、提示词缓存的 `CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`、`ENABLE_PROMPT_CACHING_1H`、`FORCE_PROMPT_CACHING_5M`、`DISABLE_PROMPT_CACHING`（见下文“提示词缓存”）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`、`CLAUDE_PRO_RATE_LIMIT_POLL_MS`（见下文“限流”）、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_RIPGREP_PATH`（rg 的路径；`off` 强制使用内置 JS 搜索）、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
 
 ```bash
 claude-pro config list                                   # 查看生效值及其来源
@@ -90,6 +90,24 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 ```
 
 会话中也可以用 `/config`、`/model`、`/effort` 修改。
+
+## 提示词缓存：和 Claude Code 一致，尽量少花钱
+
+每次请求都会把整个对话重新发给模型，账单的大头是"重复读历史"。本项目按 [Claude Code 的做法](https://code.claude.com/docs/en/prompt-caching)使用 Anthropic 的提示词缓存：
+
+- **断点**：在工具列表末尾、系统提示词、最新一条消息的末尾各放一个 `cache_control`（共 3 个，上限 4 个）。系统提示词在一个会话里只构建一次，前缀稳定才能命中。
+- **TTL 分两个桶**，默认都是 5 分钟（API 的默认值，不发送 `ttl` 字段），每次命中会重新计时：
+  - **主对话**（你的每一轮）：`CLAUDE_CODE_PROMPT_CACHE_TTL=5m|1h`，或设置项 `promptCacheTtl`
+  - **其他请求**（子 agent、压缩、小模型的辅助请求）：`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=5m|1h`，或设置项 `subagentPromptCacheTtl`
+  - `ENABLE_PROMPT_CACHING_1H=1` 让两个桶都用 1 小时（上面两个变量优先）；`FORCE_PROMPT_CACHING_5M=1` 强制两个桶都用 5 分钟，优先级最高；其他取值被忽略。
+  - 1 小时档的缓存写入按 2 倍价格计费（5 分钟档是 1.25 倍），而且每一轮新增的内容都按这个价写：只有上下文很大、而且常常停顿超过 5 分钟才划算。多数情况保持默认。
+- **关闭缓存**：`DISABLE_PROMPT_CACHING=1` 完全不发 `cache_control`；`DISABLE_PROMPT_CACHING_HAIKU` / `_SONNET` / `_OPUS` 只关 haiku/sonnet/opus 别名所指的模型，`_FABLE` 只关 Fable 模型。
+- **端点不认**：网关对 `cache_control`（或 `ttl`）返回 400 时，不会让请求失败：在被拒绝的位置去掉标记（或退回 5 分钟）后重发，并记住这个端点，之后不再发送。
+- **压缩复用缓存**：压缩请求就是对话自己的请求（同样的模型、系统提示词、工具、effort），只在末尾追加一条"请写摘要"的指令，所以能读到前面各轮写好的缓存，而不是把整个历史重新处理一遍。只有这样得不到摘要（模型一直想调工具）或请求超长时，才退回更简单、不能命中缓存的请求。
+- **会话中途不改系统提示词**：保存记忆（`#`）、`/config set` 只做标记，系统提示词要到下一次 `/clear` 或压缩时才重建（与 Claude Code 对 CLAUDE.md 的处理一致）；`/status` 会提示有待生效的改动。子 agent 共用会话开始时的日期和 git 状态快照，同类型的子 agent 反复启动时前缀相同。
+- **恢复会话**：会话文件里保存了当时的系统提示词，`--resume` / `/resume` 继续用它（模型不同则不用），所以缓存还没过期时能接着命中；日期过期了，会在下一条消息后面附一句提醒。
+- **缓存还热时，切换要确认**：`/model`、`/effort` 会让下一次请求把整个对话重读一遍，缓存还没过期时会先问一下；过期了、新对话、或端点不报告缓存用量时不问。
+- **看效果**：`/cost` 显示命中率、miss 次数、缓存是否还热、最近一次 miss 的可能原因（系统提示词/工具/effort/模型变了，还是缓存过期了）；子 agent 和压缩的用量也算在内。`-p --output-format json` 的 `usage` 同样含子 agent 和压缩，并带 `cache_creation_input_tokens`。
 
 ## 限流：自动暂停，到点自动恢复
 

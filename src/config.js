@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { normalizeTtl } from './cache.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
@@ -46,6 +47,15 @@ export const KNOWN_KEYS = {
   DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000; lowered automatically if the API allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
+  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m (default) or 1h (1h writes cost more; they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
+  CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
+  ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
+  FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
+  DISABLE_PROMPT_CACHING: 'Set to 1 to send no cache_control markers at all (prompt caching off for every model)',
+  DISABLE_PROMPT_CACHING_HAIKU: 'Set to 1 to turn prompt caching off for the model the haiku alias resolves to',
+  DISABLE_PROMPT_CACHING_SONNET: 'Set to 1 to turn prompt caching off for the model the sonnet alias resolves to',
+  DISABLE_PROMPT_CACHING_OPUS: 'Set to 1 to turn prompt caching off for the model the opus alias resolves to',
+  DISABLE_PROMPT_CACHING_FABLE: 'Set to 1 to turn prompt caching off for Fable models',
   API_TIMEOUT_MS: 'Request timeout in milliseconds',
   CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests (0 = no retries at all, which also turns off the rate limit wait)',
   CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: 'Longest total time to wait for a rate limit (e.g. the 5-hour window) to reset before continuing by itself (default 21600000 = 6 hours; 0 = report the error instead of waiting)',
@@ -123,6 +133,9 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   for (const [scope, file] of Object.entries(files)) {
     const json = readJson(file);
     if (!json) continue;
+    // Claude Code's settings for the prompt cache TTL; the same variables in "env" win over them.
+    if (json.promptCacheTtl !== undefined) set({ CLAUDE_CODE_PROMPT_CACHE_TTL: json.promptCacheTtl }, `${file} (promptCacheTtl)`);
+    if (json.subagentPromptCacheTtl !== undefined) set({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: json.subagentPromptCacheTtl }, `${file} (subagentPromptCacheTtl)`);
     set(json.env, file);
     if (json.mcpServers) Object.assign(settings.mcpServers, json.mcpServers);
     for (const [event, entries] of Object.entries(json.hooks || {})) {
@@ -154,6 +167,7 @@ const int = (v, d) => {
   const n = parseInt(v, 10);
   return Number.isFinite(n) ? n : d;
 };
+const isOn = (v) => /^(1|true|yes)$/i.test(String(v ?? '').trim());
 
 export class Config {
   constructor(env, sources, settings, cwd) {
@@ -238,6 +252,26 @@ export class Config {
   get maxOutputTokens() { return int(this.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, 128_000); }
   get thinkingBudget() {
     return this.env.MAX_THINKING_TOKENS === undefined ? null : int(this.env.MAX_THINKING_TOKENS, null);
+  }
+  // Prompt cache TTL for a request bucket, by Claude Code's rules: "main" is the conversation itself, "other"
+  // is everything else (sub-agents, compaction, side queries). In order: FORCE_PROMPT_CACHING_5M; the bucket's
+  // own variable or setting; ENABLE_PROMPT_CACHING_1H; 5 minutes.
+  cacheTtl(bucket = 'main') {
+    if (isOn(this.env.FORCE_PROMPT_CACHING_5M)) return '5m';
+    const own = normalizeTtl(bucket === 'main' ? this.env.CLAUDE_CODE_PROMPT_CACHE_TTL : this.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL);
+    if (own) return own;
+    return isOn(this.env.ENABLE_PROMPT_CACHING_1H) ? '1h' : '5m';
+  }
+  // DISABLE_PROMPT_CACHING turns it off for everything; the per-model variables only for the model that
+  // their alias resolves to (a different version pinned as the model keeps its caching), wherever it runs.
+  promptCachingDisabled(modelId) {
+    if (isOn(this.env.DISABLE_PROMPT_CACHING)) return true;
+    for (const alias of ['haiku', 'sonnet', 'opus']) {
+      if (!isOn(this.env[`DISABLE_PROMPT_CACHING_${alias.toUpperCase()}`])) continue;
+      const target = this.aliasTarget(alias);
+      if (target && this.resolveModel(target).id === modelId) return true;
+    }
+    return isOn(this.env.DISABLE_PROMPT_CACHING_FABLE) && /fable/i.test(modelId || '');
   }
   get apiTimeout() { return int(this.env.API_TIMEOUT_MS, 600_000); }
   get maxRetries() { return int(this.env.CLAUDE_PRO_MAX_RETRIES, 6); }

@@ -78,8 +78,15 @@ export function localDate(now = new Date()) {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-export function environmentBlock(cwd, { model, shellName }) {
-  const git = gitInfo(cwd);
+// The date and the git state that a conversation starts with. They are taken once and then reused, by the main
+// agent's system prompt and by the sub-agents' alike: a prompt that changes with every `git status` (or at
+// midnight) cannot be read from the prompt cache, and the git status is labelled as a snapshot anyway.
+export function takeEnvSnapshot(cwd) {
+  return { date: localDate(), git: gitInfo(cwd) };
+}
+
+export function environmentBlock(cwd, { model, shellName, snapshot = null }) {
+  const { date, git } = snapshot || takeEnvSnapshot(cwd);
   const lines = [
     '<env>',
     `Working directory: ${cwd}`,
@@ -87,7 +94,7 @@ export function environmentBlock(cwd, { model, shellName }) {
     `Platform: ${process.platform}`,
     `Shell: ${shellName}`,
     `OS Version: ${os.type()} ${os.release()}`,
-    `Today's date: ${localDate()}`,
+    `Today's date: ${date}`,
     '</env>',
     `You are powered by the model ${model.id}.`,
   ];

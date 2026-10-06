@@ -4,9 +4,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
-import { compactPrompt, continuationMessage, PLAN_MODE_REMINDER } from './prompts.js';
+import { compactPrompt, continuationMessage, PLAN_MODE_REMINDER, SUMMARY_SYSTEM } from './prompts.js';
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
+import { CacheStats } from './cache.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -91,7 +92,7 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0 }) {
+  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt }) {
     this.config = config;
     this.depth = depth; // 0 for the main agent, +1 for every level of sub-agent
     this.hooks = hooks;
@@ -114,7 +115,15 @@ export class Agent {
     this.cwd = cwd;
     this.lastContextTokens = 0;
     this.tokensSinceUsage = 0;
-    this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 };
+    // What this agent's own requests used. `requests` counts the turns' requests; the summary requests of
+    // compactions are counted apart (`compactions`) and their tokens are in the totals like any others.
+    this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0 };
+    // What the sub-agents this agent started used (they bill like everything else); only the main agent has any.
+    this.subUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0, runs: 0 };
+    this.cache = new CacheStats(); // how much of the input came from the prompt cache, and why a request missed
+    this.refreshSystemPrompt = refreshSystemPrompt; // called when the conversation starts over from a summary
+    this.recordedSystem = null; // the system prompt last reported to the io (see callModel)
+    this.reminders = []; // texts for the next user message, as <system-reminder>s (the main agent's only)
     this.toolUseCount = 0;
     this.postCompactTokens = undefined; // undefined: never compacted; null: compacted, awaiting measurement
   }
@@ -136,7 +145,52 @@ export class Agent {
 
   replaceMessages(messages) {
     this.messages = messages;
+    this.cache.noteRewrite(); // the old conversation is no longer a prefix of the next request: not a cache miss
     this.io.messagesReplaced?.(messages, this);
+  }
+
+  // The system prompt for the next request: this agent's own, built when it is first needed.
+  currentSystem() {
+    return typeof this.systemPrompt === 'function' ? this.systemPrompt() : this.systemPrompt;
+  }
+
+  // A note for the model that goes with the next user message (as a <system-reminder>), after the part of the
+  // request that is already cached.
+  addReminder(text) {
+    if (text) this.reminders.push(text);
+  }
+
+  // Everything this agent and the sub-agents it started have used so far.
+  totalUsage() {
+    const a = this.usage;
+    const b = this.subUsage;
+    const sum = (k) => a[k] + b[k];
+    return {
+      input: sum('input'), output: sum('output'), cacheRead: sum('cacheRead'), cacheWrite: sum('cacheWrite'), cacheWrite1h: sum('cacheWrite1h'),
+      requests: sum('requests'), compactions: sum('compactions'),
+    };
+  }
+
+  // Count a finished sub-agent's usage as this agent's (whatever happened to it, it was billed).
+  addSubUsage(u) {
+    const b = this.subUsage;
+    for (const k of ['input', 'output', 'cacheRead', 'cacheWrite', 'cacheWrite1h', 'requests', 'compactions']) b[k] += u[k] || 0;
+    b.runs++;
+  }
+
+  // Count one finished request. `kind` is "turn" for the conversation's own requests and "summary" for the
+  // request that compacts it; both go into the prompt cache statistics.
+  recordUsage(res, kind = 'turn') {
+    const u = res.usage || {};
+    this.usage.input += u.input_tokens || 0;
+    this.usage.output += u.output_tokens || 0;
+    this.usage.cacheRead += u.cache_read_input_tokens || 0;
+    this.usage.cacheWrite += u.cache_creation_input_tokens || 0;
+    this.usage.cacheWrite1h += u.cache_creation?.ephemeral_1h_input_tokens || 0;
+    if (kind === 'summary') this.usage.compactions++;
+    else this.usage.requests++;
+    this.cache.record({ usage: u, ...res.cache });
+    this.io.usage?.(u, this);
   }
 
   // After resuming a conversation: drop what the previous one had read and rebuild the map from the
@@ -173,6 +227,8 @@ export class Agent {
     this.lastContextTokens = 0;
     this.tokensSinceUsage = 0;
     this.postCompactTokens = undefined;
+    this.cache.newConversation();
+    this.reminders = [];
     this.checkpoints?.reset();
   }
 
@@ -191,6 +247,7 @@ export class Agent {
       if (h.context.length) content = [...content, { type: 'text', text: `<system-reminder>${h.context.join('\n')}</system-reminder>` }];
     }
     if (!this.isSubagent) content = [...content, ...this.drainNotifications()];
+    if (this.reminders.length) content = [...content, ...this.reminders.splice(0).map((text) => ({ type: 'text', text: `<system-reminder>${text}</system-reminder>` }))];
     if (!this.isSubagent && this.checkpoints) {
       const prompt = content.find((b) => b.type === 'text' && !b.text.startsWith('<system-reminder>') && !b.text.startsWith('<task-notification>'))?.text;
       this.checkpoints.beginTurn({ label: prompt || '(background agent report)', messageIndex: this.messages.length });
@@ -342,23 +399,24 @@ export class Agent {
   }
 
   async callModel(signal) {
-    const system = typeof this.systemPrompt === 'function' ? this.systemPrompt() : this.systemPrompt;
+    const system = this.currentSystem();
+    // The system prompt is kept with the conversation, so that a resumed one can continue behind the same
+    // prompt (and so with the cache it has) instead of a freshly built one.
+    if (!this.isSubagent && system !== this.recordedSystem) {
+      this.recordedSystem = system;
+      this.io.systemPrompt?.(system, this);
+    }
     const res = await streamMessage(this.config, {
       model: this.model,
       system,
       messages: normalizeMessages(this.messages),
       tools: this.toolSchemas(),
+      cacheBucket: this.isSubagent ? 'other' : 'main',
     }, { signal, onEvent: (ev) => this.io.streamEvent?.(ev, this) });
-    const u = res.usage || {};
-    this.usage.input += u.input_tokens || 0;
-    this.usage.output += u.output_tokens || 0;
-    this.usage.cacheRead += u.cache_read_input_tokens || 0;
-    this.usage.cacheWrite += u.cache_creation_input_tokens || 0;
-    this.usage.requests++;
-    this.lastContextTokens = contextTokens(u);
+    this.lastContextTokens = contextTokens(res.usage);
     this.tokensSinceUsage = 0;
     if (this.postCompactTokens === null) this.postCompactTokens = this.lastContextTokens;
-    this.io.usage?.(u, this);
+    this.recordUsage(res);
     return res;
   }
 
@@ -494,6 +552,32 @@ export class Agent {
     };
   }
 
+  // The text of a summary request's reply: what is inside <summary>, else the reply without its <analysis>.
+  static summaryOf(res) {
+    const text = res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    return /<summary>([\s\S]*?)(<\/summary>|$)/.exec(text)?.[1]?.trim() || text.replace(/<analysis>[\s\S]*?<\/analysis>/, '').trim();
+  }
+
+  // Ask the model for the summary. The request is the conversation's own request with the summary instruction
+  // at its end: the same model, system prompt, tools and effort, so that the API reads the conversation from the
+  // cache the turns have been filling instead of processing it all again (this is what Claude Code does; it is
+  // the biggest request there is). Only if that does not give a summary (the model went on calling tools, or
+  // the request is too long by the size of the instruction) the plainer request is made: a short system prompt
+  // and no effort, which cannot share the cache, but is smaller and cannot be led astray by the main prompt.
+  async requestSummary(messages, { signal, onEvent }) {
+    const call = (request) => streamMessage(this.config, { model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', ...request }, { signal, onEvent });
+    try {
+      const res = await call({ system: this.currentSystem() });
+      this.recordUsage(res, 'summary');
+      if (Agent.summaryOf(res)) return res;
+    } catch (err) {
+      if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
+    }
+    const res = await call({ system: SUMMARY_SYSTEM, effort: null });
+    this.recordUsage({ ...res, cache: { ...res.cache, caching: false } }, 'summary'); // made to miss: not a miss to report
+    return res;
+  }
+
   // Summarise the conversation and replace it with the summary.
   async compact({ signal, auto = false, instructions = '' } = {}) {
     if (this.messages.length === 0) return null;
@@ -502,19 +586,12 @@ export class Agent {
     // If the last assistant turn has unanswered tool calls, the sequence is invalid; drop it.
     let res;
     try {
-      res = await streamMessage(this.config, {
-        model: this.model,
-        system: 'You are a helpful AI assistant tasked with summarizing conversations.',
-        messages,
-        tools: this.toolSchemas(),
-        effort: null,
-      }, { signal, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
+      res = await this.requestSummary(messages, { signal, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
     } catch (err) {
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
-    let text = res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-    const summary = /<summary>([\s\S]*?)(<\/summary>|$)/.exec(text)?.[1]?.trim() || text.replace(/<analysis>[\s\S]*?<\/analysis>/, '').trim();
+    const summary = Agent.summaryOf(res);
     if (!summary) {
       const err = new Error('Compaction failed: the model returned an empty summary.');
       this.io.compactEnd?.(null, this, err);
@@ -522,6 +599,7 @@ export class Agent {
     }
     const todoNote = this.todos.length ? `\n\n<system-reminder>Current todo list:\n${this.todos.map((t) => `- [${t.status}] ${t.content}`).join('\n')}</system-reminder>` : '';
     this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto }) + todoNote }] }]);
+    this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
     this.fileState.clear();
     this.checkpoints?.markConversationStale();
     this.lastContextTokens = estimateTokens(summary) + estimateTokens(this.toolSchemas()) + 2000;

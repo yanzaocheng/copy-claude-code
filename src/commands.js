@@ -42,7 +42,25 @@ export function buildCommands(app) {
     cfg.env = fresh.env;
     cfg.sources = fresh.sources;
     cfg.settings = fresh.settings;
-    app.runtime.invalidateSystemPrompt();
+    // What the system prompt is built from may have changed (memory switched off, say). It is not rebuilt in the
+    // middle of a conversation, which would lose its prompt cache; it is, at the next /clear or compaction.
+    app.runtime.deferSystemPromptRefresh();
+  };
+
+  // Claude Code asks before something makes the next request read the whole conversation without the prompt
+  // cache, but only while that cache is still warm: once it has expired there is nothing left to lose. (A model
+  // that answered the last request has the cache that is in use, so switching to it loses nothing.)
+  const confirmCacheLoss = async (what, { model = null } = {}) => {
+    const cache = app.agent.cache;
+    if (!app.agent.messages.length || !cache.isWarm() || (model && model === cache.model)) return true;
+    const choice = await app.showDialog(new SelectDialog({
+      title: what,
+      question: `The prompt cache is warm (about ${formatTokens(cache.expected)} tokens, ${formatDuration(cache.expiresAt - Date.now())} left). ${what} makes the next request read the whole conversation again without it, which costs more and takes longer. Go on?`,
+      color: c.blue,
+      options: [{ label: 'Yes, go on', value: 'yes' }, { label: 'No, leave it as it is', value: 'no' }],
+      cancelValue: 'no',
+    }));
+    return choice === 'yes';
   };
 
   add({
@@ -193,8 +211,10 @@ export function buildCommands(app) {
         if (!choice) return;
       }
       const forget = choice === '__default__' || choice === 'default';
+      const next = cfg.resolveModel(forget ? cfg.configuredModelSpec : choice).id;
+      if (next !== cfg.mainModel.id && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
       cfg.modelOverride = forget ? null : choice;
-      app.runtime.invalidateSystemPrompt();
+      app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
       out(`Model set to ${c.bold(cfg.mainModel.label)} ${c.dim(`(${formatTokens(cfg.mainModel.contextWindow)} context)`)}${kept}`);
     },
@@ -222,6 +242,9 @@ export function buildCommands(app) {
       }
       if (choice !== 'auto' && choice !== 'default' && !EFFORTS.includes(choice)) { out(c.red(`Unknown effort "${choice}". Use one of: ${EFFORTS.join(', ')}, auto, default`)); return; }
       const forget = choice === 'default';
+      const wanted = (forget ? (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '') : choice).trim().toLowerCase();
+      const next = wanted && wanted !== 'auto' && wanted !== 'default' ? wanted : null;
+      if (next !== cfg.effort && !(await confirmCacheLoss('Changing the effort'))) { out(c.dim('The effort was not changed.')); return; }
       cfg.effortOverride = forget ? null : choice;
       out(`Effort set to ${c.bold(cfg.effort || 'auto')}${keep(cfg, { effort: cfg.effortOverride }, forget)}`);
     },
@@ -249,6 +272,7 @@ export function buildCommands(app) {
         row('Small model', cfg.smallModel.label),
         row('Effort', cfg.effort || 'auto'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
+        row('Prompt cache', cfg.promptCachingDisabled(cfg.mainModel.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', cfg.autoCompactEnabled ? `at ${formatTokens(cfg.autoCompactThreshold())} tokens (window ${formatTokens(cfg.compactWindow())})` : 'disabled'),
         row('Mode', modes.mode === 'plan' ? 'plan (read-only; shift+tab to leave)' : 'full access (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
@@ -265,11 +289,16 @@ export function buildCommands(app) {
     aliases: ['usage'],
     description: 'Show token usage for this session',
     run() {
-      const u = app.agent.usage;
+      const a = app.agent;
+      const u = a.totalUsage();
+      const b = a.subUsage;
+      const cacheLines = a.cache.describe();
       out([
-        `Total input:   ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} tokens ${c.dim(`(${formatTokens(u.cacheRead)} cache read, ${formatTokens(u.cacheWrite)} cache write)`)}`,
+        `Total input:   ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} tokens ${c.dim(`(${formatTokens(u.cacheRead)} cache read, ${formatTokens(u.cacheWrite)} cache write${u.cacheWrite1h ? `, ${formatTokens(u.cacheWrite1h)} of it for 1 hour` : ''})`)}`,
         `Total output:  ${formatTokens(u.output)} tokens`,
-        `API requests:  ${u.requests}`,
+        `API requests:  ${u.requests}${u.compactions ? c.dim(` + ${u.compactions} to compact the conversation`) : ''}`,
+        ...cacheLines.map((line, i) => (i ? c.dim(line) : line)),
+        ...(b.runs ? [c.dim(`Sub-agents:    ${b.runs} run${b.runs === 1 ? '' : 's'}, ${b.requests + b.compactions} requests, ${formatTokens(b.input + b.cacheRead + b.cacheWrite)} input (${formatTokens(b.cacheRead)} cached), ${formatTokens(b.output)} output; included in the totals`)] : []),
         `Session time:  ${formatDuration(Date.now() - app.sessionStart)}`,
       ]);
     },
