@@ -1,0 +1,6 @@
+{
+  "env": {
+    "CLAUDE_PRO_PROVIDER": "claude-code",
+    "CLAUDE_PRO_CLAUDE_CONFIG_FILE": "C:\\Users\\yzc\\.claude.json"
+  }
+}
