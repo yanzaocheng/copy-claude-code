@@ -64,7 +64,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     return promptCache;
   };
   // Build the prompt again at the next request: for a new conversation (/clear), another model, a compaction.
-  runtime.invalidateSystemPrompt = () => { promptCache = null; promptStale = false; snapshots.clear(); };
+  runtime.invalidateSystemPrompt = () => { promptCache = null; promptStale = false; snapshots.clear(); notedDate = null; };
   // Something it is built from changed in the middle of a conversation: note it, and leave the prompt as it is.
   runtime.deferSystemPromptRefresh = () => { if (promptCache) promptStale = true; };
   Object.defineProperty(runtime, 'systemPromptStale', { get: () => promptStale });
@@ -83,7 +83,21 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     promptStale = false;
     const then = /^Today's date: (\d{4}-\d{2}-\d{2})$/m.exec(saved)?.[1];
     const today = localDate();
-    if (then && then !== today) runtime.agent.addReminder(`Today's date is ${today}. This conversation was resumed from an earlier session, so the date in the environment block of your instructions (${then}) is out of date.`);
+    if (then && then !== today) {
+      runtime.agent.addReminder(`Today's date is ${today}. This conversation was resumed from an earlier session, so the date in the environment block of your instructions (${then}) is out of date.`);
+      notedDate = today;
+    }
+    return true;
+  };
+  // A conversation that goes on past midnight keeps the date its system prompt was built with (rebuilding the
+  // prompt would throw its cache away). The model is told the new date instead, once a day, in a note that goes
+  // with the next user message, after everything that is cached. Called before each of the main agent's turns.
+  let notedDate = null;
+  runtime.noteDateChange = (today = localDate()) => {
+    const then = promptCache && /^Today's date: (\d{4}-\d{2}-\d{2})$/m.exec(promptCache)?.[1];
+    if (!then || then === today || notedDate === today) return false;
+    notedDate = today;
+    runtime.agent.addReminder(`Today's date is ${today}. This conversation started on ${then}, so the date in the environment block of your instructions is out of date.`);
     return true;
   };
 
@@ -135,6 +149,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     hooks,
     tasks,
     refreshSystemPrompt: () => runtime.invalidateSystemPrompt(), // a compaction starts the conversation over
+    beforeTurn: () => runtime.noteDateChange(),
   });
 
   // A finished background agent's report is queued for the main agent; the UI decides

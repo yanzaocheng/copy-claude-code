@@ -96,7 +96,7 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt }) {
+  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn }) {
     this.config = config;
     this.depth = depth; // 0 for the main agent, +1 for every level of sub-agent
     this.hooks = hooks;
@@ -126,6 +126,7 @@ export class Agent {
     this.subUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0, runs: 0 };
     this.cache = new CacheStats(); // how much of the input came from the prompt cache, and why a request missed
     this.refreshSystemPrompt = refreshSystemPrompt; // called when the conversation starts over from a summary
+    this.beforeTurn = beforeTurn; // called at the start of each of the main agent's turns (the date note, see runtime.js)
     this.recordedSystem = null; // the system prompt last reported to the io (see callModel)
     this.reminders = []; // texts for the next user message, as <system-reminder>s (the main agent's only)
     this.toolUseCount = 0;
@@ -241,6 +242,7 @@ export class Agent {
 
   // Run one user turn to completion. Returns {text, interrupted}.
   async run(userContent, { signal } = {}) {
+    if (!this.isSubagent) this.beforeTurn?.();
     let content = toBlocks(userContent);
     if (this.modes.mode === 'plan' && !this.isSubagent) content = [...content, { type: 'text', text: PLAN_MODE_REMINDER }];
     if (this.hooks?.has('UserPromptSubmit') && !this.isSubagent) {

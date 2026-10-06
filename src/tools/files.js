@@ -9,7 +9,7 @@ import { diffLines, makeHunks, countChanges, splitLines } from '../utils/diff.js
 const MAX_LINES = 10_000;
 const MAX_LINE_CHARS = 20_000;
 const MAX_OUTPUT_CHARS = 400_000; // a read without offset/limit bigger than this is refused
-const HARD_MAX_CHARS = 1_000_000; // never return more than this in one read, even with an explicit limit
+const HARD_MAX_CHARS = 400_000; // never return more than this in one read (about 100k tokens), even with an explicit limit
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 
 export function mtime(file) {
@@ -132,11 +132,14 @@ Usage:
       return { isError: true, content: `File content (${Math.round(content.length / 1024)}KB) exceeds the maximum allowed size. Use the offset and limit parameters to read specific portions of the file, or use the Grep tool to search for specific content.` };
     }
     let cut = false;
+    let end = start + slice.length - 1;
     if (content.length > HARD_MAX_CHARS) {
-      content = `${content.slice(0, HARD_MAX_CHARS)}\n… [output cut at ${HARD_MAX_CHARS} characters; read a smaller range with offset/limit]`;
+      const kept = content.slice(0, HARD_MAX_CHARS);
+      const whole = kept.endsWith('\n'); // the cut fell between two lines
+      end = start + (kept.match(/\n/g) || []).length - (whole ? 1 : 0); // the last line shown
+      content = `${kept}${whole ? '' : '\n'}… [output cut at ${HARD_MAX_CHARS} characters: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit]`;
       cut = true;
     }
-    const end = start + slice.length - 1;
     seen(cut || start > 1 || end < lines.length);
     if (end < lines.length) content += `\n\n(File has ${lines.length} lines total; showing lines ${start}-${end}. Use offset/limit to read more.)`;
     return { content, display: { summary: `Read ${slice.length} line${slice.length === 1 ? '' : 's'}` } };

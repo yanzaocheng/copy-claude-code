@@ -863,3 +863,27 @@ test('an automatic compaction that keeps failing does not fail the turns, and st
   mockFetch(t, async (url, init) => (init.body.includes('detailed summary of the conversation') ? rejected('the summary endpoint is broken') : rejected('prompt is too long: 210000 tokens > 200000 maximum')));
   await assert.rejects(() => tooLong.run('more'), /the summary endpoint is broken/);
 });
+
+test('a conversation that goes on past midnight is told the new date once a day, without rebuilding the system prompt', async (t) => {
+  const rt = await runtimeIn(tmp());
+  t.after(() => rt.mcp.close());
+  assert.equal(rt.noteDateChange('2099-01-01'), false, 'no prompt built yet: nothing to compare');
+  const built = rt.systemPrompt();
+  const then = /^Today's date: (.+)$/m.exec(built)[1];
+  assert.equal(rt.noteDateChange(then), false, 'the same day: nothing to say');
+  assert.equal(rt.noteDateChange('2099-01-01'), true);
+  assert.equal(rt.noteDateChange('2099-01-01'), false, 'once a day');
+  assert.deepEqual(rt.agent.reminders, [`Today's date is 2099-01-01. This conversation started on ${then}, so the date in the environment block of your instructions is out of date.`]);
+  assert.equal(rt.systemPrompt(), built, 'the prompt itself stays, and so does its cache');
+  assert.equal(rt.noteDateChange('2099-01-02'), true, 'another day, another note');
+  // the main agent asks before each turn; a sub-agent does not
+  let calls = 0;
+  mockFetch(t, async () => replyWith());
+  rt.agent.reminders.length = 0;
+  rt.agent.beforeTurn = () => { calls++; };
+  await rt.agent.run('hello');
+  assert.equal(calls, 1);
+  await makeAgent(makeConfig(), { isSubagent: true, beforeTurn: () => { calls++; } }).run('sub');
+  assert.equal(calls, 1);
+});
+

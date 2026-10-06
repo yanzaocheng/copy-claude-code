@@ -138,3 +138,28 @@ test('Edit answers with the changed lines, not a snippet of the file (the snippe
   }
   assert.match(fs.readFileSync(file, 'utf8'), /^row 1\nrow 2\nrow 4\nx\ny\n/);
 });
+
+test('Read never returns more than 400k characters, and then says exactly where it stopped', async () => {
+  const dir = tmp();
+  // 60 lines of about 20k characters, numbered at their start; `width` decides where the 400k cut falls
+  const readWide = async (width) => {
+    const file = path.join(dir, `wide-${width}.txt`);
+    fs.writeFileSync(file, Array.from({ length: 60 }, (_, i) => `${String(i + 1).padStart(2, '0')}${'x'.repeat(width - 2)}`).join('\n') + '\n');
+    const ctx = ctxFor(dir);
+    const r = await ReadTool.call({ file_path: file, limit: 60 }, ctx);
+    assert.ok(!r.isError, r.content);
+    assert.ok(r.content.length < 400_400, `${r.content.length} characters`);
+    assert.equal(ctx.fileState.get(file).partial, true);
+    return r.content;
+  };
+  // the cut falls inside line 20
+  let out = await readWide(19_995);
+  assert.match(out, /output cut at 400000 characters: line 20 is the last one shown, and only in part;/);
+  assert.match(out, /showing lines 1-20\./, 'the footer names the last line shown, not the last one asked for');
+  assert.ok(out.includes('\t20x') && !out.includes('\t21x'));
+  // the cut falls exactly between lines 20 and 21 (each numbered line is 20,000 characters)
+  out = await readWide(19_992);
+  assert.match(out, /output cut at 400000 characters: line 20 is the last one shown;/);
+  assert.match(out, /showing lines 1-20\./);
+  assert.ok(out.includes('\t20x') && !out.includes('\t21x'));
+});
