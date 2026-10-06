@@ -38,14 +38,22 @@ function mockFetch(t, handle) {
 
 const sse = (events) => new Response(events.map((ev) => `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
 // A reply: text (or a tool call), with the usage the API would report.
-function replyWith({ text = 'ok', toolUse = null, usage = {} } = {}) {
+function replyWith({ text = 'ok', toolUse = null, preamble = null, usage = {} } = {}) {
+  const at = preamble ? 1 : 0; // a tool call may come after a few words of text
   return sse([
     { type: 'message_start', message: { model: 'mock', usage: { input_tokens: 10, output_tokens: 0, ...usage } } },
+    ...(preamble
+      ? [
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: preamble } },
+        { type: 'content_block_stop', index: 0 },
+      ]
+      : []),
     ...(toolUse
       ? [
-        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: toolUse, input: {} } },
-        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } },
-        { type: 'content_block_stop', index: 0 },
+        { type: 'content_block_start', index: at, content_block: { type: 'tool_use', id: 'toolu_1', name: toolUse, input: {} } },
+        { type: 'content_block_delta', index: at, delta: { type: 'input_json_delta', partial_json: '{}' } },
+        { type: 'content_block_stop', index: at },
       ]
       : [
         { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -401,6 +409,11 @@ test('the summary request misses on purpose only when the shared one fails: an e
   assert.equal(r.bodies[1].output_config, undefined);
   assert.equal(r.agent.usage.compactions, 2, 'both were billed');
   assert.equal(r.agent.cache.misses, 0, 'the one that was made to miss is not reported as a miss');
+  // the model writes a few words and then calls a tool: that is not a summary, whatever the words are
+  r = await run(() => replyWith({ preamble: 'Let me look at the file first.', toolUse: 'Alpha' }));
+  assert.equal(r.summary, 'PLAIN', 'the preamble must not be taken for the summary');
+  assert.equal(r.bodies.length, 2);
+  assert.equal(r.bodies[1].system[0].text, SUMMARY_SYSTEM);
   // the shared request is too long by the size of the instruction
   r = await run(() => rejected('prompt is too long: 200100 tokens > 200000 maximum'));
   assert.equal(r.summary, 'PLAIN');

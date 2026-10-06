@@ -552,8 +552,11 @@ export class Agent {
     };
   }
 
-  // The text of a summary request's reply: what is inside <summary>, else the reply without its <analysis>.
+  // The summary in a summary request's reply: what is inside <summary>, else the text without its <analysis>.
+  // A reply that stops to call a tool has none, whatever text comes before the call ("Let me look at the file
+  // first."): that is a few words of preamble, and taking it for the summary would throw the conversation away.
   static summaryOf(res) {
+    if (res.stopReason === 'tool_use' || res.message.content.some((b) => b.type === 'tool_use')) return '';
     const text = res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
     return /<summary>([\s\S]*?)(<\/summary>|$)/.exec(text)?.[1]?.trim() || text.replace(/<analysis>[\s\S]*?<\/analysis>/, '').trim();
   }
