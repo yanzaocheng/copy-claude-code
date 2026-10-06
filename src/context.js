@@ -13,7 +13,8 @@ export function gitInfo(cwd) {
   const branch = run('git', ['branch', '--show-current'], { cwd }) || '(detached)';
   let main = null;
   for (const b of ['main', 'master']) if (run('git', ['rev-parse', '--verify', '--quiet', b], { cwd }) !== null) { main = b; break; }
-  let status = run('git', ['status', '--short'], { cwd }) || '';
+  // quotepath=false: file names with non-ASCII characters (Chinese ones) are shown as they are, not as "\344\275\240".
+  let status = run('git', ['-c', 'core.quotepath=false', 'status', '--short'], { cwd }) || '';
   const statusLines = status.split('\n');
   if (statusLines.length > 40) status = statusLines.slice(0, 40).join('\n') + `\n... (${statusLines.length - 40} more lines, run "git status" for the rest)`;
   const log = run('git', ['log', '--oneline', '-n', '5'], { cwd }) || '';
@@ -70,6 +71,13 @@ export function projectMemoryFile(cwd) {
   return path.join(cwd, 'CLAUDE.md');
 }
 
+// The date where the user is (YYYY-MM-DD). toISOString() would give the UTC date, which for someone in
+// UTC+8 is yesterday's between midnight and 8 o'clock.
+export function localDate(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
 export function environmentBlock(cwd, { model, shellName }) {
   const git = gitInfo(cwd);
   const lines = [
@@ -79,7 +87,7 @@ export function environmentBlock(cwd, { model, shellName }) {
     `Platform: ${process.platform}`,
     `Shell: ${shellName}`,
     `OS Version: ${os.type()} ${os.release()}`,
-    `Today's date: ${new Date().toISOString().slice(0, 10)}`,
+    `Today's date: ${localDate()}`,
     '</env>',
     `You are powered by the model ${model.id}.`,
   ];

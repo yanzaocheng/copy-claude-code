@@ -10,6 +10,10 @@ import { App } from '../src/ui/repl.js';
 
 const { Terminal } = xterm;
 
+// After each message the app asks the small model for the conversation's topic (the tab title): one more
+// request to every fake server, which tests that count requests do not expect. A test can turn it back on.
+process.env.CLAUDE_PRO_DISABLE_TOPIC_TITLE ??= '1';
+
 export async function startTui({ cwd, cols = 100, rows = 40, flags = {} } = {}) {
   const term = new Terminal({ cols, rows, allowProposedApi: true, scrollback: 5000 });
   let raw = '';
@@ -74,11 +78,15 @@ export async function startTui({ cwd, cols = 100, rows = 40, flags = {} } = {}) 
       await new Promise((r) => setTimeout(r, 100));
       return dialogs;
     },
-    resize(c, r) {
+    // Resize the terminal like a window drag does: the terminal re-flows its contents first, then the
+    // program is told. Returns once the program has repainted (it waits for the resizing to pause).
+    async resize(c, r = rows) {
       term.resize(c, r);
       stdout.columns = c;
       stdout.rows = r;
       stdout.emit('resize');
+      while (app.screen.resizing) await new Promise((res) => setTimeout(res, 10));
+      await flush();
     },
     async close() { app.exit(0); await exited; },
   };

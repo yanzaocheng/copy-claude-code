@@ -72,10 +72,13 @@ export class SessionStore {
   }
 
   message(message) { this.append({ type: 'message', message, at: Date.now() }); }
+  // What the conversation is about now (the tab title); the newest one wins when the session is loaded.
+  setTopic(topic) { this.append({ type: 'meta', topic, at: Date.now() }); }
   reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
 
   static load(file) {
     const messages = [];
+    const times = []; // when each message was stored (ms since epoch), parallel to `messages`; 0 = unknown
     let meta = {};
     let title = null;
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
@@ -85,10 +88,16 @@ export class SessionStore {
       if (e.type === 'meta') meta = { ...meta, ...e };
       else if (e.type === 'message') {
         messages.push(e.message);
+        times.push(e.at || 0);
         if (!title && e.message.role === 'user') title = firstUserText(e.message);
-      } else if (e.type === 'reset') messages.splice(0, messages.length, ...e.messages);
+      } else if (e.type === 'reset') {
+        // The messages of a reset (after /clear, compaction or a rewind) were not stored one by one,
+        // so their own times are unknown.
+        messages.splice(0, messages.length, ...e.messages);
+        times.splice(0, times.length, ...e.messages.map(() => 0));
+      }
     }
-    return { messages, meta, title };
+    return { messages, times, meta, title, topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null };
   }
 
   static list(cwd) {
@@ -101,7 +110,7 @@ export class SessionStore {
       let title = null, count = 0;
       try {
         const loaded = SessionStore.load(file);
-        title = loaded.title;
+        title = loaded.topic || loaded.title; // what it was about last, else its first message
         count = loaded.messages.length;
       } catch { /* ignore */ }
       return { id: f.slice(0, -6), file, mtime: st.mtimeMs, title: title || '(no prompt)', count };

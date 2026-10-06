@@ -5,6 +5,12 @@ import { c, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './an
 const PASTE_THRESHOLD_CHARS = 800;
 const PASTE_THRESHOLD_LINES = 8;
 
+// Start of the line the cursor is on. (lastIndexOf with a negative start still looks at index 0, so a
+// text that begins with a newline made the cursor at 0 appear to be on its second line.)
+function lineStartOf(text, cursor) {
+  return cursor <= 0 ? 0 : text.lastIndexOf('\n', cursor - 1) + 1;
+}
+
 function prevBoundary(text, i) {
   if (i <= 0) return 0;
   const gs = graphemes(text.slice(0, i));
@@ -192,10 +198,10 @@ export class Editor {
     }
     if (name === 'up' || (key.ctrl && name === 'p')) {
       if (this.suggestions) { this.selected = (this.selected - 1 + this.suggestions.items.length) % this.suggestions.items.length; this.onChange?.(); return true; }
-      const lineStart = this.text.lastIndexOf('\n', this.cursor - 1) + 1;
+      const lineStart = lineStartOf(this.text, this.cursor);
       if (lineStart > 0) {
         const col = this.cursor - lineStart;
-        const prevStart = this.text.lastIndexOf('\n', lineStart - 2) + 1;
+        const prevStart = lineStartOf(this.text, lineStart - 1);
         this.set(this.text, Math.min(prevStart + col, lineStart - 1));
         return true;
       }
@@ -205,7 +211,7 @@ export class Editor {
       if (this.suggestions) { this.selected = (this.selected + 1) % this.suggestions.items.length; this.onChange?.(); return true; }
       const lineEnd = this.text.indexOf('\n', this.cursor);
       if (lineEnd >= 0) {
-        const lineStart = this.text.lastIndexOf('\n', this.cursor - 1) + 1;
+        const lineStart = lineStartOf(this.text, this.cursor);
         const col = this.cursor - lineStart;
         const nextEnd = this.text.indexOf('\n', lineEnd + 1);
         this.set(this.text, Math.min(lineEnd + 1 + col, nextEnd < 0 ? this.text.length : nextEnd));
@@ -224,7 +230,7 @@ export class Editor {
     if (key.meta && name === 'b') { this.set(this.text, wordLeft(this.text, this.cursor)); return true; }
     if (key.meta && name === 'f') { this.set(this.text, wordRight(this.text, this.cursor)); return true; }
     if (name === 'home' || (key.ctrl && name === 'a')) {
-      this.set(this.text, this.text.lastIndexOf('\n', this.cursor - 1) + 1);
+      this.set(this.text, lineStartOf(this.text, this.cursor));
       return true;
     }
     if (name === 'end' || (key.ctrl && name === 'e')) {
@@ -258,7 +264,7 @@ export class Editor {
       return true;
     }
     if (key.ctrl && name === 'u') {
-      const s = this.text.lastIndexOf('\n', this.cursor - 1) + 1;
+      const s = lineStartOf(this.text, this.cursor);
       this.set(this.text.slice(0, s) + this.text.slice(this.cursor), s);
       return true;
     }

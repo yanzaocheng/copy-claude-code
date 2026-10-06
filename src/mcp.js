@@ -43,8 +43,11 @@ class StdioTransport {
       this.child = spawn(command, args, { env, cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     }
     let buf = '';
+    // Decode as a stream: a multi-byte character (CJK text) can be split between two chunks.
+    this.child.stdout.setEncoding('utf8');
+    this.child.stderr.setEncoding('utf8');
     this.child.stdout.on('data', (d) => {
-      buf += d.toString();
+      buf += d;
       let i;
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i).trim();
@@ -55,7 +58,7 @@ class StdioTransport {
         this.onMessage(msg);
       }
     });
-    this.child.stderr.on('data', (d) => { this.stderr = (this.stderr + d.toString()).slice(-4000); });
+    this.child.stderr.on('data', (d) => { this.stderr = (this.stderr + d).slice(-4000); });
     const failAll = (err) => {
       this.closed = true;
       for (const p of this.pending.values()) p.reject(err);
@@ -90,17 +93,22 @@ class StdioTransport {
 
   request(method, params, { timeout = 60_000, signal } = {}) {
     if (this.closed) return Promise.reject(new Error(`MCP server "${this.name}" is not running`));
+    const aborted = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
+    if (signal?.aborted) return Promise.reject(aborted());
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`MCP request ${method} timed out after ${timeout}ms`)); }, timeout);
-      const done = (fn) => (v) => { clearTimeout(timer); fn(v); };
-      this.pending.set(id, { resolve: done(resolve), reject: done(reject) });
-      signal?.addEventListener('abort', () => {
+      // The abort listener must go as soon as the request is over: left in place it would send a
+      // cancellation for a request that already finished when the signal is aborted later.
+      const onAbort = () => {
         this.pending.delete(id);
+        cleanup();
         this.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id, reason: 'User interrupted' } });
-        clearTimeout(timer);
-        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-      }, { once: true });
+        reject(aborted());
+      };
+      const timer = setTimeout(() => { this.pending.delete(id); cleanup(); reject(new Error(`MCP request ${method} timed out after ${timeout}ms`)); }, timeout);
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
+      this.pending.set(id, { resolve: (v) => { cleanup(); resolve(v); }, reject: (e) => { cleanup(); reject(e); } });
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.send({ jsonrpc: '2.0', id, method, params });
     });
   }
@@ -122,8 +130,13 @@ class HttpTransport {
 
   async post(body, signal, timeout) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeout);
-    signal?.addEventListener('abort', () => ctrl.abort(), { once: true });
+    // A timeout must not look like the user's interrupt: both abort the fetch, and an AbortError
+    // would end the whole agent turn as "interrupted by user".
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeout);
+    const onAbort = () => ctrl.abort();
+    if (signal?.aborted) ctrl.abort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
     try {
       const res = await fetch(this.url, {
         method: 'POST',
@@ -154,8 +167,12 @@ class HttpTransport {
         throw new Error('No response in event stream');
       }
       return JSON.parse(text);
+    } catch (e) {
+      if (timedOut && !signal?.aborted) throw new Error(`MCP request ${body.method} timed out after ${timeout}ms`);
+      throw e;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
 
@@ -165,7 +182,8 @@ class HttpTransport {
     return msg.result;
   }
 
-  notify(method, params) { this.post({ jsonrpc: '2.0', method, params }, null, 10_000).catch(() => {}); }
+  // Returns a promise that never rejects, so callers can wait until the server has taken the notification.
+  notify(method, params) { return this.post({ jsonrpc: '2.0', method, params }, null, 10_000).catch(() => {}); }
   close() {}
 }
 
@@ -209,7 +227,9 @@ export class McpManager {
       }, { timeout });
       entry.serverInfo = init?.serverInfo;
       entry.instructions = init?.instructions;
-      transport.notify('notifications/initialized', {});
+      // Over HTTP the notification is a request of its own: tools/list must not overtake it, or a
+      // server that insists on a finished handshake answers "not initialized".
+      await transport.notify('notifications/initialized', {});
       const tools = [];
       let cursor;
       do {

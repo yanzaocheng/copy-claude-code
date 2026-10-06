@@ -121,9 +121,11 @@ async function readLinux() {
     const r = await new Promise((resolve) => {
       const chunks = [];
       const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+      // A clipboard owner that never answers must not leave the reader hanging.
+      const timer = setTimeout(() => child.kill(), 5000);
       child.stdout.on('data', (d) => chunks.push(d));
-      child.on('error', () => resolve(null));
-      child.on('close', (code) => resolve(code === 0 ? Buffer.concat(chunks) : null));
+      child.on('error', () => { clearTimeout(timer); resolve(null); });
+      child.on('close', (code) => { clearTimeout(timer); resolve(code === 0 ? Buffer.concat(chunks) : null); });
     });
     if (r?.length) {
       if (r.length > MAX_IMAGE_BYTES) return { error: 'Image is too large (max 3.7MB)' };

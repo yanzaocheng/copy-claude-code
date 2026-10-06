@@ -6,6 +6,7 @@ import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
 import { compactPrompt, continuationMessage, PLAN_MODE_REMINDER } from './prompts.js';
 import { toolResultsDir } from './session.js';
+import { rebuildFileState } from './filestate.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -138,13 +139,35 @@ export class Agent {
     this.io.messagesReplaced?.(messages, this);
   }
 
+  // After resuming a conversation: drop what the previous one had read and rebuild the map from the
+  // restored transcript, so files the model remembers reading can be edited without a re-read.
+  restoreFileState(messages, times) {
+    this.fileState.clear();
+    for (const [file, state] of rebuildFileState(messages, times, this.cwd)) this.fileState.set(file, state);
+  }
+
+  // The text the assistant has written so far (newest last, clipped to `limit` characters). A
+  // sub-agent that fails part-way hands this back so its work is not lost with the error.
+  assistantText(limit = 6000) {
+    const text = this.messages
+      .filter((m) => m.role === 'assistant' && Array.isArray(m.content))
+      .flatMap((m) => m.content.filter((b) => b.type === 'text').map((b) => b.text.trim()))
+      .filter(Boolean)
+      .join('\n\n');
+    return text.length > limit ? `…${text.slice(-limit)}` : text;
+  }
+
   // Take pending background-task notifications as content blocks.
   drainNotifications() {
     return notificationBlocks(this.notifications.splice(0));
   }
 
+  // Start over with an empty conversation, to move to another session (/clear, /resume). The
+  // session being left is deliberately not told (no messagesReplaced): an "empty conversation" record
+  // appended to it would make it load as empty, and it would vanish from the list of conversations
+  // that can be resumed.
   resetConversation() {
-    this.replaceMessages([]);
+    this.messages = [];
     this.todos = [];
     this.fileState.clear();
     this.lastContextTokens = 0;
@@ -183,7 +206,8 @@ export class Agent {
     for (;;) {
       if (signal?.aborted) return this.handleInterrupt(null);
       if (this.shouldAutoCompact()) {
-        await this.compact({ signal, auto: true });
+        const interrupted = await this.compactOnTheWay(signal);
+        if (interrupted) return interrupted;
       }
 
       let res;
@@ -198,7 +222,8 @@ export class Agent {
         if (err.promptTooLong && !compactedForError && this.messages.length > 2) {
           compactedForError = true;
           this.io.notice?.('Context limit reached; compacting conversation…', 'warn');
-          await this.compact({ signal, auto: true });
+          const interrupted = await this.compactOnTheWay(signal);
+          if (interrupted) return interrupted;
           continue;
         }
         throw err;
@@ -278,6 +303,19 @@ export class Agent {
   handleInterrupt() {
     this.pushMessage({ role: 'user', content: [{ type: 'text', text: INTERRUPT_MESSAGE }] });
     return { text: '', interrupted: true };
+  }
+
+  // Compact in the middle of a turn. The user can interrupt this like any other request (Esc during a
+  // pause for a rate limit, say), and that ends the turn as an interruption rather than an error: the
+  // result to return from run() is given back, or null when the compaction went through.
+  async compactOnTheWay(signal) {
+    try {
+      await this.compact({ signal, auto: true });
+      return null;
+    } catch (err) {
+      if (isAbort(err) || signal?.aborted) return this.handleInterrupt();
+      throw err;
+    }
   }
 
   // Run the verification command in the project root with the Bash tool. Returns {ok, output}.

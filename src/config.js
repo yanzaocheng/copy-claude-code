@@ -7,6 +7,8 @@
 //   5. <project>/.claude-pro/settings.local.json
 //   6. process environment
 //   7. command line flags (--model, --effort ...)
+// The model and effort chosen with /model and /effort are remembered apart from these (see
+// rememberChoice) and win over 1-6.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,6 +22,14 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'packag
 
 // Every key we understand, with a short description (shown by /config).
 export const KNOWN_KEYS = {
+  CLAUDE_PRO_PROVIDER: 'Authentication backend: api (default) or claude-code (direct HTTP with existing local OAuth login)',
+  CLAUDE_PRO_CLAUDE_CONFIG_FILE: 'Existing Claude Code account metadata file (default: ~/.claude.json)',
+  CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE: 'Existing Claude Code OAuth credentials file (default: ~/.claude/.credentials.json)',
+  CLAUDE_PRO_CLAUDE_CODE_VERSION: 'Claude Code version in the HTTP User-Agent (default: installed npm version)',
+  CLAUDE_PRO_DISABLE_TOKEN_REFRESH: 'Set to 1 to stop this program renewing the Claude Code login by itself (it then only reads what the official client keeps up to date)',
+  CLAUDE_PRO_AUTO_RESTART: 'Restart by itself when a turn ends and claude-pro\'s own source files changed (default 1; 0 = only on /restart or the Restart tool)',
+  CLAUDE_PRO_CLAUDE_CODE_MODEL: 'Model for Claude Code OAuth (default: sonnet; independent of API model settings)',
+  CLAUDE_CONFIG_DIR: 'Official Claude Code configuration directory, for selecting the locally signed-in account',
   ANTHROPIC_BASE_URL: 'API base URL (Anthropic compatible endpoint)',
   ANTHROPIC_AUTH_TOKEN: 'Bearer token sent as Authorization header',
   ANTHROPIC_API_KEY: 'API key sent as x-api-key header (used if no auth token)',
@@ -37,16 +47,20 @@ export const KNOWN_KEYS = {
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000; lowered automatically if the API allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
   API_TIMEOUT_MS: 'Request timeout in milliseconds',
-  CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests',
+  CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests (0 = no retries at all, which also turns off the rate limit wait)',
+  CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: 'Longest total time to wait for a rate limit (e.g. the 5-hour window) to reset before continuing by itself (default 21600000 = 6 hours; 0 = report the error instead of waiting)',
+  CLAUDE_PRO_RATE_LIMIT_POLL_MS: 'When a rate limit does not say when it resets, try again at most this far apart (default 300000 = 5 minutes)',
   BASH_DEFAULT_TIMEOUT_MS: 'Default timeout for Bash commands (default 600000 = 10 minutes)',
   BASH_MAX_TIMEOUT_MS: 'Maximum timeout the model may request for Bash commands (default 3600000 = 1 hour)',
   BASH_MAX_OUTPUT_LENGTH: 'Max characters of Bash output returned to the model; the full text is saved to a file (default 60000)',
   CLAUDE_CODE_GIT_BASH_PATH: 'Windows: path to bash.exe (Git Bash)',
+  CLAUDE_PRO_RIPGREP_PATH: 'Path to ripgrep (rg) for Grep and @-file suggestions; "off" forces the built-in JS scanner (default: rg from PATH, else the JS scanner)',
   CLAUDE_PRO_MAX_TOOL_RESULT_CHARS: 'Tool results longer than this are saved to a file and only a preview is sent (default 100000)',
   CLAUDE_PRO_MAX_SUBAGENT_DEPTH: 'How deep sub-agents may nest: agents below this depth can start their own sub-agents (default 2; 0 = no nesting)',
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
   CLAUDE_PRO_VERIFY_MAX_ROUNDS: 'How many times a failing verify command is sent back before giving up (default 3)',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
+  CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the small model for the current topic after each message (the tab title then shows the first message of the session)',
 };
 
 const SECRET_KEYS = new Set(['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS']);
@@ -125,7 +139,12 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   for (const k of Object.keys(KNOWN_KEYS)) if (process.env[k] !== undefined && process.env[k] !== '') fromProcess[k] = process.env[k];
   set(fromProcess, 'process environment');
 
-  if (flags.model) { env.ANTHROPIC_MODEL = flags.model; sources.ANTHROPIC_MODEL = '--model flag'; }
+  if (flags.provider) { env.CLAUDE_PRO_PROVIDER = flags.provider; sources.CLAUDE_PRO_PROVIDER = '--provider flag'; }
+  if (flags.model) {
+    const key = (env.CLAUDE_PRO_PROVIDER || '').trim().toLowerCase() === 'claude-code' ? 'CLAUDE_PRO_CLAUDE_CODE_MODEL' : 'ANTHROPIC_MODEL';
+    env[key] = flags.model;
+    sources[key] = '--model flag';
+  }
   if (flags.effort) { env.CLAUDE_CODE_EFFORT_LEVEL = flags.effort; sources.CLAUDE_CODE_EFFORT_LEVEL = '--effort flag'; }
 
   return new Config(env, sources, settings, cwd);
@@ -147,6 +166,18 @@ export class Config {
     this.verifyOverride = null; // set by /verify or --verify during a session
   }
 
+  get provider() {
+    const value = (this.env.CLAUDE_PRO_PROVIDER || 'api').trim().toLowerCase();
+    if (!['api', 'claude-code'].includes(value)) throw new Error(`Unknown CLAUDE_PRO_PROVIDER: ${value}. Use api or claude-code.`);
+    return value;
+  }
+  get usesClaudeCode() { return this.provider === 'claude-code'; }
+  get claudeCodeConfigFile() { return path.resolve(this.cwd, this.env.CLAUDE_PRO_CLAUDE_CONFIG_FILE || path.join(os.homedir(), '.claude.json')); }
+  get claudeCodeCredentialsFile() {
+    return path.resolve(this.cwd, this.env.CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE || path.join(
+      this.env.CLAUDE_CONFIG_DIR || path.join(path.dirname(this.claudeCodeConfigFile), '.claude'), '.credentials.json'));
+  }
+  get endpointLabel() { return this.usesClaudeCode ? 'https://api.anthropic.com (Claude Code OAuth)' : this.baseURL; }
   get baseURL() { return this.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'; }
   get authToken() { return this.env.ANTHROPIC_AUTH_TOKEN || null; }
   get apiKey() { return this.env.ANTHROPIC_API_KEY || null; }
@@ -160,6 +191,9 @@ export class Config {
   }
 
   aliasTarget(alias) {
+    if (this.usesClaudeCode) {
+      return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-4-5-20251001' }[alias] || null;
+    }
     switch (alias) {
       case 'opus': return this.env.ANTHROPIC_DEFAULT_OPUS_MODEL || 'claude-opus-4-5';
       case 'sonnet': return this.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-5';
@@ -178,12 +212,18 @@ export class Config {
       const inner = this.resolveModel(aliased);
       return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
-    return { id: name, contextWindow: oneM ? 1_000_000 : 200_000, label: `${name}${oneM ? '[1m]' : ''}` };
+    const nativeOneM = this.usesClaudeCode && /^claude-(?:sonnet-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
+    return { id: name, contextWindow: oneM || nativeOneM ? 1_000_000 : 200_000, label: `${name}${oneM ? '[1m]' : ''}` };
   }
 
-  get mainModelSpec() { return this.modelOverride || this.env.ANTHROPIC_MODEL || 'sonnet'; }
+  // The model the active provider is configured with, before any /model override.
+  get configuredModelSpec() {
+    return (this.usesClaudeCode ? this.env.CLAUDE_PRO_CLAUDE_CODE_MODEL : this.env.ANTHROPIC_MODEL) || 'sonnet';
+  }
+  get mainModelSpec() { return this.modelOverride || this.configuredModelSpec; }
   get mainModel() { return this.resolveModel(this.mainModelSpec); }
   get subagentModel() {
+    if (this.usesClaudeCode) return this.mainModel;
     return this.env.CLAUDE_CODE_SUBAGENT_MODEL ? this.resolveModel(this.env.CLAUDE_CODE_SUBAGENT_MODEL) : this.mainModel;
   }
   get smallModel() { return this.resolveModel('haiku'); }
@@ -201,6 +241,8 @@ export class Config {
   }
   get apiTimeout() { return int(this.env.API_TIMEOUT_MS, 600_000); }
   get maxRetries() { return int(this.env.CLAUDE_PRO_MAX_RETRIES, 6); }
+  get rateLimitMaxWait() { return Math.max(0, int(this.env.CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 * 3_600_000)); }
+  get rateLimitPoll() { return Math.max(1000, int(this.env.CLAUDE_PRO_RATE_LIMIT_POLL_MS, 300_000)); }
 
   // Effective window for compaction: the configured auto-compact window capped by the model window.
   compactWindow(model = this.mainModel) {
@@ -240,11 +282,54 @@ export class Config {
   }
 }
 
-// Update the "env" block (or another top level key) of a settings file.
+// Update the "env" block (or another top level key) of a settings file. A file that is there but is not
+// valid JSON is an error, not an empty file: writing it back would throw away everything in it.
 export function updateSettingsFile(file, mutate) {
   let json = {};
-  try { json = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* new file */ }
+  let text = null;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (text !== null && text.trim()) {
+    try { json = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { throw new Error(`${file} is not valid JSON (left as it is; fix it by hand)`); }
+  }
   mutate(json);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+}
+
+// What /model and /effort chose, kept per provider in the "remembered" block of the user settings so that
+// the choice is still the one in use at the next start (interactive or -p). It is applied as the session's
+// override (applyRememberedChoices), so it wins over every configured value; only --model / --effort on
+// the command line win over it, for that run. "/model default" and "/effort default" forget it.
+const userSettingsFile = () => path.join(CONFIG_DIR, 'settings.json');
+
+export function rememberedChoices(provider) {
+  const entry = readJson(userSettingsFile())?.remembered?.[provider];
+  return entry && typeof entry === 'object' ? entry : {};
+}
+
+// patch: {model?, effort?}; null or '' forgets that one. Returns whether the file changed.
+export function rememberChoice(provider, patch) {
+  const before = rememberedChoices(provider);
+  const after = { ...before };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    if (value === null || value === '') delete after[key];
+    else after[key] = String(value);
+  }
+  if (JSON.stringify(after) === JSON.stringify(before)) return false;
+  updateSettingsFile(userSettingsFile(), (json) => {
+    const all = json.remembered && typeof json.remembered === 'object' ? json.remembered : {};
+    if (Object.keys(after).length) all[provider] = after;
+    else delete all[provider];
+    if (Object.keys(all).length) json.remembered = all;
+    else delete json.remembered;
+  });
+  return true;
+}
+
+export function applyRememberedChoices(config, flags = {}) {
+  const remembered = rememberedChoices(config.provider);
+  if (!flags.model && typeof remembered.model === 'string' && remembered.model.trim()) config.modelOverride = remembered.model.trim();
+  if (!flags.effort && typeof remembered.effort === 'string' && remembered.effort.trim()) config.effortOverride = remembered.effort.trim().toLowerCase();
+  return remembered;
 }

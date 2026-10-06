@@ -1,10 +1,12 @@
-// Glob and Grep tools. Grep uses ripgrep when available and falls back to a JS scanner.
+// Glob and Grep tools. Grep uses ripgrep when available and otherwise a JS scanner that follows
+// ripgrep's rules: .gitignore files are honoured, --glob overrides win (last match, "!" excludes),
+// ^ and $ anchor at line boundaries, hidden files are searched and binary files are skipped.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolvePath, displayPath } from '../utils/paths.js';
-import { hasRipgrep } from '../utils/shell.js';
+import { ripgrepPath } from '../utils/shell.js';
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'dist-newstyle']);
 
@@ -66,75 +68,289 @@ export const GlobTool = {
   },
 };
 
+// rg --type names (plus a few aliases) → file extensions, for the JS scanner.
 const TYPE_EXT = {
   js: ['js', 'jsx', 'mjs', 'cjs'], ts: ['ts', 'tsx', 'mts', 'cts'], py: ['py', 'pyi'], rust: ['rs'], go: ['go'],
-  java: ['java'], c: ['c', 'h'], cpp: ['cpp', 'cc', 'cxx', 'hpp', 'hh', 'h'], cs: ['cs'], rb: ['rb'], php: ['php'],
-  swift: ['swift'], kotlin: ['kt', 'kts'], css: ['css', 'scss', 'less'], html: ['html', 'htm'], json: ['json'],
-  md: ['md', 'markdown'], yaml: ['yaml', 'yml'], sh: ['sh', 'bash'], sql: ['sql'], vue: ['vue'], xml: ['xml'], toml: ['toml'],
+  java: ['java'], c: ['c', 'h'], cpp: ['cpp', 'cc', 'cxx', 'hpp', 'hh', 'h'], cs: ['cs'], csharp: ['cs'], rb: ['rb'], ruby: ['rb'],
+  php: ['php'], swift: ['swift'], kotlin: ['kt', 'kts'], css: ['css', 'scss', 'less'], html: ['html', 'htm'], json: ['json'],
+  md: ['md', 'markdown'], markdown: ['md', 'markdown'], yaml: ['yaml', 'yml'], sh: ['sh', 'bash'], sql: ['sql'], vue: ['vue'],
+  xml: ['xml'], toml: ['toml'], txt: ['txt'], lua: ['lua'], dart: ['dart'], scala: ['scala', 'sc'], svelte: ['svelte'],
+  ps: ['ps1', 'psm1', 'psd1'], bat: ['bat', 'cmd'],
 };
 
-function runRg(args, cwd, signal) {
+const MAX_COLUMNS = 500; // same as the rg flags below: --max-columns 500 --max-columns-preview
+const MAX_FILE_BYTES = 20 * 1024 * 1024; // the JS scanner reads whole files, so huge ones are skipped
+const CONCURRENCY = 16;
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+
+// Compile a gitignore/ripgrep glob: `*` and `?` stay inside one path segment, a whole `**`
+// segment spans directories, `{a,b}` and `[...]` work, and dotfiles are not special.
+export function globToRegExp(glob, ignoreCase = false) {
+  let re = '';
+  let braces = 0;
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === '*') {
+      const segmentStart = i === 0 || glob[i - 1] === '/';
+      if (segmentStart && glob[i + 1] === '*' && (i + 2 === glob.length || glob[i + 2] === '/')) {
+        if (i + 2 === glob.length) { re += '.*'; i += 1; } else { re += '(?:.*/)?'; i += 2; }
+      } else {
+        while (glob[i + 1] === '*') i++;
+        re += '[^/]*';
+      }
+    } else if (ch === '?') {
+      re += '[^/]';
+    } else if (ch === '[') {
+      let j = i + 1;
+      const negate = glob[j] === '!' || glob[j] === '^';
+      if (negate) j++;
+      const bodyStart = j;
+      if (glob[j] === ']') j++;
+      while (j < glob.length && glob[j] !== ']') j++;
+      if (j >= glob.length) { re += '\\['; continue; }
+      const body = glob.slice(bodyStart, j).replace(/[\\\][^]/g, '\\$&');
+      re += negate ? `[^/${body}]` : `[${body}]`;
+      i = j;
+    } else if (ch === '{') {
+      braces++;
+      re += '(?:';
+    } else if (ch === '}' && braces) {
+      braces--;
+      re += ')';
+    } else if (ch === ',' && braces) {
+      re += '|';
+    } else if (ch === '\\' && i + 1 < glob.length) {
+      re += escapeRegExp(glob[++i]);
+    } else {
+      re += escapeRegExp(ch);
+    }
+  }
+  if (braces) throw new Error(`unclosed alternate group in glob: ${glob}`);
+  return new RegExp(`^${re}$`, ignoreCase ? 'i' : '');
+}
+
+// A .gitignore line or a --glob override. "!" flips it, a trailing "/" limits it to directories,
+// and any other "/" anchors it to its base directory instead of matching basenames at any depth.
+function parseRule(text, ignoreCase = false) {
+  let pattern = text;
+  const negate = pattern.startsWith('!');
+  if (negate) pattern = pattern.slice(1);
+  else if (pattern.startsWith('\\!') || pattern.startsWith('\\#')) pattern = pattern.slice(1);
+  const dirOnly = pattern.endsWith('/');
+  pattern = pattern.replace(/\/+$/, '');
+  const anchored = pattern.includes('/');
+  pattern = pattern.replace(/^(?:\.\/|\/)/, '');
+  if (!pattern) return null;
+  return { source: text, negate, dirOnly, anchored, re: globToRegExp(pattern, ignoreCase) };
+}
+
+// The last matching rule decides, as in .gitignore files and rg --glob.
+function lastRule(rules, rel, name, isDir) {
+  for (let i = rules.length - 1; i >= 0; i--) {
+    const r = rules[i];
+    if ((!r.dirOnly || isDir) && r.re.test(r.anchored ? rel : name)) return r;
+  }
+  return null;
+}
+
+// "*.js,*.ts" or "*.js *.ts" are two globs; commas inside {...} are not separators.
+function splitGlobs(glob) {
+  if (!glob) return [];
+  const globs = String(glob).split(/[ ,]+(?![^{]*})/).filter(Boolean);
+  return process.platform === 'win32' ? globs.map((g) => g.replace(/\\/g, '/')) : globs;
+}
+
+const IGNORE_FILES = ['.gitignore', '.ignore', '.rgignore']; // lowest precedence first
+
+async function readIgnoreFile(dir, name) {
+  let text;
+  try { text = await fs.promises.readFile(path.join(dir, name), 'utf8'); } catch { return null; }
+  const ignoreCase = name === '.gitignore' && process.platform === 'win32'; // git for Windows defaults to core.ignorecase
+  const rules = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/(?<!\\)\s+$/, '');
+    if (!line || line.startsWith('#')) continue;
+    try {
+      const rule = parseRule(line, ignoreCase);
+      if (rule) rules.push(rule);
+    } catch { /* git skips patterns it cannot parse */ }
+  }
+  return rules.length ? { dir, rules } : null;
+}
+
+// Ignore files of one directory, lowest precedence first. Like ripgrep, .gitignore only counts
+// inside a git work tree; .ignore and .rgignore always count.
+async function ignoreScopes(dir, inRepo) {
+  const names = IGNORE_FILES.filter((n) => inRepo || n !== '.gitignore');
+  return (await Promise.all(names.map((n) => readIgnoreFile(dir, n)))).filter(Boolean);
+}
+
+// Ignore files above the search root apply too, up to the top of the git work tree.
+async function ancestorScopes(base) {
+  const above = [];
+  for (let d = base; ; d = path.dirname(d)) {
+    if (fs.existsSync(path.join(d, '.git'))) {
+      const scopes = [];
+      for (const dir of above.reverse()) scopes.push(...await ignoreScopes(dir, true));
+      return { inRepo: true, scopes };
+    }
+    const parent = path.dirname(d);
+    if (parent === d) return { inRepo: false, scopes: [] };
+    above.push(parent);
+  }
+}
+
+// Deeper .gitignore files take precedence over the ones above them.
+function isIgnored(scopes, abs, name, isDir) {
+  for (let i = scopes.length - 1; i >= 0; i--) {
+    const rule = lastRule(scopes[i].rules, path.relative(scopes[i].dir, abs).replace(/\\/g, '/'), name, isDir);
+    if (rule) return !rule.negate;
+  }
+  return false;
+}
+
+async function collectFiles(base, globs, exts, signal) {
+  if (!(await fs.promises.stat(base)).isDirectory()) return [base];
+  const overrides = globs.map((g) => parseRule(g)).filter(Boolean);
+  const whitelist = overrides.some((r) => !r.negate);
+  // A directory that is skipped by default (node_modules, ...) is searched when a glob names it.
+  const named = new Set([...IGNORED_DIRS].filter((d) => d !== '.git' && overrides.some((r) => !r.negate && r.source.includes(d))));
+  const files = [];
+  const walk = async (dir, scopes, inRepo) => {
+    if (signal?.aborted) return;
+    let entries;
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    inRepo ||= entries.some((e) => e.name === '.git');
+    if (entries.some((e) => IGNORE_FILES.includes(e.name))) scopes = [...scopes, ...await ignoreScopes(dir, inRepo)];
+    for (const e of entries) {
+      const isDir = e.isDirectory();
+      if ((!isDir && !e.isFile()) || e.name === '.git') continue;
+      const abs = path.join(dir, e.name);
+      const override = lastRule(overrides, path.relative(base, abs).replace(/\\/g, '/'), e.name, isDir);
+      if (override?.negate) continue;
+      if (isDir) {
+        const skip = !override && !named.has(e.name) && (IGNORED_DIRS.has(e.name) || isIgnored(scopes, abs, e.name, true));
+        if (!skip) await walk(abs, scopes, inRepo);
+      } else if (override || (!whitelist && !isIgnored(scopes, abs, e.name, false))) {
+        if (!exts || exts.includes(path.extname(e.name).slice(1).toLowerCase())) files.push(abs);
+      }
+    }
+  };
+  const above = await ancestorScopes(base);
+  await walk(base, above.scopes, above.inRepo);
+  return files;
+}
+
+// Text of a file, or null for binary files. UTF-16 with a BOM is decoded like ripgrep does.
+function decodeText(buf) {
+  if (buf[0] === 0xFF && buf[1] === 0xFE) return buf.toString('utf16le', 2);
+  if (buf[0] === 0xFE && buf[1] === 0xFF) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  if (buf.subarray(0, 8000).includes(0)) return null;
+  const text = buf.toString('utf8');
+  return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
+}
+
+const clip = (line) => (line.length > MAX_COLUMNS ? `${line.slice(0, MAX_COLUMNS)} [... omitted end of long line]` : line);
+
+function runRg(bin, args, cwd, signal) {
   return new Promise((resolve) => {
-    const child = spawn('rg', args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     child.stdout.on('data', (d) => { if (out.length < 20_000_000) out += d; });
     child.stderr.on('data', (d) => { err += d; });
     const onAbort = () => child.kill();
     signal?.addEventListener('abort', onAbort, { once: true });
     child.on('close', (code) => { signal?.removeEventListener('abort', onAbort); resolve({ code, out, err }); });
-    child.on('error', (e) => resolve({ code: 2, out: '', err: e.message }));
+    child.on('error', (e) => { signal?.removeEventListener('abort', onAbort); resolve({ code: 2, out: '', err: e.message, spawnError: true }); });
   });
 }
 
-// JS fallback when ripgrep isn't installed.
-async function jsGrep(input, base, mode) {
-  let flags = input['-i'] ? 'i' : '';
-  if (input.multiline) flags += 's';
-  const re = new RegExp(input.pattern, flags + 'g');
-  const exts = input.type ? TYPE_EXT[input.type] : null;
-  const results = [];
-  const walk = (dir) => {
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const abs = path.join(dir, e.name);
-      if (e.isDirectory()) { if (!IGNORED_DIRS.has(e.name)) walk(abs); continue; }
-      if (!e.isFile()) continue;
-      if (exts && !exts.includes(path.extname(e.name).slice(1))) continue;
-      if (input.glob) {
-        const rel = path.relative(base, abs).replace(/\\/g, '/');
-        const globs = input.glob.split(/[ ,]+(?![^{]*})/).filter(Boolean);
-        if (!globs.some((g) => path.matchesGlob(g.includes('/') ? rel : e.name, g))) continue;
-      }
-      results.push(abs);
-    }
-  };
-  const st = fs.statSync(base);
-  if (st.isFile()) results.push(base); else walk(base);
-  const out = [];
-  const before = input['-B'] ?? input['-C'] ?? 0, after = input['-A'] ?? input['-C'] ?? 0;
-  for (const file of results) {
+// JS scanner used when ripgrep isn't available. Returns output lines in rg's format.
+async function jsGrep(input, base, mode, signal) {
+  const exts = input.type ? TYPE_EXT[String(input.type).toLowerCase()] : null;
+  if (input.type && !exts) throw new Error(`unrecognized file type: ${input.type} (known types: ${Object.keys(TYPE_EXT).join(', ')})`);
+  const flags = input['-i'] ? 'i' : '';
+  const dotAll = input.multiline ? 's' : '';
+  // ripgrep treats ^ and $ as line anchors, so whole-file matching needs the m flag.
+  const anyRe = new RegExp(input.pattern, `${flags}m${dotAll}`);
+  const allRe = new RegExp(input.pattern, `${flags}gm${dotAll}`);
+  const lineRe = new RegExp(input.pattern, flags);
+  const content = mode === 'content';
+  const before = content ? Math.max(0, Number(input['-B'] ?? input['-C'] ?? 0) || 0) : 0;
+  const after = content ? Math.max(0, Number(input['-A'] ?? input['-C'] ?? 0) || 0) : 0;
+  const files = await collectFiles(base, splitGlobs(input.glob), exts, signal);
+  let skipped = 0;
+
+  const searchFile = async (file) => {
     let text;
     try {
-      const buf = fs.readFileSync(file);
-      if (buf.subarray(0, 8000).includes(0)) continue;
-      text = buf.toString('utf8');
-    } catch { continue; }
-    re.lastIndex = 0;
-    if (!re.test(text)) continue;
-    if (mode === 'files_with_matches') { out.push(file); continue; }
-    const lines = text.split(/\r?\n/);
-    const lineRe = new RegExp(input.pattern, flags);
-    const hits = lines.map((l, i) => (lineRe.test(l) ? i : -1)).filter((i) => i >= 0);
-    if (mode === 'count') { out.push(`${file}:${hits.length}`); continue; }
-    const shown = new Set();
-    for (const h of hits) for (let i = Math.max(0, h - before); i <= Math.min(lines.length - 1, h + after); i++) shown.add(i);
-    for (const i of [...shown].sort((a, b) => a - b)) {
-      const sep = hits.includes(i) ? ':' : '-';
-      out.push(`${file}${sep}${input['-n'] === false ? '' : `${i + 1}${sep}`}${lines[i]}`);
+      if ((await fs.promises.stat(file)).size > MAX_FILE_BYTES) { skipped++; return null; }
+      text = decodeText(await fs.promises.readFile(file));
+    } catch { return null; }
+    if (text === null) return null;
+    if (text.includes('\r')) text = text.replace(/\r\n/g, '\n');
+    // Cheap whole-file check first; it can only over-match, so lines are checked below.
+    if (!anyRe.test(text)) return null;
+    const lines = text.split('\n');
+    if (lines.length > 1 && lines.at(-1) === '') lines.pop();
+    let hits;
+    if (input.multiline) {
+      const starts = [0];
+      for (let i = text.indexOf('\n'); i !== -1 && i + 1 < text.length; i = text.indexOf('\n', i + 1)) starts.push(i + 1);
+      const lineAt = (pos) => {
+        let lo = 0, hi = starts.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          if (starts[mid] <= pos) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+      };
+      const set = new Set();
+      for (const m of text.matchAll(allRe)) {
+        const last = lineAt(m.index + Math.max(0, m[0].length - 1));
+        for (let i = lineAt(m.index); i <= last; i++) set.add(i);
+      }
+      hits = [...set];
+    } else {
+      hits = [];
+      for (let i = 0; i < lines.length; i++) if (lineRe.test(lines[i])) hits.push(i);
     }
+    if (!hits.length) return null;
+    if (mode === 'files_with_matches') return [file];
+    if (mode === 'count') return [`${file}:${hits.length}`];
+    const isHit = new Set(hits);
+    const out = [];
+    let end = -1;
+    for (const h of hits) {
+      const from = Math.max(0, h - before, end + 1);
+      const to = Math.min(lines.length - 1, h + after);
+      if ((before || after) && out.length && from > end + 1) out.push('--');
+      for (let i = from; i <= to; i++) {
+        const sep = isHit.has(i) ? ':' : '-';
+        out.push(`${file}${sep}${input['-n'] === false ? '' : `${i + 1}${sep}`}${clip(lines[i])}`);
+      }
+      end = Math.max(end, to);
+    }
+    return out;
+  };
+
+  const results = new Array(files.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < files.length && !signal?.aborted) {
+      const i = next++;
+      results[i] = await searchFile(files[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+  const lines = [];
+  for (const r of results) {
+    if (!r) continue;
+    if ((before || after) && lines.length) lines.push('--');
+    for (const l of r) lines.push(l);
   }
-  return out;
+  return { lines, skipped };
 }
 
 export const GrepTool = {
@@ -181,13 +397,16 @@ Usage:
     const base = resolvePath(input.path || ctx.cwd, ctx.cwd);
     if (!fs.existsSync(base)) return { isError: true, content: `Path does not exist: ${base}` };
     const mode = input.output_mode || 'files_with_matches';
-    let lines;
-    if (hasRipgrep()) {
-      const args = ['--no-config', '--hidden', '--glob', '!.git', '--max-columns', '500', '--max-columns-preview', '--color', 'never'];
+    let lines = null;
+    let note = '';
+    const rg = ripgrepPath(ctx.config);
+    if (rg) {
+      // --crlf lets `$` match before \r\n, so line-end anchors also work in Windows (CRLF) files.
+      const args = ['--no-config', '--hidden', '--crlf', '--glob', '!.git', '--max-columns', String(MAX_COLUMNS), '--max-columns-preview', '--color', 'never'];
       if (input['-i']) args.push('-i');
       if (input.multiline) args.push('-U', '--multiline-dotall');
       if (input.type) args.push('--type', input.type);
-      if (input.glob) for (const g of input.glob.split(/[ ,]+(?![^{]*})/).filter(Boolean)) args.push('--glob', g);
+      for (const g of splitGlobs(input.glob)) args.push('--glob', g);
       if (mode === 'files_with_matches') args.push('-l');
       else if (mode === 'count') args.push('-c');
       else {
@@ -197,11 +416,20 @@ Usage:
         if (input['-B'] != null) args.push('-B', String(input['-B']));
       }
       args.push('-e', input.pattern, '--', base);
-      const r = await runRg(args, ctx.cwd, ctx.signal);
-      if (r.code === 2 && !r.out) return { isError: true, content: `ripgrep error: ${r.err.trim()}` };
-      lines = r.out.split(/\r?\n/).filter(Boolean);
-    } else {
-      try { lines = await jsGrep(input, base, mode); } catch (e) { return { isError: true, content: `Grep failed: ${e.message}` }; }
+      const r = await runRg(rg, args, ctx.cwd, ctx.signal);
+      if (!r.spawnError) {
+        if (r.code === 2 && !r.out) return { isError: true, content: `ripgrep error: ${r.err.trim()}` };
+        lines = r.out.split(/\r?\n/).filter(Boolean);
+      }
+    }
+    if (!lines) {
+      try {
+        const found = await jsGrep(input, base, mode, ctx.signal);
+        lines = found.lines;
+        if (found.skipped) note = `\n\n(${found.skipped} file${found.skipped === 1 ? '' : 's'} larger than ${MAX_FILE_BYTES / 1024 / 1024}MB not searched; install ripgrep to search them)`;
+      } catch (e) {
+        return { isError: true, content: `Grep failed: ${e.message}` };
+      }
     }
     if (mode === 'files_with_matches') {
       lines = lines.map((f) => ({ f, t: (() => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } })() }))
@@ -225,6 +453,6 @@ Usage:
       summary = `Found ${total} line${total === 1 ? '' : 's'}`;
     }
     if (total > offset + page.length) content += `\n\n(Showing ${page.length} of ${total} results. Use offset/head_limit to page, or narrow the search.)`;
-    return { content, display: { summary } };
+    return { content: content + note, display: { summary } };
   },
 };

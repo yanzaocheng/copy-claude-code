@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Tiny stdio MCP server used by the tests: tools "echo" and "add".
+// Tiny stdio MCP server used by the tests: tools "echo", "add" and "hang" (which never answers).
+// If MCP_TEST_LOG is set, every message received is appended to that file.
+import fs from 'node:fs';
 import readline from 'node:readline';
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -8,11 +10,13 @@ const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
 const tools = [
   { name: 'echo', description: 'Echo back the given text, reversed', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
   { name: 'add', description: 'Add two numbers', inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] } },
+  { name: 'hang', description: 'Never answers', inputSchema: { type: 'object', properties: {} } },
 ];
 
 rl.on('line', (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
+  if (process.env.MCP_TEST_LOG) fs.appendFileSync(process.env.MCP_TEST_LOG, `${JSON.stringify({ method: msg.method, id: msg.id, params: msg.method === 'tools/call' ? { name: msg.params.name } : msg.params })}\n`);
   if (msg.id === undefined) return; // notification
   switch (msg.method) {
     case 'initialize':
@@ -25,6 +29,7 @@ rl.on('line', (line) => {
       const { name, arguments: args } = msg.params;
       if (name === 'echo') send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: [...String(args.text)].reverse().join('') }] } });
       else if (name === 'add') send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: String(args.a + args.b) }] } });
+      else if (name === 'hang') break;
       else send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `unknown tool ${name}` }], isError: true } });
       break;
     }

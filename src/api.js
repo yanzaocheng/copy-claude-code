@@ -2,24 +2,95 @@
 // raw SSE stream into a fully assembled assistant message while reporting progress.
 
 import Anthropic from '@anthropic-ai/sdk';
+import { readClaudeCodeLogin, claudeCodeHeaders, CLAUDE_CODE_API_URL, CLAUDE_CODE_SYSTEM } from './claude-code.js';
+import { refreshClaudeCodeLogin, canRenewLogin } from './oauth.js';
+import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 
 let cached = null;
 
-export function getClient(config) {
-  const key = `${config.baseURL}|${config.authToken}|${config.apiKey}|${config.env.ANTHROPIC_CUSTOM_HEADERS || ''}`;
-  if (cached?.key === key) return cached.client;
+const LOGIN_POLL_MS = 15_000; // how often to look for a refreshed login after a pause
+const LOGIN_RENEW_RETRY_MS = 5 * 60_000; // how often to try renewing it while waiting for one
+
+// Renew the subscription login if it needs it. Returns true when the file now holds a new login. A login
+// that cannot be renewed is an error with its reason, in place of the bare "token has expired" -- unless
+// the caller has its own way of dealing with that: `onError` is told and the call returns false (the
+// wait for a login), and so does `force` (a 401: the request is reported as it is).
+async function renewLogin(config, signal, { force = false, onError } = {}) {
+  try {
+    return (await refreshClaudeCodeLogin(config, { signal, force })).refreshed;
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
+    if (onError) { onError(err); return false; }
+    if (force) return false;
+    throw err;
+  }
+}
+
+// The login expiry worth warning about before a long pause: none when this program renews it itself.
+const loginExpiryToWarnAbout = (config, login) => (config.usesClaudeCode && !canRenewLogin(config) ? login?.expiresAt ?? null : null);
+
+// The subscription login to use once a pause is over. Its access token lives 8 hours, so after hours of
+// waiting it has most likely expired: it is renewed first, with the refresh token that is stored with it.
+// If that is not possible (the refresh token was refused, the token server cannot be reached for the
+// moment, renewing is switched off) the wait is not wasted by failing at its end: keep looking for a
+// valid login for what is left of the waiting budget, renewing again every few minutes, and say so. A
+// login done in the meantime (running `claude`) is picked up. The file may also be half written at this
+// very moment by another process.
+async function loginAfterPause(config, state, { signal, onEvent }) {
+  let spent = 0;
+  let renewedAt = 0;
+  let renewError = null;
+  for (;;) {
+    if (!renewedAt || timing.now() - renewedAt >= LOGIN_RENEW_RETRY_MS) {
+      renewedAt = timing.now();
+      renewError = null;
+      await renewLogin(config, signal, { onError: (err) => { renewError = err; } });
+    }
+    try {
+      return readClaudeCodeLogin(config);
+    } catch (err) {
+      const left = config.rateLimitMaxWait - state.waitedMs;
+      if (left < LOGIN_POLL_MS) {
+        if (renewError && /access token has expired/.test(err.message)) err.message = renewError.message; // the reason, not just the fact
+        if (spent) err.message += ` (Waited ${humanDuration(spent)} for it after the limit reset.)`;
+        throw err;
+      }
+      const now = timing.now();
+      onEvent({
+        type: 'rate_limit_wait', error: err, delayMs: LOGIN_POLL_MS, resumeAt: now + LOGIN_POLL_MS, resetAt: null, label: 'login',
+        polling: true, waitingForLogin: true, giveUpAt: now + left, waitedMs: state.waitedMs, maxWaitMs: config.rateLimitMaxWait,
+        renewError: renewError?.message || null,
+      });
+      state.waitedMs += LOGIN_POLL_MS;
+      spent += LOGIN_POLL_MS;
+      await sleepUntil(now + LOGIN_POLL_MS, signal);
+    }
+  }
+}
+
+export function getClient(config, login = null) {
+  if (config.usesClaudeCode) login ||= readClaudeCodeLogin(config);
+  // Subscription credentials must only go to Anthropic, regardless of an API
+  // endpoint or custom auth headers left over from .env (e.g. DeepSeek).
+  const baseURL = login ? CLAUDE_CODE_API_URL : config.baseURL;
+  const authToken = login ? login.accessToken : config.authToken;
+  const apiKey = login || authToken ? null : (config.apiKey || null);
+  const headers = login ? claudeCodeHeaders(login) : config.customHeaders;
+  const key = `${baseURL}|${authToken}|${apiKey}|${JSON.stringify(headers)}|${config.apiTimeout}`;
+  if (cached?.key === key && cached.fetch === globalThis.fetch) return cached.client;
   const client = new Anthropic({
-    baseURL: config.baseURL,
+    baseURL,
     // Prefer the bearer token; pass null explicitly so the SDK never falls back to env vars.
-    authToken: config.authToken,
-    apiKey: config.authToken ? null : (config.apiKey || null),
-    defaultHeaders: config.customHeaders,
+    authToken,
+    apiKey,
+    defaultHeaders: headers,
+    defaultQuery: login ? { beta: 'true' } : undefined,
     timeout: config.apiTimeout,
     maxRetries: 0, // retries are handled in streamMessage so the UI can report them
 
     dangerouslyAllowBrowser: false,
   });
-  cached = { key, client };
+  cached = { key, client, fetch: globalThis.fetch };
   return client;
 }
 
@@ -41,6 +112,9 @@ function withCacheControl(messages) {
 
 // Output ceilings the API has told us about, by model id (learned from "max_tokens too large" errors).
 const outputCaps = new Map();
+// Models that refused the effort parameter (Haiku does): it is left out for them from then on.
+const noEffort = new Set();
+export const effortSupported = (modelId) => !noEffort.has(modelId);
 
 // Pull the allowed maximum out of an error such as
 //   "max_tokens: 128000 > 64000, which is the maximum allowed number of output tokens for claude-..."
@@ -55,7 +129,8 @@ export function parseMaxTokensLimit(message) {
   return n >= 256 ? n : null;
 }
 
-export function buildParams(config, { model, system, messages, tools, maxTokens, effort }) {
+export function buildParams(config, { model, system, messages, tools, maxTokens, effort }, login = null) {
+  if (config.usesClaudeCode) login ||= readClaudeCodeLogin(config);
   const wanted = maxTokens || config.maxOutputTokens;
   const params = {
     model: model.id,
@@ -64,11 +139,15 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
     messages: withCacheControl(messages),
     stream: true,
   };
+  if (login) {
+    params.system.unshift({ type: 'text', text: CLAUDE_CODE_SYSTEM });
+    params.metadata = { user_id: login.userId };
+  }
   if (tools?.length) {
     params.tools = tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t));
   }
   const eff = effort === undefined ? config.effort : effort;
-  if (eff) params.output_config = { effort: eff };
+  if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
   const budget = config.thinkingBudget;
   if (budget === 0) params.thinking = { type: 'disabled' };
   else if (budget > 0) params.thinking = { type: 'enabled', budget_tokens: Math.min(budget, params.max_tokens - 1) };
@@ -76,32 +155,34 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
 }
 
 export class APIError extends Error {
-  constructor(message, { status, retryable, promptTooLong } = {}) {
+  constructor(message, { status, retryable, promptTooLong, retryAfterMs = null, rateLimit = null } = {}) {
     super(message);
     this.status = status;
     this.retryable = retryable;
     this.promptTooLong = promptTooLong;
+    this.retryAfterMs = retryAfterMs; // what the server's Retry-After header asked for
+    this.rateLimit = rateLimit; // what the rate limit headers say (see ratelimit.js)
   }
 }
 
-function describeError(err) {
+function describeError(err, config) {
   if (err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError) return err;
   const status = err?.status;
   let msg = err?.error?.error?.message || err?.error?.message || err?.message || String(err);
   const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded/i.test(msg);
-  if (status === 401) msg = `Authentication failed (401). Check ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY. ${msg}`;
+  if (status === 401) msg = config?.usesClaudeCode
+    ? `Claude Code OAuth authentication failed (401). Check the existing local subscription credentials in ${config.claudeCodeCredentialsFile}. ${msg}`
+    : `Authentication failed (401). Check ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY. ${msg}`;
   const retryable = !status || status === 408 || status === 409 || status === 429 || status >= 500;
-  return new APIError(msg, { status, retryable, promptTooLong });
+  const header = typeof err?.headers?.get === 'function' ? err.headers.get('retry-after') : err?.headers?.['retry-after'];
+  return new APIError(msg, { status, retryable, promptTooLong, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()) });
 }
 
+// Our own aborts are named AbortError and the SDK's is an APIUserAbortError. The message test only
+// accepts the bare "aborted" wording: a server error that merely mentions "aborted" is not the user.
 export function isAbort(err) {
-  return err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError || /aborted/i.test(err?.message || '');
+  return err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError || /^(?:request was )?aborted\.?$/i.test(err?.message || '');
 }
-
-const sleep = (ms, signal) => new Promise((resolve, reject) => {
-  const t = setTimeout(resolve, ms);
-  signal?.addEventListener('abort', () => { clearTimeout(t); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); }, { once: true });
-});
 
 // Stream a message. `onEvent` receives:
 //   {type:'block_start', index, block}
@@ -109,17 +190,31 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
 //   {type:'thinking', index, text}      thinking delta
 //   {type:'tool_input', index, partial} partial JSON of a tool call
 //   {type:'block_stop', index, block}   finished block (tool_use input parsed)
-//   {type:'retry', attempt, error, delayMs}
+//   {type:'retry', attempt, error, delayMs, maxRetries}   a quick retry is about to wait delayMs
+//   {type:'rate_limit_wait', error, delayMs, resumeAt, resetAt, label, polling, waitedMs, maxWaitMs, loginExpiresAt}
+//                                       a rate limit was hit: paused until resumeAt, then the request is repeated
+//   {type:'rate_limit_resume', waitedMs}   the repeated request was accepted: the pause is over
 //   {type:'reset'}                      partial output from a failed attempt must be discarded
-// Returns {message, usage, stopReason}.
-export async function streamMessage(config, request, { signal, onEvent = () => {} } = {}) {
-  const client = getClient(config);
-  const params = buildParams(config, request);
-  let attempt = 0;
+// `waitForRateLimit: false` reports a rate limit as an error instead of waiting for it (side queries
+// where nobody wants to sit through a pause). Returns {message, usage, stopReason}.
+export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true } = {}) {
+  if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
+  // A token that has expired (or is about to) is renewed first, as the official client does.
+  if (config.usesClaudeCode) await renewLogin(config, signal);
+  let login = config.usesClaudeCode ? readClaudeCodeLogin(config) : null;
+  let client = getClient(config, login);
+  const params = buildParams(config, request, login);
+  let authReloaded = false;
+  const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0 };
+  let paused = false;
   for (;;) {
     let emitted = false;
     try {
       const stream = await client.messages.create(params, { signal });
+      if (paused) {
+        paused = false;
+        onEvent({ type: 'rate_limit_resume', waitedMs: retryState.waitedMs });
+      }
       const blocks = [];
       const jsonBufs = [];
       let usage = {};
@@ -172,7 +267,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
             if (ev.usage) usage = { ...usage, ...Object.fromEntries(Object.entries(ev.usage).filter(([, v]) => v != null)) };
             break;
           case 'error':
-            throw Object.assign(new Error(ev.error?.message || 'stream error'), { status: 500 });
+            throw Object.assign(new Error(ev.error?.message || 'stream error'), { status: ev.error?.type === 'rate_limit_error' ? 429 : 500 });
           default:
             break;
         }
@@ -187,7 +282,33 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       return { message: { role: 'assistant', content }, usage, stopReason, model };
     } catch (raw) {
       if (signal?.aborted || isAbort(raw)) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
-      const err = describeError(raw);
+      const err = describeError(raw, config);
+      // The token was refused. A running native Claude Code session may have renewed the shared token
+      // while this request was in flight: read it again. If it is the same one, it may have been revoked
+      // early or the local clock may be off: renew it once and try again.
+      if (login && err.status === 401 && !authReloaded) {
+        authReloaded = true;
+        const readValid = () => { try { return readClaudeCodeLogin(config); } catch { return null; } };
+        let updated = readValid();
+        if (!updated || updated.accessToken === login.accessToken) {
+          let failure = null;
+          if (await renewLogin(config, signal, { force: true, onError: (e) => { failure = e; } })) updated = readValid();
+          else if (!updated && failure) throw failure; // the token ran out meanwhile and cannot be renewed: say why, not just "401"
+        }
+        if (updated && updated.accessToken !== login.accessToken) {
+          login = updated;
+          client = getClient(config, login);
+          params.metadata = { user_id: login.userId };
+          if (emitted) onEvent({ type: 'reset' });
+          continue;
+        }
+      }
+      // Not every model takes an effort level. Leave it out for this one, and for the rest of the session.
+      if (err.status === 400 && params.output_config && /does not support the effort parameter/i.test(err.message)) {
+        noEffort.add(params.model);
+        delete params.output_config;
+        continue;
+      }
       // The default max_tokens is generous: if this API allows less, learn its limit and retry at once.
       const limit = err.status === 400 ? parseMaxTokensLimit(err.message) : null;
       if (limit && limit < params.max_tokens) {
@@ -196,25 +317,47 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         if (params.thinking?.budget_tokens) params.thinking.budget_tokens = Math.min(params.thinking.budget_tokens, limit - 1);
         continue;
       }
-      attempt++;
-      if (!err.retryable || attempt > config.maxRetries) throw err;
-      const delayMs = Math.min(32_000, 1000 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 500);
+      const plan = planRetry(err, retryState, config, { now: timing.now(), allowWait: waitForRateLimit });
+      if (plan.action === 'throw') {
+        if (plan.message) err.message = plan.message;
+        throw err;
+      }
       if (emitted) onEvent({ type: 'reset' });
-      onEvent({ type: 'retry', attempt, error: err, delayMs, maxRetries: config.maxRetries });
-      await sleep(delayMs, signal);
+      if (plan.kind === 'rate_limit') {
+        paused = true;
+        onEvent({
+          type: 'rate_limit_wait', error: err, delayMs: plan.delayMs, resumeAt: plan.resumeAt, resetAt: plan.resetAt,
+          label: plan.label, polling: plan.polling, waitedMs: retryState.waitedMs, maxWaitMs: config.rateLimitMaxWait,
+          loginExpiresAt: loginExpiryToWarnAbout(config, login),
+        });
+        await sleepUntil(plan.resumeAt, signal);
+        // Hours may have passed: pick up the login again, the local Claude Code may have refreshed
+        // the token (and if it has expired, wait for that rather than fail with a 401).
+        if (config.usesClaudeCode) {
+          login = await loginAfterPause(config, retryState, { signal, onEvent });
+          client = getClient(config, login);
+          params.metadata = { user_id: login.userId };
+        }
+        retryState.attempt = 0; // the pause is a fresh start: quick retries made before it do not count after it
+      } else {
+        onEvent({ type: 'retry', attempt: plan.attempt, error: err, delayMs: plan.delayMs, maxRetries: plan.maxRetries });
+        await sleepUntil(plan.resumeAt, signal);
+      }
     }
   }
 }
 
 // One-shot, non-streaming helper for small side queries (summaries, titles, web page extraction).
-export async function quickQuery(config, { model, system, prompt, maxTokens = 4096, signal }) {
+// Nothing here can tell the user that it is paused, so a rate limit is reported as an error by default
+// instead of being waited for out of sight; waitForRateLimit: true is for a caller that accepts that.
+export async function quickQuery(config, { model, system, prompt, maxTokens = 4096, signal, waitForRateLimit = false }) {
   const res = await streamMessage(config, {
     model,
     system,
     messages: [{ role: 'user', content: prompt }],
     maxTokens,
     effort: null,
-  }, { signal });
+  }, { signal, waitForRateLimit });
   return res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
 }
 

@@ -5,17 +5,18 @@ import path from 'node:path';
 import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
-import { loadConfig, settingsFiles, updateSettingsFile, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
+import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
-import { loadCustomCommands, renderSkill } from './agents.js';
+import { loadCustomCommands, renderSkill, expandCommandBody, expandShellEmbeds } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
 import { quickQuery } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath } from './utils/paths.js';
 import { rewind } from './checkpoints.js';
+import { canRestart, runSelfCheck } from './restart.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -24,6 +25,16 @@ export function buildCommands(app) {
   const add = (cmd) => commands.set(cmd.name, cmd);
   const log = (...lines) => app.screen.log(...lines);
   const out = (lines) => log(resultLines(Array.isArray(lines) ? lines : [lines]), '');
+
+  // /model and /effort choices are kept for later sessions (rememberChoice); say so, or why they are not.
+  const keep = (cfg, patch, forgotten) => {
+    try {
+      rememberChoice(cfg.provider, patch);
+      return c.dim(forgotten ? ' · the configured default from now on' : ' · kept for later sessions');
+    } catch (e) {
+      return c.yellow(` · for this session only (${e.message})`);
+    }
+  };
 
   const reloadConfig = () => {
     const fresh = loadConfig({ cwd: app.cwd, flags: app.flags });
@@ -75,6 +86,35 @@ export function buildCommands(app) {
   });
 
   add({
+    name: 'restart',
+    aliases: ['reload'],
+    argHint: '[force]',
+    description: "Restart to load changes to the program's own source code (the conversation continues)",
+    async run(args) {
+      if (!canRestart()) {
+        out(c.red(`Restarting needs an interactive session started with \`${APP_NAME}\` (not -p, and without CLAUDE_PRO_NO_SUPERVISOR). Quit and start it again.`));
+        return;
+      }
+      const force = /\bforce\b/i.test(args);
+      const blockers = app.restartBlockers();
+      if (blockers.length && !force) {
+        out(c.yellow(`A restart would kill: ${blockers.join('; ')}. Run /restart force to do it anyway.`));
+        return;
+      }
+      if (!force) {
+        out(c.dim('Checking that the new code starts…'));
+        const check = await runSelfCheck();
+        if (!check.ok) {
+          out([c.red('Not restarting: the new code does not start.'), ...check.output.split('\n').slice(0, 15).map((l) => c.dim(l)), c.dim('Fix it, or run /restart force to restart anyway.')]);
+          return;
+        }
+      }
+      const res = app.requestRestart({ force: true });
+      if (!res.ok) out(c.red(res.message));
+    },
+  });
+
+  add({
     name: 'compact',
     argHint: '[instructions]',
     description: 'Clear history but keep a summary in context',
@@ -94,6 +134,8 @@ export function buildCommands(app) {
         app.busy = false;
         app.controller = null;
         app.status = null;
+        app.rateWait = null; // cancelled while paused for a rate limit: no countdown may outlive it
+        app.sendWhatWaited(); // what was typed during a long compaction (or its pause) goes out now
       }
     },
   });
@@ -136,43 +178,52 @@ export function buildCommands(app) {
   add({
     name: 'model',
     argHint: '[model]',
-    description: 'Set the AI model for this session',
+    description: 'Set the AI model (kept for later sessions; /model default forgets it)',
     async run(args) {
       const cfg = app.runtime.config;
       let choice = args.trim();
       if (!choice) {
+        const configured = cfg.configuredModelSpec;
         const opts = [
-          { label: `Default ${c.dim(`(${cfg.env.ANTHROPIC_MODEL || 'sonnet'} → ${cfg.resolveModel(cfg.env.ANTHROPIC_MODEL || 'sonnet').id})`)}`, value: '__default__' },
+          { label: `Default ${c.dim(`(${configured} → ${cfg.resolveModel(configured).id})`)}`, value: '__default__' },
           ...['opus', 'sonnet', 'haiku'].map((a) => ({ label: `${a} ${c.dim(`→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}`)}`, value: a })),
         ];
-        if (cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ label: `${cfg.env.CLAUDE_CODE_SUBAGENT_MODEL} ${c.dim('(sub-agent model)')}`, value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL });
+        if (!cfg.usesClaudeCode && cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ label: `${cfg.env.CLAUDE_CODE_SUBAGENT_MODEL} ${c.dim('(sub-agent model)')}`, value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL });
         choice = await app.showDialog(new SelectDialog({ title: 'Select model', question: `Current: ${c.bold(cfg.mainModel.label)}. Any name works too: /model <name>`, options: opts }));
         if (!choice) return;
       }
-      cfg.modelOverride = choice === '__default__' || choice === 'default' ? null : choice;
+      const forget = choice === '__default__' || choice === 'default';
+      cfg.modelOverride = forget ? null : choice;
       app.runtime.invalidateSystemPrompt();
-      out(`Model set to ${c.bold(cfg.mainModel.label)} ${c.dim(`(${formatTokens(cfg.mainModel.contextWindow)} context)`)}`);
+      const kept = keep(cfg, { model: cfg.modelOverride }, forget);
+      out(`Model set to ${c.bold(cfg.mainModel.label)} ${c.dim(`(${formatTokens(cfg.mainModel.contextWindow)} context)`)}${kept}`);
     },
   });
 
   add({
     name: 'effort',
-    argHint: `[${EFFORTS.join('|')}|auto]`,
-    description: 'Set reasoning effort (output_config.effort)',
+    argHint: `[${EFFORTS.join('|')}|auto|default]`,
+    description: 'Set reasoning effort (output_config.effort; kept for later sessions)',
     async run(args) {
       const cfg = app.runtime.config;
       let choice = args.trim().toLowerCase();
       if (!choice) {
+        const configured = (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase() || 'auto';
         choice = await app.showDialog(new SelectDialog({
           title: 'Reasoning effort',
           question: `Current: ${c.bold(cfg.effort || 'auto (not sent)')}`,
-          options: [...EFFORTS.map((e) => ({ label: e, value: e })), { label: 'auto (use API default)', value: 'auto' }],
+          options: [
+            ...EFFORTS.map((e) => ({ label: e, value: e })),
+            { label: 'auto (use API default)', value: 'auto' },
+            { label: `default ${c.dim(`(configured: ${configured})`)}`, value: 'default' },
+          ],
         }));
         if (!choice) return;
       }
-      if (choice !== 'auto' && !EFFORTS.includes(choice)) { out(c.red(`Unknown effort "${choice}". Use one of: ${EFFORTS.join(', ')}, auto`)); return; }
-      cfg.effortOverride = choice;
-      out(`Effort set to ${c.bold(cfg.effort || 'auto')}`);
+      if (choice !== 'auto' && choice !== 'default' && !EFFORTS.includes(choice)) { out(c.red(`Unknown effort "${choice}". Use one of: ${EFFORTS.join(', ')}, auto, default`)); return; }
+      const forget = choice === 'default';
+      cfg.effortOverride = forget ? null : choice;
+      out(`Effort set to ${c.bold(cfg.effort || 'auto')}${keep(cfg, { effort: cfg.effortOverride }, forget)}`);
     },
   });
 
@@ -190,8 +241,9 @@ export function buildCommands(app) {
         row('Version', VERSION),
         row('Session ID', app.store.id),
         row('cwd', app.cwd),
-        row('API base URL', cfg.baseURL),
-        row('Auth', cfg.authToken ? `ANTHROPIC_AUTH_TOKEN (${cfg.display('ANTHROPIC_AUTH_TOKEN')})` : cfg.apiKey ? `ANTHROPIC_API_KEY (${cfg.display('ANTHROPIC_API_KEY')})` : c.red('none')),
+        row('Provider', cfg.provider),
+        row('Endpoint', cfg.endpointLabel),
+        row('Auth', cfg.usesClaudeCode ? `existing Claude Code OAuth (${cfg.claudeCodeCredentialsFile})` : cfg.authToken ? `ANTHROPIC_AUTH_TOKEN (${cfg.display('ANTHROPIC_AUTH_TOKEN')})` : cfg.apiKey ? `ANTHROPIC_API_KEY (${cfg.display('ANTHROPIC_API_KEY')})` : c.red('none')),
         row('Model', `${cfg.mainModel.label} ${c.dim(`(sent as "${cfg.mainModel.id}", ${formatTokens(cfg.mainModel.contextWindow)} context)`)}`),
         row('Sub-agent model', cfg.subagentModel.label),
         row('Small model', cfg.smallModel.label),
@@ -201,7 +253,7 @@ export function buildCommands(app) {
         row('Mode', modes.mode === 'plan' ? 'plan (read-only; shift+tab to leave)' : 'full access (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
         row('Shell', `${app.runtime.shell.name} ${c.dim(app.runtime.shell.path)}`),
-        row('ripgrep', hasRipgrep() ? 'yes' : 'no (using JS fallback)'),
+        row('ripgrep', hasRipgrep(cfg) ? 'yes' : 'no (using JS fallback)'),
         row('Memory', mem.length ? mem.map((m) => m.file).join(', ') : c.dim('none')),
         row('MCP servers', mcp.length ? mcp.map((m) => `${m.name} (${m.status})`).join(', ') : c.dim('none')),
       ], '');
@@ -471,11 +523,14 @@ export function buildCommands(app) {
     description: 'Check the installation and test the API connection',
     async run() {
       const cfg = app.runtime.config;
+      const rg = hasRipgrep(cfg);
       const lines = [
         `${c.green('✔')} Node ${process.versions.node}`,
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
-        `${hasRipgrep() ? c.green('✔') : c.yellow('!')} ripgrep ${hasRipgrep() ? 'found' : 'not found (Grep uses a slower JS fallback)'}`,
-        `${cfg.authToken || cfg.apiKey ? c.green('✔') : c.red('✘')} Credentials ${cfg.authToken ? 'ANTHROPIC_AUTH_TOKEN' : cfg.apiKey ? 'ANTHROPIC_API_KEY' : 'missing'}`,
+        `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
+        cfg.usesClaudeCode
+          ? `${c.yellow('!')} Existing Claude Code OAuth: ${cfg.claudeCodeCredentialsFile} (checked by the request below)`
+          : `${cfg.authToken || cfg.apiKey ? c.green('✔') : c.red('✘')} Credentials ${cfg.authToken ? 'ANTHROPIC_AUTH_TOKEN' : cfg.apiKey ? 'ANTHROPIC_API_KEY' : 'missing'}`,
       ];
       out(lines);
       app.busy = true;
@@ -484,14 +539,15 @@ export function buildCommands(app) {
       app.controller = new AbortController();
       const started = Date.now();
       try {
-        const reply = await quickQuery(cfg, { model: cfg.mainModel, system: 'Reply with exactly: pong', prompt: 'ping', maxTokens: 200, signal: app.controller.signal });
-        out(`${c.green('✔')} API ${cfg.baseURL} · model ${cfg.mainModel.id} replied "${truncate(reply, 40)}" in ${Date.now() - started}ms`);
+        const reply = await quickQuery(cfg, { model: cfg.mainModel, system: 'Reply with exactly: pong', prompt: 'ping', maxTokens: 200, signal: app.controller.signal, waitForRateLimit: false });
+        out(`${c.green('✔')} ${cfg.endpointLabel} · model ${cfg.mainModel.id} replied "${truncate(reply, 40)}" in ${Date.now() - started}ms`);
       } catch (e) {
         out(`${c.red('✘')} API request failed: ${e.message}`);
       } finally {
         app.busy = false;
         app.status = null;
         app.controller = null;
+        app.sendWhatWaited();
       }
     },
   });
@@ -511,15 +567,11 @@ export function buildCommands(app) {
       argHint: custom.argumentHint,
       description: `${custom.description} ${c.dim(`(${custom.scope})`)}`,
       async run(args) {
-        const argv = args.split(/\s+/).filter(Boolean);
-        let body = custom.body.replace(/\$ARGUMENTS/g, args).replace(/\$(\d)/g, (m, n) => argv[+n - 1] ?? '');
-        if (!custom.body.includes('$ARGUMENTS') && args) body += `\n\nARGUMENTS: ${args}`;
-        // !`command` expands to the command's output.
         const bash = app.runtime.tools.find((t) => t.name === 'Bash');
-        for (const m of [...body.matchAll(/!`([^`]+)`/g)]) {
-          const r = await bash.call({ command: m[1] }, app.agent.makeCtx());
-          body = body.replace(m[0], typeof r.content === 'string' ? r.content : '');
-        }
+        const body = await expandShellEmbeds(expandCommandBody(custom.body, args), async (command) => {
+          const r = await bash.call({ command }, app.agent.makeCtx());
+          return typeof r.content === 'string' ? r.content : '';
+        });
         return app.startTurn(body, { echo: false });
       },
     });
@@ -550,4 +602,3 @@ export function buildCommands(app) {
   app.sessionStart = Date.now();
   return commands;
 }
-

@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findShell, killTree, spawnShell } from '../utils/shell.js';
+import { findShell, killTree, spawnShell, watchShell } from '../utils/shell.js';
 import { stripAnsi } from '../ui/ansi.js';
 import { toolResultsDir } from '../session.js';
 
@@ -31,11 +31,24 @@ function saveFullOutput(root, text) {
   }
 }
 
+// Append to a background shell's buffer. Past `max` characters only the newest `keep` are kept, and
+// `readPos` moves back by what was removed so it still marks the text the model has already read.
+export function appendOutput(bg, text, max = 5_000_000, keep = 2_000_000) {
+  bg.output += text;
+  if (bg.output.length > max) {
+    const cut = bg.output.length - keep;
+    bg.output = bg.output.slice(cut);
+    bg.readPos = Math.max(0, bg.readPos - cut);
+  }
+}
+
 function childEnv() {
   const env = { ...process.env };
   // Keep child processes non-interactive and colour free.
   Object.assign(env, { GIT_EDITOR: 'true', GIT_PAGER: 'cat', PAGER: 'cat', NO_COLOR: '1', CLAUDE_PRO: '1' });
   delete env.FORCE_COLOR;
+  // What commands run from here start must not believe they are a restartable session of this program.
+  for (const key of ['CLAUDE_PRO_SUPERVISED', 'CLAUDE_PRO_RESTART_FILE', 'CLAUDE_PRO_RESTARTED']) delete env[key];
   return env;
 }
 
@@ -98,7 +111,10 @@ Only create commits when requested by the user. When asked to commit: run git st
         const id = `bash_${++bgCounter}`;
         const bg = { child, command, output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
         background.set(id, bg);
-        const onData = (d) => { bg.output += stripAnsi(d.toString()); if (bg.output.length > 5_000_000) bg.output = bg.output.slice(-2_000_000); };
+        // Decode as a stream: a multi-byte character (CJK text) can be split between two chunks.
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        const onData = (d) => appendOutput(bg, stripAnsi(d));
         child.stdout.on('data', onData);
         child.stderr.on('data', onData);
         child.on('close', (code) => { bg.status = bg.status === 'killed' ? 'killed' : 'completed'; bg.exitCode = code; });
@@ -110,7 +126,6 @@ Only create commits when requested by the user. When asked to commit: run git st
       return await new Promise((resolve, reject) => {
         let output = '';
         let timedOut = false;
-        let settled = false;
         let child;
         try {
           child = spawnShell(shell, command, { cwd, env: childEnv(), cwdFile, stdin: stdinText });
@@ -118,19 +133,10 @@ Only create commits when requested by the user. When asked to commit: run git st
           resolve({ isError: true, content: `Failed to start shell: ${e.message}` });
           return;
         }
-        const onData = (d) => {
-          output += d.toString();
-          if (output.length > 10_000_000) output = output.slice(-5_000_000);
-          ctx.onProgress?.(stripAnsi(output));
-        };
-        child.stdout.on('data', onData);
-        child.stderr.on('data', onData);
         const timer = setTimeout(() => { timedOut = true; killTree(child); }, timeout);
         const onAbort = () => killTree(child);
         ctx.signal?.addEventListener('abort', onAbort, { once: true });
         const finish = (code, err) => {
-          if (settled) return;
-          settled = true;
           clearTimeout(timer);
           ctx.signal?.removeEventListener('abort', onAbort);
           try {
@@ -155,8 +161,14 @@ Only create commits when requested by the user. When asked to commit: run git st
           if (code && code !== 0 && !timedOut) text += `${text ? '\n' : ''}Exit code ${code}`;
           resolve({ isError, content: text || '(no output)', display: { output: text, exitCode: code } });
         };
-        child.on('error', (e) => finish(null, e));
-        child.on('close', (code) => finish(code));
+        watchShell(child, {
+          onOutput: (text) => {
+            output += text;
+            if (output.length > 10_000_000) output = output.slice(-5_000_000);
+            ctx.onProgress?.(stripAnsi(output));
+          },
+          done: finish,
+        });
       });
     },
   };

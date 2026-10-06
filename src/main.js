@@ -1,16 +1,18 @@
 import fs from 'node:fs';
-import { VERSION, KNOWN_KEYS, loadConfig, settingsFiles, updateSettingsFile } from './config.js';
+import { VERSION, KNOWN_KEYS, loadConfig, settingsFiles, updateSettingsFile, applyRememberedChoices } from './config.js';
 import { SessionStore } from './session.js';
+import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
 
-A Claude Code style coding agent for any Anthropic-compatible API.
+A Claude Code style coding agent for APIs or existing local Claude Code OAuth credentials.
 Starts an interactive session by default; use -p for non-interactive output.
 
 Options:
   -p, --print                      Print the response and exit (useful for pipes)
   -c, --continue                   Continue the most recent conversation in this directory
   -r, --resume [sessionId]         Resume a conversation (picker if no id given)
+  --provider <backend>            api (default) | claude-code (direct HTTP with existing local login)
   --model <model>                  Model for this session (name or alias: opus, sonnet, haiku)
   --effort <level>                 Reasoning effort: none|minimal|low|medium|high|xhigh|max
   --plan                           Start in read-only plan mode (research first, then ExitPlanMode)
@@ -53,6 +55,7 @@ function parseArgs(argv) {
         if (argv[i + 1] && !argv[i + 1].startsWith('-') && /^[0-9a-f-]{8,}$/i.test(argv[i + 1])) flags.resumeId = next();
         break;
       case '--model': flags.model = next(); break;
+      case '--provider': flags.provider = next(); break;
       case '--effort': flags.effort = next(); break;
       case '--plan': flags.plan = true; break;
       case '--permission-mode': if (next() === 'plan') flags.plan = true; break;
@@ -82,6 +85,7 @@ function configCommand(args, cwd) {
   const file = scopeFlag === '--project' ? files.project : scopeFlag === '--local' ? files.local : files.user;
   if (!sub || sub === 'list' || sub === 'get') {
     const cfg = loadConfig({ cwd });
+    const remembered = applyRememberedChoices(cfg);
     const keys = sub === 'get' && key ? [key] : Object.keys(KNOWN_KEYS);
     for (const k of keys) {
       const v = cfg.display(k);
@@ -89,7 +93,12 @@ function configCommand(args, cwd) {
       console.log(`${k}=${v ?? ''}${cfg.sources[k] ? `    # ${cfg.sources[k]}` : ''}`);
     }
     if (sub !== 'get') {
-      console.log(`\nmain model: ${cfg.mainModel.label} (context ${cfg.mainModel.contextWindow.toLocaleString()})`);
+      console.log(`\nprovider: ${cfg.provider} (${cfg.endpointLabel})`);
+      console.log(`main model: ${cfg.mainModel.label} (context ${cfg.mainModel.contextWindow.toLocaleString()})${cfg.effort ? `, effort ${cfg.effort}` : ''}`);
+      if (remembered.model || remembered.effort) {
+        const what = Object.entries(remembered).map(([k, v]) => `${k} ${v}`).join(', ');
+        console.log(`chosen with /model, /effort: ${what} (kept in ${files.user}; wins over the settings above, --model/--effort win over it)`);
+      }
       console.log(`sub-agent model: ${cfg.subagentModel.label}; small model: ${cfg.smallModel.label}`);
       console.log(`auto-compact at ${cfg.autoCompactThreshold().toLocaleString()} tokens (window ${cfg.compactWindow().toLocaleString()})`);
     }
@@ -136,11 +145,24 @@ function readStdin({ optional }) {
 export async function main(argv) {
   const cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
+  if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }
   if (flags.help) { process.stdout.write(HELP); return 0; }
 
   let prompt = positional.join(' ');
+
+  // Started by a restart of a running session: that session is picked up again, whatever the command line
+  // that started the first one said (-c, --resume, a first prompt).
+  const interactive = !(flags.print || !process.stdout.isTTY || !process.stdin.isTTY);
+  const restart = interactive ? takeRestartState() : null;
+  if (restart) {
+    flags.restart = restart;
+    flags.continue = false;
+    flags.resume = false;
+    flags.resumeId = undefined;
+    prompt = '';
+  }
 
   if (flags.continue || (flags.resume && flags.resumeId)) {
     const sessions = SessionStore.list(cwd);

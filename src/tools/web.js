@@ -4,7 +4,64 @@
 import { quickQuery } from '../api.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
-const cache = new Map(); // url -> {at, text, status, bytes}
+const cache = new Map(); // url -> {at, text, status, bytes}; only successful responses
+
+// Limits, in one object so tests can shrink them.
+export const webLimits = {
+  timeoutMs: 30_000, // for a whole page, headers and body
+  searchTimeoutMs: 20_000,
+  maxBodyBytes: 10 * 1024 * 1024, // the rest of a bigger response is never downloaded
+  cacheMs: 15 * 60_000,
+  cacheEntries: 40,
+  cacheBytes: 60 * 1024 * 1024,
+};
+
+// Content that is not text: a page read as text would be a wall of garbage for the model.
+const BINARY_TYPE = /^(?:image\/(?!svg)|audio\/|video\/|font\/)|^application\/(?:pdf|zip|gzip|x-gzip|x-tar|x-7z-compressed|x-rar-compressed|octet-stream|msword|wasm|vnd\.ms-|vnd\.openxmlformats-)/i;
+
+// Decode a response body using the charset from the Content-Type header, a byte order mark or a
+// <meta> tag, in that order of preference (pages in GBK, Big5 or Shift_JIS are common enough).
+export function decodeBody(buf, contentType = '') {
+  let label = /charset\s*=\s*["']?([\w.:-]+)/i.exec(contentType)?.[1];
+  if (buf[0] === 0xFF && buf[1] === 0xFE) label = 'utf-16le';
+  else if (buf[0] === 0xFE && buf[1] === 0xFF) label = 'utf-16be';
+  else if (!label) label = /<meta[^>]+charset\s*=\s*["']?([\w.:-]+)/i.exec(buf.subarray(0, 4096).toString('latin1'))?.[1];
+  try {
+    return new TextDecoder(label || 'utf-8').decode(buf); // an unknown label throws
+  } catch {
+    return buf.toString('utf8');
+  }
+}
+
+// Read at most `max` bytes of a response body and stop downloading after that.
+async function readCapped(res, max) {
+  const reader = res.body?.getReader();
+  if (!reader) return Buffer.from(await res.arrayBuffer()).subarray(0, max);
+  const chunks = [];
+  let size = 0;
+  while (size < max) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    size += value.length;
+  }
+  try { await reader.cancel(); } catch { /* already finished */ }
+  return Buffer.concat(chunks).subarray(0, max);
+}
+
+function remember(url, entry) {
+  const now = Date.now();
+  for (const [key, old] of cache) if (now - old.at >= webLimits.cacheMs) cache.delete(key);
+  cache.set(url, entry);
+  let bytes = 0;
+  for (const e of cache.values()) bytes += e.text.length;
+  // Oldest first (Map keeps insertion order); the page just fetched always stays.
+  for (const key of cache.keys()) {
+    if (cache.size <= 1 || (cache.size <= webLimits.cacheEntries && bytes <= webLimits.cacheBytes)) break;
+    bytes -= cache.get(key).text.length;
+    cache.delete(key);
+  }
+}
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', mdash: '—', ndash: '–', hellip: '…', copy: '©', reg: '®', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“' };
 
@@ -49,21 +106,33 @@ export function htmlToMarkdown(html, baseUrl) {
 
 async function fetchText(url, signal) {
   const hit = cache.get(url);
-  if (hit && Date.now() - hit.at < 15 * 60_000) return hit;
+  if (hit && Date.now() - hit.at < webLimits.cacheMs) return hit;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 30_000);
-  signal?.addEventListener('abort', () => ctrl.abort(), { once: true });
+  // A timeout must be reported as one, and must not look like the user's interrupt.
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, webLimits.timeoutMs);
+  const onAbort = () => ctrl.abort();
+  if (signal?.aborted) ctrl.abort(); else signal?.addEventListener('abort', onAbort, { once: true });
   try {
     const res = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'text/html,text/markdown,text/plain,application/json;q=0.9,*/*;q=0.8' }, redirect: 'follow', signal: ctrl.signal });
-    const buf = Buffer.from(await res.arrayBuffer());
+    const buf = await readCapped(res, webLimits.maxBodyBytes);
     const type = res.headers.get('content-type') || '';
-    let text = buf.subarray(0, 10 * 1024 * 1024).toString('utf8');
+    const base = { at: Date.now(), status: res.status, statusText: res.statusText, bytes: buf.length, finalUrl: res.url, type };
+    // Binary content (a PDF, an image, an archive) is not shown as text.
+    if (BINARY_TYPE.test(type) || buf.subarray(0, 8000).includes(0)) return { ...base, text: '', binary: true };
+    let text = decodeBody(buf, type);
     if (/html/i.test(type) || /^\s*<(!doctype|html)/i.test(text)) text = htmlToMarkdown(text, res.url);
-    const r = { at: Date.now(), text, status: res.status, statusText: res.statusText, bytes: buf.length, finalUrl: res.url };
-    cache.set(url, r);
+    const r = { ...base, text };
+    // Only a successful page is remembered: a 503 or a 404 must not be served for the next 15 minutes
+    // after the server has recovered.
+    if (res.ok) remember(url, r);
     return r;
+  } catch (e) {
+    if (timedOut && !signal?.aborted) throw new Error(`timed out after ${Number((webLimits.timeoutMs / 1000).toFixed(1))}s`);
+    throw e;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
   }
 }
 
@@ -103,6 +172,9 @@ Usage notes:
       const size = page.bytes > 1024 ? `${(page.bytes / 1024).toFixed(1)}KB` : `${page.bytes}B`;
       const display = { summary: `Received ${size} (${page.status} ${page.statusText || ''})`.trim() };
       if (page.status >= 400) return { isError: true, content: `HTTP ${page.status} ${page.statusText} fetching ${url.href}\n\n${page.text.slice(0, 2000)}`, display };
+      if (page.binary) {
+        return { isError: true, content: `${page.finalUrl || url.href} is not text (${page.type || 'binary data'}, ${size}), so WebFetch cannot read it. If you need the file, download it with curl in Bash.`, display };
+      }
       if (input.raw) {
         const text = page.text.length > 1_000_000 ? `${page.text.slice(0, 1_000_000)}\n\n[content truncated at 1,000,000 characters]` : page.text;
         return { content: text || '(the page has no text content)', display };
@@ -115,6 +187,9 @@ Usage notes:
           prompt: `Web page content from ${page.finalUrl || url.href}:\n---\n${content}\n---\n\n${input.prompt || 'Summarize this page, keeping all important details, code and numbers.'}\n\nRespond based only on the content above.`,
           maxTokens: 16_000,
           signal: ctx.signal,
+          // Nobody is told about a pause that happens inside a tool call, so the summary is skipped
+          // instead (the page text below is returned as it is) and the main agent does the waiting.
+          waitForRateLimit: false,
         });
         return { content: answer || content.slice(0, 50_000), display };
       } catch (e) {
@@ -125,12 +200,15 @@ Usage notes:
   };
 }
 
+// A search engine that never answers must not hold the tool call for minutes.
+const withTimeout = (signal) => AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(webLimits.searchTimeoutMs)]);
+
 async function searchDuckDuckGo(query, signal) {
   const res = await fetch('https://html.duckduckgo.com/html/', {
     method: 'POST',
     headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ q: query }).toString(),
-    signal,
+    signal: withTimeout(signal),
   });
   const html = await res.text();
   const results = [];
@@ -148,7 +226,7 @@ async function searchDuckDuckGo(query, signal) {
 }
 
 async function searchBing(query, signal) {
-  const res = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en`, { headers: { 'User-Agent': UA }, signal });
+  const res = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en`, { headers: { 'User-Agent': UA }, signal: withTimeout(signal) });
   const html = await res.text();
   const results = [];
   for (const block of html.split('<li class="b_algo"').slice(1)) {

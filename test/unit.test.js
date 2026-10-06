@@ -267,7 +267,7 @@ test('MCP stdio client lists and calls tools', async () => {
   const mgr = new McpManager({ echo: { command: 'node', args: [path.join(here, 'fixtures', 'mcp-echo-server.js')] } }, { cwd: here });
   await mgr.start();
   const tools = mgr.tools();
-  assert.deepEqual(tools.map((t) => t.name), ['mcp__echo__echo', 'mcp__echo__add']);
+  assert.deepEqual(tools.map((t) => t.name), ['mcp__echo__echo', 'mcp__echo__add', 'mcp__echo__hang']);
   const r = await tools[1].call({ a: 2, b: 40 }, {});
   assert.equal(r.content, '42');
   mgr.close();

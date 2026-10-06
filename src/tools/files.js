@@ -22,10 +22,14 @@ function isBinary(buf) {
   return false;
 }
 
-function readText(file) {
-  const raw = fs.readFileSync(file, 'utf8');
+// `crlf` is true when CRLF is the file's main line ending. Editing rewrites every line ending, so a
+// mostly-LF file with one stray CRLF must stay LF instead of being converted wholesale.
+function readText(file, buf = fs.readFileSync(file)) {
+  const raw = buf.toString('utf8');
   const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-  return { text, bom: text !== raw, crlf: /\r\n/.test(text) };
+  const crlfCount = (text.match(/\r\n/g) || []).length;
+  const bareLfCount = (text.match(/\n/g) || []).length - crlfCount;
+  return { text, bom: text !== raw, crlf: crlfCount > 0 && crlfCount >= bareLfCount };
 }
 
 export function numberLines(lines, start) {
@@ -108,14 +112,17 @@ Usage:
     const buf = fs.readFileSync(file);
     if (isBinary(buf)) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
 
-    const { text } = readText(file);
+    const { text } = readText(file, buf);
     const lines = splitLines(text);
-    ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial: !!(input.offset || input.limit) });
+    // `partial` records that part of the file was not shown, so Write can refuse to overwrite it.
+    const seen = (partial) => ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial });
     if (lines.length === 0) {
+      seen(false);
       return { content: '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>', display: { summary: 'Read 0 lines (empty file)' } };
     }
     const start = Math.max(1, Math.floor(input.offset || 1));
     if (start > lines.length) {
+      seen(true);
       return { content: `<system-reminder>Warning: the file exists but is shorter than the provided offset (${start}). The file has ${lines.length} lines.</system-reminder>`, display: { summary: 'Read 0 lines' } };
     }
     const limit = Math.max(1, Math.floor(input.limit || MAX_LINES));
@@ -124,17 +131,27 @@ Usage:
     if (content.length > MAX_OUTPUT_CHARS && !input.limit) {
       return { isError: true, content: `File content (${Math.round(content.length / 1024)}KB) exceeds the maximum allowed size. Use the offset and limit parameters to read specific portions of the file, or use the Grep tool to search for specific content.` };
     }
-    if (content.length > HARD_MAX_CHARS) content = `${content.slice(0, HARD_MAX_CHARS)}\n… [output cut at ${HARD_MAX_CHARS} characters; read a smaller range with offset/limit]`;
+    let cut = false;
+    if (content.length > HARD_MAX_CHARS) {
+      content = `${content.slice(0, HARD_MAX_CHARS)}\n… [output cut at ${HARD_MAX_CHARS} characters; read a smaller range with offset/limit]`;
+      cut = true;
+    }
     const end = start + slice.length - 1;
+    seen(cut || start > 1 || end < lines.length);
     if (end < lines.length) content += `\n\n(File has ${lines.length} lines total; showing lines ${start}-${end}. Use offset/limit to read more.)`;
     return { content, display: { summary: `Read ${slice.length} line${slice.length === 1 ? '' : 's'}` } };
   },
 };
 
-// Validate that a file may be written: it must have been read (fully) and be unchanged since.
-export function checkFreshness(file, ctx) {
+// Validate that a file may be written: it must have been read and be unchanged since. With
+// `full`, which Write needs because it replaces the whole file, the read must also have covered
+// all of it; Edit only replaces text it matched exactly, so a partial read is enough there.
+export function checkFreshness(file, ctx, { full = false } = {}) {
   const state = ctx.fileState.get(file);
   if (!state) return 'File has not been read yet. Read it first before writing to it.';
+  if (full && state.partial) {
+    return 'File was only partly read (offset/limit), so Write would overwrite content you have not seen. Read the whole file first, or use Edit for targeted changes.';
+  }
   const now = mtime(file);
   if (now !== null && state.mtimeMs !== undefined && Math.abs(now - state.mtimeMs) > 1) {
     return 'File has been modified since it was last read, either by the user or by a linter. Read it again before attempting to write it.';
@@ -183,7 +200,7 @@ Usage:
     const file = resolvePath(input.file_path, ctx.cwd);
     if (fs.existsSync(file)) {
       if (fs.statSync(file).isDirectory()) return `${file} is a directory`;
-      return checkFreshness(file, ctx);
+      return checkFreshness(file, ctx, { full: true });
     }
     return null;
   },
@@ -302,8 +319,8 @@ Usage:
     return { file, before, after: r.result, index: r.index, count: r.count, meta: { crlf, bom }, newStr };
   },
   validate(input, ctx) { return this.plan(input, ctx).error || null; },
-  preview(input, ctx) {
-    const p = this.plan(input, ctx);
+  // `p` is an already computed plan, so call() does not read the file and redo the edit a second time.
+  preview(input, ctx, p = this.plan(input, ctx)) {
     if (p.error) return null;
     if (p.created) return { kind: 'create', path: p.file, lines: splitLines(p.after) };
     const ops = diffLines(splitLines(p.before), splitLines(p.after));
@@ -312,9 +329,11 @@ Usage:
   async call(input, ctx) {
     const p = this.plan(input, ctx);
     if (p.error) return { isError: true, content: p.error };
-    const preview = this.preview(input, ctx);
+    const preview = this.preview(input, ctx, p);
+    const prior = ctx.fileState.get(p.file);
     writeText(p.file, p.after, p.meta);
-    ctx.fileState.set(p.file, { mtimeMs: mtime(p.file) });
+    // An edit does not show the rest of the file, so a partial read stays partial (a created file is all ours).
+    ctx.fileState.set(p.file, { mtimeMs: mtime(p.file), partial: !p.created && !!prior?.partial });
     if (p.created) {
       return { content: `File created successfully at: ${p.file}`, display: { summary: `Created ${displayPath(p.file, ctx.cwd)}`, preview } };
     }

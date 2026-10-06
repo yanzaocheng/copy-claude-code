@@ -3,12 +3,29 @@
 
 import { createRuntime } from './runtime.js';
 import { SessionStore } from './session.js';
+import { describePause, shouldAnnounce } from './ratelimit.js';
 import { c } from './ui/ansi.js';
 
-export async function runPrint({ prompt, flags, cwd }) {
+export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, stderr = process.stderr }) {
   const format = flags.outputFormat || 'text';
-  const err = (s) => process.stderr.write(s + '\n');
-  const emit = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
+  const err = (s) => stderr.write(s + '\n');
+  const emit = (obj) => stdout.write(JSON.stringify(obj) + '\n');
+  // A pause can last hours: always say so, or the run looks hung. `who` names a sub-agent. A reporter
+  // remembers the pause it announced, so the waits that only continue it (polling) are not repeated.
+  const rateLimitReporter = (who = '') => {
+    let paused = null;
+    return (ev) => {
+      if (ev.type === 'rate_limit_wait') {
+        if (shouldAnnounce(paused, ev)) err(c.yellow(who + describePause(ev)));
+        paused = { resumeAt: ev.resumeAt, waitingForLogin: Boolean(ev.waitingForLogin) };
+      }
+      if (ev.type === 'rate_limit_resume') {
+        paused = null;
+        err(c.yellow(`${who}The limit has cleared; continuing.`));
+      }
+    };
+  };
+  const mainRateLimit = rateLimitReporter();
   const io = {
     approvePlan: async () => 'reject', // non-interactive: a plan is only presented, never executed
     askQuestion: async () => null,
@@ -21,17 +38,29 @@ export async function runPrint({ prompt, flags, cwd }) {
     messageAdded: (msg) => { store.message(msg); if (format === 'stream-json' && msg.role === 'user') emit({ type: 'user', message: msg }); },
     messagesReplaced: (msgs) => store.reset(msgs),
     compactStart: (auto) => { if (flags.verbose) err(c.gray(`✻ ${auto ? 'Auto-compacting' : 'Compacting'} conversation…`)); },
-    streamEvent: (ev) => { if (ev.type === 'retry' && flags.verbose) err(c.yellow(`API error (${ev.error.message}), retrying in ${Math.round(ev.delayMs / 1000)}s…`)); },
+    streamEvent: (ev) => {
+      if (ev.type === 'retry' && flags.verbose) err(c.yellow(`API error (${ev.error.message}), retrying in ${Math.round(ev.delayMs / 1000)}s…`));
+      mainRateLimit(ev);
+    },
+    compactProgress: (ev) => mainRateLimit(ev),
+    // Sub-agents have no screen of their own here; their pauses are still reported, whether it is a
+    // turn or the compaction of their own conversation that is paused.
+    subagentIo: ({ def }) => {
+      const report = rateLimitReporter(`[${def.name}] `);
+      return { streamEvent: report, compactProgress: report };
+    },
   };
   const runtime = await createRuntime({ cwd, flags, io });
   let store = new SessionStore(cwd);
   if (flags.resumeFile) {
     const loaded = SessionStore.load(flags.resumeFile);
     runtime.agent.messages = loaded.messages;
+    runtime.agent.restoreFileState(loaded.messages, loaded.times);
     store = new SessionStore(cwd, flags.resumeId);
   }
   const ctrl = new AbortController();
-  process.on('SIGINT', () => ctrl.abort());
+  const onSigint = () => ctrl.abort();
+  process.on('SIGINT', onSigint);
   const started = Date.now();
   let result;
   try {
@@ -50,6 +79,8 @@ export async function runPrint({ prompt, flags, cwd }) {
     else err(c.red(`Error: ${e.message}`));
     runtime.tasks.killAll(); runtime.mcp.close();
     return 1;
+  } finally {
+    process.off('SIGINT', onSigint);
   }
   const a = runtime.agent;
   if (format === 'json' || format === 'stream-json') {
@@ -63,7 +94,7 @@ export async function runPrint({ prompt, flags, cwd }) {
       usage: { input_tokens: a.usage.input, output_tokens: a.usage.output, cache_read_input_tokens: a.usage.cacheRead },
     });
   } else {
-    process.stdout.write(result.text + '\n');
+    stdout.write(result.text + '\n');
   }
   runtime.tasks.killAll(); runtime.mcp.close();
   return result.interrupted ? 130 : 0;

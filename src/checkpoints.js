@@ -60,6 +60,19 @@ export class CheckpointStore {
     }
   }
 
+  // The state to hand to the next process of a restarted session (see adopt).
+  snapshot() { return { dir: this.dir, entries: this.entries, counter: this.counter }; }
+
+  // Take over what the process before a restart had: its snapshots stay where they are on disk.
+  adopt({ dir, entries, counter } = {}) {
+    if (!dir || !Array.isArray(entries)) return false;
+    this.dir = dir;
+    this.entries = entries;
+    this.counter = Math.max(Number(counter) || 0, ...entries.map((e) => e.id || 0));
+    this.current = entries[entries.length - 1] || null;
+    return true;
+  }
+
   // Checkpoints that are part of the current conversation, newest first.
   list() { return this.entries.filter((e) => !e.orphaned).reverse(); }
   get(id) { return this.entries.find((e) => e.id === id); }

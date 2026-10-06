@@ -41,18 +41,73 @@ function hasUnclassifiableSyntax(cmd) {
   return /[<>]/.test(redir);
 }
 
+// Commands that read only, whatever their arguments (the ones whose arguments can make them write or run
+// something have their own check in COMMAND_CHECKS below). No pagers: `less +!cmd` runs a command.
 const READ_ONLY_SIMPLE = new Set([
-  'ls', 'pwd', 'echo', 'cat', 'head', 'tail', 'wc', 'which', 'whoami', 'date', 'tree', 'file', 'stat', 'du', 'df',
-  'uname', 'hostname', 'printenv', 'type', 'realpath', 'basename', 'dirname', 'sort', 'uniq', 'cut', 'tr', 'diff',
-  'grep', 'egrep', 'fgrep', 'rg', 'true', 'false', 'test', 'nproc', 'id', 'cd', 'less', 'more', 'column', 'jq', 'md5sum', 'sha256sum',
+  'ls', 'pwd', 'echo', 'cat', 'head', 'tail', 'wc', 'which', 'whoami', 'stat', 'du', 'df',
+  'uname', 'printenv', 'type', 'realpath', 'basename', 'dirname', 'cut', 'tr', 'diff',
+  'grep', 'egrep', 'fgrep', 'true', 'false', 'test', 'nproc', 'id', 'cd', 'column', 'jq', 'md5sum', 'sha256sum',
 ]);
 const READ_ONLY_PREFIXES = [
-  'git status', 'git diff', 'git log', 'git show', 'git branch', 'git remote -v', 'git rev-parse', 'git ls-files',
-  'git blame', 'git describe', 'git tag -l', 'git stash list', 'git config --get', 'git config -l', 'git config --list',
+  'git status', 'git rev-parse', 'git ls-files', 'git blame', 'git describe', 'git stash list',
+  'git config --get', 'git config -l', 'git config --list',
   'node --version', 'node -v', 'npm --version', 'npm -v', 'npm ls', 'npm list', 'npm view', 'npm outdated', 'pnpm --version',
-  'yarn --version', 'python --version', 'python3 --version', 'pip list', 'pip show', 'pip --version', 'go version', 'go env',
+  'yarn --version', 'python --version', 'python3 --version', 'pip list', 'pip show', 'pip --version', 'go version',
   'cargo --version', 'rustc --version', 'java -version', 'dotnet --version', 'docker ps', 'docker images', 'where',
 ];
+
+// `git branch` only lists with these flags; a name, -d/-D, -m/-M, -c/-C, -u ... would create, delete or rename.
+const GIT_BRANCH_FLAGS = new Set(['-a', '--all', '-r', '--remotes', '-v', '-vv', '--verbose', '-l', '--list', '--show-current', '--no-color', '--color', '--no-column', '--column']);
+const GIT_BRANCH_VALUE_FLAGS = /^--(?:contains|no-contains|merged|no-merged|points-at|sort|format|abbrev)(?:=.*)?$/;
+function gitBranchReads(args) {
+  let listing = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (GIT_BRANCH_FLAGS.has(a)) { if (a === '-l' || a === '--list') listing = true; continue; }
+    if (GIT_BRANCH_VALUE_FLAGS.test(a)) { if (!a.includes('=') && !/^--abbrev$/.test(a)) i++; continue; }
+    if (listing && !a.startsWith('-')) continue; // a pattern to list
+    return false;
+  }
+  return true;
+}
+
+// `git tag` likewise: listing is fine, anything that makes or removes a tag is not.
+function gitTagReads(args) {
+  if (!args.some((a) => a === '-l' || a === '--list')) return false;
+  return args.every((a) => !a.startsWith('-') || /^(?:-l|--list|-n\d*|--sort=.*|--column|--no-column|--contains|--no-contains|--merged|--no-merged|--points-at|--format=.*|--color|--no-color)$/.test(a));
+}
+
+const positional = (args) => args.filter((a) => !a.startsWith('-') && !a.startsWith('+'));
+
+// Commands that are read-only only with certain arguments: args => true when this call reads only.
+const COMMAND_CHECKS = {
+  // -exec and -delete run or remove things, -fprint* and -fls write files
+  find: (args) => !args.some((a) => /^-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/.test(a)),
+  // -o FILE and --output FILE (GNU getopt accepts any unambiguous prefix of it)
+  sort: (args) => !args.some((a) => /^-[a-zA-Z]*o/.test(a) || /^--o/.test(a)),
+  // `uniq INPUT OUTPUT` writes OUTPUT
+  uniq: (args) => positional(args).length <= 1,
+  tree: (args) => !args.some((a) => /^-[a-zA-Z]*o/.test(a) || /^--output/.test(a)),
+  // setting the clock or the host name changes the machine
+  date: (args) => !args.some((a) => /^-[a-zA-Z]*s/.test(a) || /^--set/.test(a)) && positional(args).length === 0,
+  hostname: (args) => args.length === 0 || args.every((a) => /^(?:-[fsiIdAy]|--(?:fqdn|short|ip-address|domain|all-ip-addresses))$/.test(a)),
+  // --pre runs a command on every file
+  rg: (args) => !args.some((a) => /^--(?:pre|hostname-bin)(?:=|$)/.test(a)),
+  file: (args) => !args.some((a) => /^-[a-zA-Z]*C/.test(a) || a === '--compile'),
+  // `git log --output=FILE` and friends write the result to a file
+  git: (args, part) => {
+    const sub = args.find((a) => !a.startsWith('-'));
+    const rest = args.slice(args.indexOf(sub) + 1);
+    if (args[0] !== sub) return null; // options before the subcommand (-C dir, -c key=value): not classified
+    if (sub === 'diff' || sub === 'log' || sub === 'show') return !rest.some((a) => /^--output(?:=|$)/.test(a));
+    if (sub === 'branch') return gitBranchReads(rest);
+    if (sub === 'tag') return gitTagReads(rest);
+    if (sub === 'remote') return part === 'git remote' || part === 'git remote -v';
+    return null;
+  },
+  // `go env -w` and `-u` change the Go settings
+  go: (args) => (args[0] === 'env' ? !args.some((a) => a === '-w' || a === '-u') : args[0] === 'version'),
+};
 
 // True when every part of the command only reads (used to let research commands run in plan mode).
 export function isReadOnlyCommand(cmd) {
@@ -61,10 +116,15 @@ export function isReadOnlyCommand(cmd) {
     const words = part.split(/\s+/);
     const first = words[0];
     if (/^\w+=/.test(first)) return false; // env assignment prefix
-    if (first === 'find') return !/\s-(exec|execdir|delete|ok|okdir|fprint|fls|fprintf)\b/.test(part);
-    if (first === 'sort' && /\s-o\b/.test(part)) return false;
+    // hasOwn: a command called `constructor` or `toString` must not find a function on the prototype.
+    if (Object.hasOwn(COMMAND_CHECKS, first)) {
+      const verdict = COMMAND_CHECKS[first](words.slice(1), part);
+      if (verdict !== null) return verdict;
+    }
     if (READ_ONLY_SIMPLE.has(first)) return true;
-    return READ_ONLY_PREFIXES.some((p) => part === p || part.startsWith(p + ' '));
+    // A command that has an argument check is only ever read-only through that check, except where it
+    // is also in the simple list (above); the rest is matched by prefix.
+    return READ_ONLY_PREFIXES.some((p) => part === p || part.startsWith(`${p} `));
   });
 }
 

@@ -6,7 +6,7 @@
 // Exit code 0: fine (stdout is kept as extra context). Exit code 2: block, stderr goes to the model.
 // Any other non-zero exit code is reported as a warning and ignored.
 
-import { spawnShell, killTree, findShell } from './utils/shell.js';
+import { spawnShell, killTree, findShell, watchShell } from './utils/shell.js';
 import { stripAnsi } from './ui/ansi.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -34,15 +34,15 @@ function runCommand(shell, command, { cwd, payload, timeout, signal }) {
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, timeout);
     const onAbort = () => killTree(child);
     signal?.addEventListener('abort', onAbort, { once: true });
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    const done = (code) => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      resolve({ code: timedOut ? 1 : code, out: stripAnsi(out).trim(), err: stripAnsi(err + (timedOut ? `\nhook timed out after ${timeout}ms` : '')).trim() });
-    };
-    child.on('error', (e) => { err += e.message; done(1); });
-    child.on('close', done);
+    watchShell(child, {
+      onOutput: (text, stream) => { if (stream === 'stderr') err += text; else out += text; },
+      done: (code, error) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (error) err += error.message;
+        resolve({ code: timedOut || error ? 1 : code, out: stripAnsi(out).trim(), err: stripAnsi(err + (timedOut ? `\nhook timed out after ${timeout}ms` : '')).trim() });
+      },
+    });
   });
 }
 

@@ -1,6 +1,6 @@
 # claude-pro — 完全访问的命令行编程 Agent
 
-`claude-pro` 是一个**自己实现**的 Claude Code 风格终端 AI 编程助手：不依赖官方 Claude Code，可以接任何 **Anthropic 兼容 API**（DeepSeek 的 `https://api.deepseek.com/anthropic`、Anthropic 官方 API 等）。
+`claude-pro` 是一个**自己实现**的 Claude Code 风格终端 AI 编程助手：可以直接接 **Anthropic 兼容 API**（DeepSeek 的 `https://api.deepseek.com/anthropic`、Anthropic 官方 API 等），也可以读取本机 Claude Code 的现有订阅登录态，直接发送 Claude Code OAuth HTTP 请求。
 
 和官方相比最大的区别：**没有任何权限确认**。Bash 命令、文件读写、联网、MCP 工具，模型要用就直接执行，不弹窗、不问、没有 allow/deny 规则。它面向你自己的测试机器，目的是让模型的能力不被打断地发挥出来。作为补偿，每次文件修改都会做检查点，`/rewind` 可以撤销。
 
@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：自己实现的 agent 只能用 API key（`ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`），不能用 Claude 订阅登录；订阅登录只有官方 `claude` 程序可以用。
+> **认证**：`api` 后端使用 `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`；`claude-code` 后端读取现有 Claude Code OAuth 凭据并直接请求 Anthropic。本项目没有登录流程，不复制凭据，也不启动官方 CLI 来生成回复；访问令牌过期时，它用凭据文件里的刷新令牌**自己续期**（见下）。
 
 ## 安装与运行
 
@@ -29,6 +29,34 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 ```
 
 > 在 Git Bash 自带的 mintty 窗口里交互模式需要 `winpty claude-pro`；推荐在 Windows Terminal / PowerShell / cmd 中运行。
+
+## 复用已有的 Claude Code 登录态
+
+已有本机 Claude Code 订阅登录时，选择 `claude-code` 认证即可，不需要在本项目中登录或填写 API key：
+
+```powershell
+node bin/claude-pro.js --provider claude-code
+node bin/claude-pro.js --provider claude-code --model opus
+node bin/claude-pro.js --provider claude-code -p "用 Read 工具读取 package.json，告诉我项目版本"
+```
+
+希望**所有目录**默认都复用该登录态（写入 `~/.claude-pro/settings.json`）：
+
+```powershell
+claude-pro config set CLAUDE_PRO_PROVIDER claude-code
+```
+
+只对当前项目生效时加 `--local`（写入 `<项目>/.claude-pro/settings.local.json`，优先于用户级设置）。反过来，某个项目要继续用 `.env` 里的 API（如 DeepSeek）：在那个项目里 `claude-pro config set CLAUDE_PRO_PROVIDER api --local`，或者只这一次 `claude-pro --provider api`。
+
+`~/.claude.json` 保存设备 ID 和 OAuth 账号信息，实际访问令牌保存在 `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken` 中。Windows 对应 `%USERPROFILE%\.claude.json` 和 `%USERPROFILE%\.claude\.credentials.json`。可用 `CLAUDE_PRO_CLAUDE_CONFIG_FILE` 和 `CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE` 指向现有文件；`CLAUDE_CONFIG_DIR` 可以指定凭据目录。凭据位置参考[官方认证文档](https://code.claude.com/docs/en/authentication#credential-management)。
+
+调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上 Claude Code 的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点、计划模式及会话功能都由本项目原有逻辑处理。
+
+此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-4-5-20251001`；子 agent 默认跟随主模型。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
+
+每次请求重新读取现有凭据；如果本机 Claude Code 更新了令牌，下次请求自动使用新值。
+
+**令牌自动续期**：访问令牌有效期 8 小时。发请求前如果它已过期或不到 5 分钟就过期，本项目会用同一个文件里的刷新令牌向官方令牌接口续期（协议与官方客户端一致），把新令牌写回 `.credentials.json`——刷新会**轮换刷新令牌**，所以必须写回，否则官方客户端手里的就是失效的。写回只改令牌相关字段、原子替换、保持原有缩进；和官方客户端使用同样的目录锁（`.claude/.oauth_refresh.lock` 与 `.claude.lock`），两边不会同时刷新，抢先被对方刷新过就直接用对方的结果。请求收到 401 时也会强制续期一次再重试。只有刷新令牌本身被拒绝或过期（约 30 天不用）时才需要你运行 `claude` 再 `/login`，此时报错会写明原因。不想让本项目改写凭据文件：`CLAUDE_PRO_DISABLE_TOKEN_REFRESH=1`。令牌接口地址固定，不能通过任何设置（包括项目里的 `.env`）改掉，避免刷新令牌被发到别处。HTTP 认证兼容方式依赖 Claude Code 的接口约定，官方协议变化时可能需要同步调整；可用 `CLAUDE_PRO_CLAUDE_CODE_VERSION` 指定 User-Agent 中的版本（默认读取本机 npm 安装版本）。
 
 ## 配置
 
@@ -53,7 +81,7 @@ CLAUDE_CODE_EFFORT_LEVEL=max                 # 以 output_config.effort 发送
 CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432       # 自动压缩按这个窗口大小计算
 ```
 
-其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
+其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`、`CLAUDE_PRO_RATE_LIMIT_POLL_MS`（见下文“限流”）、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_RIPGREP_PATH`（rg 的路径；`off` 强制使用内置 JS 搜索）、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
 
 ```bash
 claude-pro config list                                   # 查看生效值及其来源
@@ -62,6 +90,43 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 ```
 
 会话中也可以用 `/config`、`/model`、`/effort` 修改。
+
+## 限流：自动暂停，到点自动恢复
+
+订阅账号（`--provider claude-code`）有滚动窗口限额：5 小时和每周。窗口用完后 API 返回 429，并在 `anthropic-ratelimit-unified-*` 响应头里写明是哪个窗口、什么时候重置（与官方客户端读取的字段相同）。遇到这种情况本项目**不再报错停下**，而是：
+
+1. 暂停当前请求，界面上显示实时倒计时：`✻ 5-hour limit reached · resumes at 23:41 (in 2h 13m) (esc to cancel)`，并记录一行说明；
+2. 到重置时间（再加几秒余量和随机抖动，避免多个子 agent 同时冲上去）后，**原样重发同一个请求**，对话、已完成的工具结果都不受影响，不会重复发送你的提示；
+3. 请求被接受后提示 `The limit has cleared; continuing.`，任务接着做完。
+
+要点：
+
+- **等待期间可以随时 `Esc` 取消**；`-p` 模式会在 stderr 打印同样的说明，进程保持运行直到恢复。
+- **服务器没给出重置时间**（只有一句泛泛的 429）时，按 1s、2s、4s…递增、最长 `CLAUDE_PRO_RATE_LIMIT_POLL_MS`（默认 5 分钟）的间隔反复试，限流一解除就继续。
+- **等待上限** `CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，默认 6 小时（够等一个 5 小时窗口）。重置时间超出上限（比如周限额还有几天）时立即报错，并写明「它在几点重置、还有多久」，而不是只说“稍后再试”。设为 `0` 则不等待、直接报错；`CLAUDE_PRO_MAX_RETRIES=0` 会关闭一切重试（含等待）。
+- 等待用墙上时钟分段检查（每 15 秒一次），电脑睡眠/休眠后醒来会立刻发现已过了重置时间，不会多等。
+- **登录令牌**：官方登录的访问令牌有效期 8 小时，等 5 小时窗口恢复时它多半已经过期。恢复时本项目先**自己用刷新令牌续期**（见上文"令牌自动续期"），然后接着做，不需要你干预。只有续期失败时才会等：刷新令牌被拒绝（需要 `claude` → `/login`）、令牌接口暂时连不上、或关闭了自动续期。此时界面显示"Waiting for the Claude Code login to be renewed"并写明失败原因，每 5 分钟重试续期、每 15 秒检查一次凭据文件，你登录后就自动接着做；等待时长受上面的等待上限剩余部分约束，用完才报错，并写明失败原因和已经等了多久。凭据文件恰好被别的进程写到一半（JSON 不完整）也按同样方式等过去。
+- **压缩对话时**撞上限流同样会暂停，界面显示同样的倒计时（不会一直停在"Compacting conversation"上让人以为卡死了）。
+- **子 agent 和后台 agent** 同样会等待，暂停与恢复都以 `[agent 名]` 为前缀提示一次（倒计时那一行属于主 agent，因为后台 agent 暂停时主 agent 可能还在干活）。轮询（服务器没给重置时间）每隔几分钟重试一次，但只提示一次，不会刷屏。
+- `/doctor` 这类诊断请求不等，直接报告限流。
+
+## 终端标题、页脚与窗口缩放
+
+- **终端标题**：标签/窗口标题显示 `✳ <会话标题> | <目录> · <模型> · <effort>`（会话标题是**当前话题**：每次发消息后，后台让小模型（haiku）判断是否换了话题，换了就生成一个简短标题，和官方客户端一样；"继续"之类的消息不会改标题。话题记在会话文件里，`/resume`、重启后仍在，`/resume` 列表也显示它。旧会话没有话题时，恢复时按最近一条提问生成。还没生成时显示第一条提问。最多 40 字，保证模型和 effort 不被窄标签截掉。`CLAUDE_PRO_DISABLE_TOPIC_TITLE=1` 关闭，省掉每条消息一次的小请求）。忙碌时前缀在 `⠂`/`⠐` 之间闪动，限流暂停时变 `⏸`，退出时恢复进入前的标题。`/model`、`/effort`、`/clear`、`/resume` 后自动更新。**VS Code**(1.140 起)只对它认得的 AI 命令行(claude/codex/copilot/gemini)把程序设置的标题显示在标签上(`terminal.integrated.tabs.allowAgentCliTitle`,默认开),其余一律显示进程名 `node`;它在 Windows 上靠 `node.exe` 命令行里的 `\claude-code\` 路径段识别 Claude Code,所以监督进程用 `bin\claude-code\..\claude-pro.js` 启动会话(目录不必存在,Node 自己化简 `..`)。不经过监督进程的启动方式(`CLAUDE_PRO_NO_SUPERVISOR=1`)或 Linux/macOS 上,要在 VS Code 设置里把 `terminal.integrated.tabs.title` 改成 `${sequence}` 才能看到标题。
+- **页脚**：输入框下方右侧常驻当前模型和 effort（如 `sonnet-5-5 · high`）；没发送 effort（auto）或该模型不支持时只显示模型；窄窗口放不下时先让位给"上下文快满"等提示，再不行就不显示。
+- **缩放窗口**：拖动期间不重绘，停下约 80ms 后从左上角整屏绝对重绘一次，输入框不会再留下残影。注意：很短的会话里这次重绘会覆盖终端上方 shell 的内容。
+
+## 自动重启：改了自己的代码马上生效
+
+交互式会话运行在一个很薄的**监督进程**（`src/supervisor.js`，只用 Node 内置模块）之下，所以程序可以自己重启、加载自己刚改过的代码，不需要你退出再启动：
+
+- **模型自己重启**：改完 `src/`、`bin/` 里的代码后，模型调用 `Restart` 工具。它先在一个临时进程里把新代码完整启动一遍（所有模块能加载、界面能画出来、工具定义和系统提示词合法）——**启动不起来就不重启**，把错误还给模型去修，修好再调用；通过后在**本回合结束时**重启，对话、待办列表、`/model`、`/effort`、计划模式、排队的消息、输入框里没发出去的草稿、`/rewind` 检查点都带过去，新进程里模型收到一条"已重启"的提示后接着做（可用 `then` 指定重启后先验证什么）。
+- **改了源码自动重启**：一个回合结束（或空闲）时，如果 `src/`、`bin/` 下的文件变过，就自动做同样的检查并重启。检查不通过只提示错误、不重启。按 Esc 打断的那一回合不会触发。`CLAUDE_PRO_AUTO_RESTART=0` 关闭。
+- **手动**：`/restart`（别名 `/reload`），`/restart force` 跳过检查并无视后台任务。
+- 后台 agent / 后台 shell 会被重启杀掉，所以有它们在跑时拒绝重启（可 `force`）。5 分钟内重启超过 5 次视为死循环，拒绝。
+- 重启之间终端保持原样（不退回 shell 提示符，原始模式不关），重启时敲的键不会丢；标签标题也不闪。
+- 需要真正退出再启动的只有两种情况：改了 `bin/claude-pro.js` 或 `src/supervisor.js`（运行中的监督进程是旧代码）；以及新代码启动不起来而你想强行重启。`-p`、管道、`config` 子命令不经过监督进程；`CLAUDE_PRO_NO_SUPERVISOR=1` 也可以关掉它（环境变量，不是配置项）。
+- `claude-pro --self-check` 可以单独运行那个启动检查。
 
 ## 完全访问与安全网
 
@@ -86,16 +151,17 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 | `Bash` 的标准输入 | 一律关闭 | 可以用 `stdin` 参数喂入文本（回答提示、给脚本传数据） |
 | 提示词里的限制 | “尽量少输出”“除非必要不要建文件”“不要强推/改 git 配置/amend” | 回答长度按任务需要；需要就建文件（测试、脚本、配置）；用户要求时可以做上述 git 操作 |
 
-**刻意保留的**：`Edit`/`Write` 必须先 `Read`（防止覆盖没看过的改动，这是正确性保护，不是能力限制）、计划模式（需要时才开）、"没被要求就不提交"、做不可撤销且没被要求的外部操作（强推、发布包、给外部服务发消息或花钱）之前先说一声。
+**刻意保留的**：`Edit`/`Write` 必须先 `Read`（防止覆盖没看过的改动，这是正确性保护，不是能力限制；`Write` 覆盖已有文件要求读过完整内容，只读了一部分时用 `Edit`；`--resume` 恢复会话时会按记录重建读取状态，读过之后被改动的文件需要重读）、计划模式（需要时才开）、"没被要求就不提交"、做不可撤销且没被要求的外部操作（强推、发布包、给外部服务发消息或花钱）之前先说一声。
 
 ## 功能
 
-**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则 JS 实现）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`ExitPlanMode`、`AskUserQuestion`，以及 MCP 工具。
+**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；找不到 rg 时可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`ExitPlanMode`、`AskUserQuestion`，以及 MCP 工具。
 
 **交互**
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
-- `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`@` 文件补全并附加内容、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
+- `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
+- `@文件` 补全并附加内容：走的就是 `Read` 工具，等于模型自己读了这个文件。最多带前 2000 行（被截断时会明确告诉模型，并把该文件记为"只读了一部分"，之后 `Write` 不会去覆盖没给它看过的行）；图片作为图片附加；二进制文件和超过 512KB 的文本会被跳过并提示原因；`@目录` 列出目录内容
 - `alt+v` 粘贴剪贴板里的图片（截图用 `Win+Shift+S`），输入框里显示为 `[Image #1]`；超过 1568px 的图会自动缩小。把图片文件拖进终端（或粘贴图片路径）也会作为图片附加
 - 上下文用量接近阈值时自动压缩（`CLAUDE_CODE_AUTO_COMPACT_WINDOW`），也可手动 `/compact`
 - 会话自动保存到 `~/.claude-pro/projects/`，`claude-pro -c` 继续上次，`claude-pro -r` 选择历史会话
@@ -166,16 +232,24 @@ claude-pro -p --plan "给出重构方案"                    # 只调研、只�
 npm test                     # 单元测试（node:test）
 ```
 
-`test/tui-harness.js` 可以在无头 xterm 中驱动真实的交互界面（发送按键、截取屏幕），用于测试 UI。
+`test/tui-harness.js` 可以在无头 xterm 中驱动真实的交互界面（发送按键、截取屏幕），用于测试 UI。限流相关的测试把 `src/ratelimit.js` 的 `timing`（时钟和休眠）换成可控的假时钟，几小时的暂停在测试里瞬间走完；`test/e2e.test.js` 则启动真正的命令行进程对接假 API 服务器。
 
 ```
-bin/claude-pro.js     入口
+bin/claude-pro.js     入口；交互式会话在这里交给监督进程
+src/supervisor.js     监督进程：子进程以退出码 75 请求重启时重新启动它，只用 Node 内置模块
+src/restart.js        重启的程序侧：交接的状态、启动检查（runSelfCheck）、监视源码、重启提示
+src/selfcheck.js      `--self-check`：在假终端里把整个程序启动一遍并检查工具/系统提示词
+src/tools/restart.js  Restart 工具
 src/main.js           参数解析、config 子命令
 src/config.js         配置加载（.env / settings.json / 环境变量）与模型解析
-src/api.js            Anthropic SDK 封装：流式、重试、effort/thinking 参数
+src/api.js            后端路由、Anthropic SDK 封装：流式、重试、effort/thinking 参数
+src/ratelimit.js      限流：解析重置时间响应头、决定等多久、墙上时钟休眠、提示文案
+src/claude-code.js    读取现有 Claude Code OAuth 登录态，生成认证头和账号 metadata
+src/oauth.js          访问令牌过期时用刷新令牌续期，加锁、原子写回凭据文件
 src/agent.js          Agent 循环：工具调度、并行只读工具、中断、自动压缩、验证循环
 src/modes.js          会话模式：完全访问 / 计划模式（没有权限规则）
 src/checkpoints.js    检查点与 /rewind
+src/filestate.js      恢复会话时从记录重建"已读文件"状态（文件自读取后没变过才信任）
 src/hooks.js          Hooks 运行器
 src/tasks.js          后台子 agent 注册表与完成通知
 src/prompts.js        系统提示词、压缩提示词、自动记忆提示

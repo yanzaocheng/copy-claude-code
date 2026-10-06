@@ -1,14 +1,15 @@
 {
   "name": "copy-claude-code",
   "version": "0.4.0",
-  "description": "claude-pro: a self-implemented Claude Code style coding agent for any Anthropic-compatible API. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
+  "description": "claude-pro: a self-implemented coding agent for Anthropic-compatible APIs or local Claude Code subscription login. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
   "bin": {
     "claude-pro": "bin/claude-pro.js"
   },
   "scripts": {
     "start": "node bin/claude-pro.js",
-    "test": "node --test \"test/**/*.test.js\""
+    "check": "node bin/claude-pro.js --self-check",
+    "test": "node --test --test-force-exit --test-timeout=60000 \"test/**/*.test.js\""
   },
   "engines": {
     "node": ">=22"

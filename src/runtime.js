@@ -2,25 +2,29 @@
 
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { loadConfig } from './config.js';
+import { loadConfig, applyRememberedChoices } from './config.js';
 import { ModeManager } from './modes.js';
 import { CheckpointStore } from './checkpoints.js';
 import { loadAgents, loadSkills } from './agents.js';
 import { buildTools, toolsForSubagent } from './tools/index.js';
-import { findShell } from './utils/shell.js';
+import { findShell, pruneStaleShellFiles } from './utils/shell.js';
 import { mainSystemPrompt, subagentSystemPrompt } from './prompts.js';
 import { Agent } from './agent.js';
+import { isAbort } from './api.js';
 import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
 import { autoMemoryDir, pruneToolResults, pruneCheckpoints, projectDir } from './session.js';
 import { loadAutoMemoryIndex } from './context.js';
+import { canRestart } from './restart.js';
 
 export async function createRuntime({ cwd, flags = {}, io }) {
   const config = loadConfig({ cwd, flags });
+  applyRememberedChoices(config, flags); // what /model and /effort chose last time
   if (flags.verify) config.verifyOverride = flags.verify;
   pruneToolResults(cwd);
   pruneCheckpoints(cwd);
+  pruneStaleShellFiles();
   // Full access: nothing is ever asked. The only mode switch is the read-only plan mode (--plan).
   const modes = new ModeManager(flags.plan ? 'plan' : 'full');
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));
@@ -35,13 +39,15 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   const memoryDir = autoMemoryDir(cwd);
   const runtime = { config, modes, checkpoints, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir };
   runtime.skills = loadSkills(cwd);
-  runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools() });
+  // The self-check builds the Restart tool too, so that a mistake in it is found before a restart relies on it.
+  const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
+  runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools(), restart: restartable });
 
   let promptCache = null;
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
-      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory });
+      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: restartable });
     }
     return promptCache;
   };
@@ -67,7 +73,15 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       name: def.name,
       hooks,
     });
-    const result = await sub.run(prompt, { signal: ctx.signal });
+    let result;
+    try {
+      result = await sub.run(prompt, { signal: ctx.signal });
+    } catch (err) {
+      // An API failure (rate limit, outage) must not throw away what the agent already found.
+      const partial = isAbort(err) || ctx.signal?.aborted ? '' : sub.assistantText();
+      if (partial) err.message += `\n\nThe agent failed before finishing (${sub.toolUseCount} tool uses). What it had written so far:\n${partial}`;
+      throw err;
+    }
     if (result.interrupted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     return { text: result.text, toolUses: sub.toolUseCount, tokens: sub.usage.output + sub.lastContextTokens };
   };

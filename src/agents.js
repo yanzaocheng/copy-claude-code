@@ -28,15 +28,45 @@ export const BUILTIN_AGENTS = [
   },
 ];
 
-function parseFrontmatter(text) {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+function unquote(value) {
+  const m = /^(["'])([\s\S]*)\1$/.exec(value);
+  if (!m) return value;
+  // Only a double-quoted YAML string has escapes; agent descriptions often hold "\n" for line breaks.
+  return m[1] === '"' ? m[2].replace(/\\(n|"|\\)/g, (all, c) => (c === 'n' ? '\n' : c)) : m[2];
+}
+
+// Frontmatter as Claude Code agent, skill and command files write it: `key: value` lines, where the
+// value may be quoted, continue on indented lines, be a block scalar (`|` or `>`) or a list (`[a, b]`
+// or `- a` lines). A byte order mark, which Windows editors like to add, is ignored.
+export function parseFrontmatter(text) {
+  const m = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n([\s\S]*))?$/.exec(text);
   if (!m) return null;
   const meta = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = /^([\w-]+)\s*:\s*(.*)$/.exec(line);
-    if (kv) meta[kv[1]] = kv[2].replace(/^["']|["']$/g, '').trim();
+  const lines = m[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const kv = /^([\w-]+)\s*:\s*(.*)$/.exec(lines[i]);
+    if (!kv) continue;
+    let value = kv[2].trim();
+    const block = /^([|>])[+-]?$/.exec(value);
+    if (block || value === '') {
+      // The indented lines after `key: |` (or after a bare `key:`) belong to the value.
+      const parts = [];
+      while (i + 1 < lines.length && !/^[\w-]+\s*:/.test(lines[i + 1])) parts.push(lines[++i].trim());
+      const items = parts.filter(Boolean);
+      value = items.length && items.every((p) => /^-\s+/.test(p))
+        ? items.map((p) => p.replace(/^-\s+/, '')).join(', ')
+        : items.join(block && block[1] === '|' ? '\n' : ' ');
+    } else {
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) value += ` ${lines[++i].trim()}`;
+    }
+    meta[kv[1]] = unquote(value);
   }
-  return { meta, body: m[2].trim() };
+  return { meta, body: (m[2] || '').trim() };
+}
+
+// "Read, Grep", "[Read, Grep]" and "- Read" lists all give ['Read', 'Grep'].
+function toolList(value) {
+  return String(value).replace(/^\[|\]$/g, '').split(/\s*,\s*/).map((t) => unquote(t.trim())).filter(Boolean);
 }
 
 export function loadAgents(cwd) {
@@ -56,7 +86,7 @@ export function loadAgents(cwd) {
         agents.set(parsed.meta.name, {
           name: parsed.meta.name,
           description: parsed.meta.description,
-          tools: parsed.meta.tools ? parsed.meta.tools.split(/\s*,\s*/).filter(Boolean) : '*',
+          tools: parsed.meta.tools ? toolList(parsed.meta.tools) : '*',
           model: parsed.meta.model && parsed.meta.model !== 'inherit' ? parsed.meta.model : null,
           prompt: parsed.body,
           source: path.join(dir, f),
@@ -85,7 +115,7 @@ export function loadSkills(cwd) {
       let text;
       try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
       const parsed = parseFrontmatter(text);
-      const body = (parsed ? parsed.body : text).trim();
+      const body = (parsed ? parsed.body : text.replace(/^\uFEFF/, '')).trim();
       const name = (parsed?.meta.name || d.name).trim();
       if (!body || !/^[\w.:-]+$/.test(name)) continue;
       const description = parsed?.meta.description || body.split('\n').find((l) => l.trim() && !l.startsWith('#'))?.slice(0, 160) || name;
@@ -97,9 +127,29 @@ export function loadSkills(cwd) {
 
 // The text a skill expands to: its instructions with $ARGUMENTS filled in.
 export function renderSkill(skill, args = '') {
-  let body = skill.body.replace(/\$ARGUMENTS/g, args);
+  // A function, not a string: in a replacement string `$&` and `$$` in the arguments would be expanded.
+  let body = skill.body.replace(/\$ARGUMENTS/g, () => args);
   if (args && !skill.body.includes('$ARGUMENTS')) body += `\n\nARGUMENTS: ${args}`;
   return `Base directory for this skill: ${skill.dir}\n\n${body}`;
+}
+
+// The text a custom command expands to: $ARGUMENTS and $1..$9 filled in. One pass with a function, so
+// what the arguments contain (`$1`, `$&`, `$$`) is neither interpreted nor expanded a second time.
+export function expandCommandBody(body, args = '') {
+  const argv = args.split(/\s+/).filter(Boolean);
+  let out = body.replace(/\$ARGUMENTS|\$(\d)/g, (m, n) => (n === undefined ? args : (argv[+n - 1] ?? '')));
+  if (!body.includes('$ARGUMENTS') && args) out += `\n\nARGUMENTS: ${args}`;
+  return out;
+}
+
+// !`command` in a command file is replaced by what `command` prints (run(command) -> text).
+export async function expandShellEmbeds(body, run) {
+  let out = body;
+  for (const m of [...body.matchAll(/!`([^`]+)`/g)]) {
+    const output = await run(m[1]);
+    out = out.replace(m[0], () => output); // a function: the output may contain `$&` or `$$` (shell scripts do)
+  }
+  return out;
 }
 
 // Custom slash commands: .claude/commands/*.md, .claude-pro/commands/*.md, ~/.claude-pro/commands/*.md
@@ -117,9 +167,10 @@ export function loadCustomCommands(cwd) {
       if (e.isDirectory()) { walk(path.join(dir, e.name), `${prefix}${e.name}:`, scope); continue; }
       if (!e.name.endsWith('.md')) continue;
       const file = path.join(dir, e.name);
-      const text = fs.readFileSync(file, 'utf8');
+      let text;
+      try { text = fs.readFileSync(file, 'utf8'); } catch { continue; } // a broken link or a locked file must not stop the others
       const parsed = parseFrontmatter(text);
-      const body = parsed ? parsed.body : text;
+      const body = parsed ? parsed.body : text.replace(/^\uFEFF/, '');
       const name = prefix + e.name.slice(0, -3);
       commands.set(name, {
         name,

@@ -6,9 +6,11 @@ import { TodoWriteTool, ExitPlanModeTool, AskUserQuestionTool } from './interact
 import { makeTaskTool, TaskOutputTool, TaskStopTool } from './task.js';
 import { NotebookEditTool } from './notebook.js';
 import { makeSkillTool } from './skill.js';
+import { RestartTool } from './restart.js';
 
 // Build the full tool set for the main agent.
-export function buildTools(config, { agents, skills, mcpTools = [] }) {
+// `restart`: this session can restart itself (it runs under the supervisor), so it gets the Restart tool.
+export function buildTools(config, { agents, skills, mcpTools = [], restart = false }) {
   return [
     makeTaskTool(agents),
     ...(skills?.size ? [makeSkillTool(skills)] : []),
@@ -28,11 +30,12 @@ export function buildTools(config, { agents, skills, mcpTools = [] }) {
     KillShellTool,
     ExitPlanModeTool,
     AskUserQuestionTool,
+    ...(restart ? [RestartTool] : []),
     ...mcpTools,
   ];
 }
 
-const NEVER_FOR_SUBAGENTS = new Set(['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion']);
+const NEVER_FOR_SUBAGENTS = new Set(['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion', 'Restart']);
 
 // Tools for a sub-agent. `allowTask`: it is below the nesting limit, so it may start sub-agents of its own.
 export function toolsForSubagent(allTools, def, { allowTask = false } = {}) {
