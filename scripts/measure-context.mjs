@@ -154,11 +154,20 @@ function analyse(file) {
         else if (t >= 100 && !gone.has(b) && !resultText(b).startsWith(CLEARED) && !resultText(b).startsWith('<persisted-output>')) { clearable += t - 15; clear.push(b); }
       });
       let thinking = 0;
-      for (const { message } of conversation) if (message.role === 'assistant') for (const b of blocksOf(message)) if ((b.type === 'thinking' || b.type === 'redacted_thinking') && !gone.has(b)) { thinking += blockTokens(b); clear.push(b); }
+      let thinkingBlocks = 0;
+      for (const { message } of conversation) {
+        if (message.role !== 'assistant') continue;
+        for (const b of blocksOf(message)) {
+          if (b.type !== 'thinking' && b.type !== 'redacted_thinking') continue;
+          thinkingBlocks++;
+          if (!gone.has(b)) { thinking += blockTokens(b); clear.push(b); }
+        }
+      }
       const last = conversation.findLast(({ message }) => message.role === 'assistant')?.message;
-      const unfinished = last && blocksOf(last).find((b) => b.type === 'tool_use')?.name; // not cleared then: see clearAfterIdle
+      // the turn before stopped at a tool call, and there is thinking to send back as it was: not cleared (see clearAfterIdle)
+      const unfinished = thinkingBlocks > 0 && last && blocksOf(last).find((b) => b.type === 'tool_use')?.name;
       const qualifies = clearable >= AT_LEAST && !unfinished;
-      idleLog.push({ file, minutes: Math.round((e.at - lastAt) / 60_000), history, clearable, kept, others, thinking, unfinished, qualifies });
+      idleLog.push({ file, minutes: Math.round((e.at - lastAt) / 60_000), history, clearable, kept, others, thinking, thinkingBlocks, unfinished, qualifies });
       if (qualifies) {
         for (const b of clear) gone.add(b);
         s.idleReturns++;
@@ -212,8 +221,8 @@ if (idleLog.length) {
   console.log(`   Each return after more than ${IDLE_MS / 60_000} minutes (results of Read/Bash/Grep/Glob/Web*/Edit/Write past the last ${KEEP}; other tools' results are never cleared):`);
   for (const r of idleLog.slice(0, 30)) {
     const others = Object.entries(r.others).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, t]) => `${name} ${k(t)}`).join(', ') || 'none';
-    const verdict = r.qualifies ? 'cleared' : r.unfinished ? `not cleared: the turn before stopped at a ${r.unfinished} call` : `not cleared: under ${k(AT_LEAST)}`;
-    console.log(`   ${path.basename(r.file).slice(0, 8)} after ${r.minutes} min, history ${k(r.history)}: clearable ${k(r.clearable)}, last ${KEEP} ${k(r.kept)}, other tools ${others}, thinking ${k(r.thinking)} -> ${verdict}`);
+    const verdict = r.qualifies ? 'cleared' : r.unfinished ? `not cleared: the turn before stopped at a ${r.unfinished} call, and there is thinking` : `not cleared: under ${k(AT_LEAST)}`;
+    console.log(`   ${path.basename(r.file).slice(0, 8)} after ${r.minutes} min, history ${k(r.history)}: clearable ${k(r.clearable)}, last ${KEEP} ${k(r.kept)}, other tools ${others}, thinking ${k(r.thinking)} in ${r.thinkingBlocks} blocks -> ${verdict}`);
   }
   if (idleLog.length > 30) console.log(`   … and ${idleLog.length - 30} more`);
 }

@@ -316,15 +316,17 @@ export class Agent {
   }
 
   // Back after more than an hour away (IDLE_CLEARING): clear old tool results, see clearOldToolResults. The main
-  // conversation only, where Config.clearAfterIdle has it on. Not after a turn that stopped in the middle of its
-  // tool calls: the thinking of an unfinished tool call is to be sent back as it was, and it cannot stay once a
-  // result before it has changed. Returns what clearOldToolResults did, or null.
+  // conversation only, where Config.clearAfterIdle has it on. A turn that stopped in the middle of its tool calls
+  // (the request after a tool result failed or was interrupted) goes on from there, and the thinking of that tool
+  // call is to be sent back as it was, which cannot be once a result before it has changed: then nothing is
+  // cleared, if the conversation has thinking at all. Returns what clearOldToolResults did, or null.
   clearAfterIdle(now = Date.now()) {
     if (this.isSubagent || !this.config.clearAfterIdle || !this.lastActivityAt) return null;
     const idle = now - this.lastActivityAt;
     if (idle <= IDLE_CLEARING.idleMs) return null;
     const last = this.messages.findLast((m) => m.role === 'assistant');
-    if (Array.isArray(last?.content) && last.content.some((b) => b.type === 'tool_use')) return null;
+    const unfinished = Array.isArray(last?.content) && last.content.some((b) => b.type === 'tool_use');
+    if (unfinished && this.messages.some((m) => m.role === 'assistant' && Array.isArray(m.content) && m.content.some(isThinking))) return null;
     const out = clearOldToolResults(this.messages, { save: (id, text) => saveToolOutput(this.projectRoot, id, text), cwd: this.cwd });
     if (!out) return null;
     this.replaceMessages(out.messages); // into the session file too: a resumed conversation goes on with the short one
