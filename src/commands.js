@@ -42,6 +42,7 @@ export function buildCommands(app) {
     cfg.env = fresh.env;
     cfg.sources = fresh.sources;
     cfg.settings = fresh.settings;
+    cfg.ignoredFromDotEnv = fresh.ignoredFromDotEnv;
     // What the system prompt is built from may have changed (memory switched off, say). It is not rebuilt in the
     // middle of a conversation, which would lose its prompt cache; it is, at the next /clear or compaction.
     app.runtime.deferSystemPromptRefresh();
@@ -187,6 +188,7 @@ export function buildCommands(app) {
         if (v === undefined) continue;
         lines.push(`${padEnd(k, 34)} ${c.bold(v)}  ${c.dim(cfg.sources[k] || '')}`);
       }
+      if (cfg.ignoredFromDotEnv.length) lines.push('', c.dim(`Not applied from .env with the claude-code provider (it is the API provider's setup; Claude Code's defaults are used instead): ${cfg.ignoredFromDotEnv.join(', ')}. Set them with /config set or /effort to apply them here.`));
       lines.push('', c.dim('Other keys: ' + Object.keys(KNOWN_KEYS).filter((k) => cfg.env[k] === undefined).join(', ')));
       lines.push('', `${c.dim('Change with')} /config set KEY VALUE [--project|--local] ${c.dim('or edit')} ${settingsFiles(app.cwd).user}`);
       log(lines, '');

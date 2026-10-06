@@ -109,6 +109,59 @@ test('the TTL settings promptCacheTtl and subagentPromptCacheTtl work like the v
   assert.equal(cfg.cacheTtl('other'), '5m');
 });
 
+test('out of the box: the subscription login caches the conversation for an hour, as Claude Code does; the API provider for 5 minutes', () => {
+  const sub = (env = {}) => makeConfig({ CLAUDE_PRO_PROVIDER: 'claude-code', ...env });
+  assert.equal(sub().cacheTtl('main'), '1h');
+  assert.equal(sub().cacheTtl('other'), '5m', 'sub-agents, compaction and side queries stay at 5 minutes');
+  assert.equal(makeConfig().cacheTtl('main'), '5m', 'an API key or another endpoint: 5 minutes');
+  assert.equal(sub({ FORCE_PROMPT_CACHING_5M: '1' }).cacheTtl('main'), '5m', 'FORCE still wins');
+  assert.equal(sub({ CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }).cacheTtl('main'), '5m', 'so does the conversation\'s own setting');
+  assert.equal(sub({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }).cacheTtl('other'), '1h');
+  const cfg = sub();
+  const params = buildParams(cfg, request(cfg), { accessToken: 'x', userId: '{}', version: '2.1.289' });
+  assert.deepEqual(params.system[1].cache_control, { type: 'ephemeral', ttl: '1h' });
+  assert.deepEqual(buildParams(cfg, request(cfg, { cacheBucket: 'other' }), { accessToken: 'x', userId: '{}', version: '2.1.289' }).system[1].cache_control, { type: 'ephemeral' });
+});
+
+test('out of the box: the API provider\'s tuning in .env is not carried into the subscription provider', (t) => {
+  // the shell this runs in may set some of these itself (MAX_THINKING_TOKENS is not unusual)
+  const keys = ['CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  t.after(() => { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+  const dir = tmp();
+  const dotEnv = path.join(dir, '.env');
+  fs.writeFileSync(dotEnv, ['CLAUDE_CODE_EFFORT_LEVEL=max', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000', 'MAX_THINKING_TOKENS=0', 'BASH_DEFAULT_TIMEOUT_MS=1000', 'ANTHROPIC_MODEL=deepseek-flash[1m]'].join('\n'));
+  const cwd = tmp();
+  // the API provider keeps all of it
+  const api = loadConfig({ cwd, dotEnvFile: dotEnv });
+  assert.equal(api.effort, 'max');
+  assert.equal(api.compactWindow(), 786_432);
+  assert.deepEqual(api.ignoredFromDotEnv, []);
+  // the subscription provider starts from Claude Code's defaults
+  const sub = loadConfig({ cwd, dotEnvFile: dotEnv, flags: { provider: 'claude-code' } });
+  assert.equal(sub.effort, null, 'no effort is sent: the model\'s own default applies');
+  assert.equal(sub.compactWindow(), 1_000_000, 'the model\'s whole window (sonnet 5.5 has 1M)');
+  assert.equal(sub.maxOutputTokens, 128_000);
+  assert.equal(sub.thinkingBudget, null);
+  assert.deepEqual(sub.ignoredFromDotEnv, ['CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS']);
+  assert.equal(sub.bashDefaultTimeout, 1000, 'settings that are not about the model are not touched');
+  assert.equal(sub.sources.CLAUDE_CODE_EFFORT_LEVEL, undefined);
+  // the provider may itself come from .env
+  fs.appendFileSync(dotEnv, '\nCLAUDE_PRO_PROVIDER=claude-code\n');
+  assert.equal(loadConfig({ cwd, dotEnvFile: dotEnv }).effort, null);
+  // the same keys from anywhere else do apply: a settings file, a flag, the shell
+  fs.mkdirSync(path.join(cwd, '.claude-pro'));
+  fs.writeFileSync(path.join(cwd, '.claude-pro', 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_EFFORT_LEVEL: 'high', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '250000' } }));
+  const mine = loadConfig({ cwd, dotEnvFile: dotEnv });
+  assert.equal(mine.effort, 'high');
+  assert.equal(mine.compactWindow(), 250_000);
+  assert.ok(!mine.ignoredFromDotEnv.includes('CLAUDE_CODE_EFFORT_LEVEL'), 'a value that was overridden is not reported as ignored');
+  assert.equal(loadConfig({ cwd: tmp(), dotEnvFile: dotEnv, flags: { effort: 'low' } }).effort, 'low');
+  process.env.CLAUDE_CODE_EFFORT_LEVEL = 'medium';
+  assert.equal(loadConfig({ cwd: tmp(), dotEnvFile: dotEnv }).effort, 'medium');
+});
+
 test('DISABLE_PROMPT_CACHING turns it off everywhere; the per-model variables only for the model their alias is', () => {
   const off = (env, id) => makeConfig(env).promptCachingDisabled(id);
   assert.equal(off({}, 'mock'), false);

@@ -96,11 +96,13 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 每次请求都会把整个对话重新发给模型，账单的大头是"重复读历史"。本项目按 [Claude Code 的做法](https://code.claude.com/docs/en/prompt-caching)使用 Anthropic 的提示词缓存：
 
 - **断点**：在工具列表末尾、系统提示词、最新一条消息的末尾各放一个 `cache_control`（共 3 个，上限 4 个）。系统提示词在一个会话里只构建一次，前缀稳定才能命中。
-- **TTL 分两个桶**，默认都是 5 分钟（API 的默认值，不发送 `ttl` 字段），每次命中会重新计时：
+- **开箱即用，不需要配置**：默认值和 Claude Code 一致。订阅登录（`--provider claude-code`）下**主对话用 1 小时**缓存（Claude Code 在订阅额度内就是这样请求的），API key / 其他端点用 5 分钟（API 默认值，不发送 `ttl` 字段）；子 agent、压缩等其他请求永远默认 5 分钟。effort 不设就用模型自己的默认值（Sonnet 5.5、Opus 5.5 是 medium），自动压缩窗口不设就是模型的整个窗口。
+- **`.env` 只属于 API 提供方**：`--provider claude-code` 时，`.env` 里的 `CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS` 不会被读取（它们是为 DeepSeek 之类的端点调的），订阅模式用上面的默认值；`/config` 会列出被忽略的键。想在订阅模式下调，用 `/config set`、`/effort`、设置文件、环境变量或 `--effort`，这些照常生效。
+- **TTL 分两个桶**（可以改），每次命中会重新计时：
   - **主对话**（你的每一轮）：`CLAUDE_CODE_PROMPT_CACHE_TTL=5m|1h`，或设置项 `promptCacheTtl`
   - **其他请求**（子 agent、压缩、小模型的辅助请求）：`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=5m|1h`，或设置项 `subagentPromptCacheTtl`
   - `ENABLE_PROMPT_CACHING_1H=1` 让两个桶都用 1 小时（上面两个变量优先）；`FORCE_PROMPT_CACHING_5M=1` 强制两个桶都用 5 分钟，优先级最高；其他取值被忽略。
-  - 1 小时档的缓存写入按 2 倍价格计费（5 分钟档是 1.25 倍），而且每一轮新增的内容都按这个价写：只有上下文很大、而且常常停顿超过 5 分钟才划算。多数情况保持默认。
+  - 1 小时档的缓存写入按 2 倍价格计费（5 分钟档是 1.25 倍），而且每一轮新增的内容都按这个价写：用 API key 按 token 付费时，只有上下文很大、而且常常停顿超过 5 分钟才划算，所以那里默认是 5 分钟。订阅额度内 Claude Code 默认用 1 小时；想在订阅模式下用 5 分钟，设 `FORCE_PROMPT_CACHING_5M=1`。
 - **关闭缓存**：`DISABLE_PROMPT_CACHING=1` 完全不发 `cache_control`；`DISABLE_PROMPT_CACHING_HAIKU` / `_SONNET` / `_OPUS` 只关 haiku/sonnet/opus 别名所指的模型，`_FABLE` 只关 Fable 模型。
 - **端点不认**：网关对 `cache_control`（或 `ttl`）返回 400 时，不会让请求失败：在被拒绝的位置去掉标记（或退回 5 分钟）后重发，并记住这个端点，之后不再发送。
 - **压缩复用缓存**：压缩请求就是对话自己的请求（同样的模型、系统提示词、工具、effort），只在末尾追加一条"请写摘要"的指令，所以能读到前面各轮写好的缓存，而不是把整个历史重新处理一遍。只有这样得不到摘要（模型一直想调工具）或请求超长时，才退回更简单、不能命中缓存的请求。

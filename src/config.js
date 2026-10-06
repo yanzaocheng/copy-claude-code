@@ -47,7 +47,7 @@ export const KNOWN_KEYS = {
   DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000; lowered automatically if the API allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
-  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m (default) or 1h (1h writes cost more; they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
+  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login, as in Claude Code, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
   ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
   FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
@@ -113,7 +113,14 @@ export function settingsFiles(cwd) {
   };
 }
 
-export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
+// What the install's .env holds is, by its own template, the API provider's setup: an endpoint, its token and
+// models, and how hard and how long that model works. The subscription provider (claude-code) does not take that
+// tuning over: it starts from Claude Code's own defaults (the model's default effort, the model's whole context
+// window), which is what makes it work without any setting. The same keys in a settings file, in the shell, as a
+// flag, or chosen with /effort do apply there.
+export const API_ONLY_DOTENV_KEYS = ['CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS'];
+
+export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.join(INSTALL_DIR, '.env') } = {}) {
   const env = {};
   const sources = {};
   const set = (obj, source) => {
@@ -124,7 +131,6 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
     }
   };
 
-  const dotEnvFile = path.join(INSTALL_DIR, '.env');
   if (fs.existsSync(dotEnvFile)) set(parseDotEnv(fs.readFileSync(dotEnvFile, 'utf8')), dotEnvFile);
 
   const files = settingsFiles(cwd);
@@ -160,7 +166,18 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   }
   if (flags.effort) { env.CLAUDE_CODE_EFFORT_LEVEL = flags.effort; sources.CLAUDE_CODE_EFFORT_LEVEL = '--effort flag'; }
 
-  return new Config(env, sources, settings, cwd);
+  const ignoredFromDotEnv = [];
+  if ((env.CLAUDE_PRO_PROVIDER || '').trim().toLowerCase() === 'claude-code') {
+    for (const key of API_ONLY_DOTENV_KEYS) {
+      if (sources[key] !== dotEnvFile) continue;
+      delete env[key];
+      delete sources[key];
+      ignoredFromDotEnv.push(key);
+    }
+  }
+  const config = new Config(env, sources, settings, cwd);
+  config.ignoredFromDotEnv = ignoredFromDotEnv; // shown by /config
+  return config;
 }
 
 const int = (v, d) => {
@@ -178,6 +195,7 @@ export class Config {
     this.modelOverride = null; // set by /model during a session
     this.effortOverride = null; // set by /effort during a session
     this.verifyOverride = null; // set by /verify or --verify during a session
+    this.ignoredFromDotEnv = []; // .env keys that are not applied because of the provider (see API_ONLY_DOTENV_KEYS)
   }
 
   get provider() {
@@ -255,12 +273,15 @@ export class Config {
   }
   // Prompt cache TTL for a request bucket, by Claude Code's rules: "main" is the conversation itself, "other"
   // is everything else (sub-agents, compaction, side queries). In order: FORCE_PROMPT_CACHING_5M; the bucket's
-  // own variable or setting; ENABLE_PROMPT_CACHING_1H; 5 minutes.
+  // own variable or setting; ENABLE_PROMPT_CACHING_1H; then the default: with the subscription login the
+  // conversation's own requests use 1 hour, which is what Claude Code asks for there (within the plan's
+  // usage); with an API key or another endpoint, and for everything else, 5 minutes.
   cacheTtl(bucket = 'main') {
     if (isOn(this.env.FORCE_PROMPT_CACHING_5M)) return '5m';
     const own = normalizeTtl(bucket === 'main' ? this.env.CLAUDE_CODE_PROMPT_CACHE_TTL : this.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL);
     if (own) return own;
-    return isOn(this.env.ENABLE_PROMPT_CACHING_1H) ? '1h' : '5m';
+    if (isOn(this.env.ENABLE_PROMPT_CACHING_1H)) return '1h';
+    return bucket === 'main' && this.usesClaudeCode ? '1h' : '5m';
   }
   // DISABLE_PROMPT_CACHING turns it off for everything; the per-model variables only for the model that
   // their alias resolves to (a different version pinned as the model keeps its caching), wherever it runs.
