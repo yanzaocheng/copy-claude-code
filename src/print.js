@@ -57,6 +57,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     const loaded = SessionStore.load(flags.resumeFile);
     runtime.agent.messages = loaded.messages;
     runtime.agent.restoreFileState(loaded.messages, loaded.times);
+    runtime.agent.lastActivityAt = loaded.lastAt;
     store = new SessionStore(cwd, flags.resumeId);
     store.systemPrompt = loaded.systemPrompt;
     runtime.resumeSystemPrompt(loaded.systemPrompt); // continue behind the prompt (and the cache) the conversation had

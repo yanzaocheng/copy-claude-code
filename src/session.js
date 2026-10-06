@@ -89,10 +89,12 @@ export class SessionStore {
     const times = []; // when each message was stored (ms since epoch), parallel to `messages`; 0 = unknown
     let meta = {};
     let title = null;
+    let lastAt = 0; // when the conversation last changed: the latest message or reset (0: unknown)
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       let e;
       try { e = JSON.parse(line); } catch { continue; }
+      if (e.type === 'message' || e.type === 'reset') lastAt = Math.max(lastAt, e.at || 0);
       if (e.type === 'meta') meta = { ...meta, ...e };
       else if (e.type === 'message') {
         messages.push(e.message);
@@ -106,7 +108,7 @@ export class SessionStore {
       }
     }
     return {
-      messages, times, meta, title,
+      messages, times, lastAt, meta, title,
       topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,
       systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,
     };

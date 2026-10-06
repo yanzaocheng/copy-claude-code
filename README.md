@@ -81,7 +81,7 @@ CLAUDE_CODE_EFFORT_LEVEL=max                 # 以 output_config.effort 发送
 CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432       # 自动压缩按这个窗口大小计算
 ```
 
-其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、提示词缓存的 `CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`、`ENABLE_PROMPT_CACHING_1H`、`FORCE_PROMPT_CACHING_5M`、`DISABLE_PROMPT_CACHING`（见下文“提示词缓存”）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`、`CLAUDE_PRO_RATE_LIMIT_POLL_MS`（见下文“限流”）、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_RIPGREP_PATH`（rg 的路径；`off` 强制使用内置 JS 搜索）、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
+其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、提示词缓存的 `CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`、`ENABLE_PROMPT_CACHING_1H`、`FORCE_PROMPT_CACHING_5M`、`DISABLE_PROMPT_CACHING`（见下文“提示词缓存”）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`、`CLAUDE_PRO_RATE_LIMIT_POLL_MS`（见下文“限流”）、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_CLEAR_AFTER_IDLE`（见下文“提示词缓存”）、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_RIPGREP_PATH`（rg 的路径；`off` 强制使用内置 JS 搜索）、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
 
 ```bash
 claude-pro config list                                   # 查看生效值及其来源
@@ -109,6 +109,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - **压缩复用缓存**：压缩请求就是对话自己的请求（同样的模型、系统提示词、工具、effort），只在末尾追加一条"请写摘要"的指令，所以能读到前面各轮写好的缓存，而不是把整个历史重新处理一遍。只有这样得不到摘要（模型一直想调工具）或请求超长时，才退回更简单、不能命中缓存的请求。
 - **会话中途不改系统提示词**：保存记忆（`#`）、`/config set` 只做标记，系统提示词要到下一次 `/clear` 或压缩时才重建（与 Claude Code 对 CLAUDE.md 的处理一致）；`/status` 会提示有待生效的改动。子 agent 共用会话开始时的日期和 git 状态快照，同类型的子 agent 反复启动时前缀相同。会话跨过午夜时，系统提示词里的日期不变（保住缓存），新日期以一条提醒附在下一条消息后面，每天一次。
 - **恢复会话**：会话文件里保存了当时的系统提示词（`/clear` 之后的新会话也保存），`--resume` / `/resume` 继续用它，所以缓存还没过期时能接着命中；模型不同、或这次的 `--append-system-prompt` 文本不同时不用它，重新构建。日期过期了，会在下一条消息后面附一句提醒。
+- **离开一个多小时后清掉旧的工具结果**：距上一条消息超过 65 分钟再发消息时，缓存一定已经过期，这次请求本来就要把整段对话重写一遍。这时和 Claude Code 一样，把最近 5 个以外的旧工具结果（读文件、命令、搜索、网页的输出）换成一行占位，能清掉的不足 2 万 token 就不动；之前的 thinking 也一起去掉（改了早先的工具结果，API 就不再接受它后面的 thinking）。之后每次请求都少读这部分。命令、搜索的原始输出存进 `tool-results/`，模型需要时能读回来；文件需要时重新读，编辑前也要求先重读。子 agent 的报告、你的回答等不清。默认只对订阅登录和 api.anthropic.com 开启；DeepSeek 等其他端点的缓存可能保留几个小时，清了反而不命中，默认关。`CLAUDE_PRO_CLEAR_AFTER_IDLE=1` / `0` 强制开关。
 - **缓存还热时，切换要确认**：`/model`、`/effort` 会让下一次请求把整个对话重读一遍，缓存还没过期时会先问一下；过期了、新对话、或端点不报告缓存用量时不问。
 - **看效果**：`/cost` 显示命中率、miss 次数、缓存是否还热、最近一次 miss 的可能原因（系统提示词/工具/effort/模型变了，还是缓存过期了）；子 agent 和压缩的用量也算在内。`-p --output-format json` 的 `usage` 同样含子 agent 和压缩，并带 `cache_creation_input_tokens`。
 

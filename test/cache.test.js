@@ -24,7 +24,8 @@ const { Config, loadConfig, KNOWN_KEYS } = await import('../src/config.js');
 const { buildParams, streamMessage, quickQuery, cacheRefusals } = await import('../src/api.js');
 const { CLAUDE_CODE_SYSTEM } = await import('../src/claude-code.js');
 const { CacheStats, cacheControl, cachePlanOf, fingerprint, normalizeTtl } = await import('../src/cache.js');
-const { Agent } = await import('../src/agent.js');
+const { Agent, CLEARED, clearOldToolResults } = await import('../src/agent.js');
+const { resolvePath } = await import('../src/utils/paths.js');
 const { ModeManager } = await import('../src/modes.js');
 const { SUMMARY_SYSTEM, subagentSystemPrompt } = await import('../src/prompts.js');
 const { environmentBlock, takeEnvSnapshot } = await import('../src/context.js');
@@ -887,3 +888,110 @@ test('a conversation that goes on past midnight is told the new date once a day,
   assert.equal(calls, 1);
 });
 
+
+// ------------------------------------------------------------------------------ clearing after a long pause
+
+// A conversation of tool calls, each with thinking before it: Read a.js, Bash, Task, Read b.js, a small Grep,
+// Read b.js again, then 4 more Bash calls. The big results are about 10k tokens each.
+function longConversation() {
+  const big = (tag) => `${tag}\n${'x'.repeat(40_000)}`;
+  const calls = [
+    ['Read', { file_path: '/proj/a.js' }, big('a.js')],
+    ['Bash', { command: 'npm test' }, big('test log')],
+    ['Task', { prompt: 'look around' }, big('report')],
+    ['Read', { file_path: '/proj/b.js' }, big('b.js')],
+    ['Grep', { pattern: 'x' }, 'one match'],
+    ['Read', { file_path: '/proj/b.js' }, big('b.js again')],
+    ...[6, 7, 8, 9].map((i) => ['Bash', { command: `step ${i}` }, big(`log ${i}`)]),
+  ];
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'start' }] }];
+  calls.forEach(([name, input, result], i) => {
+    messages.push({ role: 'assistant', content: [{ type: 'thinking', thinking: 'Let me think. '.repeat(50), signature: 'sig' }, { type: 'tool_use', id: `t${i}`, name, input }] });
+    messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: result }] });
+  });
+  messages.push({ role: 'assistant', content: [{ type: 'thinking', thinking: 'Done.', signature: 'sig' }, { type: 'text', text: 'All done.' }] });
+  return messages;
+}
+const resultOf = (messages, id) => messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b.type === 'tool_result' && b.tool_use_id === id);
+
+test('clearing old tool results: all but the last 5, only what can be got again, and all the thinking', () => {
+  const messages = longConversation();
+  const before = JSON.stringify(messages);
+  const saved = [];
+  const out = clearOldToolResults(messages, { save: (id, text) => { saved.push([id, text]); return `/saved/${id}.txt`; }, cwd: '/proj' });
+  assert.equal(out.results, 3, 'Read a.js, the first Bash and the first Read of b.js');
+  assert.equal(resultOf(out.messages, 't0').content, `${CLEARED} Read the file again if you need it.`);
+  assert.equal(resultOf(out.messages, 't1').content, `${CLEARED} The full output was saved to /saved/t1.txt; read it there if you need it.`);
+  assert.deepEqual(saved.map(([id, text]) => [id, text.split('\n')[0]]), [['t1', 'test log']], 'a command\'s output is kept in a file; a file read is not');
+  assert.equal(resultOf(out.messages, 't3').content, `${CLEARED} Read the file again if you need it.`);
+  for (const id of ['t2', 't4', 't5', 't6', 't7', 't8', 't9']) assert.equal(resultOf(out.messages, id).content, resultOf(messages, id).content, `${id} stays`);
+  assert.ok(out.messages.every((m) => !Array.isArray(m.content) || m.content.every((b) => b.type !== 'thinking')), 'no thinking is left');
+  assert.equal(out.messages.filter((m) => m.role === 'assistant').flatMap((m) => m.content).filter((b) => b.type === 'tool_use').length, 10, 'the tool calls stay');
+  assert.ok(out.tokens > 30_000);
+  assert.deepEqual(out.forget, [resolvePath('/proj/a.js', '/proj')], 'b.js is still shown by its later Read');
+  assert.equal(JSON.stringify(messages), before, 'the conversation it was given is not changed');
+  assert.equal(clearOldToolResults(messages, { atLeast: 40_000 }), null, 'less than there is to gain: nothing is done');
+  assert.equal(clearOldToolResults(out.messages, { atLeast: 1 }), null, 'what was cleared is not cleared again');
+});
+
+test('back after more than 65 minutes, the next request goes out without the old results; the session file and the file state follow', async (t) => {
+  const bodies = [];
+  mockFetch(t, async (url, init) => { bodies.push(bodyOf(init)); return replyWith(); });
+  const replaced = [];
+  const notices = [];
+  const agent = makeAgent(makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '1' }), { io: { messagesReplaced: (m) => replaced.push(m), notice: (text) => notices.push(text) } });
+  agent.cwd = '/proj';
+  agent.messages = longConversation();
+  agent.fileState.set(resolvePath('/proj/a.js', '/proj'), { mtimeMs: 1 });
+  agent.fileState.set(resolvePath('/proj/b.js', '/proj'), { mtimeMs: 1 });
+  agent.lastActivityAt = Date.now() - 66 * 60_000;
+  await agent.run('back again');
+  const sent = JSON.stringify(bodies[0].messages);
+  assert.ok(sent.includes(CLEARED) && !sent.includes('"thinking"') && !sent.includes('a.js\\nxxxx'), 'the request carries the cleared conversation');
+  assert.equal(replaced.length, 1, 'the session file gets the cleared conversation');
+  assert.match(notices[0], /^Back after 66 minutes, with the prompt cache expired: cleared 3 old tool results and the earlier thinking \(about \d+k tokens\)/);
+  assert.equal(agent.fileState.has(resolvePath('/proj/a.js', '/proj')), false, 'a.js has to be read again before it is edited');
+  assert.equal(agent.fileState.has(resolvePath('/proj/b.js', '/proj')), true);
+  await agent.run('and again');
+  assert.equal(replaced.length, 1, 'right after a turn there is nothing to clear');
+});
+
+test('clearing after a pause: not before 65 minutes, not for a sub-agent, not after an unfinished tool call, and only where it is on', () => {
+  const idleAgent = (cfg, extra = {}, minutes = 66) => {
+    const agent = makeAgent(cfg, extra);
+    agent.messages = longConversation();
+    agent.lastActivityAt = Date.now() - minutes * 60_000;
+    return agent;
+  };
+  const on = makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '1' });
+  assert.equal(idleAgent(on, {}, 64).clearAfterIdle(), null, 'the 1-hour cache may still be there');
+  assert.equal(idleAgent(on, { isSubagent: true }).clearAfterIdle(), null);
+  assert.equal(idleAgent(makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '0' })).clearAfterIdle(), null);
+  const unknown = idleAgent(on);
+  unknown.lastActivityAt = 0;
+  assert.equal(unknown.clearAfterIdle(), null, 'no idea when the last message came');
+  const interrupted = idleAgent(on);
+  interrupted.messages.splice(-1, 1, { role: 'assistant', content: [{ type: 'thinking', thinking: 'hm', signature: 'sig' }, { type: 'tool_use', id: 'tx', name: 'Bash', input: {} }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tx', content: 'Interrupted by user', is_error: true }] });
+  assert.equal(interrupted.clearAfterIdle(), null, 'the thinking of an unfinished tool call has to stay as it was');
+  assert.equal(idleAgent(on).clearAfterIdle()?.results, 3);
+  // out of the box: on for the subscription login and Anthropic's own endpoint; off for the others
+  const configWith = (env) => new Config(env, {}, { hooks: {}, mcpServers: {} }, process.cwd());
+  assert.equal(configWith({ CLAUDE_PRO_PROVIDER: 'claude-code' }).clearAfterIdle, true);
+  assert.equal(configWith({}).clearAfterIdle, true);
+  assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com/' }).clearAfterIdle, true);
+  assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' }).clearAfterIdle, false);
+  assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic', CLAUDE_PRO_CLEAR_AFTER_IDLE: 'true' }).clearAfterIdle, true);
+  assert.equal(configWith({ CLAUDE_PRO_PROVIDER: 'claude-code', CLAUDE_PRO_CLEAR_AFTER_IDLE: '0' }).clearAfterIdle, false);
+  assert.ok(KNOWN_KEYS.CLAUDE_PRO_CLEAR_AFTER_IDLE);
+});
+
+test('a resumed conversation knows when it last changed, so a pause before it counts', () => {
+  const store = new SessionStore(tmp());
+  const start = Date.now();
+  store.message({ role: 'user', content: 'hello' });
+  assert.ok(SessionStore.load(store.file).lastAt >= start);
+  store.reset([{ role: 'user', content: 'summary' }]);
+  const loaded = SessionStore.load(store.file);
+  assert.ok(loaded.lastAt >= start, 'the time of a reset counts: its messages have none of their own');
+  assert.deepEqual(loaded.times, [0]);
+});

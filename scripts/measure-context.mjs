@@ -2,9 +2,11 @@
 // Measure, on your own claude-pro sessions, what two proposed changes would save before deciding on them:
 //   A. "file unchanged": a Read that returns exactly what an earlier Read of the same file and range returned,
 //      while that earlier copy is still in the conversation (Claude Code answers such a Read with a short note);
-//   B. "idle clearing": at a message that comes more than 65 minutes after the previous one (the 1-hour prompt
-//      cache has expired, so the next request writes everything again anyway), replacing the results of all but
-//      the last 5 tool uses, and all thinking blocks, with short placeholders (Claude Code has the same thresholds).
+//   B. "idle clearing" (CLAUDE_PRO_CLEAR_AFTER_IDLE, see clearOldToolResults in src/agent.js): at a message that
+//      comes more than 65 minutes after the previous one (the 1-hour prompt cache has expired, so the next request
+//      writes everything again anyway), replacing the results of all but the last 5 calls of the tools Claude Code
+//      clears (Read, Bash, Grep, Glob, WebFetch, WebSearch, Edit, Write) with short placeholders, when that clears
+//      at least 20k tokens, and dropping all thinking blocks with them.
 // It reads the session files (nothing is sent anywhere) and prints the estimated savings in the cost model used
 // for the cache work: cache read 0.1, cache write 2.0 (1-hour TTL; --write=1.25 for 5 minutes), per input token.
 //
@@ -25,6 +27,8 @@ const AT_LEAST = option('at-least', 20_000);
 const TOP = option('top', 5);
 const PREFIX = 13_000; // the system prompt and the tools, cached like the rest of the request
 const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
+const CLEARABLE = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'Write']);
+const CLEARED = '[Old tool result content cleared]';
 
 // The same rough estimate the program uses: 4 ASCII characters or 1.25 other characters per token.
 function tokens(text) {
@@ -127,15 +131,20 @@ function analyse(file) {
       pendingIdle = true;
       // B: what clearing would take out of the conversation at this point
       const results = [];
-      for (const { message } of conversation) for (const b of blocksOf(message)) if (b.type === 'tool_result') results.push(b);
-      const keep = new Set(results.slice(-KEEP).map((b) => b.tool_use_id));
+      for (const { message } of conversation) for (const b of blocksOf(message)) if (b.type === 'tool_result' && CLEARABLE.has(toolUses.get(b.tool_use_id)?.name)) results.push(b);
       let clearable = 0;
-      for (const b of results) if (!keep.has(b.tool_use_id)) clearable += Math.max(0, blockTokens(b) - 15);
-      for (const { message } of conversation) if (message.role === 'assistant') for (const b of blocksOf(message)) if (b.type === 'thinking' || b.type === 'redacted_thinking') clearable += blockTokens(b);
-      if (clearable >= AT_LEAST) {
+      for (const b of results.slice(0, Math.max(0, results.length - KEEP))) {
+        const t = blockTokens(b);
+        if (t >= 100 && !resultText(b).startsWith(CLEARED) && !resultText(b).startsWith('<persisted-output>')) clearable += t - 15;
+      }
+      let thinking = 0;
+      for (const { message } of conversation) if (message.role === 'assistant') for (const b of blocksOf(message)) if (b.type === 'thinking' || b.type === 'redacted_thinking') thinking += blockTokens(b);
+      const last = conversation.findLast(({ message }) => message.role === 'assistant')?.message;
+      const unfinished = last && blocksOf(last).some((b) => b.type === 'tool_use'); // not cleared then: see clearAfterIdle
+      if (clearable >= AT_LEAST && !unfinished) {
         s.idleReturns++;
-        s.cleared += clearable;
-        alive.push({ kind: 'B', tokens: clearable, fresh: false });
+        s.cleared += clearable + thinking;
+        alive.push({ kind: 'B', tokens: clearable + thinking, fresh: false });
       }
     }
     for (const b of blocks) {
@@ -175,7 +184,7 @@ console.log(`A. "File unchanged" for an identical re-read`);
 console.log(`   duplicate reads: ${sum('dupReads')} (${M(sum('dupTokens'))} tokens of content)`);
 console.log(`   saving: ${M(sum('savedA'))} = ${pct(sum('savedA'), total)} of the input cost`);
 console.log('');
-console.log(`B. Clearing old tool results and thinking after more than ${IDLE_MS / 60_000} minutes idle (keep the last ${KEEP} tool uses, at least ${AT_LEAST} tokens)`);
+console.log(`B. Clearing old tool results and thinking after more than ${IDLE_MS / 60_000} minutes idle (keep the last ${KEEP} results, at least ${AT_LEAST} tokens of them)`);
 console.log(`   idle returns that qualify: ${sum('idleReturns')} · tokens cleared in all: ${M(sum('cleared'))}`);
 console.log(`   saving: ${M(sum('savedB'))} = ${pct(sum('savedB'), total)} of the input cost (before the cost of reading files again)`);
 const top = [...sessions].sort((a, b) => b.savedA + b.savedB - (a.savedA + a.savedB)).slice(0, TOP).filter((s) => s.savedA + s.savedB > 0);

@@ -8,6 +8,7 @@ import { compactPrompt, continuationMessage, PLAN_MODE_REMINDER, SUMMARY_SYSTEM 
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
 import { CacheStats } from './cache.js';
+import { resolvePath } from './utils/paths.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -33,20 +34,91 @@ export function estimateTokens(value) {
 
 const PREVIEW_CHARS = 2000;
 
-// A tool result too large to send in full is saved to a file; the model gets a preview and the
-// path, and can page through the file with Read/Grep. Returns the text to send instead.
-export function persistLargeOutput(root, id, text) {
-  let file = null;
+// Save a tool's output to a file of the project's tool-results directory. Returns its path, or null.
+function saveToolOutput(root, id, text) {
   try {
     const dir = toolResultsDir(root);
     fs.mkdirSync(dir, { recursive: true });
-    file = path.join(dir, `${String(id).replace(/[^\w-]/g, '_')}.txt`);
+    const file = path.join(dir, `${String(id).replace(/[^\w-]/g, '_')}.txt`);
     fs.writeFileSync(file, text);
-  } catch { file = null; }
+    return file;
+  } catch { return null; }
+}
+
+// A tool result too large to send in full is saved to a file; the model gets a preview and the
+// path, and can page through the file with Read/Grep. Returns the text to send instead.
+export function persistLargeOutput(root, id, text) {
+  const file = saveToolOutput(root, id, text);
   const kb = (text.length / 1024).toFixed(1);
   const preview = text.slice(0, PREVIEW_CHARS);
   if (!file) return `${text.slice(0, 20_000)}\n\n[Output truncated: ${kb}KB total; it could not be saved to a file.]`;
   return `<persisted-output>\nOutput too large (${kb}KB). Full output saved to: ${file}\nUse Read with offset/limit, or Grep, on that file to see what you need.\n\nPreview (first ${PREVIEW_CHARS / 1000}KB):\n${preview}\n...\n</persisted-output>`;
+}
+
+// Coming back after a long pause, the prompt cache has expired and the next request writes the whole conversation
+// again anyway. Claude Code then clears the results of all but the last few tool calls, and so does this program,
+// with the same numbers: more than 65 minutes away, the last 5 results kept, at least 20k tokens to gain. Only
+// what the model can get again is cleared (what a file, a command or a search showed); a sub-agent's report, the
+// user's answers and the like stay whatever their age.
+export const IDLE_CLEARING = { idleMs: 65 * 60_000, keep: 5, atLeast: 20_000 };
+export const CLEARED = '[Old tool result content cleared]';
+const CLEARABLE_TOOLS = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'Write']);
+const MIN_CLEAR_TOKENS = 100; // a smaller result is left as it is: clearing it gains next to nothing
+
+const isThinking = (b) => b.type === 'thinking' || b.type === 'redacted_thinking';
+const resultText = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.filter((b) => b.type === 'text').map((b) => b.text).join('\n') : '');
+
+// Clear the results of all but the last `keep` clearable tool calls, if that takes out at least `atLeast` tokens
+// (else null). The thinking goes too, all of it: once a tool result before it has changed, the API takes earlier
+// thinking for tampered with, and rejects the request. `save(id, text)` keeps a cleared output in a file and
+// returns its path, so that what a command printed can still be looked up; a file read is read again instead.
+// Returns {messages (a new list: the old one is not changed), results (how many were cleared), tokens (about
+// how many went, thinking included), forget (the files whose Read results went, and of which no Read is left)}.
+export function clearOldToolResults(messages, { keep = IDLE_CLEARING.keep, atLeast = IDLE_CLEARING.atLeast, save = () => null, cwd = process.cwd() } = {}) {
+  const uses = new Map(); // tool_use id -> the tool_use block
+  for (const m of messages) if (m.role === 'assistant' && Array.isArray(m.content)) for (const b of m.content) if (b.type === 'tool_use') uses.set(b.id, b);
+  const results = messages.flatMap((m) => (m.role === 'user' && Array.isArray(m.content) ? m.content : []))
+    .filter((b) => b.type === 'tool_result' && CLEARABLE_TOOLS.has(uses.get(b.tool_use_id)?.name));
+  const clear = new Set();
+  let tokens = 0;
+  for (const b of results.slice(0, Math.max(0, results.length - keep))) {
+    const text = resultText(b.content);
+    if (text.startsWith(CLEARED) || text.startsWith('<persisted-output>')) continue; // cleared already, or short already
+    const t = estimateTokens(b.content);
+    if (t < MIN_CLEAR_TOKENS) continue;
+    clear.add(b);
+    tokens += t;
+  }
+  if (tokens < atLeast) return null;
+  const fileOf = (b) => {
+    const p = uses.get(b.tool_use_id)?.input?.file_path;
+    return typeof p === 'string' && p.trim() ? resolvePath(p, cwd) : null;
+  };
+  const placeholder = (b) => {
+    if (uses.get(b.tool_use_id).name === 'Read') return `${CLEARED} Read the file again if you need it.`;
+    const text = resultText(b.content);
+    const file = text && save(b.tool_use_id, text);
+    return file ? `${CLEARED} The full output was saved to ${file}; read it there if you need it.` : CLEARED;
+  };
+  const gone = new Set();
+  const shown = new Set();
+  const out = messages.map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    if (m.role === 'assistant') {
+      if (!m.content.some(isThinking)) return m;
+      for (const b of m.content) if (isThinking(b)) tokens += estimateTokens(b.thinking ?? b.data ?? '');
+      const content = m.content.filter((b) => !isThinking(b));
+      return { ...m, content: content.length ? content : [{ type: 'text', text: '(no content)' }] };
+    }
+    for (const b of m.content) {
+      if (b.type !== 'tool_result' || uses.get(b.tool_use_id)?.name !== 'Read' || !fileOf(b)) continue;
+      if (clear.has(b)) gone.add(fileOf(b));
+      else if (!b.is_error && !resultText(b.content).startsWith(CLEARED)) shown.add(fileOf(b));
+    }
+    if (!m.content.some((b) => clear.has(b))) return m;
+    return { ...m, content: m.content.map((b) => (clear.has(b) ? { ...b, content: placeholder(b) } : b)) };
+  });
+  return { messages: out, results: clear.size, tokens, forget: [...gone].filter((f) => !shown.has(f)) };
 }
 
 const notificationBlocks = (notes) => notes.map((n) => ({ type: 'text', text: n.text }));
@@ -132,6 +204,7 @@ export class Agent {
     this.toolUseCount = 0;
     this.postCompactTokens = undefined; // undefined: never compacted; null: compacted, awaiting measurement
     this.compactFailures = 0; // automatic compactions that failed in a row
+    this.lastActivityAt = 0; // when the last message was added (ms since epoch; 0: unknown), see clearAfterIdle
   }
 
   get model() { return this.modelFn(); }
@@ -145,6 +218,7 @@ export class Agent {
 
   pushMessage(msg) {
     this.messages.push(msg);
+    this.lastActivityAt = Date.now();
     if (msg.role === 'user') this.tokensSinceUsage += estimateTokens(msg.content);
     this.io.messageAdded?.(msg, this);
   }
@@ -236,13 +310,34 @@ export class Agent {
     this.cache.newConversation();
     this.reminders = [];
     this.compactFailures = 0;
+    this.lastActivityAt = 0;
     this.recordedSystem = null; // the next conversation's session file has to get the system prompt too, even if it is the same text
     this.checkpoints?.reset();
+  }
+
+  // Back after more than an hour away (IDLE_CLEARING): clear old tool results, see clearOldToolResults. The main
+  // conversation only, where Config.clearAfterIdle has it on. Not after a turn that stopped in the middle of its
+  // tool calls: the thinking of an unfinished tool call is to be sent back as it was, and it cannot stay once a
+  // result before it has changed. Returns what clearOldToolResults did, or null.
+  clearAfterIdle(now = Date.now()) {
+    if (this.isSubagent || !this.config.clearAfterIdle || !this.lastActivityAt) return null;
+    const idle = now - this.lastActivityAt;
+    if (idle <= IDLE_CLEARING.idleMs) return null;
+    const last = this.messages.findLast((m) => m.role === 'assistant');
+    if (Array.isArray(last?.content) && last.content.some((b) => b.type === 'tool_use')) return null;
+    const out = clearOldToolResults(this.messages, { save: (id, text) => saveToolOutput(this.projectRoot, id, text), cwd: this.cwd });
+    if (!out) return null;
+    this.replaceMessages(out.messages); // into the session file too: a resumed conversation goes on with the short one
+    for (const file of out.forget) this.fileState.delete(file); // the model no longer sees it: Read before Edit/Write
+    this.lastContextTokens = Math.max(0, this.lastContextTokens - out.tokens);
+    this.io.notice?.(`Back after ${Math.round(idle / 60_000)} minutes, with the prompt cache expired: cleared ${out.results} old tool results and the earlier thinking (about ${Math.round(out.tokens / 1000)}k tokens). The last ${IDLE_CLEARING.keep} results are kept; files are read again when needed.`);
+    return out;
   }
 
   // Run one user turn to completion. Returns {text, interrupted}.
   async run(userContent, { signal } = {}) {
     if (!this.isSubagent) this.beforeTurn?.();
+    this.clearAfterIdle();
     let content = toBlocks(userContent);
     if (this.modes.mode === 'plan' && !this.isSubagent) content = [...content, { type: 'text', text: PLAN_MODE_REMINDER }];
     if (this.hooks?.has('UserPromptSubmit') && !this.isSubagent) {

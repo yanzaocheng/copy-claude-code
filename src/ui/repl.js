@@ -831,6 +831,7 @@ export class App {
     this.firstPrompt = loaded.title;
     this.agent.messages = loaded.messages;
     this.agent.restoreFileState(loaded.messages, loaded.times);
+    this.agent.lastActivityAt = loaded.lastAt; // a long pause before this turn clears old tool results, as it would have
     this.agent.lastContextTokens = estimateTokens(loaded.messages);
     // Continue behind the system prompt the conversation had (and its cache), not a freshly built one.
     this.store.systemPrompt = loaded.systemPrompt;

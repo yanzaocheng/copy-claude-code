@@ -66,6 +66,7 @@ export const KNOWN_KEYS = {
   CLAUDE_CODE_GIT_BASH_PATH: 'Windows: path to bash.exe (Git Bash)',
   CLAUDE_PRO_RIPGREP_PATH: 'Path to ripgrep (rg) for Grep and @-file suggestions; "off" forces the built-in JS scanner (default: rg from PATH, else the JS scanner)',
   CLAUDE_PRO_MAX_TOOL_RESULT_CHARS: 'Tool results longer than this are saved to a file and only a preview is sent (default 100000)',
+  CLAUDE_PRO_CLEAR_AFTER_IDLE: 'Back after more than 65 minutes away (the prompt cache has expired): clear old tool results and thinking, keeping the last 5 results, as Claude Code does. 1 = on, 0 = off (default: on for the Claude Code login and api.anthropic.com, off for other endpoints, whose cache may last for hours)',
   CLAUDE_PRO_MAX_SUBAGENT_DEPTH: 'How deep sub-agents may nest: agents below this depth can start their own sub-agents (default 2; 0 = no nesting)',
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
   CLAUDE_PRO_VERIFY_MAX_ROUNDS: 'How many times a failing verify command is sent back before giving up (default 3)',
@@ -322,6 +323,13 @@ export class Config {
   get bashMaxTimeout() { return int(this.env.BASH_MAX_TIMEOUT_MS, 3_600_000); }
   get bashMaxOutput() { return int(this.env.BASH_MAX_OUTPUT_LENGTH, 60_000); }
   get maxToolResultChars() { return int(this.env.CLAUDE_PRO_MAX_TOOL_RESULT_CHARS, 100_000); }
+  // Clearing old tool results after a long pause (see Agent.clearAfterIdle): on where the cache is Anthropic's,
+  // which has expired by then. Another endpoint may keep its cache for hours, and clearing would make it miss.
+  get clearAfterIdle() {
+    const v = String(this.env.CLAUDE_PRO_CLEAR_AFTER_IDLE ?? '').trim();
+    if (v) return isOn(v);
+    return this.usesClaudeCode || /^https:\/\/api\.anthropic\.com\/?$/i.test(this.baseURL);
+  }
   // How deep sub-agents may nest: the main agent is depth 0; an agent below this depth gets the Task tool.
   get maxSubagentDepth() { return Math.max(0, int(this.env.CLAUDE_PRO_MAX_SUBAGENT_DEPTH, 2)); }
 
