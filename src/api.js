@@ -128,29 +128,34 @@ const blocksAt = (params, place) => {
 };
 const hasMark = (params, place) => blocksAt(params, place).some((b) => b.cache_control);
 
-// Take cache_control (or only its ttl) off a request after the endpoint refused it. Returns whether anything
-// changed: a request without markers has nothing left to take off, so the caller must give up on it.
-function refuseCache(config, params, message, login) {
-  const key = cacheKey(config, params.model, login);
-  const refused = cacheRefused.get(key) || new Set();
+// What an endpoint has refused so far, for /status: the places (system, tools, messages) and "ttl".
+export function cacheRefusals(config, modelId) {
+  return [...(cacheRefused.get(cacheKey(config, modelId, config.usesClaudeCode)) || [])];
+}
+
+// Take cache_control (or only its ttl) off a request after the endpoint refused it. Returns what was taken off
+// (a set of places, or "ttl"), empty when there was nothing left to take off: then the caller must give up on
+// the request. The refusal is only remembered once a request has got through without it (see streamMessage):
+// an error that merely mentions cache_control must not switch caching off for good.
+function refuseCache(params, message) {
   const text = String(message || '').toLowerCase();
-  let changed = false;
+  const taken = new Set();
   if (/\bttl\b/.test(text) && cachePlanOf(params).ttl === '1h') {
     // "a ttl='1h' cache_control block must occur before ...", "ttl: Extra inputs are not permitted": the 5-minute default
     for (const place of PLACES) for (const b of blocksAt(params, place)) if (b.cache_control?.ttl) b.cache_control = { type: 'ephemeral' };
-    refused.add('ttl');
-    changed = true;
-  } else {
-    const marked = PLACES.filter((p) => hasMark(params, p));
-    const named = marked.filter((p) => new RegExp(`\\b${p}\\b`).test(text));
-    for (const place of named.length ? named : marked) {
-      for (const b of blocksAt(params, place)) delete b.cache_control;
-      refused.add(place);
-      changed = true;
-    }
+    taken.add('ttl');
+    return taken;
   }
-  if (changed) cacheRefused.set(key, refused);
-  return changed;
+  const marked = PLACES.filter((p) => hasMark(params, p));
+  const named = marked.filter((p) => new RegExp(`\\b${p}\\b`).test(text));
+  // An error that says where is believed. One that does not ("a maximum of 4 blocks ... may be provided") loses
+  // one place at a time, the newest first, so that as much of the caching as possible is kept.
+  const places = named.length ? named : ['messages', 'tools', 'system'].filter((p) => marked.includes(p)).slice(0, 1);
+  for (const place of places) {
+    for (const b of blocksAt(params, place)) delete b.cache_control;
+    taken.add(place);
+  }
+  return taken;
 }
 
 // Output ceilings the API has told us about, by model id (learned from "max_tokens too large" errors).
@@ -173,8 +178,9 @@ export function parseMaxTokensLimit(message) {
 }
 
 // `cacheBucket` says which prompt cache TTL applies: "main" for the conversation itself (the default), "other"
-// for sub-agents, compaction and side queries (see Config.cacheTtl).
-export function buildParams(config, { model, system, messages, tools, maxTokens, effort, cacheBucket = 'main' }, login = null) {
+// for sub-agents, compaction and side queries (see Config.cacheTtl). `cacheMessages: false` leaves the messages
+// unmarked: for a request whose messages are never sent twice, writing them to the cache only costs more.
+export function buildParams(config, { model, system, messages, tools, maxTokens, effort, cacheBucket = 'main', cacheMessages = true }, login = null) {
   if (config.usesClaudeCode) login ||= readClaudeCodeLogin(config);
   const wanted = maxTokens || config.maxOutputTokens;
   const refused = cacheRefused.get(cacheKey(config, model.id, login));
@@ -186,7 +192,7 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
     model: model.id,
     max_tokens: outputCaps.has(model.id) ? Math.min(wanted, outputCaps.get(model.id)) : wanted,
     system: [{ type: 'text', text: system, ...(systemMark ? { cache_control: systemMark } : {}) }],
-    messages: withCacheControl(messages, mark('messages')),
+    messages: withCacheControl(messages, cacheMessages ? mark('messages') : null),
     stream: true,
   };
   if (login) {
@@ -256,6 +262,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   let client = getClient(config, login);
   const params = buildParams(config, request, login);
   let authReloaded = false;
+  const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
   const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0 };
   let paused = false;
   for (;;) {
@@ -331,6 +338,10 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       }
       if (!stopped && !stopReason) throw Object.assign(new Error('The response stream ended unexpectedly'), { status: 503 });
       const content = blocks.filter(Boolean).filter((b) => !(b.type === 'text' && !b.text));
+      if (refused.size) { // it got through without what the endpoint refused: leave that off from now on
+        const key = cacheKey(config, params.model, login);
+        cacheRefused.set(key, new Set([...(cacheRefused.get(key) || []), ...refused]));
+      }
       return { message: { role: 'assistant', content }, usage, stopReason, model, cache: { ...cachePlanOf(params), fingerprint: fingerprint(params), at: startedAt } };
     } catch (raw) {
       if (signal?.aborted || isAbort(raw)) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
@@ -363,7 +374,13 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       }
       // The endpoint does not take cache_control (or the 1-hour ttl) where it was sent: carry on without it
       // instead of failing the request, and do not send it there again (see refuseCache).
-      if (err.status === 400 && /cache_control|\bttl\b/i.test(err.message) && refuseCache(config, params, err.message, login)) continue;
+      if (err.status === 400 && /cache_control|\bttl\b/i.test(err.message)) {
+        const taken = refuseCache(params, err.message);
+        if (taken.size) {
+          for (const item of taken) refused.add(item);
+          continue;
+        }
+      }
       // The default max_tokens is generous: if this API allows less, learn its limit and retry at once.
       const limit = err.status === 400 ? parseMaxTokensLimit(err.message) : null;
       if (limit && limit < params.max_tokens) {
@@ -413,6 +430,7 @@ export async function quickQuery(config, { model, system, prompt, maxTokens = 40
     maxTokens,
     effort: null,
     cacheBucket: 'other',
+    cacheMessages: false, // one-off content (a whole web page, say): caching it would only cost the write premium
   }, { signal, waitForRateLimit });
   return res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
 }

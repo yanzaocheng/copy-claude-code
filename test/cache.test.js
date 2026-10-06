@@ -12,9 +12,16 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 process.env.CLAUDE_PRO_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cache-config-'));
+// The shell this runs in, or the repository's own .env (loadConfig and createRuntime read it), must not change
+// what these tests expect: the cache variables are neutral here (tests that read settings files pass their own .env).
+for (const key of ['CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL']) delete process.env[key];
+for (const key of ['ENABLE_PROMPT_CACHING_1H', 'FORCE_PROMPT_CACHING_5M', 'DISABLE_PROMPT_CACHING', 'DISABLE_PROMPT_CACHING_HAIKU', 'DISABLE_PROMPT_CACHING_SONNET', 'DISABLE_PROMPT_CACHING_OPUS', 'DISABLE_PROMPT_CACHING_FABLE']) process.env[key] = '0';
+const realFetch = globalThis.fetch;
+let hasGit = true;
+try { execFileSync('git', ['--version'], { stdio: 'pipe' }); } catch { hasGit = false; }
 
 const { Config, loadConfig, KNOWN_KEYS } = await import('../src/config.js');
-const { buildParams, streamMessage } = await import('../src/api.js');
+const { buildParams, streamMessage, quickQuery, cacheRefusals } = await import('../src/api.js');
 const { CLAUDE_CODE_SYSTEM } = await import('../src/claude-code.js');
 const { CacheStats, cacheControl, cachePlanOf, fingerprint, normalizeTtl } = await import('../src/cache.js');
 const { Agent } = await import('../src/agent.js');
@@ -31,14 +38,14 @@ const tool = (name) => ({ name, description: `the ${name} tool`, input_schema: {
 const tools = [tool('Alpha'), tool('Beta'), tool('Gamma')];
 
 function mockFetch(t, handle) {
-  const original = globalThis.fetch;
   globalThis.fetch = handle;
-  t.after(() => { globalThis.fetch = original; });
+  t.after(() => { globalThis.fetch = realFetch; }); // the real one, however many times a test installs a mock
 }
+const strip = (value) => JSON.parse(JSON.stringify(value, (k, v) => (k === 'cache_control' ? undefined : v)));
 
 const sse = (events) => new Response(events.map((ev) => `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
 // A reply: text (or a tool call), with the usage the API would report.
-function replyWith({ text = 'ok', toolUse = null, preamble = null, usage = {} } = {}) {
+function replyWith({ text = 'ok', toolUse = null, preamble = null, usage = {}, stop = null } = {}) {
   const at = preamble ? 1 : 0; // a tool call may come after a few words of text
   return sse([
     { type: 'message_start', message: { model: 'mock', usage: { input_tokens: 10, output_tokens: 0, ...usage } } },
@@ -60,7 +67,7 @@ function replyWith({ text = 'ok', toolUse = null, preamble = null, usage = {} } 
         { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
         { type: 'content_block_stop', index: 0 },
       ]),
-    { type: 'message_delta', delta: { stop_reason: toolUse ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 5 } },
+    { type: 'message_delta', delta: { stop_reason: stop || (toolUse ? 'tool_use' : 'end_turn') }, usage: { output_tokens: 5 } },
     { type: 'message_stop' },
   ]);
 }
@@ -94,19 +101,41 @@ test('cache TTL follows Claude Code: FORCE 5m, the bucket\'s own value, ENABLE 1
   }
 });
 
-test('the TTL settings promptCacheTtl and subagentPromptCacheTtl work like the variables, which win over them', () => {
+test('the TTL settings promptCacheTtl and subagentPromptCacheTtl rank below the variables, from whichever file; invalid values are ignored', () => {
+  const noDotEnv = path.join(tmp(), 'none.env'); // not the repository's own .env
   const cwd = tmp();
   fs.mkdirSync(path.join(cwd, '.claude-pro'));
-  const file = path.join(cwd, '.claude-pro', 'settings.json');
-  fs.writeFileSync(file, JSON.stringify({ promptCacheTtl: '1h', subagentPromptCacheTtl: '1h' }));
-  let cfg = loadConfig({ cwd });
-  assert.equal(cfg.cacheTtl('main'), '1h');
-  assert.equal(cfg.cacheTtl('other'), '1h');
-  assert.match(cfg.sources.CLAUDE_CODE_PROMPT_CACHE_TTL, /promptCacheTtl/);
-  fs.writeFileSync(file, JSON.stringify({ promptCacheTtl: '1h', env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' } }));
-  cfg = loadConfig({ cwd });
-  assert.equal(cfg.cacheTtl('main'), '5m', 'the variable in "env" wins over the setting');
-  assert.equal(cfg.cacheTtl('other'), '5m');
+  const project = path.join(cwd, '.claude-pro', 'settings.json');
+  const user = path.join(process.env.CLAUDE_PRO_CONFIG_DIR, 'settings.json');
+  const load = () => loadConfig({ cwd, dotEnvFile: noDotEnv });
+  try {
+    fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: '1h', subagentPromptCacheTtl: '1h' }));
+    assert.equal(load().cacheTtl('main'), '1h');
+    assert.equal(load().cacheTtl('other'), '1h');
+    fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: '1h', env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' } }));
+    assert.equal(load().cacheTtl('main'), '5m', 'the variable in "env" wins over the setting');
+    assert.equal(load().cacheTtl('other'), '5m');
+    // the variable wins from a lower file too: a setting does not override a variable of another file
+    fs.writeFileSync(user, JSON.stringify({ env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } }));
+    fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: '5m' }));
+    assert.equal(load().cacheTtl('main'), '1h');
+    fs.writeFileSync(user, JSON.stringify({ env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' } }));
+    fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: '1h' }));
+    assert.equal(load().cacheTtl('main'), '5m');
+    // invalid values are ignored: they neither count nor hide what is below them
+    fs.writeFileSync(user, JSON.stringify({ env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } }));
+    fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: 'soon' }));
+    assert.equal(load().cacheTtl('main'), '1h');
+    // ... and an invalid setting falls through to the next rule: here the default of the subscription login, 1 hour
+    const sub = () => loadConfig({ cwd, dotEnvFile: noDotEnv, flags: { provider: 'claude-code' } });
+    fs.writeFileSync(user, JSON.stringify({ promptCacheTtl: true }));
+    fs.writeFileSync(project, JSON.stringify({}));
+    assert.equal(sub().cacheTtl('main'), '1h');
+    fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: '5m' }));
+    assert.equal(sub().cacheTtl('main'), '5m', 'a valid one does count');
+  } finally {
+    fs.rmSync(user, { force: true });
+  }
 });
 
 test('out of the box: the subscription login caches the conversation for an hour, as Claude Code does; the API provider for 5 minutes', () => {
@@ -282,31 +311,82 @@ test('an endpoint that does not know the 1-hour ttl is sent the 5-minute default
   assert.equal(JSON.stringify(bodies[2]).includes('"ttl"'), false);
 });
 
-test('an endpoint that refuses cache_control without saying where gets none at all; other 400s are not swallowed', async (t) => {
+test('an endpoint that refuses cache_control without saying where loses the markers one place at a time, newest first', async (t) => {
   const bodies = [];
-  let message = 'cache_control is not supported by this gateway';
   mockFetch(t, async (url, init) => {
     bodies.push(bodyOf(init));
-    return init.body.includes('cache_control') ? rejected(message) : replyWith();
+    return init.body.includes('cache_control') ? rejected('cache_control is not supported by this gateway') : replyWith();
+  });
+  const cfg = makeConfig();
+  await streamMessage(cfg, request(cfg));
+  const marks = (b) => ({ system: Boolean(b.system[0].cache_control), tools: Boolean(b.tools.at(-1).cache_control), messages: JSON.stringify(b.messages).includes('cache_control') });
+  assert.deepEqual(bodies.map((b) => Object.values(marks(b)).filter(Boolean).length), [3, 2, 1, 0]);
+  assert.equal(marks(bodies[1]).messages, false, 'the messages go first');
+  assert.equal(marks(bodies[2]).tools, false, 'then the tools');
+  assert.deepEqual(cacheRefusals(cfg, cfg.mainModel.id).sort(), ['messages', 'system', 'tools'], 'what it refused is known (and shown by /status)');
+  await streamMessage(cfg, request(cfg));
+  assert.equal(bodies.length, 5, 'the next request is made once');
+  assert.equal(JSON.stringify(bodies[4]).includes('cache_control'), false, 'and none is sent later');
+});
+
+test('an error that merely mentions cache_control does not switch caching off for good', async (t) => {
+  // a gateway that keeps complaining ends in an error, not in a loop, and nothing is remembered
+  let calls = 0;
+  const firstMarks = [];
+  mockFetch(t, async (url, init) => { calls++; if (calls === 1 || calls === 5) firstMarks.push(JSON.stringify(init.body).split('cache_control').length - 1); return rejected('cache_control: nope'); });
+  const stubborn = makeConfig();
+  await assert.rejects(() => streamMessage(stubborn, request(stubborn)), /cache_control/);
+  assert.equal(calls, 4, 'three places, one at a time, then the end');
+  await assert.rejects(() => streamMessage(stubborn, request(stubborn)), /cache_control/);
+  assert.deepEqual(firstMarks, [3, 3], 'the second call starts with all three markers again: the first one proved nothing');
+  assert.deepEqual(cacheRefusals(stubborn, stubborn.mainModel.id), []);
+  // a "maximum of 4 blocks" style error names no place: the messages marker goes, the rest stays, and that is remembered once it worked
+  const bodies = [];
+  mockFetch(t, async (url, init) => {
+    const body = bodyOf(init);
+    bodies.push(body);
+    return JSON.stringify(body.messages).includes('cache_control') ? rejected('A maximum of 4 blocks with cache_control may be provided. Found 5.') : replyWith();
   });
   const cfg = makeConfig();
   await streamMessage(cfg, request(cfg));
   assert.equal(bodies.length, 2);
-  assert.equal(JSON.stringify(bodies[1]).includes('cache_control'), false);
+  assert.ok(bodies[1].system[0].cache_control && bodies[1].tools.at(-1).cache_control, 'the system prompt and the tools keep theirs');
   await streamMessage(cfg, request(cfg));
   assert.equal(bodies.length, 3);
-  assert.equal(JSON.stringify(bodies[2]).includes('cache_control'), false, 'and none is sent later');
-
-  // an error that has nothing to do with caching reaches the caller as it is
+  assert.deepEqual(cacheRefusals(cfg, cfg.mainModel.id), ['messages']);
+  assert.ok(bodies[2].system[0].cache_control, 'still cached where it can be');
+  // a 400 about the ttl on a 5-minute request cannot loop either
+  let ttlCalls = 0;
+  mockFetch(t, async () => { ttlCalls++; return rejected('ttl value is not valid for this request'); });
   const plain = makeConfig();
+  await assert.rejects(() => streamMessage(plain, request(plain)), /ttl/);
+  assert.ok(ttlCalls <= 4, `gave up after ${ttlCalls} requests`);
+  // other 400s reach the caller as they are
   mockFetch(t, async () => rejected('messages: roles must alternate'));
-  await assert.rejects(() => streamMessage(plain, request(plain)), (err) => err.status === 400 && /roles must alternate/.test(err.message));
-  // and a gateway that keeps complaining about cache_control ends in an error, not in a loop
-  let calls = 0;
-  const stubborn = makeConfig();
-  mockFetch(t, async () => { calls++; return rejected('cache_control: nope'); });
-  await assert.rejects(() => streamMessage(stubborn, request(stubborn)), /cache_control/);
-  assert.ok(calls <= 3, `gave up after ${calls} requests`);
+  const other = makeConfig();
+  await assert.rejects(() => streamMessage(other, request(other)), (err) => err.status === 400 && /roles must alternate/.test(err.message));
+});
+
+test('what an endpoint refused is remembered per model, and quickQuery marks neither its message nor the 1-hour TTL', async (t) => {
+  const bodies = [];
+  mockFetch(t, async (url, init) => {
+    const body = bodyOf(init);
+    bodies.push(body);
+    return body.model === 'model-one' && body.system[0].cache_control ? rejected('system.0.cache_control: Extra inputs are not permitted') : replyWith();
+  });
+  const cfg = makeConfig({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' });
+  await streamMessage(cfg, request(cfg, { model: { ...cfg.mainModel, id: 'model-one' } }));
+  await streamMessage(cfg, request(cfg, { model: { ...cfg.mainModel, id: 'model-two' } }));
+  assert.equal(bodies.at(-1).model, 'model-two');
+  assert.ok(bodies.at(-1).system[0].cache_control, 'another model of the same endpoint is not affected');
+  assert.deepEqual(cacheRefusals(cfg, 'model-one'), ['system']);
+  assert.deepEqual(cacheRefusals(cfg, 'model-two'), []);
+  // a side query: its content is never sent twice, so it is not written to the cache, and it never gets the conversation's TTL
+  bodies.length = 0;
+  await quickQuery(cfg, { model: cfg.mainModel, system: 'be brief', prompt: 'a whole web page and a question' });
+  assert.equal(bodies.length, 1);
+  assert.equal(JSON.stringify(bodies[0].messages).includes('cache_control'), false);
+  assert.equal(JSON.stringify(bodies[0]).includes('"ttl"'), false);
 });
 
 // ---------------------------------------------------------------------------------------------- the statistics
@@ -419,7 +499,9 @@ test('the summary request is the conversation\'s own request with the instructio
   assert.equal(compaction.model, turn.model);
   // the history is a continuation of the turn's request, and the instruction comes last
   assert.deepEqual(compaction.messages[0].content.map((b) => b.text), ['hello']);
+  assert.deepEqual(strip(compaction.messages.slice(0, turn.messages.length)), strip(turn.messages), 'the history is the turn\'s request, unchanged');
   assert.equal(compaction.messages[1].role, 'assistant');
+  assert.equal(compaction.messages[1].content.map((b) => b.text).join(''), 'first answer', 'the reply that came after it is kept as it was');
   const last = compaction.messages.at(-1);
   assert.equal(last.role, 'user');
   assert.match(last.content.at(-1).text, /detailed summary of the conversation/);
@@ -440,33 +522,41 @@ test('the summary request is the conversation\'s own request with the instructio
   assert.deepEqual(agent.totalUsage().compactions, 1);
 });
 
-test('the summary request misses on purpose only when the shared one fails: an empty answer, or a prompt that is too long', async (t) => {
-  const run = async (first) => {
+test('the summary request misses on purpose only when the shared one fails: no summary, or a prompt that is too long', async (t) => {
+  const run = async (first, cfgEnv = {}) => {
     const bodies = [];
     mockFetch(t, async (url, init) => {
       bodies.push(bodyOf(init));
-      return bodies.length === 1 ? first() : replyWith({ text: '<summary>PLAIN</summary>', usage: usageOf(0, 100) });
+      if (bodies.length === 1) return replyWith({ text: 'hi', usage: usageOf(0, 12_000) }); // a real turn: 12,000 tokens are in the cache
+      return bodies.length === 2 ? first() : replyWith({ text: '<summary>PLAIN</summary>', usage: usageOf(0, 100) });
     });
-    const cfg = makeConfig({ CLAUDE_CODE_EFFORT_LEVEL: 'high' });
+    const cfg = makeConfig({ CLAUDE_CODE_EFFORT_LEVEL: 'high', ...cfgEnv });
     const agent = makeAgent(cfg);
-    agent.messages = [{ role: 'user', content: 'hello' }, { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }];
+    await agent.run('hello');
     const summary = await agent.compact();
-    return { bodies, summary, agent };
+    return { bodies: bodies.slice(1), summary, agent };
   };
   // the model keeps calling tools instead of writing the summary
-  let r = await run(() => replyWith({ toolUse: 'Alpha' }));
+  let r = await run(() => replyWith({ toolUse: 'Alpha', usage: usageOf(12_000, 50) }));
   assert.equal(r.summary, 'PLAIN');
   assert.equal(r.bodies.length, 2);
   assert.equal(r.bodies[0].system[0].text, 'MAIN SYSTEM');
   assert.equal(r.bodies[1].system[0].text, SUMMARY_SYSTEM, 'then the plain request');
   assert.equal(r.bodies[1].output_config, undefined);
   assert.equal(r.agent.usage.compactions, 2, 'both were billed');
-  assert.equal(r.agent.cache.misses, 0, 'the one that was made to miss is not reported as a miss');
+  assert.equal(r.agent.cache.misses, 0, 'the one that was made to miss is not reported as a miss (it read 0 of the 12,000 cached tokens)');
   // the model writes a few words and then calls a tool: that is not a summary, whatever the words are
-  r = await run(() => replyWith({ preamble: 'Let me look at the file first.', toolUse: 'Alpha' }));
+  r = await run(() => replyWith({ preamble: 'Let me look at the file first.', toolUse: 'Alpha', usage: usageOf(12_000, 50) }));
   assert.equal(r.summary, 'PLAIN', 'the preamble must not be taken for the summary');
-  assert.equal(r.bodies.length, 2);
   assert.equal(r.bodies[1].system[0].text, SUMMARY_SYSTEM);
+  // a summary that the output limit cut off is not a summary: it would end in the middle of a sentence
+  r = await run(() => replyWith({ text: '<summary>1. Primary request: fix the bug in the pars', stop: 'max_tokens', usage: usageOf(12_000, 50) }));
+  assert.equal(r.summary, 'PLAIN');
+  assert.equal(r.bodies.length, 2);
+  // ... but one that was finished before the limit is kept
+  r = await run(() => replyWith({ text: '<summary>COMPLETE</summary>', stop: 'max_tokens', usage: usageOf(12_000, 50) }));
+  assert.equal(r.summary, 'COMPLETE');
+  assert.equal(r.bodies.length, 1);
   // the shared request is too long by the size of the instruction
   r = await run(() => rejected('prompt is too long: 200100 tokens > 200000 maximum'));
   assert.equal(r.summary, 'PLAIN');
@@ -479,11 +569,47 @@ test('the summary request misses on purpose only when the shared one fails: an e
   agent.messages = [{ role: 'user', content: 'hello' }];
   await assert.rejects(() => agent.compact(), /something else is wrong/);
   assert.equal(calls, 1);
-  // an empty summary from the plain request too is the error it always was
+  // an empty summary from the plain request too is the error it always was; a cut-off one says so
   mockFetch(t, async () => replyWith({ text: '   ' }));
   const empty = makeAgent(makeConfig());
   empty.messages = [{ role: 'user', content: 'hello' }];
   await assert.rejects(() => empty.compact(), /empty summary/);
+  mockFetch(t, async () => replyWith({ text: '<summary>cut', stop: 'max_tokens' }));
+  const cut = makeAgent(makeConfig());
+  cut.messages = [{ role: 'user', content: 'hello' }];
+  await assert.rejects(() => cut.compact(), /cut off by the output token limit/);
+  assert.equal(cut.messages.length, 1, 'the conversation is kept');
+  assert.equal(cut.messages[0].content, 'hello');
+});
+
+test('compaction and its plain fallback are "other" requests: they never get the conversation\'s 1-hour TTL', async (t) => {
+  const bodies = [];
+  mockFetch(t, async (url, init) => {
+    bodies.push(bodyOf(init));
+    if (bodies.length === 1) return replyWith({ text: 'hi', usage: usageOf(0, 12_000) });
+    return bodies.length === 2 ? replyWith({ toolUse: 'Alpha', usage: usageOf(12_000, 50) }) : replyWith({ text: '<summary>S</summary>' });
+  });
+  const cfg = makeConfig({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' });
+  const agent = makeAgent(cfg);
+  await agent.run('hello');
+  await agent.compact();
+  assert.equal(bodies.length, 3);
+  assert.ok(JSON.stringify(bodies[0]).includes('"ttl":"1h"'), 'the conversation\'s own request has the 1-hour TTL');
+  assert.equal(JSON.stringify(bodies[1]).includes('"ttl"'), false, 'the summary request does not');
+  assert.equal(bodies[2].system[0].text, SUMMARY_SYSTEM);
+  assert.equal(JSON.stringify(bodies[2]).includes('"ttl"'), false, 'nor does the plain one');
+});
+
+test('a sub-agent\'s own compaction does not end the main conversation\'s checkpoints', async (t) => {
+  mockFetch(t, async () => replyWith({ text: '<summary>S</summary>' }));
+  const stale = [];
+  const checkpoints = { markConversationStale: () => stale.push(1), reset() {} };
+  for (const isSubagent of [true, false]) {
+    const agent = makeAgent(makeConfig(), { checkpoints, isSubagent });
+    agent.messages = [{ role: 'user', content: 'hello' }];
+    await agent.compact();
+  }
+  assert.equal(stale.length, 1, 'only the main agent\'s compaction replaces the conversation the checkpoints belong to');
 });
 
 test('a sub-agent\'s requests use the "other" TTL; the main agent\'s use the "main" one', async (t) => {
@@ -497,7 +623,7 @@ test('a sub-agent\'s requests use the "other" TTL; the main agent\'s use the "ma
 });
 
 test('the agent keeps the cache statistics of its requests, and tells the io about a new system prompt once', async (t) => {
-  const answers = [usageOf(0, 30_000), usageOf(30_000, 500), usageOf(0, 31_000)];
+  const answers = [usageOf(0, 30_000), usageOf(30_000, 500), usageOf(0, 31_000), usageOf(0, 100)];
   let n = 0;
   mockFetch(t, async () => replyWith({ usage: answers[n++] }));
   const prompts = [];
@@ -514,13 +640,16 @@ test('the agent keeps the cache statistics of its requests, and tells the io abo
   assert.equal(agent.cache.misses, 1);
   assert.equal(agent.cache.lastMiss.cause, 'the system prompt changed');
   assert.equal(agent.usage.requests, 3);
-  // a new conversation starts without expecting anything from the cache
+  // a new conversation starts without expecting anything from the cache, and its session file gets the prompt too,
+  // even when it is the very same text (a /clear that changed nothing)
   agent.resetConversation();
   assert.ok(!agent.cache.isWarm());
+  await agent.run('four');
+  assert.deepEqual(prompts, ['FIRST', 'SECOND', 'SECOND']);
   // sub-agents' usage is the main agent's to report
   agent.addSubUsage({ input: 100, output: 20, cacheRead: 5000, cacheWrite: 700, cacheWrite1h: 0, requests: 4, compactions: 1 });
   const total = agent.totalUsage();
-  assert.equal(total.requests, 7);
+  assert.equal(total.requests, 8);
   assert.equal(total.compactions, 1);
   assert.equal(total.cacheRead, 30_000 + 5000);
   assert.equal(agent.subUsage.runs, 1);
@@ -541,7 +670,7 @@ test('a reminder goes into the next user message only, after the user\'s own tex
 
 // ---------------------------------------------------------------------------------------------- the system prompt
 
-test('sub-agents share one snapshot of the date and git state, while the git state itself moves on', () => {
+test('sub-agents share one snapshot of the date and git state, while the git state itself moves on', { skip: !hasGit && 'git is not installed' }, () => {
   const dir = tmp();
   const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
   git('init', '-q');
@@ -585,9 +714,9 @@ test('the session file keeps the system prompt; the newest wins, and the same on
   assert.equal(fs.readFileSync(store.file, 'utf8').trim().split('\n').length, lines.length);
 });
 
-async function runtimeIn(cwd, env = {}) {
+async function runtimeIn(cwd, env = {}, flags = {}) {
   Object.assign(process.env, { CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_RIPGREP_PATH: 'off', ...env });
-  const runtime = await createRuntime({ cwd, flags: { noMcp: true }, io: {} });
+  const runtime = await createRuntime({ cwd, flags: { noMcp: true, ...flags }, io: {} });
   return runtime;
 }
 
@@ -645,4 +774,57 @@ test('a resumed conversation continues behind its own system prompt; a note brin
   assert.equal(rt2.resumeSystemPrompt('  '), false);
   rt.mcp.close();
   rt2.mcp.close();
+});
+
+test('--append-system-prompt: a saved prompt is only reused when it was built with the same text', async () => {
+  const cwd = tmp();
+  const first = await runtimeIn(cwd, {}, { appendSystemPrompt: 'EXTRA RULES' });
+  const saved = first.systemPrompt();
+  assert.ok(saved.endsWith('\n\nEXTRA RULES'));
+  const same = await runtimeIn(cwd, {}, { appendSystemPrompt: 'EXTRA RULES' });
+  assert.equal(same.resumeSystemPrompt(saved), true);
+  assert.equal(same.systemPrompt(), saved);
+  const other = await runtimeIn(cwd, {}, { appendSystemPrompt: 'OTHER RULES' });
+  assert.equal(other.resumeSystemPrompt(saved), false, 'the flag of this run is not dropped in favour of the old one');
+  assert.ok(other.systemPrompt().endsWith('\n\nOTHER RULES'));
+  assert.doesNotMatch(other.systemPrompt(), /EXTRA RULES/);
+  const plain = await runtimeIn(cwd);
+  const plainSaved = plain.systemPrompt();
+  assert.equal((await runtimeIn(cwd)).resumeSystemPrompt(plainSaved), true, 'no flag, nothing to compare');
+  const added = await runtimeIn(cwd, {}, { appendSystemPrompt: 'NEW RULES' });
+  assert.equal(added.resumeSystemPrompt(plainSaved), false, 'a flag added on resume is honoured');
+  for (const rt of [first, same, other, plain, added]) rt.mcp.close();
+});
+
+test('through createRuntime: sub-agents share the snapshot, and their usage is the main agent\'s to report', { skip: !hasGit && 'git is not installed' }, async (t) => {
+  const dir = tmp();
+  const git = (...args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git('init', '-q');
+  git('config', 'user.email', 't@example.com');
+  git('config', 'user.name', 'Tester');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a');
+  git('add', '.');
+  git('commit', '-q', '-m', 'first');
+  const rt = await runtimeIn(dir);
+  const systems = [];
+  mockFetch(t, async (url, init) => { systems.push(JSON.stringify(bodyOf(init).system)); return replyWith({ usage: usageOf(700, 0) }); });
+  t.after(() => rt.mcp.close());
+  const run = (prompt) => rt.spawnSubagent({ def: { name: 'probe', prompt: 'You probe.', tools: [] }, prompt, description: prompt, ctx: { cwd: dir, depth: 0 } });
+  await run('one');
+  fs.writeFileSync(path.join(dir, 'b.txt'), 'x'); // the repository changes between the two runs
+  await run('two');
+  assert.equal(systems[0], systems[1], 'the same system prompt for both: its prefix stays in the cache');
+  assert.doesNotMatch(systems[0], /b\.txt/);
+  const total = rt.agent.totalUsage();
+  assert.equal(total.requests, 2, 'the sub-agents\' requests are counted');
+  assert.equal(total.cacheRead, 1400);
+  assert.equal(rt.agent.subUsage.runs, 2);
+  assert.equal(rt.agent.usage.requests, 0, 'none of them was the main agent\'s own');
+  rt.invalidateSystemPrompt(); // /clear or a compaction: the snapshot is taken again
+  await run('three');
+  assert.match(systems[2], /b\.txt/);
+  // a sub-agent that fails is billed too
+  mockFetch(t, async () => rejected('boom'));
+  await assert.rejects(() => run('four'), /boom/);
+  assert.equal(rt.agent.subUsage.runs, 4);
 });

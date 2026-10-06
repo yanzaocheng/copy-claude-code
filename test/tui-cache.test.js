@@ -35,8 +35,10 @@ Object.assign(process.env, {
   CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
   ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
   CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: 'auto', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '0', // "auto" and "0": an empty value would not override the repository's own .env
+  CLAUDE_CODE_PROMPT_CACHE_TTL: '5m', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '5m', ENABLE_PROMPT_CACHING_1H: '0', FORCE_PROMPT_CACHING_5M: '0', DISABLE_PROMPT_CACHING: '0',
 });
 const { startTui } = await import('./tui-harness.js');
+const { SessionStore } = await import('../src/session.js');
 
 test.after(() => server.close());
 
@@ -170,5 +172,87 @@ test('a memory saved with # waits for /clear or a compaction instead of changing
   tui.send('/clear\r');
   await tui.waitFor('Welcome to', { timeout: 20_000 });
   assert.match(tui.app.runtime.systemPrompt(), /Always use tabs\./);
+  assert.equal(tui.app.runtime.systemPromptStale, false);
+});
+
+test('the system prompt goes into every session file, /clear included, and a resumed conversation continues behind its own', async (t) => {
+  requests = 0;
+  withCache = true;
+  const cwd = project();
+  const tui = await startTui({ cwd });
+  t.after(() => tui.close());
+  tui.send('first question\r');
+  await tui.waitFor('All done.', { timeout: 20_000 });
+  await tui.waitIdle({ timeout: 20_000 });
+  const first = { file: tui.app.store.file, id: tui.app.store.id };
+  const built = tui.app.runtime.systemPrompt();
+  assert.equal(SessionStore.load(first.file).systemPrompt, built, 'saved with the first conversation');
+
+  tui.send('/clear\r'); // nothing changed: the new prompt is the same text, and still belongs in the new file
+  await tui.waitFor('Welcome to', { timeout: 20_000 });
+  tui.send('second question\r');
+  await tui.waitIdle({ timeout: 20_000 });
+  assert.notEqual(tui.app.store.id, first.id);
+  assert.equal(SessionStore.load(tui.app.store.file).systemPrompt, tui.app.runtime.systemPrompt(), 'saved with the one that follows /clear');
+
+  // the project changes, a fresh prompt would differ; resuming the first conversation keeps its own
+  fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'MARKER-NEW use tabs\n');
+  tui.send('/clear\r');
+  await tui.waitFor('Welcome to', { timeout: 20_000 });
+  assert.match(tui.app.runtime.systemPrompt(), /MARKER-NEW/, 'a new conversation starts from a fresh prompt');
+  tui.app.agent.resetConversation();
+  tui.app.loadSession(first.file, first.id);
+  assert.equal(tui.app.runtime.systemPrompt(), built, 'the resumed conversation continues behind the prompt it had (and its cache)');
+  assert.doesNotMatch(tui.app.runtime.systemPrompt(), /MARKER-NEW/);
+});
+
+test('/model to the model in use changes nothing, /config set only marks the prompt, another model rebuilds it', async (t) => {
+  requests = 0;
+  withCache = true;
+  const cwd = project();
+  const tui = await startTui({ cwd });
+  t.after(() => tui.close());
+  tui.send('/model default\r'); // an earlier test's /model is remembered for later sessions: start from the configured model
+  await tui.waitFor('Model set to mock', { timeout: 20_000 });
+  tui.send('hello there\r');
+  await tui.waitFor('All done.', { timeout: 20_000 });
+  await tui.waitIdle({ timeout: 20_000 });
+  const built = tui.app.runtime.systemPrompt();
+  fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'MARKER-RULES use tabs\n'); // what a rebuilt prompt would pick up
+
+  tui.send('/model mock\r'); // the model that is already in use: no question, no change
+  await tui.waitFor('Model set to mock', { timeout: 20_000 });
+  assert.ok(!tui.app.dialogs.length);
+  assert.equal(tui.app.runtime.systemPrompt(), built, 'the prompt was not rebuilt, so the cache is not lost');
+
+  tui.send('/config set SOME_TEST_KEY 1\r');
+  await tui.waitFor('Set SOME_TEST_KEY', { timeout: 20_000 });
+  assert.equal(tui.app.runtime.systemPromptStale, true);
+  assert.equal(tui.app.runtime.systemPrompt(), built);
+
+  tui.send('/model other-model\r'); // another model: asked first (the cache is warm), and then the prompt names it
+  await tui.waitFor('The prompt cache is warm', { timeout: 20_000 });
+  tui.send('\r');
+  await tui.waitFor('Model set to other-model', { timeout: 20_000 });
+  assert.match(tui.app.runtime.systemPrompt(), /You are powered by the model other-model\./);
+  assert.match(tui.app.runtime.systemPrompt(), /MARKER-RULES/, 'and a switch is a place where the changes that were waiting apply');
+  assert.equal(tui.app.runtime.systemPromptStale, false);
+});
+
+test('a model chosen with /config set is a switch: the prompt names it from then on', async (t) => {
+  requests = 0;
+  withCache = true;
+  const saved = process.env.ANTHROPIC_MODEL; // the shell's variable would win over a settings file
+  delete process.env.ANTHROPIC_MODEL;
+  t.after(() => { process.env.ANTHROPIC_MODEL = saved; });
+  const tui = await startTui({ cwd: project() });
+  t.after(() => tui.close());
+  tui.send('/model default\r'); // forget what an earlier test chose
+  await tui.waitFor('Model set to', { timeout: 20_000 });
+  assert.doesNotMatch(tui.app.runtime.systemPrompt(), /You are powered by the model third-model\./);
+  tui.send('/config set ANTHROPIC_MODEL third-model\r');
+  await tui.waitFor('Set ANTHROPIC_MODEL', { timeout: 20_000 });
+  assert.equal(tui.app.runtime.config.mainModel.id, 'third-model');
+  assert.match(tui.app.runtime.systemPrompt(), /You are powered by the model third-model\./);
   assert.equal(tui.app.runtime.systemPromptStale, false);
 });

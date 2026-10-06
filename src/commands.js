@@ -12,7 +12,7 @@ import { INIT_PROMPT } from './prompts.js';
 import { loadCustomCommands, renderSkill, expandCommandBody, expandShellEmbeds } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
-import { quickQuery } from './api.js';
+import { quickQuery, cacheRefusals } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath } from './utils/paths.js';
 import { rewind } from './checkpoints.js';
@@ -39,13 +39,16 @@ export function buildCommands(app) {
   const reloadConfig = () => {
     const fresh = loadConfig({ cwd: app.cwd, flags: app.flags });
     const cfg = app.runtime.config;
+    const model = cfg.mainModel.id;
     cfg.env = fresh.env;
     cfg.sources = fresh.sources;
     cfg.settings = fresh.settings;
     cfg.ignoredFromDotEnv = fresh.ignoredFromDotEnv;
     // What the system prompt is built from may have changed (memory switched off, say). It is not rebuilt in the
-    // middle of a conversation, which would lose its prompt cache; it is, at the next /clear or compaction.
-    app.runtime.deferSystemPromptRefresh();
+    // middle of a conversation, which would lose its prompt cache; it is, at the next /clear or compaction. A
+    // different model is the exception: the prompt names it, and the new model has a cache of its own anyway.
+    if (cfg.mainModel.id !== model) app.runtime.invalidateSystemPrompt();
+    else app.runtime.deferSystemPromptRefresh();
   };
 
   // Claude Code asks before something makes the next request read the whole conversation without the prompt
@@ -214,9 +217,10 @@ export function buildCommands(app) {
       }
       const forget = choice === '__default__' || choice === 'default';
       const next = cfg.resolveModel(forget ? cfg.configuredModelSpec : choice).id;
-      if (next !== cfg.mainModel.id && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
+      const changed = next !== cfg.mainModel.id;
+      if (changed && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
       cfg.modelOverride = forget ? null : choice;
-      app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
+      if (changed) app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
       out(`Model set to ${c.bold(cfg.mainModel.label)} ${c.dim(`(${formatTokens(cfg.mainModel.contextWindow)} context)`)}${kept}`);
     },
@@ -274,7 +278,7 @@ export function buildCommands(app) {
         row('Small model', cfg.smallModel.label),
         row('Effort', cfg.effort || 'auto'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
-        row('Prompt cache', cfg.promptCachingDisabled(cfg.mainModel.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
+        row('Prompt cache', cfg.promptCachingDisabled(cfg.mainModel.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.mainModel.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.mainModel.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', cfg.autoCompactEnabled ? `at ${formatTokens(cfg.autoCompactThreshold())} tokens (window ${formatTokens(cfg.compactWindow())})` : 'disabled'),
         row('Mode', modes.mode === 'plan' ? 'plan (read-only; shift+tab to leave)' : 'full access (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
@@ -300,7 +304,7 @@ export function buildCommands(app) {
         `Total output:  ${formatTokens(u.output)} tokens`,
         `API requests:  ${u.requests}${u.compactions ? c.dim(` + ${u.compactions} to compact the conversation`) : ''}`,
         ...cacheLines.map((line, i) => (i ? c.dim(line) : line)),
-        ...(b.runs ? [c.dim(`Sub-agents:    ${b.runs} run${b.runs === 1 ? '' : 's'}, ${b.requests + b.compactions} requests, ${formatTokens(b.input + b.cacheRead + b.cacheWrite)} input (${formatTokens(b.cacheRead)} cached), ${formatTokens(b.output)} output; included in the totals`)] : []),
+        ...(b.runs ? [c.dim(`Sub-agents:    ${b.runs} run${b.runs === 1 ? '' : 's'}, ${b.requests + b.compactions} request${b.requests + b.compactions === 1 ? '' : 's'}, ${formatTokens(b.input + b.cacheRead + b.cacheWrite)} input (${formatTokens(b.cacheRead)} cached), ${formatTokens(b.output)} output; included in the totals`)] : []),
         `Session time:  ${formatDuration(Date.now() - app.sessionStart)}`,
       ]);
     },

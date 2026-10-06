@@ -139,9 +139,10 @@ export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.
   for (const [scope, file] of Object.entries(files)) {
     const json = readJson(file);
     if (!json) continue;
-    // Claude Code's settings for the prompt cache TTL; the same variables in "env" win over them.
-    if (json.promptCacheTtl !== undefined) set({ CLAUDE_CODE_PROMPT_CACHE_TTL: json.promptCacheTtl }, `${file} (promptCacheTtl)`);
-    if (json.subagentPromptCacheTtl !== undefined) set({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: json.subagentPromptCacheTtl }, `${file} (subagentPromptCacheTtl)`);
+    // Claude Code's settings for the prompt cache TTL. They stay settings (the variables rank above them, whichever
+    // file they come from; see Config.cacheTtl); a later file's setting replaces an earlier one's.
+    if (json.promptCacheTtl !== undefined) settings.promptCacheTtl = json.promptCacheTtl;
+    if (json.subagentPromptCacheTtl !== undefined) settings.subagentPromptCacheTtl = json.subagentPromptCacheTtl;
     set(json.env, file);
     if (json.mcpServers) Object.assign(settings.mcpServers, json.mcpServers);
     for (const [event, entries] of Object.entries(json.hooks || {})) {
@@ -278,7 +279,10 @@ export class Config {
   // usage); with an API key or another endpoint, and for everything else, 5 minutes.
   cacheTtl(bucket = 'main') {
     if (isOn(this.env.FORCE_PROMPT_CACHING_5M)) return '5m';
-    const own = normalizeTtl(bucket === 'main' ? this.env.CLAUDE_CODE_PROMPT_CACHE_TTL : this.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL);
+    // an invalid value is ignored, and the next rule applies (as in Claude Code)
+    const own = bucket === 'main'
+      ? normalizeTtl(this.env.CLAUDE_CODE_PROMPT_CACHE_TTL) || normalizeTtl(this.settings?.promptCacheTtl)
+      : normalizeTtl(this.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL) || normalizeTtl(this.settings?.subagentPromptCacheTtl);
     if (own) return own;
     if (isOn(this.env.ENABLE_PROMPT_CACHING_1H)) return '1h';
     return bucket === 'main' && this.usesClaudeCode ? '1h' : '5m';

@@ -74,6 +74,9 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   // brought up to date by a note to the model, which comes after everything that is cached.
   runtime.resumeSystemPrompt = (saved) => {
     if (flags.systemPrompt || typeof saved !== 'string' || !saved.trim()) return false;
+    // --append-system-prompt is the last thing in the prompt: one built with other text is not what this run asked for
+    const extra = flags.appendSystemPrompt || '';
+    if (extra && !saved.endsWith(`\n\n${extra}`)) return false;
     const modelIn = (text) => /^You are powered by the model (.+)\.$/m.exec(text)?.[1];
     if (modelIn(saved) !== config.mainModel.id) return false;
     promptCache = saved;

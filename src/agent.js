@@ -229,6 +229,7 @@ export class Agent {
     this.postCompactTokens = undefined;
     this.cache.newConversation();
     this.reminders = [];
+    this.recordedSystem = null; // the next conversation's session file has to get the system prompt too, even if it is the same text
     this.checkpoints?.reset();
   }
 
@@ -555,10 +556,14 @@ export class Agent {
   // The summary in a summary request's reply: what is inside <summary>, else the text without its <analysis>.
   // A reply that stops to call a tool has none, whatever text comes before the call ("Let me look at the file
   // first."): that is a few words of preamble, and taking it for the summary would throw the conversation away.
+  // A reply that the output limit cut off before the summary was closed is no summary either: it would end in
+  // the middle of a sentence and the rest of the conversation would be gone.
   static summaryOf(res) {
     if (res.stopReason === 'tool_use' || res.message.content.some((b) => b.type === 'tool_use')) return '';
     const text = res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-    return /<summary>([\s\S]*?)(<\/summary>|$)/.exec(text)?.[1]?.trim() || text.replace(/<analysis>[\s\S]*?<\/analysis>/, '').trim();
+    if (res.stopReason === 'max_tokens' && !/<\/summary>/.test(text)) return '';
+    const summary = /<summary>([\s\S]*?)(<\/summary>|$)/.exec(text)?.[1]?.trim() || text.replace(/<analysis>[\s\S]*?<\/analysis>/, '').trim();
+    return summary.replace(/<\/?(?:summary|analysis)>/g, '').trim();
   }
 
   // Ask the model for the summary. The request is the conversation's own request with the summary instruction
@@ -596,7 +601,7 @@ export class Agent {
     }
     const summary = Agent.summaryOf(res);
     if (!summary) {
-      const err = new Error('Compaction failed: the model returned an empty summary.');
+      const err = new Error(res.stopReason === 'max_tokens' ? 'Compaction failed: the summary was cut off by the output token limit.' : 'Compaction failed: the model returned an empty summary.');
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
@@ -604,7 +609,7 @@ export class Agent {
     this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto }) + todoNote }] }]);
     this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
     this.fileState.clear();
-    this.checkpoints?.markConversationStale();
+    if (!this.isSubagent) this.checkpoints?.markConversationStale(); // the checkpoints are the main conversation's: a sub-agent's own compaction does not end them
     this.lastContextTokens = estimateTokens(summary) + estimateTokens(this.toolSchemas()) + 2000;
     this.tokensSinceUsage = 0;
     this.postCompactTokens = null; // measured on the next request
