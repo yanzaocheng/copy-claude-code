@@ -5,7 +5,10 @@ import path from 'node:path';
 import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
-import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
+import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
+import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, formatUsd } from './gateway.js';
+import { codexLoginSummary, codexModels } from './codex/client.js';
+import { readClaudeCodeLogin } from './claude-code.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
@@ -207,11 +210,15 @@ export function buildCommands(app) {
       let choice = args.trim();
       if (!choice) {
         const configured = cfg.configuredModelSpec;
-        const opts = [
-          { label: `Default ${c.dim(`(${configured} → ${cfg.resolveModel(configured).id})`)}`, value: '__default__' },
-          ...['opus', 'sonnet', 'haiku'].map((a) => ({ label: `${a} ${c.dim(`→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}`)}`, value: a })),
-        ];
-        if (!cfg.usesClaudeCode && cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ label: `${cfg.env.CLAUDE_CODE_SUBAGENT_MODEL} ${c.dim('(sub-agent model)')}`, value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL });
+        const opts = [{ label: `Default ${c.dim(`(${configured} → ${cfg.resolveModel(configured).id})`)}`, value: '__default__' }];
+        if (cfg.usesCodex) {
+          // The models the local Codex install lists.
+          for (const m of codexModels({ ...process.env, ...cfg.env }).models.filter((x) => !x.hidden)) opts.push({ label: `${m.slug}${m.contextWindow ? c.dim(` (${formatTokens(m.contextWindow)} context)`) : ''}`, value: m.slug });
+        } else {
+          opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ label: `${a} ${c.dim(`→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}`)}`, value: a })));
+        }
+        if (cfg.usesGateway) opts.push({ label: `gpt-6.1-sol ${c.dim('(OpenAI, through the gateway\'s Codex login)')}`, value: 'gpt-6.1-sol' });
+        if (cfg.provider === 'api' && cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ label: `${cfg.env.CLAUDE_CODE_SUBAGENT_MODEL} ${c.dim('(sub-agent model)')}`, value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL });
         choice = await app.showDialog(new SelectDialog({ title: 'Select model', question: `Current: ${c.bold(cfg.mainModel.label)}. Any name works too: /model <name>`, options: opts }));
         if (!choice) return;
       }
@@ -257,6 +264,112 @@ export function buildCommands(app) {
     },
   });
 
+  // Switch the provider (kept in the user settings) and take up its own remembered /model and /effort.
+  const switchProvider = (provider) => {
+    const cfg = app.runtime.config;
+    const file = settingsFiles(app.cwd).user;
+    updateSettingsFile(file, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_PROVIDER: provider }; });
+    const model = cfg.mainModel.id;
+    reloadConfig();
+    cfg.modelOverride = null;
+    cfg.effortOverride = null;
+    cfg.effortBoost = null;
+    applyRememberedChoices(cfg, app.flags);
+    if (cfg.mainModel.id !== model) app.runtime.invalidateSystemPrompt();
+    const overridden = cfg.sources.CLAUDE_PRO_PROVIDER !== file;
+    return overridden ? c.yellow(` · note: CLAUDE_PRO_PROVIDER is overridden by ${cfg.sources.CLAUDE_PRO_PROVIDER}`) : '';
+  };
+  const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
+  let pendingLogin = null;
+
+  add({
+    name: 'login',
+    argHint: '[claude|gateway|codex]',
+    description: 'Choose where model requests go: the Claude subscription, the codex-gateway account (browser login), or the Codex subscription',
+    async run(args) {
+      const cfg = app.runtime.config;
+      let choice = args.trim().toLowerCase();
+      if (choice === 'claude') choice = 'claude-code';
+      if (!choice) {
+        const saved = readGatewayLogin(cfg.gatewayUrl);
+        const codex = codexLoginSummary({ ...process.env, ...cfg.env });
+        choice = await app.showDialog(new SelectDialog({
+          title: 'Log in',
+          question: `Now: ${c.bold(cfg.provider)} (${cfg.endpointLabel})`,
+          options: [
+            { label: `Claude subscription ${c.dim('(the local Claude Code login)')}`, value: 'claude-code' },
+            { label: `Gateway ${cfg.gatewayUrl} ${c.dim(saved ? `(logged in as ${saved.account?.email || 'this machine'}; paid from the account balance)` : '(log in in the browser; paid from the account balance)')}`, value: 'gateway' },
+            { label: `Codex subscription ${c.dim(codex.ok ? `(the local Codex login${codex.plan ? `, ${codex.plan}` : ''})` : '(run `codex login` first)')}`, value: 'codex' },
+          ],
+        }));
+        if (!choice) return;
+      }
+      if (!['claude-code', 'gateway', 'codex'].includes(choice)) { out(c.red(`Unknown choice "${choice}". Use claude, gateway or codex.`)); return; }
+      if (choice !== cfg.provider && !(await confirmCacheLoss('Switching the provider'))) { out(c.dim('Nothing was changed.')); return; }
+
+      if (choice === 'claude-code') {
+        try { readClaudeCodeLogin(cfg); } catch (e) {
+          // An expired token is renewed at the first request; a missing login is not.
+          if (!/expired/i.test(e.message)) {
+            out(c.red(`The Claude subscription login cannot be used: ${e.message}. Log in with the official \`claude\` once, then run /login again.`));
+            return;
+          }
+        }
+        const note = switchProvider('claude-code');
+        out(`Using the ${c.bold('Claude subscription')}: ${cfg.mainModel.label}${note}`);
+        return;
+      }
+      if (choice === 'codex') {
+        const codex = codexLoginSummary({ ...process.env, ...cfg.env });
+        if (!codex.ok) { out(c.red(`The Codex login cannot be used: ${codex.error}`)); return; }
+        const note = switchProvider('codex');
+        out(`Using the ${c.bold('Codex subscription')}${codex.email ? ` (${codex.email}${codex.plan ? `, ${codex.plan}` : ''})` : ''}: ${cfg.mainModel.label}${note}`);
+        return;
+      }
+
+      // The gateway: a saved key that still works is used as it is; otherwise log in through the browser.
+      const url = cfg.gatewayUrl;
+      const saved = readGatewayLogin(url);
+      if (saved) {
+        try {
+          const account = await fetchGatewayAccount(saved);
+          const note = switchProvider('gateway');
+          out([`Using the gateway ${c.bold(url)}: ${cfg.mainModel.label}${note}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
+          return;
+        } catch (e) {
+          if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
+          clearGatewayLogin(); // the key was revoked: log in again
+        }
+      }
+      pendingLogin?.abort();
+      const controller = new AbortController();
+      pendingLogin = controller;
+      try {
+        const login = await loginWithBrowser({
+          url,
+          signal: controller.signal,
+          onUrl: (page) => out([`Opening the gateway login in your browser. If it does not open, visit:`, c.blue(page), c.dim('Waiting for the browser (10 minutes at most)…')]),
+        });
+        const note = switchProvider('gateway');
+        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.mainModel.label}${note}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
+      } catch (e) {
+        if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
+      } finally {
+        if (pendingLogin === controller) pendingLogin = null;
+      }
+    },
+  });
+
+  add({
+    name: 'logout',
+    description: 'Forget the gateway login of this machine',
+    run() {
+      const cfg = app.runtime.config;
+      const had = clearGatewayLogin();
+      out(had ? `Logged out of the gateway ${cfg.gatewayUrl}.${cfg.usesGateway ? ' Run /login to log in again or choose another provider.' : ''}` : c.dim('There was no gateway login. (The Claude and Codex subscription logins belong to their own CLIs.)'));
+    },
+  });
+
   add({
     name: 'status',
     description: 'Show version, model, API endpoint and session info',
@@ -273,7 +386,10 @@ export function buildCommands(app) {
         row('cwd', app.cwd),
         row('Provider', cfg.provider),
         row('Endpoint', cfg.endpointLabel),
-        row('Auth', cfg.usesClaudeCode ? `existing Claude Code OAuth (${cfg.claudeCodeCredentialsFile})` : cfg.authToken ? `ANTHROPIC_AUTH_TOKEN (${cfg.display('ANTHROPIC_AUTH_TOKEN')})` : cfg.apiKey ? `ANTHROPIC_API_KEY (${cfg.display('ANTHROPIC_API_KEY')})` : c.red('none')),
+        row('Auth', cfg.usesClaudeCode ? `existing Claude Code OAuth (${cfg.claudeCodeCredentialsFile})`
+          : cfg.usesGateway ? (readGatewayLogin(cfg.gatewayUrl) ? `gateway key of ${readGatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)'))
+            : cfg.usesCodex ? (() => { const s = codexLoginSummary({ ...process.env, ...cfg.env }); return s.ok ? `Codex login${s.email ? ` of ${s.email}` : ''}${s.plan ? ` (${s.plan})` : ''} ${c.dim(s.file)}` : c.red(s.error); })()
+              : cfg.authToken ? `ANTHROPIC_AUTH_TOKEN (${cfg.display('ANTHROPIC_AUTH_TOKEN')})` : cfg.apiKey ? `ANTHROPIC_API_KEY (${cfg.display('ANTHROPIC_API_KEY')})` : c.red('none')),
         row('Model', `${cfg.mainModel.label} ${c.dim(`(sent as "${cfg.mainModel.id}", ${formatTokens(cfg.mainModel.contextWindow)} context)`)}`),
         row('Sub-agent model', cfg.subagentModel.label),
         row('Small model', cfg.smallModel.label),
@@ -294,8 +410,8 @@ export function buildCommands(app) {
   add({
     name: 'cost',
     aliases: ['usage'],
-    description: 'Show token usage for this session',
-    run() {
+    description: 'Show token usage for this session (and the gateway balance)',
+    async run() {
       const a = app.agent;
       const u = a.totalUsage();
       const b = a.subUsage;
@@ -308,6 +424,18 @@ export function buildCommands(app) {
         ...(b.runs ? [c.dim(`Sub-agents:    ${b.runs} run${b.runs === 1 ? '' : 's'}, ${b.requests + b.compactions} request${b.requests + b.compactions === 1 ? '' : 's'}, ${formatTokens(b.input + b.cacheRead + b.cacheWrite)} input (${formatTokens(b.cacheRead)} cached), ${formatTokens(b.output)} output; included in the totals`)] : []),
         `Session time:  ${formatDuration(Date.now() - app.sessionStart)}`,
       ]);
+      const cfg = app.runtime.config;
+      const saved = cfg.usesGateway && readGatewayLogin(cfg.gatewayUrl);
+      if (!saved) return;
+      try {
+        const account = await fetchGatewayAccount(saved);
+        out([
+          `Gateway:       ${accountLine(account)}${Number(account.reserved_usd) ? c.dim(` (${formatUsd(account.reserved_usd)} held for requests in flight)`) : ''}`,
+          c.dim(`               ${account.request_count} requests in all, ${formatTokens(account.input_tokens + account.cache_read_input_tokens + account.cache_creation_input_tokens)} input, ${formatTokens(account.output_tokens)} output · top up and usage: ${cfg.gatewayUrl}/user`),
+        ]);
+      } catch (e) {
+        out(c.yellow(`Gateway: could not read the balance (${e.message})`));
+      }
     },
   });
 
@@ -566,7 +694,9 @@ export function buildCommands(app) {
         `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
         cfg.usesClaudeCode
           ? `${c.yellow('!')} Existing Claude Code OAuth: ${cfg.claudeCodeCredentialsFile} (checked by the request below)`
-          : `${cfg.authToken || cfg.apiKey ? c.green('✔') : c.red('✘')} Credentials ${cfg.authToken ? 'ANTHROPIC_AUTH_TOKEN' : cfg.apiKey ? 'ANTHROPIC_API_KEY' : 'missing'}`,
+          : cfg.usesGateway ? `${readGatewayLogin(cfg.gatewayUrl) ? c.green('✔') : c.red('✘')} Gateway login for ${cfg.gatewayUrl}${readGatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/login)'}`
+            : cfg.usesCodex ? (() => { const s = codexLoginSummary({ ...process.env, ...cfg.env }); return `${s.ok ? c.green('✔') : c.red('✘')} Codex login ${s.ok ? s.file : s.error}`; })()
+              : `${cfg.authToken || cfg.apiKey ? c.green('✔') : c.red('✘')} Credentials ${cfg.authToken ? 'ANTHROPIC_AUTH_TOKEN' : cfg.apiKey ? 'ANTHROPIC_API_KEY' : 'missing'}`,
       ];
       out(lines);
       app.busy = true;

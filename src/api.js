@@ -6,6 +6,8 @@ import { readClaudeCodeLogin, claudeCodeHeaders, CLAUDE_CODE_API_URL, CLAUDE_COD
 import { refreshClaudeCodeLogin, canRenewLogin } from './oauth.js';
 import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
+import { readGatewayLogin } from './gateway.js';
+import { createCodexFetch, codexModels } from './codex/client.js';
 
 let cached = null;
 
@@ -69,7 +71,34 @@ async function loginAfterPause(config, state, { signal, onEvent }) {
   }
 }
 
+let codexFetch = null;
+
+// The gateway provider's key, from /login. Without one the request fails the way a refused key does.
+function gatewayKey(config) {
+  const login = readGatewayLogin(config.gatewayUrl);
+  if (!login) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /login and choose the gateway.`, { status: 401, retryable: false });
+  return login.apiKey;
+}
+
 export function getClient(config, login = null) {
+  if (config.usesGateway || config.usesCodex) {
+    const gateway = config.usesGateway;
+    const baseURL = gateway ? config.gatewayUrl : 'https://codex.invalid';
+    const authToken = gateway ? gatewayKey(config) : 'codex-login';
+    if (!gateway) codexFetch ||= createCodexFetch({ env: { ...process.env, ...config.env } });
+    const key = `${config.provider}|${baseURL}|${authToken}|${config.apiTimeout}`;
+    if (cached?.key === key && cached.fetch === globalThis.fetch) return cached.client;
+    const client = new Anthropic({
+      baseURL,
+      authToken,
+      apiKey: null,
+      timeout: config.apiTimeout,
+      maxRetries: 0,
+      ...(gateway ? {} : { fetch: codexFetch }),
+    });
+    cached = { key, client, fetch: globalThis.fetch };
+    return client;
+  }
   if (config.usesClaudeCode) login ||= readClaudeCodeLogin(config);
   // Subscription credentials must only go to Anthropic, regardless of an API
   // endpoint or custom auth headers left over from .env (e.g. DeepSeek).
@@ -165,10 +194,12 @@ const noEffort = new Set();
 export const effortSupported = (modelId) => !noEffort.has(modelId);
 
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
-// the other models that take one. null for a model that takes none or is not known.
+// the other models that take one; for a GPT model, its default in the local Codex install's models cache. null for
+// a model that takes none or is not known.
 export function defaultEffort(modelId) {
   const id = String(modelId || '');
   if (!effortSupported(id)) return null;
+  if (/^gpt-/i.test(id)) return codexModels().models.find((m) => m.slug === id)?.defaultEffort || null;
   if (/^claude-(?:opus|haiku)-5-5(?:-|$)/i.test(id)) return 'medium';
   if (/^claude-(?:fable|mythos|opus-(?:5|4-[5-8])|sonnet-(?:5|4-6))(?:-|$)/i.test(id)) return 'high';
   return null;
@@ -213,7 +244,9 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
     const toolMark = mark('tools');
     params.tools = tools.map((t, i) => (i === tools.length - 1 && toolMark ? { ...t, cache_control: toolMark } : t));
   }
-  const eff = effort === undefined ? config.effort : effort;
+  // A GPT model with no effort set gets its default from the local Codex models cache, sent explicitly, so that
+  // the gateway (whose own default is its Codex config) uses what the footer shows.
+  const eff = (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id) : null);
   if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
   const budget = config.thinkingBudget;
   if (budget === 0) params.thinking = { type: 'disabled' };
@@ -237,9 +270,13 @@ function describeError(err, config) {
   const status = err?.status;
   let msg = err?.error?.error?.message || err?.error?.message || err?.message || String(err);
   const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded/i.test(msg);
+  if (err instanceof APIError) return err;
   if (status === 401) msg = config?.usesClaudeCode
     ? `Claude Code OAuth authentication failed (401). Check the existing local subscription credentials in ${config.claudeCodeCredentialsFile}. ${msg}`
-    : `Authentication failed (401). Check ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY. ${msg}`;
+    : config?.usesGateway ? `The gateway refused the login (401). Run /login to log in again. ${msg}`
+      : config?.usesCodex ? msg
+        : `Authentication failed (401). Check ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY. ${msg}`;
+  if (status === 402 && config?.usesGateway) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (or run /login to check the balance). ${msg}`;
   const retryable = !status || status === 408 || status === 409 || status === 429 || status >= 500;
   const header = typeof err?.headers?.get === 'function' ? err.headers.get('retry-after') : err?.headers?.['retry-after'];
   return new APIError(msg, { status, retryable, promptTooLong, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()) });

@@ -1,0 +1,163 @@
+// The gateway and codex providers: configuration, the gateway's browser login, and the Codex translation with
+// its token renewal. Nothing here reaches a real server, the real ~/.claude-pro or the real ~/.codex.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-providers-'));
+const codexHome = path.join(tmp, 'codex');
+fs.mkdirSync(codexHome, { recursive: true });
+process.env.CLAUDE_PRO_CONFIG_DIR = path.join(tmp, 'config');
+process.env.CODEX_HOME = codexHome;
+
+const { Config } = await import('../src/config.js');
+const { streamMessage, buildParams } = await import('../src/api.js');
+const { loginWithBrowser, readGatewayLogin, gatewayLoginFile, clearGatewayLogin } = await import('../src/gateway.js');
+const { createCodexFetch } = await import('../src/codex/client.js');
+
+const jwt = (payload) => `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.sig`;
+const claims = { 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_1', chatgpt_plan_type: 'plus' } };
+const config = (env) => new Config({ CODEX_HOME: codexHome, CLAUDE_PRO_MAX_RETRIES: '0', ...env }, {}, { hooks: {}, mcpServers: {} }, tmp);
+
+fs.writeFileSync(path.join(codexHome, 'models_cache.json'), JSON.stringify({
+  client_version: '0.162.1',
+  models: [{ slug: 'gpt-6.1-sol', visibility: 'list', context_window: 272000, default_reasoning_level: 'low', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }, { effort: 'max' }] }],
+}));
+
+test('gateway and codex providers: models, windows, sub-agent and output defaults', () => {
+  const gw = config({ CLAUDE_PRO_PROVIDER: 'gateway' });
+  assert.equal(gw.mainModel.id, 'claude-opus-5-5');
+  assert.equal(gw.mainModel.contextWindow, 1_000_000);
+  assert.equal(gw.subagentModel.id, 'claude-sonnet-5-5');
+  assert.equal(gw.smallModel.id, 'claude-haiku-4-5');
+  assert.equal(gw.maxOutputTokens, 32_000, 'a smaller balance hold per request');
+  assert.equal(gw.gatewayUrl, 'https://gw.predix.icu');
+  const gpt = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol' });
+  assert.deepEqual([gpt.mainModel.id, gpt.mainModel.contextWindow, gpt.subagentModel.id], ['gpt-6.1-sol', 272_000, 'gpt-6.1-sol']);
+  assert.deepEqual(buildParams(gpt, { model: gpt.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }).output_config, { effort: 'low' }, 'the model default is sent');
+
+  const cx = config({ CLAUDE_PRO_PROVIDER: 'codex' });
+  assert.equal(cx.mainModel.id, 'gpt-6.1-sol');
+  assert.equal(cx.subagentModel.id, 'gpt-6.1-sol');
+  assert.match(cx.endpointLabel, /chatgpt\.com/);
+  assert.throws(() => config({ CLAUDE_PRO_PROVIDER: 'nope' }).provider, /api, claude-code, gateway, codex/);
+});
+
+test('gateway login: browser round trip, code exchange, key saved privately; requests use it', async (t) => {
+  const seen = [];
+  const gateway = http.createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    seen.push(`${req.method} ${req.url.split('?')[0]} ${req.headers.authorization || ''}`);
+    if (req.url === '/cli/token') {
+      const { code, state } = JSON.parse(body);
+      const ok = code === 'cli_code_1' && state;
+      res.writeHead(ok ? 200 : 400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(ok ? { api_key: 'gw_live_test', key: {}, account: { id: 'u1', name: 'Tester', email: 't@example.com', available_usd: 3 } } : { error: { message: 'bad code' } }));
+      return;
+    }
+    if (req.url.startsWith('/v1/messages')) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      for (const ev of [
+        { type: 'message_start', message: { model: 'claude-opus-5-5', usage: { input_tokens: 5, output_tokens: 0 } } },
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+        { type: 'message_stop' },
+      ]) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+      res.end();
+      return;
+    }
+    if (req.url === '/v1/account') { res.writeHead(402, { 'content-type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'billing_error', message: 'Insufficient gateway balance.' } })); return; }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  t.after(() => { gateway.close(); clearGatewayLogin(); });
+  const url = `http://127.0.0.1:${gateway.address().port}`;
+
+  let opened = null;
+  const login = await loginWithBrowser({
+    url,
+    open: async (page) => {
+      opened = new URL(page);
+      // A wrong state is refused by the local callback and does not end the login.
+      assert.equal((await fetch(`http://127.0.0.1:${opened.searchParams.get('port')}/callback?code=x&state=wrong`)).status, 400);
+      const res = await fetch(`http://127.0.0.1:${opened.searchParams.get('port')}/callback?code=cli_code_1&state=${opened.searchParams.get('state')}`);
+      assert.equal(res.status, 200);
+    },
+  });
+  assert.equal(opened.pathname, '/cli/login');
+  assert.equal(opened.searchParams.get('client'), 'claude-pro');
+  assert.equal(login.apiKey, 'gw_live_test');
+  assert.equal(readGatewayLogin(url).account.email, 't@example.com');
+  assert.equal(readGatewayLogin('https://other.example'), null, 'a key belongs to its gateway');
+  if (process.platform !== 'win32') assert.equal(fs.statSync(gatewayLoginFile()).mode & 0o077, 0, 'only the user can read it');
+
+  const cfg = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: url });
+  const res = await streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(res.message.content[0].text, 'hi');
+  assert.ok(seen.includes('POST /v1/messages Bearer gw_live_test'), seen.join('\n'));
+
+  clearGatewayLogin();
+  await assert.rejects(streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }), /Not logged in to the gateway .*\/login/);
+});
+
+test('codex fetch: Anthropic request in, Responses request out, SSE translated back; a 401 renews the token and writes it back', async () => {
+  const authFile = path.join(codexHome, 'auth.json');
+  const stale = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, ...claims, n: 1 });
+  const fresh = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, ...claims, n: 2 });
+  fs.writeFileSync(authFile, JSON.stringify({ tokens: { access_token: stale, id_token: jwt(claims), refresh_token: 'rt_1', account_id: 'acct_1' } }));
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url, headers: init.headers, body });
+    if (url.includes('oauth/token')) {
+      assert.equal(body.refresh_token, 'rt_1');
+      return new Response(JSON.stringify({ access_token: fresh, refresh_token: 'rt_2' }), { status: 200 });
+    }
+    if (init.headers.authorization === `Bearer ${stale}`) return new Response('{"detail":"Unauthorized"}', { status: 401 });
+    const events = [
+      { type: 'response.created', response: { id: 'r1' } },
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc1', call_id: 'call_1', name: 'Read', arguments: '' } },
+      { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'fc1', delta: '{"file_path":"a.txt"}' },
+      { type: 'response.output_item.done', output_index: 0, item: { type: 'function_call', id: 'fc1', call_id: 'call_1', name: 'Read', arguments: '{"file_path":"a.txt"}' } },
+      { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 1000, input_tokens_details: { cached_tokens: 800 }, output_tokens: 20 } } },
+    ];
+    return new Response(events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const cfg = config({ CLAUDE_PRO_PROVIDER: 'codex' });
+  const codexFetch = createCodexFetch({ env: { CODEX_HOME: codexHome }, fetchImpl, sessionId: 'sess-1' });
+  const anth = buildParams(cfg, {
+    model: cfg.mainModel, system: 'You are a coding agent.', effort: 'max',
+    messages: [{ role: 'user', content: 'read a.txt' }],
+    tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: { file_path: { type: 'string' } } } }],
+  });
+  const res = await codexFetch('https://codex.invalid/v1/messages?beta=true', { method: 'POST', body: JSON.stringify(anth) });
+  assert.equal(res.status, 200);
+  const sse = await res.text();
+  assert.match(sse, /"type":"tool_use","id":"call_1","name":"Read"/);
+  assert.match(sse, /"cache_read_input_tokens":800/);
+  const upstream = calls.filter((c) => c.url.includes('/codex/responses'));
+  assert.equal(upstream.length, 2, 'refused once, then sent again with the renewed token');
+  assert.equal(upstream[1].headers['chatgpt-account-id'], 'acct_1');
+  assert.equal(upstream[1].headers.version, '0.162.1');
+  assert.equal(upstream[1].body.model, 'gpt-6.1-sol');
+  assert.deepEqual(upstream[1].body.reasoning, { effort: 'max', summary: 'auto' });
+  assert.equal(upstream[1].body.prompt_cache_key, 'sess-1');
+  assert.equal(upstream[1].body.instructions, 'You are a coding agent.');
+  assert.equal(upstream[1].body.tools[0].name, 'Read');
+  const saved = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+  assert.equal(saved.tokens.access_token, fresh);
+  assert.equal(saved.tokens.refresh_token, 'rt_2');
+
+  // A usage limit becomes a rate limit with the reset time, which the program waits for.
+  const limited = createCodexFetch({ env: { CODEX_HOME: codexHome }, fetchImpl: async () => new Response(JSON.stringify({ error: { type: 'usage_limit_reached', message: 'The usage limit has been reached', resets_in_seconds: 120 } }), { status: 429 }) });
+  const r = await limited('https://codex.invalid/v1/messages', { method: 'POST', body: JSON.stringify(anth) });
+  assert.equal(r.status, 429);
+  assert.equal(r.headers.get('retry-after'), '120');
+  assert.equal((await r.json()).error.type, 'rate_limit_error');
+});

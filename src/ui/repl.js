@@ -17,6 +17,7 @@ import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
 import { defaultEffort, effortSupported, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, rememberChoice } from '../config.js';
+import { readGatewayLogin } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -457,7 +458,9 @@ export class App {
       c.claude('╰' + '─'.repeat(w - 2) + '╯'),
     ];
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
-    if (!cfg.usesClaudeCode && !cfg.authToken && !cfg.apiKey) {
+    if (cfg.usesGateway && !readGatewayLogin(cfg.gatewayUrl)) {
+      lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
+    } else if (cfg.provider === 'api' && !cfg.authToken && !cfg.apiKey) {
       lines.push('', c.yellow(' ⚠ No API credentials found. Set ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY in .env, ~/.claude-pro/settings.json or the environment.'));
     }
     const mcp = this.runtime.mcp.status();

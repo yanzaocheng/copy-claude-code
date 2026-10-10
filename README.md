@@ -52,11 +52,19 @@ claude-pro config set CLAUDE_PRO_PROVIDER claude-code
 
 调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上 Claude Code 的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点、计划模式及会话功能都由本项目原有逻辑处理。
 
-此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-4-5-20251001`；子 agent 默认跟随主模型。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
+此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-4-5-20251001`；子 agent 默认用 `sonnet`（`CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL` 可改）。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
 
 每次请求重新读取现有凭据；如果本机 Claude Code 更新了令牌，下次请求自动使用新值。
 
 **令牌自动续期**：访问令牌有效期 8 小时。发请求前如果它已过期或不到 5 分钟就过期，本项目会用同一个文件里的刷新令牌向官方令牌接口续期（协议与官方客户端一致），把新令牌写回 `.credentials.json`——刷新会**轮换刷新令牌**，所以必须写回，否则官方客户端手里的就是失效的。写回只改令牌相关字段、原子替换、保持原有缩进；和官方客户端使用同样的目录锁（`.claude/.oauth_refresh.lock` 与 `.claude.lock`），两边不会同时刷新，抢先被对方刷新过就直接用对方的结果。请求收到 401 时也会强制续期一次再重试。只有刷新令牌本身被拒绝或过期（约 30 天不用）时才需要你运行 `claude` 再 `/login`，此时报错会写明原因。不想让本项目改写凭据文件：`CLAUDE_PRO_DISABLE_TOKEN_REFRESH=1`。令牌接口地址固定，不能通过任何设置（包括项目里的 `.env`）改掉，避免刷新令牌被发到别处。HTTP 认证兼容方式依赖 Claude Code 的接口约定，官方协议变化时可能需要同步调整；可用 `CLAUDE_PRO_CLAUDE_CODE_VERSION` 指定 User-Agent 中的版本（默认读取本机 npm 安装版本）。
+
+## /login：Claude 订阅、网关、Codex 订阅三选一
+
+交互界面里 `/login` 选择模型请求发往哪里（记在 `~/.claude-pro/settings.json` 的 `CLAUDE_PRO_PROVIDER`，每个后端各自记住 `/model`、`/effort`）：
+
+- **Claude 订阅**（`claude-code`）：本机 Claude Code 的登录，见上一节。
+- **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下用 `sonnet`。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 32K。`/logout` 删除本机的网关 Key。
+- **Codex 订阅**（`codex`）：本机 `codex login`（ChatGPT 套餐）写下的 `~/.codex/auth.json`（`CODEX_HOME` 可改）。请求直接发往 Codex 后端，Anthropic 格式在本机和 OpenAI Responses 格式互相转换（工具调用、推理、缓存用量都对应上）；访问令牌快到期时用同一文件里的刷新令牌续期并写回，Codex CLI 也能接着用。模型默认取 `~/.codex/config.toml` 的 `model`，否则 `gpt-6.1-sol`；不设 effort 时用模型自己的默认值（`models_cache.json` 里写的）。
 
 ## 配置
 
