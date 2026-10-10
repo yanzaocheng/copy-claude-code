@@ -237,7 +237,8 @@ test('Bash tool: output, exit codes, cwd persistence, timeout', async () => {
   assert.ok(r.isError);
   assert.match(r.content, /oops[\s\S]*Exit code 3/);
   await bash.call({ command: 'cd inner' }, ctx);
-  assert.equal(path.resolve(ctx.cwd), path.resolve(dir, 'inner'));
+  // The shell reports the real path: /private/var for /var on macOS, the long name for RUNNER~1 on Windows.
+  assert.equal(fs.realpathSync.native(ctx.cwd), fs.realpathSync.native(path.join(dir, 'inner')));
   r = await bash.call({ command: 'sleep 5', timeout: 1000 }, ctx);
   assert.ok(r.isError && /timed out/.test(r.content));
 });
