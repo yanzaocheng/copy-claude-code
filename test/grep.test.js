@@ -157,5 +157,7 @@ test('configuredModelSpec follows the provider and a /model override wins over i
   cc.modelOverride = 'haiku';
   assert.equal(cc.mainModelSpec, 'haiku');
   assert.equal(cc.configuredModelSpec, 'opus');
-  assert.equal(new Config({}, {}, {}, process.cwd()).configuredModelSpec, 'sonnet');
+  assert.equal(new Config({ CLAUDE_PRO_PROVIDER: 'api' }, {}, {}, process.cwd()).configuredModelSpec, 'sonnet');
+  const fresh = new Config({}, {}, {}, process.cwd());
+  assert.deepEqual([fresh.provider, fresh.configuredModelSpec], ['gateway', 'opus'], 'nothing configured: the gateway, logged in to with /login');
 });

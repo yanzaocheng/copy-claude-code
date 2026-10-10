@@ -60,7 +60,7 @@ claude-pro config set CLAUDE_PRO_PROVIDER claude-code
 
 ## /login：Claude 订阅、网关、Codex 订阅三选一
 
-交互界面里 `/login` 选择模型请求发往哪里（记在 `~/.claude-pro/settings.json` 的 `CLAUDE_PRO_PROVIDER`，每个后端各自记住 `/model`、`/effort`）：
+什么都没配置时（没有 `CLAUDE_PRO_PROVIDER`，也没有 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`）默认用**网关**，第一次启动直接弹出登录选择（网关排第一）；配置了 API 端点、密钥或模型的老用户仍然默认 `api`。交互界面里 `/login` 选择模型请求发往哪里（记在 `~/.claude-pro/settings.json` 的 `CLAUDE_PRO_PROVIDER`，每个后端各自记住 `/model`、`/effort`）：
 
 - **Claude 订阅**（`claude-code`）：本机 Claude Code 的登录，见上一节。
 - **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下用 `sonnet`。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 32K。`/logout` 删除本机的网关 Key。
@@ -257,6 +257,8 @@ claude-pro -p --plan "给出重构方案"                    # 只调研、只�
 | `Tab` | 补全命令 / 文件 |
 
 ## 开发
+
+GitHub Actions（`.github/workflows/test.yml`）在 Ubuntu、macOS、Windows 上用 Node 22 和 24 跑 `npm run check` 和 `npm test`。
 
 ```bash
 npm test                     # 单元测试（node:test）

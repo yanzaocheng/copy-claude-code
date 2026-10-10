@@ -224,6 +224,10 @@ export class App {
     this.spinnerTimer = setInterval(() => { if (this.busy || this.active.length) this.screen.schedule(); }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
+    // Nothing configured yet: the gateway is the default, and its login comes first, as in Claude Code.
+    else if (this.config.usesGateway && !readGatewayLogin(this.config.gatewayUrl)) {
+      Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
+    }
     this.fileIndex.refresh();
     this.startSourceWatch();
     return new Promise((resolve) => { this.resolveExit = resolve; });

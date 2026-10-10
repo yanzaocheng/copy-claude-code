@@ -297,8 +297,8 @@ export function buildCommands(app) {
           title: 'Log in',
           question: `Now: ${c.bold(cfg.provider)} (${cfg.endpointLabel})`,
           options: [
-            { label: `Claude subscription ${c.dim('(the local Claude Code login)')}`, value: 'claude-code' },
             { label: `Gateway ${cfg.gatewayUrl} ${c.dim(saved ? `(logged in as ${saved.account?.email || 'this machine'}; paid from the account balance)` : '(log in in the browser; paid from the account balance)')}`, value: 'gateway' },
+            { label: `Claude subscription ${c.dim('(the local Claude Code login)')}`, value: 'claude-code' },
             { label: `Codex subscription ${c.dim(codex.ok ? `(the local Codex login${codex.plan ? `, ${codex.plan}` : ''})` : '(run `codex login` first)')}`, value: 'codex' },
           ],
         }));

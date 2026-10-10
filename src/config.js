@@ -28,7 +28,7 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'packag
 
 // Every key we understand, with a short description (shown by /config).
 export const KNOWN_KEYS = {
-  CLAUDE_PRO_PROVIDER: 'Authentication backend: api (default), claude-code (local Claude subscription login), gateway (codex-gateway account, /login) or codex (local Codex/ChatGPT subscription login)',
+  CLAUDE_PRO_PROVIDER: 'Authentication backend: gateway (default; api when an API endpoint or key is configured), api, claude-code (local Claude subscription login), gateway (codex-gateway account, /login) or codex (local Codex/ChatGPT subscription login)',
   CLAUDE_PRO_GATEWAY_URL: `codex-gateway address for the gateway provider (default https://gw.predix.icu)`,
   CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
   CLAUDE_PRO_CODEX_MODEL: 'Model with the codex provider (default: the model in ~/.codex/config.toml, else gpt-6.1-sol)',
@@ -214,8 +214,11 @@ export class Config {
     this.ignoredFromDotEnv = []; // .env keys that are not applied because of the provider (see API_ONLY_DOTENV_KEYS)
   }
 
+  // Not set: an API endpoint, key or model that is configured (.env, settings) means the api provider, as before;
+  // otherwise the gateway, where /login gets an account in the browser.
   get provider() {
-    const value = (this.env.CLAUDE_PRO_PROVIDER || 'api').trim().toLowerCase();
+    const configuredApi = this.env.ANTHROPIC_AUTH_TOKEN || this.env.ANTHROPIC_API_KEY || this.env.ANTHROPIC_BASE_URL || this.env.ANTHROPIC_MODEL;
+    const value = (this.env.CLAUDE_PRO_PROVIDER || (configuredApi ? 'api' : 'gateway')).trim().toLowerCase();
     if (!PROVIDERS.includes(value)) throw new Error(`Unknown CLAUDE_PRO_PROVIDER: ${value}. Use ${PROVIDERS.join(', ')}.`);
     return value;
   }
