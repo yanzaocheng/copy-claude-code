@@ -7,6 +7,7 @@ import { makeTaskTool, TaskOutputTool, TaskStopTool } from './task.js';
 import { NotebookEditTool } from './notebook.js';
 import { makeSkillTool } from './skill.js';
 import { RestartTool } from './restart.js';
+import { makeEffortTool } from './effort.js';
 
 // Build the full tool set for the main agent.
 // `restart`: this session can restart itself (it runs under the supervisor), so it gets the Restart tool.
@@ -30,12 +31,14 @@ export function buildTools(config, { agents, skills, mcpTools = [], restart = fa
     KillShellTool,
     ExitPlanModeTool,
     AskUserQuestionTool,
+    makeEffortTool(config),
     ...(restart ? [RestartTool] : []),
     ...mcpTools,
   ];
 }
 
-const NEVER_FOR_SUBAGENTS = new Set(['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion', 'Restart']);
+// Effort: a sub-agent shares the main agent's settings, so it must not change them.
+const NEVER_FOR_SUBAGENTS = new Set(['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion', 'Restart', 'Effort']);
 
 // Tools for a sub-agent. `allowTask`: it is below the nesting limit, so it may start sub-agents of its own.
 export function toolsForSubagent(allTools, def, { allowTask = false } = {}) {

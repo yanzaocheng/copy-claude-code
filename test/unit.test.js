@@ -290,3 +290,25 @@ test('agent loop runs tools and feeds results back (mock model)', async () => {
   assert.equal(r.text, 'done');
   assert.equal(agent.messages.length, 4);
 });
+
+test('Effort tool: raises the effort for the current request, the next user message goes back', async () => {
+  const { makeEffortTool } = await import('../src/tools/effort.js');
+  const { toolsForSubagent, buildTools } = await import('../src/tools/index.js');
+  const cfg = makeConfig({ CLAUDE_PRO_PROVIDER: 'claude-code', CLAUDE_PRO_CLAUDE_CODE_MODEL: 'opus' });
+  const tool = makeEffortTool(cfg);
+  assert.equal(cfg.effort, null);
+  const res = await tool.call({ level: 'max', reason: 'hard bug' });
+  assert.match(res.content, /from medium to max.*back to medium/);
+  assert.equal(cfg.effort, 'max');
+  const notices = [];
+  const self = { config: cfg, io: { notice: (t) => notices.push(t) } };
+  cfg.effortBoostKeepNext = true; // a restart continues the request
+  Agent.prototype.endEffortBoost.call(self);
+  assert.equal(cfg.effort, 'max');
+  Agent.prototype.endEffortBoost.call(self);
+  assert.equal(cfg.effort, null);
+  assert.match(notices[0], /back to the model default/);
+  cfg.effortOverride = 'high';
+  assert.match((await tool.call({ level: 'high', reason: 'x' })).content, /already high/);
+  assert.ok(!toolsForSubagent(buildTools(cfg, { agents: new Map() }), { tools: null }, {}).some((t) => t.name === 'Effort'));
+});

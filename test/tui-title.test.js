@@ -47,6 +47,7 @@ const { startTui } = await import('./tui-harness.js');
 const { timing } = await import('../src/ratelimit.js');
 const { cleanTitle } = await import('../src/ui/screen.js');
 const { modelTag, modelInfo } = await import('../src/ui/repl.js');
+const { defaultEffort } = await import('../src/api.js');
 const { Config } = await import('../src/config.js');
 
 test.after(() => server.close());
@@ -84,6 +85,15 @@ test('modelInfo leaves the effort out when none is sent and for a model that doe
   assert.deepEqual(modelInfo(config({ CLAUDE_CODE_EFFORT_LEVEL: 'high' })), { model: 'sonnet-5-5', effort: 'high' });
   assert.deepEqual(modelInfo(config({})), { model: 'sonnet-5-5', effort: null });
   assert.deepEqual(modelInfo(config({ CLAUDE_CODE_EFFORT_LEVEL: 'auto' })), { model: 'sonnet-5-5', effort: null });
+});
+
+test('defaultEffort is the effort a model uses when none is sent', () => {
+  assert.equal(defaultEffort('claude-opus-5-5'), 'medium');
+  assert.equal(defaultEffort('claude-haiku-5-5'), 'medium');
+  assert.equal(defaultEffort('claude-sonnet-5-5'), 'high');
+  assert.equal(defaultEffort('claude-opus-4-7'), 'high');
+  assert.equal(defaultEffort('claude-haiku-4-5-20251001'), null);
+  assert.equal(defaultEffort('mock'), null);
 });
 
 test('the tab is titled with the directory, model and effort from the start, and the shell\'s title is saved and brought back', async (t) => {
@@ -197,17 +207,17 @@ test('the footer always shows the model and effort in use', async (t) => {
   const tui = await startTui({ cwd: project(), flags: { effort: 'high' } });
   t.after(() => tui.close());
   const bottom = async () => (await tui.snapshot()).split('\n').filter((l) => l.trim()).at(-1);
-  assert.match(await bottom(), /^ {2}\? for shortcuts {2,}mock · high$/);
+  assert.match(await bottom(), /^ {2}\? for shortcuts {2,}mock · effort high$/);
 
   tui.send('/effort low\r');
   await tui.waitFor('Effort set to low', { timeout: 20_000 });
   await tui.wait(100);
-  assert.match(await bottom(), /\? for shortcuts {2,}mock · low$/);
+  assert.match(await bottom(), /\? for shortcuts {2,}mock · effort low$/);
 
   tui.send('/effort auto\r');
   await tui.waitFor('Effort set to auto', { timeout: 20_000 });
   await tui.wait(100);
-  assert.match(await bottom(), /\? for shortcuts {2,}mock$/, 'no effort is sent, so none is shown');
+  assert.match(await bottom(), /\? for shortcuts {2,}mock$/, 'no effort is sent and the model\'s default is not known, so none is shown');
 });
 
 test('the footer drops the model when the window is too narrow, instead of overflowing', async (t) => {
@@ -215,11 +225,11 @@ test('the footer drops the model when the window is too narrow, instead of overf
   const tui = await startTui({ cwd: project(), flags: { effort: 'high' }, cols: 60 });
   t.after(() => tui.close());
   const bottom = async () => (await tui.snapshot()).split('\n').filter((l) => l.trim()).at(-1);
-  assert.match(await bottom(), /\? for shortcuts +mock · high$/);
+  assert.match(await bottom(), /\? for shortcuts +mock · effort high$/);
   await tui.resize(24);
   const narrow = await bottom();
   assert.ok(narrow.length <= 24, `"${narrow}" fits the window`);
   assert.match(narrow, /\? for shortcuts/);
   await tui.resize(60);
-  assert.match(await bottom(), /\? for shortcuts +mock · high$/, 'and it is back when there is room');
+  assert.match(await bottom(), /\? for shortcuts +mock · effort high$/, 'and it is back when there is room');
 });

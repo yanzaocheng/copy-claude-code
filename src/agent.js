@@ -338,9 +338,23 @@ export class Agent {
     return out;
   }
 
+  // A new request from the user goes back to the effort the user chose, after the Effort tool changed it for
+  // the one before. A request that a restart continues keeps it.
+  endEffortBoost() {
+    const cfg = this.config;
+    if (cfg.effortBoostKeepNext) { cfg.effortBoostKeepNext = false; return; }
+    if (!cfg.effortBoost) return;
+    const was = cfg.effortBoost;
+    cfg.effortBoost = null;
+    this.io.notice?.(`Effort back to ${cfg.effort || 'the model default'} (it was raised to ${was} for the previous request).`);
+  }
+
   // Run one user turn to completion. Returns {text, interrupted}.
   async run(userContent, { signal } = {}) {
-    if (!this.isSubagent) this.beforeTurn?.();
+    if (!this.isSubagent) {
+      this.beforeTurn?.();
+      this.endEffortBoost();
+    }
     this.clearAfterIdle();
     let content = toBlocks(userContent);
     if (this.modes.mode === 'plan' && !this.isSubagent) content = [...content, { type: 'text', text: PLAN_MODE_REMINDER }];

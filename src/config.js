@@ -40,7 +40,8 @@ export const KNOWN_KEYS = {
   ANTHROPIC_DEFAULT_SONNET_MODEL: 'Model used for the "sonnet" alias',
   ANTHROPIC_DEFAULT_HAIKU_MODEL: 'Small/fast model (web page summarising, titles)',
   ANTHROPIC_SMALL_FAST_MODEL: 'Deprecated alias of ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  CLAUDE_CODE_SUBAGENT_MODEL: 'Model used by Task sub-agents',
+  CLAUDE_CODE_SUBAGENT_MODEL: 'Model used by Task sub-agents (API providers; default: the main model)',
+  CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL: 'Model used by Task sub-agents with the claude-code provider (default: sonnet)',
   CLAUDE_CODE_EFFORT_LEVEL: 'Reasoning effort: none|minimal|low|medium|high|xhigh|max (sent as output_config.effort)',
   CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'Context size (tokens) used for auto-compaction calculations',
   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: 'Percentage (1-100) of the window at which auto-compaction triggers',
@@ -196,6 +197,8 @@ export class Config {
     this.cwd = cwd;
     this.modelOverride = null; // set by /model during a session
     this.effortOverride = null; // set by /effort during a session
+    this.effortBoost = null; // set by the model with the Effort tool, for the rest of the user's current request
+    this.effortBoostKeepNext = false; // a restart continues the request: the next turn keeps the boost
     this.verifyOverride = null; // set by /verify or --verify during a session
     this.ignoredFromDotEnv = []; // .env keys that are not applied because of the provider (see API_ONLY_DOTENV_KEYS)
   }
@@ -257,13 +260,15 @@ export class Config {
   get mainModelSpec() { return this.modelOverride || this.configuredModelSpec; }
   get mainModel() { return this.resolveModel(this.mainModelSpec); }
   get subagentModel() {
-    if (this.usesClaudeCode) return this.mainModel;
+    // With the subscription login sub-agents run on Sonnet: much cheaper than Opus, and good at the searching and
+    // well-specified subtasks they are given. CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL (or a sub-agent's own model) changes it.
+    if (this.usesClaudeCode) return this.resolveModel(this.env.CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL || 'sonnet');
     return this.env.CLAUDE_CODE_SUBAGENT_MODEL ? this.resolveModel(this.env.CLAUDE_CODE_SUBAGENT_MODEL) : this.mainModel;
   }
   get smallModel() { return this.resolveModel('haiku'); }
 
   get effort() {
-    const v = (this.effortOverride ?? this.env.CLAUDE_CODE_EFFORT_LEVEL ?? '').trim().toLowerCase();
+    const v = (this.effortBoost ?? this.effortOverride ?? this.env.CLAUDE_CODE_EFFORT_LEVEL ?? '').trim().toLowerCase();
     return v && v !== 'auto' && v !== 'default' ? v : null;
   }
 

@@ -164,6 +164,16 @@ const outputCaps = new Map();
 const noEffort = new Set();
 export const effortSupported = (modelId) => !noEffort.has(modelId);
 
+// The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
+// the other models that take one. null for a model that takes none or is not known.
+export function defaultEffort(modelId) {
+  const id = String(modelId || '');
+  if (!effortSupported(id)) return null;
+  if (/^claude-(?:opus|haiku)-5-5(?:-|$)/i.test(id)) return 'medium';
+  if (/^claude-(?:fable|mythos|opus-(?:5|4-[5-8])|sonnet-(?:5|4-6))(?:-|$)/i.test(id)) return 'high';
+  return null;
+}
+
 // Pull the allowed maximum out of an error such as
 //   "max_tokens: 128000 > 64000, which is the maximum allowed number of output tokens for claude-..."
 //   "Invalid max_tokens value, the valid range of max_tokens is [1, 8192]"

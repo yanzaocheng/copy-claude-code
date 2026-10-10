@@ -15,7 +15,7 @@ import {
 } from './render.js';
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
-import { effortSupported, quickQuery } from '../api.js';
+import { defaultEffort, effortSupported, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, rememberChoice } from '../config.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
@@ -25,7 +25,7 @@ import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
-import { readClipboardImage, imageFromFile } from '../utils/clipboard.js';
+import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -55,6 +55,9 @@ export function parseTopicTitle(answer, { required = false } = {}) {
 }
 
 const imageBlock = (img) => ({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
+
+const FOCUS_EVENTS_ON = '\x1b[?1004h';
+const FOCUS_EVENTS_OFF = '\x1b[?1004l';
 
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '✳', '✢', '·'];
 const VERBS = ['Thinking', 'Pondering', 'Crafting', 'Brewing', 'Computing', 'Conjuring', 'Cooking', 'Musing', 'Noodling', 'Percolating', 'Ruminating', 'Synthesizing', 'Working', 'Tinkering', 'Mulling', 'Deliberating', 'Churning', 'Forging', 'Hatching', 'Simmering'];
@@ -190,6 +193,7 @@ export class App {
     stdin.setRawMode(true);
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
+    this.watchCopies();
     const cleanup = () => this.restoreTerminal();
     process.on('exit', cleanup);
     process.on('SIGTERM', () => this.exit(143));
@@ -289,6 +293,8 @@ export class App {
     this.restored = true;
     try {
       this.screen.close({ keepTitle: handOver });
+      this.clipboardWatch?.close();
+      if (this.clipboardWatch) this.stdout.write(FOCUS_EVENTS_OFF);
       this.stdout.write(handOver ? ESC.showCursor : ESC.bracketedPasteOff + ESC.showCursor);
       if (!handOver && this.stdin.isTTY) this.stdin.setRawMode(false);
     } catch { /* ignore */ }
@@ -356,6 +362,7 @@ export class App {
       sessionFile: this.store.file,
       modelOverride: cfg.modelOverride,
       effortOverride: cfg.effortOverride,
+      effortBoost: cfg.effortBoost,
       mode: this.runtime.modes.mode,
       todos: this.agent.todos,
       draft: this.editor.text,
@@ -379,6 +386,8 @@ export class App {
     const kept = {};
     if (state.modelOverride) cfg.modelOverride = kept.model = state.modelOverride;
     if (state.effortOverride) cfg.effortOverride = kept.effort = state.effortOverride;
+    // The Effort tool's level holds for the request the restart continues, not for the user's next one.
+    if (state.effortBoost) { cfg.effortBoost = state.effortBoost; cfg.effortBoostKeepNext = Boolean(state.continueWith); }
     // These were chosen with /model and /effort, which are kept for later sessions. One made by a version of
     // the program that did not keep them yet is saved now.
     try { rememberChoice(cfg.provider, kept); } catch { /* it still holds for this session */ }
@@ -462,8 +471,24 @@ export class App {
 
   // ---------------------------------------------------------------- input
 
+  // Say "copied" when the user copies text selected in this terminal, as Claude Code does. The terminal does the
+  // selecting and copying and tells nobody, so the clipboard is watched; focus events (which the terminal sends
+  // once asked to) keep copies made in other windows from being announced. Off with CLAUDE_PRO_COPY_NOTICE=0,
+  // and when not writing to the real terminal (the tests).
+  watchCopies() {
+    if (this.stdout !== process.stdout || !this.stdout.isTTY || /^(0|false|no)$/i.test(process.env.CLAUDE_PRO_COPY_NOTICE || '')) return;
+    this.focused = true;
+    this.clipboardWatch = watchClipboard((chars) => {
+      if (!this.focused || this.exiting) return;
+      this.flash(chars ? `Copied ${chars.toLocaleString()} characters to the clipboard` : 'Copied to the clipboard');
+    });
+    this.stdout.write(FOCUS_EVENTS_ON);
+  }
+
   onKey(str, key) {
     if (this.exiting) return;
+    if (key.sequence === '\x1b[I') { this.focused = true; return; }
+    if (key.sequence === '\x1b[O') { this.focused = false; return; }
     if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
     const dialog = this.dialogs[0];
     if (dialog) {
@@ -1269,7 +1294,9 @@ export class App {
     // The model and effort in use always have a place at the right: with the notice after it when both fit,
     // and the notice alone when they do not (a context warning matters more than the model's name).
     const { model, effort } = modelInfo(cfg);
-    const info = c.dim(effort ? `${model} · ${effort}` : model);
+    // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
+    const level = effort || defaultEffort(cfg.mainModel.id);
+    const info = c.dim(level ? `${model} · effort ${level}` : model);
     const room = w - stringWidth(left) - 1;
     const right = [notice && info ? `${notice}${c.dim(' · ')}${info}` : '', notice, info].find((r) => r && stringWidth(r) < room) || '';
     const gap = room - stringWidth(right);

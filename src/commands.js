@@ -252,6 +252,7 @@ export function buildCommands(app) {
       const next = wanted && wanted !== 'auto' && wanted !== 'default' ? wanted : null;
       if (next !== cfg.effort && !(await confirmCacheLoss('Changing the effort'))) { out(c.dim('The effort was not changed.')); return; }
       cfg.effortOverride = forget ? null : choice;
+      cfg.effortBoost = null; // the user's choice replaces what the model set for itself with the Effort tool
       out(`Effort set to ${c.bold(cfg.effort || 'auto')}${keep(cfg, { effort: cfg.effortOverride }, forget)}`);
     },
   });

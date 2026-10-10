@@ -54,7 +54,7 @@ function mockFetch(t, handle) {
 test('subscription aliases resolve to Claude IDs independently of existing API configuration', () => {
   const cfg = new Config({ CLAUDE_PRO_PROVIDER: 'claude-code', ANTHROPIC_MODEL: 'deepseek-flash', ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash' }, {}, {}, process.cwd());
   assert.equal(cfg.mainModel.id, 'claude-sonnet-5-5');
-  assert.equal(cfg.subagentModel.id, cfg.mainModel.id);
+  assert.equal(cfg.subagentModel.id, 'claude-sonnet-5-5');
   assert.equal(cfg.smallModel.id, 'claude-haiku-4-5-20251001');
   assert.equal(cfg.resolveModel('opus').id, 'claude-opus-5-5');
   assert.equal(cfg.mainModel.contextWindow, 1_000_000);

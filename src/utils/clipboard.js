@@ -141,3 +141,57 @@ export async function readClipboardImage({ source } = {}) {
   if (process.platform === 'darwin') return readMac();
   return readLinux();
 }
+
+// Watch the clipboard and call `onCopy(chars)` when something new is put on it, so that the program can say
+// "copied" after the user copies text selected in the terminal (the terminal itself does not tell the program).
+// Windows only: one long-lived PowerShell that polls the clipboard's sequence number, which is cheap, and leaves
+// when this process is gone. Returns {close()}; elsewhere it never calls back.
+const WATCH_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -Namespace ClaudePro -Name Clip -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();'
+$parent = [int]$env:CLAUDE_PRO_PARENT_PID
+$last = [ClaudePro.Clip]::GetClipboardSequenceNumber()
+$n = 0
+while ($true) {
+  Start-Sleep -Milliseconds 250
+  $seq = [ClaudePro.Clip]::GetClipboardSequenceNumber()
+  if ($seq -ne $last) {
+    $last = $seq
+    Start-Sleep -Milliseconds 50
+    $text = Get-Clipboard -Raw
+    $len = if ($text) { $text.Length } else { 0 }
+    [Console]::Out.WriteLine("COPY $len")
+    [Console]::Out.Flush()
+  }
+  $n++
+  if ($n % 8 -eq 0) { try { [void][System.Diagnostics.Process]::GetProcessById($parent) } catch { exit } }
+}
+`;
+
+export function watchClipboard(onCopy) {
+  if (process.platform !== 'win32') return { close() {} };
+  let child;
+  try {
+    const encoded = Buffer.from(WATCH_SCRIPT, 'utf16le').toString('base64'); // "-Command -" runs a loop line by line, which breaks it
+    child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+      env: { ...process.env, CLAUDE_PRO_PARENT_PID: String(process.pid) }, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return { close() {} };
+  }
+  child.on('error', () => {});
+  let buf = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const m = /^COPY (\d+)/.exec(buf.slice(0, i).trim());
+      buf = buf.slice(i + 1);
+      if (m) { try { onCopy(Number(m[1])); } catch { /* the callback's problem */ } }
+    }
+  });
+  child.unref();
+  child.stdout.unref?.();
+  return { close() { try { child.kill(); } catch { /* gone already */ } } };
+}
