@@ -1,3 +1,4 @@
 node_modules/
-# .env
-# .claude-pro/settings.local.json
+.env
+.claude-pro/settings.local.json
+*.tgz

@@ -6,6 +6,12 @@
   "bin": {
     "claude-pro": "bin/claude-pro.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    ".env.example",
+    "README.md"
+  ],
   "scripts": {
     "start": "node bin/claude-pro.js",
     "check": "node bin/claude-pro.js --self-check",
