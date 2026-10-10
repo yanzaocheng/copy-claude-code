@@ -5,6 +5,29 @@ import { c, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './an
 const PASTE_THRESHOLD_CHARS = 800;
 const PASTE_THRESHOLD_LINES = 8;
 
+// "╭─ left ───── right ─╮", the parts cut short to fit (the start of the directory goes first).
+export function topBorder(boxW, color, title) {
+  const plain = () => color('╭' + '─'.repeat(boxW - 2) + '╮');
+  if (!title || (!title.left && !title.right)) return plain();
+  const room = boxW - 6; // the corners, a dash at each end and a space each side of a part
+  const right = title.right ? truncate(title.right, Math.max(0, Math.floor(room / 3))).replace(/\x1b\[0m$/, '') : '';
+  const rightW = right ? stringWidth(right) + 2 : 0;
+  let left = title.left || '';
+  const leftRoom = room - rightW - (right && left ? 1 : 0) - 2;
+  if (leftRoom < 4) left = '';
+  else if (stringWidth(left) > leftRoom) {
+    const chars = [...left];
+    while (chars.length && stringWidth(chars.join('')) > leftRoom - 1) chars.shift();
+    left = '…' + chars.join('');
+  }
+  if (!left && !right) return plain();
+  const leftPart = left ? ` ${left} ` : '';
+  const rightPart = right ? ` ${right} ` : '';
+  const dashes = boxW - 4 - stringWidth(leftPart) - stringWidth(rightPart);
+  if (dashes < 1) return plain();
+  return color('╭─') + c.dim(leftPart) + color('─'.repeat(dashes)) + (right ? c.blue(rightPart) : '') + color('─╮');
+}
+
 // Start of the line the cursor is on. (lastIndexOf with a negative start still looks at index 0, so a
 // text that begins with a newline made the cursor at 0 appear to be on its second line.)
 function lineStartOf(text, cursor) {
@@ -306,7 +329,8 @@ export class Editor {
   }
 
   // Render as a rounded box. Returns {lines, cursor:{row,col}}.
-  render(width, { placeholder = '', active = true, borderColor } = {}) {
+  // `title`: {left, right}, shown in the top border (left: the directory; right: the session's name).
+  render(width, { placeholder = '', active = true, borderColor, title = null } = {}) {
     const boxW = Math.max(20, width - 1);
     const textW = boxW - 6;
     const mode = this.mode;
@@ -337,7 +361,7 @@ export class Editor {
       if (cur.col >= textW) { rows.push(''); widths.push(0); cur = { row: rows.length - 1, col: 0 }; }
     }
 
-    const lines = [color('╭' + '─'.repeat(boxW - 2) + '╮')];
+    const lines = [topBorder(boxW, color, title)];
     rows.forEach((r, i) => {
       let content = r;
       if (!body && i === 0 && placeholder) content = c.dim(truncate(placeholder, textW));

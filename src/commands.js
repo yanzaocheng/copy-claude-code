@@ -267,8 +267,14 @@ export function buildCommands(app) {
   // Switch the provider (kept in the user settings) and take up its own remembered /model and /effort.
   const switchProvider = (provider) => {
     const cfg = app.runtime.config;
-    const file = settingsFiles(app.cwd).user;
-    updateSettingsFile(file, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_PROVIDER: provider }; });
+    const files = settingsFiles(app.cwd);
+    // The choice goes where the setting that wins is now: a project's settings file overrides the user's,
+    // so writing only the user's file would change nothing in this project.
+    const winning = cfg.sources.CLAUDE_PRO_PROVIDER;
+    const file = [files.local, files.project].includes(winning) ? winning : files.user;
+    const set = (f) => updateSettingsFile(f, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_PROVIDER: provider }; });
+    set(files.user); // the default for the other projects too
+    if (file !== files.user) set(file);
     const model = cfg.mainModel.id;
     reloadConfig();
     cfg.modelOverride = null;
@@ -276,8 +282,8 @@ export function buildCommands(app) {
     cfg.effortBoost = null;
     applyRememberedChoices(cfg, app.flags);
     if (cfg.mainModel.id !== model) app.runtime.invalidateSystemPrompt();
-    const overridden = cfg.sources.CLAUDE_PRO_PROVIDER !== file;
-    return overridden ? c.yellow(` · note: CLAUDE_PRO_PROVIDER is overridden by ${cfg.sources.CLAUDE_PRO_PROVIDER}`) : '';
+    if (cfg.provider !== provider) return c.red(` · NOT switched: CLAUDE_PRO_PROVIDER=${cfg.provider} is set by ${cfg.sources.CLAUDE_PRO_PROVIDER}, which overrides the settings files; change it there`);
+    return file !== files.user ? c.dim(` · also saved in ${displayPath(file, app.cwd)}, which overrides the user settings in this project`) : '';
   };
   const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
   let pendingLogin = null;
@@ -522,6 +528,33 @@ export function buildCommands(app) {
       out(list.length
         ? list.map((t) => `${c.bold(t.id)} ${t.status === 'running' ? c.yellow(t.status) : t.status === 'completed' ? c.green(t.status) : c.red(t.status)} ${c.dim(`${t.subagentType} · ${formatDuration((t.ended || Date.now()) - t.started)}`)} ${truncate(t.description, 60)}`)
         : [c.dim('No background agents. The agent starts them with Task run_in_background.')]);
+    },
+  });
+
+  add({
+    name: 'update',
+    description: `Look for a newer ${APP_NAME} on npm now and install it`,
+    async run() { out(c.dim(`Version ${VERSION} · checking npm…`)); await app.autoUpdate({ force: true }); },
+  });
+
+  add({
+    name: 'peers',
+    aliases: ['sessions'],
+    argHint: '[name NEW-NAME]',
+    description: 'List the other sessions on this machine (send one a task with @name ...), or rename this one',
+    run(args) {
+      const node = app.peers;
+      if (!node) { out(c.dim('Talking to other sessions is off (CLAUDE_PRO_PEERS=0).')); return; }
+      const [action, ...rest] = args.split(/\s+/).filter(Boolean);
+      if (action === 'name' && rest.length) { out(`This session is now ${c.bold('@' + node.setName(rest.join('-')))}`); app.screen.schedule(); return; }
+      const peers = node.peers();
+      out([
+        `This session: ${c.bold('@' + node.name)} ${c.dim(displayPath(node.cwd, app.cwd))}`,
+        ...(peers.length
+          ? peers.map((p) => `${c.bold('@' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`)
+          : [c.dim('No other session is running. Start claude-pro in another terminal.')]),
+        c.dim('Type "@name task" to send a task to a session; its answer is shown here. The agent can use ListPeers / MessagePeer too.'),
+      ]);
     },
   });
 

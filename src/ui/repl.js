@@ -3,6 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { c, ESC, stringWidth, truncate, padEnd, wordWrap } from './ansi.js';
@@ -27,6 +28,8 @@ import { describePause, formatClock, humanDuration, shouldAnnounce } from '../ra
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
+import { checkForUpdate } from '../updater.js';
+import { PeerNode, peersEnabled, findPeer, peerMessagePrompt } from '../peers.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -166,6 +169,9 @@ export class App {
     this.sourceChanged = null; // the program's own source changed since it was last checked
     this.reloading = false;
     this.skipAutoReload = false;
+    this.peers = null; // this session as seen by the other sessions on the machine (see peers.js)
+    this.turnPeers = []; // tasks from other sessions that the running turn answers: [{msg}]
+    this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
     this.fileIndex = new FileIndex(cwd, () => this.runtime?.config);
     this.store = new SessionStore(cwd);
     this.editor = new Editor({
@@ -200,6 +206,7 @@ export class App {
     process.on('SIGTERM', () => this.exit(143));
     process.on('SIGHUP', () => this.exit(129));
 
+    await this.startPeer();
     this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this });
     this.commands = buildCommands(this);
     // Keys typed while starting up stay buffered in stdin until we listen.
@@ -230,6 +237,7 @@ export class App {
     }
     this.fileIndex.refresh();
     this.startSourceWatch();
+    if (!this.noProcessExit && !this.flags.restart) this.autoUpdate();
     return new Promise((resolve) => { this.resolveExit = resolve; });
   }
 
@@ -314,6 +322,7 @@ export class App {
     shutdownBackgroundShells();
     this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
+    this.peers?.close();
     const u = this.agent?.totalUsage();
     if (!restart && u && u.requests) {
       this.screen.log(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
@@ -323,6 +332,60 @@ export class App {
     this.stdin.pause();
     this.resolveExit?.(code);
     if (!this.noProcessExit) setTimeout(() => process.exit(code), 50).unref();
+  }
+
+  // ---------------------------------------------------------------- other sessions (see peers.js)
+
+  // Register this session so that the other sessions on the machine can send it tasks. Not in the tests
+  // (which drive the App themselves) and not with CLAUDE_PRO_PEERS=0.
+  async startPeer() {
+    if (this.noProcessExit || !peersEnabled()) return;
+    try {
+      this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, onMessage: (msg) => this.onPeerMessage(msg) }).start();
+    } catch (e) {
+      this.peers = null;
+      this.notice(`Other sessions cannot reach this one: ${e.message}`, 'warn');
+    }
+  }
+
+  // `byModel`: the MessagePeer tool sent it, so the answer goes to the model; otherwise the user typed
+  // `@name ...` and the answer is only shown (and noted for the model).
+  async sendToPeer(name, text, { byModel = false } = {}) {
+    if (!this.peers) throw new Error('Talking to other sessions is off in this session.');
+    const r = await this.peers.send(name, { text });
+    if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
+    return r;
+  }
+
+  onPeerMessage(msg) {
+    if (this.exiting) return;
+    const from = c.bold(`@${msg.from.name}`);
+    const width = this.width - 1;
+    if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
+      // the answer to something the user sent: shown, and noted for the model, without a turn of its own
+      this.screen.log(`${c.blue('✉')} ${from} ${c.dim('answered:')}`, ...renderMarkdown(msg.text, { width: width - 2 }).map((l) => '  ' + l), '');
+      this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} (${msg.from.cwd}), which answered:\n${msg.text}`);
+      return;
+    }
+    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${msg.text}`;
+    const item = { text: peerMessagePrompt(msg), images: [], display, peer: msg.kind === 'task' ? msg : null };
+    if (this.busy) { this.queue.push(item); this.screen.schedule(); return; }
+    this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });
+  }
+
+  // The turn that handled tasks of other sessions ended: send each its answer.
+  answerPeers(result, error) {
+    const tasks = this.turnPeers.splice(0);
+    if (!tasks.length || !this.peers) return;
+    const text = error ? `The session failed before finishing: ${error.message || error}`
+      : result?.interrupted ? `The user of ${this.peers.name} interrupted the work before it was finished.${result.text ? `\n\nWhat it had written:\n${result.text}` : ''}`
+        : (result?.text || '(no answer text)');
+    for (const msg of tasks) {
+      const peer = findPeer(this.peers.peers(), msg.from.id);
+      if (!peer) { this.notice(`@${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); continue; }
+      this.peers.send(peer, { text, kind: 'reply', inReplyTo: msg.id })
+        .then(() => this.screen.log(c.dim(`  ⎿  Answer sent to @${msg.from.name}`)), (e) => this.notice(`Could not send the answer to @${msg.from.name}: ${e.message}`, 'warn'));
+    }
   }
 
   // ---------------------------------------------------------------- restarting (see restart.js)
@@ -375,6 +438,7 @@ export class App {
       queue: this.queue.map((q) => ({ text: q.text, images: q.images || [] })),
       checkpoints: this.runtime.checkpoints.snapshot(),
       restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), now],
+      peerName: this.peers?.name,
     };
     try {
       writeRestartState(state);
@@ -426,7 +490,7 @@ export class App {
   }
 
   async maybeAutoReload() {
-    if (!this.sourceChanged || this.reloading || this.busy || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
+    if (!this.sourceChanged || this.updating || this.reloading || this.busy || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
     if (this.skipAutoReload) { this.skipAutoReload = false; return; } // the user just interrupted: not now
     if (this.restartBlockers().length) return; // looked at again whenever the program is next idle
     const changed = this.sourceChanged;
@@ -442,6 +506,30 @@ export class App {
     }
     if (this.busy || this.dialogs.length) { this.sourceChanged = changed; return; } // something started meanwhile: later
     this.requestRestart({ reason: 'source changed', force: true });
+  }
+
+  // A newer version on npm is installed in the background (see updater.js) and loaded by a restart once the
+  // session is idle. `force`: the /update command, which also says when there is nothing to do.
+  async autoUpdate({ force = false } = {}) {
+    if (this.updating) { if (force) this.notice('An update is already being installed.'); return; }
+    let r;
+    try {
+      r = await checkForUpdate({ force, env: { ...process.env, ...this.config.env }, onInstalling: (v) => { this.updating = true; this.flash(`Installing ${APP_NAME} ${v}…`); } });
+    } catch (e) {
+      r = { status: 'failed', error: e.message };
+    } finally {
+      this.updating = false;
+    }
+    if (this.exiting) return;
+    if (r.status === 'updated') {
+      this.notice(`${APP_NAME} was updated to ${r.version} (from ${VERSION}); it is loaded by a restart as soon as the session is idle.`);
+      if (canRestart()) { this.sourceChanged = true; if (!this.busy) this.maybeAutoReload(); }
+      else this.notice('Restart the program to use it.');
+    } else if (r.status === 'failed') {
+      if (force || r.version) this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
+    } else if (force) {
+      this.notice(r.status === 'dev' ? `This copy runs from a source checkout (${INSTALL_DIR}): update it with git.` : `${APP_NAME} ${VERSION} is the latest version.`);
+    }
   }
 
   printWelcome() {
@@ -563,11 +651,16 @@ export class App {
       const quoted = m[2] !== undefined;
       const q = quoted ? m[2] : m[3];
       const files = this.fileIndex.search(q);
-      if (!files.length) return null;
+      // At the start of the message `@name` sends it to another session.
+      const peers = !quoted && m.index === 0 && this.peers
+        ? this.peers.peers().filter((p) => p.name.toLowerCase().startsWith(q.toLowerCase()))
+          .map((p) => ({ value: '@' + p.name, label: `@${p.name}`, description: `session · ${displayPath(p.cwd, this.cwd)}` }))
+        : [];
+      if (!files.length && !peers.length) return null;
       // A name with spaces has to be quoted for the mention to be read back as one file. A directory
       // leaves the quote open, so that completion goes on inside it; a file closes it.
       const value = (f) => (quoted || /\s/.test(f) ? (f.endsWith('/') ? `@"${f}` : `@"${f}"`) : '@' + f);
-      return { items: files.map((f) => ({ value: value(f), label: f, noSpace: f.endsWith('/') })), from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
+      return { items: [...peers, ...files.map((f) => ({ value: value(f), label: f, noSpace: f.endsWith('/') }))], from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
     }
     return null;
   }
@@ -576,6 +669,7 @@ export class App {
     const text = value.trim();
     if (!text) { this.screen.schedule(); return; }
     appendHistory(this.cwd, raw);
+    if (this.sendTypedToPeer(text)) return;
     if (this.busy) {
       if (text.startsWith('/')) { this.notice('Wait for the current task to finish (or press Esc) before running commands.', 'warn'); return; }
       this.queue.push({ text: value, images });
@@ -602,11 +696,25 @@ export class App {
     this.startTurn(value);
   }
 
+  // `@name message`, name being another session: the message goes to that session, as a task for it.
+  sendTypedToPeer(text) {
+    const m = /^@([\w.-]+)\s+([\s\S]+)$/.exec(text);
+    if (!m || !this.peers) return false;
+    const peer = findPeer(this.peers.peers(), m[1]);
+    if (!peer || peer.name.toLowerCase() !== m[1].toLowerCase()) return false;
+    this.screen.log(renderUserMessage(text, this.width));
+    this.sendToPeer(peer, m[2].trim()).then(
+      () => this.screen.log(c.dim(`  ⎿  Sent to @${peer.name} (${displayPath(peer.cwd, this.cwd)}); its answer will be shown here`), ''),
+      (e) => this.notice(e.message, 'warn'),
+    );
+    return true;
+  }
+
   shortcutsHelp() {
     const rows = [
       ['! for bash mode', 'double tap esc to clear input'],
       ['/ for commands', 'shift + tab to cycle permission modes'],
-      ['@ for file paths', 'ctrl + o to toggle verbose output'],
+      ['@ for file paths or sessions', 'ctrl + o to toggle verbose output'],
       ['# to memorize', 'ctrl + t to toggle todos'],
       ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
       ['alt + v to paste an image', ''],
@@ -679,7 +787,8 @@ export class App {
   }
 
   // `topic`: what to name the conversation's topic after (default: the message as shown).
-  async startTurn(prompt, { echo = true, display, images = [], topic } = {}) {
+  // `peers`: tasks of other sessions that this turn answers.
+  async startTurn(prompt, { echo = true, display, images = [], topic, peers = [] } = {}) {
     if (echo) this.screen.log(renderUserMessage(display ?? prompt, this.width));
     this.refreshTopic(topic ?? display ?? prompt);
     let content;
@@ -689,7 +798,7 @@ export class App {
       this.logError(e); // nobody awaits this method: an error left to escape would end the program
       return;
     }
-    await this.runAgent(content);
+    await this.runAgent(content, { peers });
   }
 
   // alt+v (ctrl+v where the terminal passes it through): attach an image from the clipboard.
@@ -722,15 +831,18 @@ export class App {
     this.flashTimer = setTimeout(() => this.screen.schedule(), 4100);
   }
 
-  async runAgent(content) {
+  async runAgent(content, { peers = [] } = {}) {
     this.busy = true;
+    this.turnPeers.push(...peers);
+    let result = null;
+    let error = null;
     this.controller = new AbortController();
     this.turnStart = Date.now();
     this.turnTokens = 0;
     this.verb = VERBS[Math.floor(Math.random() * VERBS.length)];
     this.screen.schedule();
     try {
-      const result = await this.agent.run(content, { signal: this.controller.signal });
+      result = await this.agent.run(content, { signal: this.controller.signal });
       if (result.interrupted) {
         this.flushStreaming();
         this.flushActive(true);
@@ -742,11 +854,13 @@ export class App {
         if (this.sourceChanged) this.skipAutoReload = true;
       }
     } catch (e) {
+      error = e;
       this.flushStreaming();
       this.logError(e);
     } finally {
       this.flushStreaming();
       this.flushActive(true);
+      this.answerPeers(result, error);
       this.busy = false;
       this.controller = null;
       this.status = null;
@@ -765,7 +879,11 @@ export class App {
     if (this.restartRequest) { this.restartNow(); return; }
     if (this.queue.length) {
       const next = this.queue.splice(0);
-      this.startTurn(next.map((q) => q.text).join('\n\n'), { images: next.flatMap((q) => q.images) });
+      this.startTurn(next.map((q) => q.text).join('\n\n'), {
+        images: next.flatMap((q) => q.images),
+        display: next.map((q) => q.display ?? q.text).join('\n\n'),
+        peers: next.map((q) => q.peer).filter(Boolean),
+      });
     } else if (this.agent.notifications.length) {
       this.runAgent(this.agent.drainNotifications());
     } else {
@@ -1135,8 +1253,9 @@ export class App {
   takeQueued() {
     if (!this.queue.length) return [];
     const items = this.queue.splice(0);
-    for (const q of items) this.screen.log(renderUserMessage(q.text, this.width));
-    this.refreshTopic(items.map((q) => q.text).join('\n\n'));
+    for (const q of items) this.screen.log(renderUserMessage(q.display ?? q.text, this.width));
+    this.turnPeers.push(...items.map((q) => q.peer).filter(Boolean));
+    this.refreshTopic(items.map((q) => q.display ?? q.text).join('\n\n'));
     // Content blocks for the agent: each queued message's text followed by its images.
     return items.flatMap((q) => [{ type: 'text', text: q.text }, ...q.images.map(imageBlock)]);
   }
@@ -1265,11 +1384,11 @@ export class App {
       return { lines, cursor };
     }
     if (this.queue.length) {
-      for (const q of this.queue) lines.push(c.dim('  ⎿ queued: ') + c.gray(truncate(q.text.replace(/\s+/g, ' '), w - 14)));
+      for (const q of this.queue) lines.push(c.dim('  ⎿ queued: ') + c.gray(truncate((q.display ?? q.text).replace(/\s+/g, ' '), w - 14)));
     }
     if (lines.length) lines.push('');
     const placeholder = this.busy ? 'Type a message to queue it for the agent…' : (this.agent.messages.length ? '' : 'Try "explain this codebase" or "fix the failing test"');
-    const r = this.editor.render(width, { placeholder });
+    const r = this.editor.render(width, { placeholder, title: this.boxTitle() });
     const top = lines.length;
     lines.push(...r.lines);
     if (r.cursor) cursor = { row: top + r.cursor.row, col: r.cursor.col };
@@ -1277,6 +1396,15 @@ export class App {
     else if (this.editor.text === '?') lines.push(...this.shortcutsHelp());
     else lines.push(this.footer(w));
     return { lines, cursor };
+  }
+
+  // In the input box's top border: the directory the agent is in now (a `cd` moves it), and this
+  // session's name for the other sessions.
+  boxTitle() {
+    const dir = this.agent?.cwd || this.cwd;
+    const home = os.homedir();
+    const shown = dir.toLowerCase().startsWith(home.toLowerCase()) ? '~' + dir.slice(home.length) : dir;
+    return { left: shown.replace(/\\/g, '/'), right: this.peers ? `@${this.peers.name}` : '' };
   }
 
   footer(w) {

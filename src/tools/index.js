@@ -8,10 +8,12 @@ import { NotebookEditTool } from './notebook.js';
 import { makeSkillTool } from './skill.js';
 import { RestartTool } from './restart.js';
 import { makeEffortTool } from './effort.js';
+import { ListPeersTool, MessagePeerTool } from './peers.js';
 
 // Build the full tool set for the main agent.
 // `restart`: this session can restart itself (it runs under the supervisor), so it gets the Restart tool.
-export function buildTools(config, { agents, skills, mcpTools = [], restart = false }) {
+// `peers`: an interactive session, which can talk to the other sessions on this machine.
+export function buildTools(config, { agents, skills, mcpTools = [], restart = false, peers = false }) {
   return [
     makeTaskTool(agents),
     ...(skills?.size ? [makeSkillTool(skills)] : []),
@@ -33,12 +35,13 @@ export function buildTools(config, { agents, skills, mcpTools = [], restart = fa
     AskUserQuestionTool,
     makeEffortTool(config),
     ...(restart ? [RestartTool] : []),
+    ...(peers ? [ListPeersTool, MessagePeerTool] : []),
     ...mcpTools,
   ];
 }
 
 // Effort: a sub-agent shares the main agent's settings, so it must not change them.
-const NEVER_FOR_SUBAGENTS = new Set(['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion', 'Restart', 'Effort']);
+const NEVER_FOR_SUBAGENTS = new Set(['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion', 'Restart', 'Effort', 'ListPeers', 'MessagePeer']);
 
 // Tools for a sub-agent. `allowTask`: it is below the nesting limit, so it may start sub-agents of its own.
 export function toolsForSubagent(allTools, def, { allowTask = false } = {}) {

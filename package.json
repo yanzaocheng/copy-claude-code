@@ -1,8 +1,14 @@
 {
-  "name": "claude-pro",
+  "name": "@yanzc/claude-pro",
   "version": "0.4.0",
   "description": "claude-pro: a self-implemented coding agent for Anthropic-compatible APIs or local Claude Code subscription login. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yanzaocheng/copy-claude-code.git"
+  },
+  "homepage": "https://github.com/yanzaocheng/copy-claude-code#readme",
+  "keywords": ["claude", "coding-agent", "cli", "anthropic", "ai"],
   "bin": {
     "claude-pro": "bin/claude-pro.js"
   },
@@ -10,7 +16,8 @@
     "bin/",
     "src/",
     ".env.example",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "start": "node bin/claude-pro.js",
@@ -20,12 +27,14 @@
   "engines": {
     "node": ">=22"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0"
   },
   "devDependencies": {
     "@xterm/headless": "^6.0.0"
-  },
-  "private": true
+  }
 }

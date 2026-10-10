@@ -41,7 +41,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   runtime.skills = loadSkills(cwd);
   // The self-check builds the Restart tool too, so that a mistake in it is found before a restart relies on it.
   const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
-  runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools(), restart: restartable });
+  runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools(), restart: restartable, peers: Boolean(io?.peers) || process.env.CLAUDE_PRO_SELF_CHECK === '1' });
 
   // The system prompt is built once and kept for the conversation: a prompt that changes in the middle of it
   // cannot be read from the prompt cache. So a change to what it is built from (memory, configuration) waits

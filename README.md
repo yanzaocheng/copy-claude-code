@@ -21,8 +21,20 @@
 
 需要 Node.js 22+。Windows 上 Bash 工具使用 Git Bash（与 Claude Code 相同），会自动查找，也可以用 `CLAUDE_CODE_GIT_BASH_PATH` 指定。
 
+从 npm 安装（推荐）：
+
 ```bash
-cd D:\d\node\copy-claude-code
+npm install -g @yanzc/claude-pro
+claude-pro                 # 在任意项目目录里运行
+```
+
+自动更新（与 Claude Code 一样）：用 npm 全局安装的版本每 6 小时最多查一次 npm 上的最新版，有新版就在后台 `npm install -g @yanzc/claude-pro@新版本`，装好后在会话空闲时自动重启加载，对话保留。`/update` 立即检查；`CLAUDE_PRO_AUTO_UPDATE=0` 或 `DISABLE_AUTOUPDATER=1` 关闭。从源码运行（git 检出）的副本从不自动更新。
+
+从源码运行：
+
+```bash
+git clone https://github.com/yanzaocheng/copy-claude-code.git
+cd copy-claude-code
 npm install
 node bin/claude-pro.js     # 直接运行
 npm link                   # 注册全局命令 claude-pro，之后在任意项目目录里输入 claude-pro
