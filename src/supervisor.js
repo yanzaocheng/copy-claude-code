@@ -49,7 +49,7 @@ export function shouldSupervise(argv, env = process.env, isTty = (fd) => tty.isa
 function putTerminalRight() {
   // The child may have died with the terminal in the mode it had set for itself.
   // (the fullscreen renderer's alternate screen and mouse reporting included)
-  try { process.stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?1049l\x1b[?2004l\x1b[?25h'); } catch { /* nothing to do */ }
+  try { process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1049l\x1b[?2004l\x1b[?25h'); } catch { /* nothing to do */ }
   try { if (tty.isatty(0)) process.stdin.setRawMode(false); } catch { /* nothing to do */ }
 }
 

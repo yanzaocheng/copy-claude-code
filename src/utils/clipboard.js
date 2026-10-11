@@ -135,6 +135,35 @@ async function readLinux() {
   return { error: null };
 }
 
+// Put `text` on the system clipboard (the fullscreen renderer's selection): Windows PowerShell (read as UTF-8 from
+// stdin, so any text and any length), pbcopy on macOS, wl-copy / xclip / xsel elsewhere. Resolves with whether
+// one of them took it.
+export async function writeClipboard(text) {
+  const tries = process.platform === 'win32'
+    ? [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$s=[IO.StreamReader]::new([Console]::OpenStandardInput(),[Text.Encoding]::UTF8).ReadToEnd(); Set-Clipboard -Value $s']]]
+    : process.platform === 'darwin'
+      ? [['pbcopy', []]]
+      : [['wl-copy', []], ['xclip', ['-selection', 'clipboard']], ['xsel', ['--clipboard', '--input']]];
+  for (const [cmd, args] of tries) {
+    const ok = await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(cmd, args, { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+      } catch {
+        resolve(false);
+        return;
+      }
+      const timer = setTimeout(() => child.kill(), 10_000);
+      child.on('error', () => { clearTimeout(timer); resolve(false); });
+      child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+      child.stdin.on('error', () => {});
+      child.stdin.end(Buffer.from(process.platform === 'win32' ? text.replace(/\r?\n/g, '\r\n') : text, 'utf8'));
+    });
+    if (ok) return true;
+  }
+  return false;
+}
+
 // Returns {image} on success, {error: string} on failure, or {error: null} when the clipboard has no image.
 export async function readClipboardImage({ source } = {}) {
   if (process.platform === 'win32') return readWindows(source);

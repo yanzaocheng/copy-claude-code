@@ -309,3 +309,40 @@ test('fullscreen: mouse reports are taken out of the keys, also when a report co
   assert.equal(text, 'abcd\x1b', 'the keys, an Esc at the end included');
   assert.deepEqual(mouse.map((m) => m.button), [64, 65]);
 });
+
+test('fullscreen: a drag selects (shown inverted) and gives the text to copy; a click clears it; double and triple clicks; a click on the bar jumps to the bottom', async () => {
+  const t = setup({ cols: 60, rows: 14 });
+  t.screen.setFull(true);
+  for (let i = 1; i <= 30; i++) t.screen.log(`row ${i} alpha beta`);
+  await t.settle();
+  const rows = await t.rows();
+  const y = rows.indexOf('row 25 alpha beta') + 1; // 1-based, as the terminal reports
+  const press = (x, yy, extra = {}) => t.screen.mouse({ button: 0, x, y: yy, release: false, ...extra });
+  assert.equal(press(5, y), null);
+  assert.equal(t.screen.mouse({ button: 32, x: 11, y: y + 1, release: false }), null);
+  const done = t.screen.mouse({ button: 0, x: 11, y: y + 1, release: true });
+  assert.deepEqual(done, { copy: '25 alpha beta\nrow 26 alph' });
+  await t.flush();
+  const line = t.term.buffer.active.getLine(t.term.buffer.active.baseY + y - 1);
+  assert.equal(line.getCell(3).isInverse(), 0, 'before the selection: as it was');
+  assert.ok(line.getCell(4).isInverse(), 'the selection is drawn inverted');
+  // the selection stays on its text when the view scrolls
+  t.screen.scrollBy(2);
+  assert.equal(t.screen.selectedText(), '25 alpha beta\nrow 26 alph');
+  t.screen.scrollBy('bottom');
+  // a click (no drag) clears it
+  press(5, y);
+  assert.equal(t.screen.mouse({ button: 0, x: 5, y, release: true }), null);
+  assert.equal(t.screen.selection, null);
+  // double click: a word; a third: the line
+  await new Promise((r) => setTimeout(r, 500));
+  press(9, y); t.screen.mouse({ button: 0, x: 9, y, release: true });
+  assert.deepEqual(press(9, y), { copy: 'alpha' });
+  t.screen.mouse({ button: 0, x: 9, y, release: true });
+  assert.deepEqual(press(9, y), { copy: 'row 25 alpha beta' });
+  // scrolled up, a click on the "Jump to bottom" bar goes there
+  t.screen.scrollBy(6);
+  assert.ok(t.screen.scroll > 0);
+  press(30, t.screen.barRow + 1);
+  assert.equal(t.screen.scroll, 0);
+});

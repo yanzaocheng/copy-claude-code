@@ -29,7 +29,7 @@
 // of a restart) goes on right below the output.
 
 import { PassThrough } from 'node:stream';
-import { ESC, wrapLine, termWidth, truncate, stringWidth } from './ansi.js';
+import { ESC, wrapLine, termWidth, truncate, stringWidth, stripAnsi, graphemes, graphemeWidth } from './ansi.js';
 
 const SYNC_START = '\x1b[?2026h';
 const SYNC_END = '\x1b[?2026l';
@@ -39,8 +39,24 @@ const RESIZE_MAX_WAIT_MS = 300; // ... or at the latest this long after it start
 const HISTORY_KEEP = 600; // static lines remembered for repainting (a screen shows far fewer)
 const HISTORY_LINE_CHARS = 20_000;
 const FULL_KEEP = 20_000; // fullscreen: lines of the conversation kept to scroll back through
-const ALT_ON = '\x1b[?1049h\x1b[?1000h\x1b[?1006h'; // the alternate screen, and mouse buttons and wheel reported (SGR)
-const ALT_OFF = '\x1b[?1000l\x1b[?1006l\x1b[?1049l';
+// The alternate screen, and the mouse reported (SGR): buttons, the wheel, and moves while a button is held (a drag).
+const ALT_ON = '\x1b[?1049h\x1b[?1002h\x1b[?1006h';
+const ALT_OFF = '\x1b[?1002l\x1b[?1006l\x1b[?1049l';
+const MULTI_CLICK_MS = 450;
+
+// The part of `plain` (no escape codes) between columns `from` (included) and `to` (not).
+function sliceCols(plain, from, to) {
+  let out = '';
+  let col = 0;
+  for (const g of graphemes(plain)) {
+    if (col >= to) break;
+    if (col >= from) out += g;
+    col += graphemeWidth(g);
+  }
+  return out;
+}
+
+const before = (a, b) => a.line < b.line || (a.line === b.line && (a.sub < b.sub || (a.sub === b.sub && a.col <= b.col)));
 const MOUSE = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
 
 // The keys of `stdin` without the mouse reports in it (SGR: ESC [ < b ; x ; y M/m), which go to
@@ -128,6 +144,11 @@ export class Screen {
     this.wrapped = []; // fullscreen: history[i] wrapped to wrapCols - 1, made when first needed
     this.wrapCols = 0;
     this.lastArea = 0; // fullscreen: rows the conversation had on screen at the last draw
+    this.viewMap = []; // fullscreen: what each row of the conversation area shows, {line, sub} (null: blank)
+    this.barRow = null; // fullscreen: the row of the "Jump to bottom" bar, when it is shown
+    this.selection = null; // fullscreen: {anchor, focus}, points {line, sub, col} of the conversation (history line, wrapped row, column)
+    this.dragging = false;
+    this.lastClick = { at: 0, x: 0, y: 0, count: 0 };
     this.cursorRow = 0; // row of the terminal cursor, relative to the top of the live region
     this.staticQueue = [];
     this.history = []; // the most recent static lines, for repainting after a resize
@@ -201,7 +222,7 @@ export class Screen {
   }
 
   wrappedAt(i, cols) {
-    if (this.wrapCols !== cols) { this.wrapped = []; this.wrapCols = cols; }
+    if (this.wrapCols !== cols) { this.wrapped = []; this.wrapCols = cols; this.selection = null; } // its rows are other rows now
     return (this.wrapped[i] ??= wrapLine(this.history[i], Math.max(1, cols - 1)));
   }
 
@@ -212,15 +233,147 @@ export class Screen {
     return n;
   }
 
-  // `rows` rows of the conversation, ending `this.scroll` rows above its end; padded below when it is shorter.
+  // `rows` rows of the conversation, ending `this.scroll` rows above its end, as {text, line, sub}; padded below
+  // with null when it is shorter.
   view(rows, cols) {
     const need = rows + this.scroll;
-    const got = [];
-    for (let i = this.history.length - 1; i >= 0 && got.length < need; i--) got.unshift(...this.wrappedAt(i, cols));
+    const chunks = [];
+    let count = 0;
+    for (let i = this.history.length - 1; i >= 0 && count < need; i--) {
+      const w = this.wrappedAt(i, cols);
+      chunks.push(w.map((text, sub) => ({ text, line: i, sub })));
+      count += w.length;
+    }
+    const got = chunks.reverse().flat();
     const end = Math.max(0, got.length - this.scroll);
     const shown = got.slice(Math.max(0, end - rows), end);
-    while (shown.length < rows) shown.push('');
+    while (shown.length < rows) shown.push(null);
     return shown;
+  }
+
+  // ------------------------------------------------------------ selecting with the mouse (fullscreen)
+
+  // The selection in order: [start, end].
+  ordered() {
+    const { anchor, focus } = this.selection;
+    return before(anchor, focus) ? [anchor, focus] : [focus, anchor];
+  }
+
+  // The columns of row {line, sub} that are selected: [from, to), or null.
+  selectedCols(e) {
+    if (!this.selection) return null;
+    const [a, b] = this.ordered();
+    const row = { line: e.line, sub: e.sub, col: 0 };
+    if (before(row, { ...a, col: -1 }) || !before({ ...row, col: 0 }, { ...b, col: Infinity })) return null;
+    const from = e.line === a.line && e.sub === a.sub ? a.col : 0;
+    const to = e.line === b.line && e.sub === b.sub ? b.col + 1 : Infinity;
+    return to > from ? [from, to] : null;
+  }
+
+  paintRow(e) {
+    const cols = this.selectedCols(e);
+    if (!cols) return e.text;
+    const plain = stripAnsi(e.text);
+    return sliceCols(plain, 0, cols[0]) + '\x1b[7m' + sliceCols(plain, cols[0], cols[1]) + '\x1b[27m' + sliceCols(plain, cols[1], Infinity);
+  }
+
+  // The text selected, as it was printed: rows a long line was wrapped onto are joined again.
+  selectedText() {
+    if (!this.selection) return '';
+    const cols = this.width;
+    const [a, b] = this.ordered();
+    const lines = [];
+    for (let line = a.line; line <= b.line && line < this.history.length; line++) {
+      const rows = this.wrappedAt(line, cols);
+      let text = '';
+      rows.forEach((row, sub) => {
+        const range = this.selectedCols({ line, sub });
+        if (range) text += sliceCols(stripAnsi(row), range[0], range[1]);
+      });
+      lines.push(text.replace(/\s+$/, ''));
+    }
+    return lines.join('\n');
+  }
+
+  clearSelection() {
+    if (!this.selection) return false;
+    this.selection = null;
+    this.dragging = false;
+    this.draw();
+    return true;
+  }
+
+  // The point of the conversation at screen cell (x, y), 1-based: the nearest row that shows some of it.
+  pointAt(x, y) {
+    let i = Math.max(0, Math.min(this.lastArea - 1, y - 1));
+    while (i > 0 && !this.viewMap[i]) i--;
+    const e = this.viewMap[i];
+    return e ? { line: e.line, sub: e.sub, col: Math.max(0, x - 1) } : null;
+  }
+
+  // Word (`whole`: the whole line) around point `p`.
+  expand(p, whole) {
+    const rows = this.wrappedAt(p.line, this.width);
+    if (whole) return { anchor: { line: p.line, sub: 0, col: 0 }, focus: { line: p.line, sub: rows.length - 1, col: Infinity } };
+    const cells = [];
+    for (const g of graphemes(stripAnsi(rows[p.sub] || ''))) {
+      for (let k = 0; k < Math.max(1, graphemeWidth(g)); k++) cells.push(g);
+    }
+    const word = (g) => g !== undefined && !/\s/.test(g);
+    if (!word(cells[p.col])) return null;
+    let from = p.col;
+    let to = p.col;
+    while (word(cells[from - 1])) from--;
+    while (word(cells[to + 1])) to++;
+    return { anchor: { ...p, col: from }, focus: { ...p, col: to } };
+  }
+
+  // A mouse report (fullscreen). Returns {copy: text} when a selection was made, for the caller to put on the
+  // clipboard. Drag to select (the view scrolls at its edges), double-click a word, triple-click a line; a click
+  // clears the selection; a click on the "Jump to bottom" bar goes there.
+  mouse({ button, x, y, release }) {
+    if (!this.full || this.closed) return null;
+    if (button & 64) return null; // the wheel: the caller scrolls
+    const left = (button & 3) === 0;
+    if (!left) return null;
+    const motion = Boolean(button & 32);
+    if (!motion && !release) { // a press
+      const now = Date.now();
+      const c = this.lastClick;
+      const count = now - c.at < MULTI_CLICK_MS && Math.abs(c.x - x) <= 1 && c.y === y ? c.count + 1 : 1;
+      this.lastClick = { at: now, x, y, count };
+      if (this.barRow !== null && y - 1 === this.barRow) { this.selection = null; this.scrollBy('bottom'); return null; }
+      if (y - 1 >= this.lastArea) { this.clearSelection(); return null; } // the input box, the footer
+      const p = this.pointAt(x, y);
+      if (!p) { this.clearSelection(); return null; }
+      if (count >= 2) {
+        const sel = this.expand(p, count >= 3);
+        this.selection = sel;
+        this.dragging = false;
+        this.draw();
+        const text = sel ? this.selectedText() : '';
+        return text ? { copy: text } : null;
+      }
+      this.selection = { anchor: p, focus: { ...p }, moved: false };
+      this.dragging = true;
+      return null;
+    }
+    if (!this.dragging || !this.selection) return null;
+    if (motion) {
+      // past the top or the bottom of the conversation: it scrolls, and the selection goes on with it
+      if (y <= 1) this.scrollBy(1);
+      else if (y - 1 >= this.lastArea - 1 && this.scroll > 0) this.scrollBy(-1);
+      const p = this.pointAt(x, y);
+      if (p) { this.selection.focus = p; this.selection.moved = true; }
+      this.draw();
+      return null;
+    }
+    // released
+    this.dragging = false;
+    if (!this.selection.moved) { this.clearSelection(); return null; } // a plain click
+    this.lastClick.count = 0; // a drag: the next click starts a count of its own
+    const text = this.selectedText();
+    return text ? { copy: text } : null;
   }
 
   // Scroll the conversation up (`rows` > 0) or down. 'top' and 'bottom' go to its ends.
@@ -254,8 +407,11 @@ export class Screen {
     const layout = this.layoutLive(cols);
     const area = Math.max(0, screenRows - layout.rows.length);
     this.lastArea = area;
-    const top = this.view(area, cols);
-    if (this.scroll > 0 && area > 0) top[area - 1] = this.jumpBar(cols);
+    const shown = this.view(area, cols);
+    this.viewMap = shown;
+    const top = shown.map((e) => (e ? this.paintRow(e) : ''));
+    this.barRow = this.scroll > 0 && area > 0 ? area - 1 : null;
+    if (this.barRow !== null) top[this.barRow] = this.jumpBar(cols);
     const frame = [...top, ...layout.rows];
     let buf = SYNC_START + ESC.hideCursor + this.titleUpdate();
     if (full) { buf += '\x1b[2J'; this.frame = []; }
@@ -318,6 +474,10 @@ export class Screen {
       const drop = this.history.length - keep;
       this.history.splice(0, drop);
       this.wrapped.splice(0, drop);
+      if (this.selection) {
+        for (const p of [this.selection.anchor, this.selection.focus]) p.line -= drop;
+        if (this.selection.anchor.line < 0 || this.selection.focus.line < 0) this.selection = null;
+      }
     }
     return lines;
   }
@@ -472,6 +632,7 @@ export class Screen {
     if (this.full) {
       this.history = [];
       this.wrapped = [];
+      this.selection = null;
       this.scroll = 0;
       this.unseen = 0;
       this.staticQueue = [];

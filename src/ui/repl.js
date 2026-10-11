@@ -27,7 +27,7 @@ import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
-import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
+import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard } from '../utils/clipboard.js';
 import { fitImagesIn } from '../utils/images.js';
 import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
 import { copyUnique } from '../transfer.js';
@@ -1077,25 +1077,46 @@ export class App {
     return mode === 'fullscreen' && this.stdout.isTTY !== false;
   }
 
-  // Fullscreen: the wheel scrolls the conversation (CLAUDE_PRO_SCROLL_SPEED rows a notch, 3 by default).
-  onMouse({ button }) {
-    if (!this.screen.full || this.exiting || !(button & 64) || button & 128) return;
-    const speed = Math.max(1, Math.min(20, Number(this.config.env.CLAUDE_PRO_SCROLL_SPEED) || 3));
-    this.screen.scrollBy(button & 1 ? -speed : speed);
+  // Fullscreen: the wheel scrolls the conversation (CLAUDE_PRO_SCROLL_SPEED rows a notch, 3 by default); a drag,
+  // a double or a triple click selects, and what is selected goes to the clipboard (see Screen.mouse).
+  onMouse(m) {
+    if (!this.screen.full || this.exiting) return;
+    if (m.button & 64) {
+      if (m.button & 128) return;
+      const speed = Math.max(1, Math.min(20, Number(this.config.env.CLAUDE_PRO_SCROLL_SPEED) || 3));
+      this.screen.scrollBy(m.button & 1 ? -speed : speed);
+      return;
+    }
+    const r = this.screen.mouse(m);
+    if (r?.copy) this.copyText(r.copy);
+  }
+
+  copyText(text) {
+    writeClipboard(text).then((ok) => {
+      if (ok) this.flash(`Copied ${text.length.toLocaleString()} characters to the clipboard`);
+      else this.flash('Could not copy: no clipboard tool found (hold Shift and drag to select with the terminal)', 'warn');
+    });
   }
 
   onKey(str, key) {
     if (this.exiting) return;
     if (key.sequence === '\x1b[I') { this.focused = true; return; }
     if (key.sequence === '\x1b[O') { this.focused = false; return; }
-    if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
     if (this.screen.full) {
       const half = Math.max(1, Math.floor((this.screen.lastArea || this.screen.height) / 2));
       if (key.name === 'pageup') { this.screen.scrollBy(half); return; }
       if (key.name === 'pagedown') { this.screen.scrollBy(-half); return; }
       if (key.ctrl && key.name === 'home') { this.screen.scrollBy('top'); return; }
       if (key.ctrl && key.name === 'end') { this.screen.scrollBy('bottom'); return; }
+      // A selection: ctrl+c copies it (and does not interrupt), esc only clears it, any other key clears it and
+      // then does what it does.
+      if (this.screen.selection) {
+        if (key.ctrl && key.name === 'c') { this.copyText(this.screen.selectedText()); this.screen.clearSelection(); return; }
+        this.screen.clearSelection();
+        if (key.name === 'escape') return;
+      }
     }
+    if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
     const dialog = this.dialogs[0];
     if (dialog) {
       dialog.handleKey(str, key);
