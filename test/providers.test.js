@@ -79,7 +79,8 @@ test('thinking made from Codex reasoning (cgw1:) goes to the Codex backend only;
   assert.deepEqual(replies(send(gpt, history))[0], [codexThinking, { type: 'text', text: 'b' }], 'a GPT model replays it');
   assert.deepEqual(replies(send(config({ CLAUDE_PRO_PROVIDER: 'codex' }), history))[1], [codexThinking]);
 
-  // A tool loop begun by a GPT model and carried on by Claude: no thinking until the next prompt.
+  // A tool loop begun by a GPT model and carried on by Claude: `thinking` left out until the next prompt ("disabled"
+  // is refused by Opus 5.5, Fable and Sonnet 5.5; left out, they think adaptively and older models do not think).
   const loop = [
     { role: 'user', content: 'a' },
     { role: 'assistant', content: [codexThinking, { type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
@@ -87,9 +88,13 @@ test('thinking made from Codex reasoning (cgw1:) goes to the Codex backend only;
   ];
   const first = send(claude, loop);
   assert.deepEqual(first.messages[1].content, [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }]);
-  assert.deepEqual(first.thinking, { type: 'disabled' });
+  assert.equal(first.thinking, undefined);
   const carried = [...loop, { role: 'assistant', content: [{ type: 'tool_use', id: 't2', name: 'Read', input: {} }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't2', content: 'ok' }] }];
-  assert.deepEqual(send(claude, carried).thinking, { type: 'disabled' }, 'Claude\'s own steps in that loop have no thinking either');
+  assert.equal(send(claude, carried).thinking, undefined, 'Claude\'s own steps in that loop have no thinking budget either');
+  // An interrupted GPT tool loop, then new prompts: they merge into the tool_result message, so the loop goes on.
+  const opus = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'claude-opus-5-5', MAX_THINKING_TOKENS: '0' });
+  const resumed = [loop[0], loop[1], { role: 'user', content: [...loop[2].content, { type: 'text', text: '[Request interrupted by user]' }, { type: 'text', text: '继续' }] }];
+  assert.equal(send(opus, resumed).thinking, undefined);
   const next = [...carried, { role: 'assistant', content: [{ type: 'text', text: 'done' }] }, { role: 'user', content: 'next' }];
   assert.equal(send(claude, next).thinking.type, 'enabled');
 });
@@ -97,6 +102,7 @@ test('thinking made from Codex reasoning (cgw1:) goes to the Codex backend only;
 test('gateway login: browser round trip, code exchange, key saved privately; requests use it', async (t) => {
   const seen = [];
   const bodies = [];
+  const sessions = []; // the X-Claude-Code-Session-Id of each /v1/messages request
   const gateway = http.createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
@@ -112,6 +118,7 @@ test('gateway login: browser round trip, code exchange, key saved privately; req
     }
     if (req.url.startsWith('/v1/messages')) {
       bodies.push(JSON.parse(body));
+      sessions.push(req.headers['x-claude-code-session-id'] ?? null);
     }
     if (req.url === '/cli/token') {
       const { code, state } = JSON.parse(body);
@@ -162,6 +169,11 @@ test('gateway login: browser round trip, code exchange, key saved privately; req
   const res = await streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] });
   assert.equal(res.message.content[0].text, 'hi');
   assert.ok(seen.includes('POST /v1/messages Bearer gw_live_test'), seen.join('\n'));
+  assert.equal(sessions.at(-1), null, 'no session, no header');
+  // The conversation's id names it to the gateway, which keeps it on the upstream account that has its cache.
+  cfg.sessionId = 'session-1';
+  await streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(sessions.at(-1), 'session-1');
 
   // Two GPT conversations use the gateway's per-model metadata, not the local Codex cache or each other's context.
   const sol = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: url, CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol', CLAUDE_CODE_EFFORT_LEVEL: 'ultra' });

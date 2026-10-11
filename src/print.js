@@ -62,6 +62,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     store.systemPrompt = loaded.systemPrompt;
     runtime.resumeSystemPrompt(loaded.systemPrompt); // continue behind the prompt (and the cache) the conversation had
   }
+  runtime.config.sessionId = store.id; // sent to the gateway with each request (see streamMessage)
   const ctrl = new AbortController();
   const onSigint = () => ctrl.abort();
   process.on('SIGINT', onSigint);

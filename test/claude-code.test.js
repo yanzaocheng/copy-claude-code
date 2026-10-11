@@ -204,3 +204,20 @@ test('a model that does not take an effort level is retried without it, and reme
   assert.deepEqual(seen, ['high', null, null], 'and not asked again');
   assert.equal(effortSupported(cfg.mainModel.id), true, 'other models keep theirs');
 });
+
+test('MAX_THINKING_TOKENS=0 on a model whose thinking cannot be turned off: retried without thinking, and remembered', async (t) => {
+  const { cfg } = fixture(t);
+  cfg.env.MAX_THINKING_TOKENS = '0';
+  const seen = [];
+  mockFetch(t, async (url, options) => {
+    const params = JSON.parse(options.body);
+    seen.push(params.thinking?.type ?? null);
+    if (params.thinking?.type === 'disabled') return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    return sse([{ type: 'text', text: 'fine' }]);
+  });
+  const model = cfg.resolveModel('claude-opus-5-5');
+  const ask = () => streamMessage(cfg, { model, system: 's', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal((await ask()).message.content[0].text, 'fine');
+  await ask();
+  assert.deepEqual(seen, ['disabled', null, null]);
+});

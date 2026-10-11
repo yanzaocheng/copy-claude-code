@@ -193,6 +193,9 @@ const outputCaps = new Map();
 // Models that refused the effort parameter (Haiku does): it is left out for them from then on.
 const noEffort = new Set();
 export const effortSupported = (modelId) => !noEffort.has(modelId);
+// Models that refused thinking "disabled" (MAX_THINKING_TOKENS=0): Opus 5.5, Fable, Sonnet 5.5, and Opus 5 at a
+// high effort. Their requests leave `thinking` out from then on, which is adaptive thinking.
+const thinkingStaysOn = new Set();
 
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
 // the other models that take one; for a GPT model, the gateway's metadata or the local Codex models cache. null for
@@ -243,8 +246,10 @@ export function parseMaxTokensLimit(message) {
 // Codex backend only: Anthropic refuses their signatures ("Invalid `signature` in `thinking` block"), so a
 // conversation that moves from a GPT model to Claude, or to another provider, sends them without those blocks.
 // The session keeps them, for a later switch back. `inTurn`: blocks were taken out of the turn in progress (the
-// tool loop since the last prompt), whose assistant messages Anthropic wants to start with thinking when thinking
-// is on; such a turn goes on without thinking until the next prompt.
+// tool loop since the last prompt), whose assistant messages Anthropic wants to start with thinking when a thinking
+// budget is set; such a turn's requests leave `thinking` out until the next prompt. That is no thinking on older
+// models and adaptive thinking on those that cannot turn it off (Opus 5.5, Fable, Sonnet 5.5 refuse "disabled"),
+// which takes assistant messages without thinking.
 const isCodexThinking = (b) => b?.type === 'thinking' && typeof b.signature === 'string' && b.signature.startsWith(SIGNATURE_PREFIX);
 const isPrompt = (m) => m.role === 'user' && !(Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_result'));
 function withoutCodexThinking(messages) {
@@ -294,9 +299,9 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
   const eff = effortToSend(config, model.id, (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id, config) : null));
   if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
   const budget = config.thinkingBudget;
-  if (budget === 0) params.thinking = { type: 'disabled' };
+  if (budget === 0 && !thinkingStaysOn.has(model.id)) params.thinking = { type: 'disabled' };
   else if (budget > 0) params.thinking = { type: 'enabled', budget_tokens: Math.min(budget, params.max_tokens - 1) };
-  if (turnLostThinking) params.thinking = { type: 'disabled' };
+  if (turnLostThinking) delete params.thinking;
   return params;
 }
 
@@ -365,6 +370,9 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   }
   let client = getClient(config, login);
   const params = buildParams(config, request, login);
+  // The gateway keeps a conversation on the upstream account that served it, where its prompt cache is; the
+  // session id names the conversation, in the header Claude Code sends it in.
+  const options = { signal, ...(config.usesGateway && config.sessionId ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) };
   let authReloaded = false;
   const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
   const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0, overloaded: 0, overloadedWaitMs: 0 };
@@ -373,7 +381,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
     let emitted = false;
     const startedAt = Date.now(); // the cache TTL counts from the start of the request, not from the end of the reply
     try {
-      const stream = await client.messages.create(params, { signal });
+      const stream = await client.messages.create(params, options);
       if (paused) {
         const overloaded = paused.overloaded;
         paused = null;
@@ -475,6 +483,12 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       if (err.status === 400 && params.output_config && /does not support the effort parameter/i.test(err.message)) {
         noEffort.add(params.model);
         delete params.output_config;
+        continue;
+      }
+      // A model whose thinking cannot be turned off: carry on with its adaptive thinking.
+      if (err.status === 400 && params.thinking?.type === 'disabled' && /thinking\.type\.disabled|"disabled"/i.test(err.message) && /not supported/i.test(err.message)) {
+        thinkingStaysOn.add(params.model);
+        delete params.thinking;
         continue;
       }
       // The endpoint does not take cache_control (or the 1-hour ttl) where it was sent: carry on without it

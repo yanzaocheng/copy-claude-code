@@ -210,6 +210,8 @@ export class App {
 
     await this.startPeer();
     this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this });
+    // The conversation's id, sent to the gateway with each request (see streamMessage); it follows /clear and /resume.
+    Object.defineProperty(this.runtime.config, 'sessionId', { get: () => this.store.id, configurable: true });
     this.commands = buildCommands(this);
     // Keys typed while starting up stay buffered in stdin until we listen.
     stdin.on('keypress', (str, key) => {
