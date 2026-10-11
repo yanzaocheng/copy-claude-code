@@ -31,7 +31,7 @@ import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, read
 import { fitImagesIn } from '../utils/images.js';
 import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
 import { copyUnique } from '../transfer.js';
-import { checkForUpdate, CHECK_EVERY_MS } from '../updater.js';
+import { checkForUpdate, installUpdate, installedVersion, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
 import { qrLines } from '../qr.js';
@@ -400,7 +400,7 @@ export class App {
   async startPeer() {
     if (this.driven || !peersEnabled()) return;
     try {
-      this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, id: this.flags.restart?.peerId, onMessage: (msg) => this.onPeerMessage(msg) }).start();
+      this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, id: this.flags.restart?.peerId, onMessage: (msg) => this.onPeerMessage(msg), getStatus: () => ({ busy: this.working() }) }).start();
     } catch (e) {
       this.peers = null;
       this.notice(`Other sessions cannot reach this one: ${e.message}`, 'warn');
@@ -886,8 +886,15 @@ export class App {
   // ---------------------------------------------------------------- restarting (see restart.js)
 
   // What a restart would kill: agents and shells that are still running in the background.
+  // Something is going on that an update must not cut into: a turn, a question waiting for an answer, messages
+  // waiting to be sent, background agents and shells, files on their way.
+  working() {
+    return Boolean(this.busy || this.dialogs.length || this.queue.length || this.restartBlockers().length);
+  }
+
   restartBlockers() {
     const found = [];
+    for (const t of this.transfers.values()) found.push(`files on their way ${t.direction === 'up' ? 'to' : 'from'} &${t.label}`);
     for (const t of this.runtime.tasks.running()) found.push(`background agent ${t.id} "${t.description}"`);
     for (const s of listBackgroundShells()) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
     return found;
@@ -985,6 +992,13 @@ export class App {
     if (!canRestart() || /^(0|false|no|off)$/i.test(this.config.env.CLAUDE_PRO_AUTO_RESTART || '')) return;
     this.sourceWatch = watchSource(INSTALL_DIR, (file) => {
       this.sourceChanged = file || true;
+      // another window (or npm) installed a new version: say so, and load it once this session is idle
+      const disk = installedVersion();
+      if (disk !== VERSION && isNewer(disk, VERSION) && this.updateRestart !== disk) {
+        this.updateRestart = disk;
+        this.pendingUpdate = null;
+        this.notice(`${APP_NAME} ${disk} was installed (by another window or npm); this one restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
+      }
       if (!this.busy) this.maybeAutoReload();
     });
   }
@@ -996,7 +1010,7 @@ export class App {
     const changed = this.sourceChanged;
     this.sourceChanged = null;
     this.reloading = true;
-    this.flash('Source changed: checking the new code…');
+    this.flash(this.updateRestart ? `Updated to ${this.updateRestart}: checking it starts, then restarting…` : 'Source changed: checking the new code…');
     let check;
     try { check = await runSelfCheck(); } finally { this.reloading = false; }
     if (this.exiting) return;
@@ -1005,32 +1019,91 @@ export class App {
       return;
     }
     if (this.busy || this.dialogs.length) { this.sourceChanged = changed; return; } // something started meanwhile: later
-    this.requestRestart({ reason: 'source changed', force: true });
+    this.requestRestart({ reason: this.updateRestart ? `updated to ${APP_NAME} ${this.updateRestart}` : 'source changed', force: true });
   }
 
-  // A newer version on npm is installed in the background (see updater.js) and loaded by a restart once the
-  // session is idle. `force`: the /update command, which also says when there is nothing to do.
-  // `quiet`: a periodic check, which says nothing when the install fails (it is tried again in a minute).
+  // A newer version on npm (see updater.js): it is installed once no session of this machine is working, and then
+  // loaded by a restart (this session's; the others restart when they see the files change). `force`: the /update
+  // command, which also says when there is nothing to do. `quiet`: the periodic check, which says nothing when an
+  // install fails (it is tried again in a minute).
   async autoUpdate({ force = false, quiet = false } = {}) {
-    if (this.updating) { if (force) this.notice('An update is already being installed.'); return; }
+    if (this.updating) { if (force) this.notice(`${APP_NAME} ${this.updating} is being installed.`); return; }
     let r;
     try {
-      r = await checkForUpdate({ force, env: { ...process.env, ...this.config.env }, onInstalling: (v) => { this.updating = true; this.flash(`Installing ${APP_NAME} ${v}…`); } });
+      r = await checkForUpdate({ force, env: { ...process.env, ...this.config.env } });
     } catch (e) {
       r = { status: 'failed', error: e.message };
-    } finally {
-      this.updating = false;
     }
     if (this.exiting) return;
-    if (r.status === 'updated') {
-      this.notice(`${APP_NAME} was updated to ${r.version} (from ${VERSION}); it is loaded by a restart as soon as the session is idle.`);
-      if (canRestart()) { this.sourceChanged = true; if (!this.busy) this.maybeAutoReload(); }
-      else this.notice('Restart the program to use it.');
+    if (r.status === 'available') {
+      if (this.pendingUpdate !== r.version) {
+        this.pendingUpdate = r.version;
+        this.updateQuiet = quiet;
+        this.screen.schedule();
+      }
+      if (force && this.working()) this.notice(`${APP_NAME} ${r.version} is out: it is installed as soon as this session's work is done.`);
+      await this.maybeInstallUpdate({ force });
+    } else if (r.status === 'installed') {
+      if (force || this.updateRestart !== r.version) this.notice(`${APP_NAME} ${r.version} is installed already; this session restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
+      this.updateRestart = r.version;
+      if (canRestart()) { this.sourceChanged ||= true; if (!this.busy) this.maybeAutoReload(); }
     } else if (r.status === 'failed') {
       if (force || (r.version && !quiet)) this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
     } else if (force) {
       this.notice(r.status === 'dev' ? `This copy runs from a source checkout (${INSTALL_DIR}): update it with git.` : `${APP_NAME} ${VERSION} is the latest version.`);
     }
+  }
+
+  // Install the version found (pendingUpdate) if nothing is going on: in this session, and in the other sessions
+  // of this machine, whose files it replaces under them. Called again when this session's turn ends, and every
+  // half minute while another session works.
+  async maybeInstallUpdate({ force = false } = {}) {
+    const version = this.pendingUpdate;
+    if (!version || this.updating || this.exiting || this.restartRequest) return;
+    if (this.working()) return; // the end of the turn calls this again
+    const local = this.peers?.peers() || [];
+    const busy = [];
+    for (const p of local) if ((await this.peers.status(p)).busy) busy.push(p.name);
+    if (this.pendingUpdate !== version || this.updating || this.exiting) return;
+    if (busy.length) {
+      if (this.updateWaitingFor !== busy.join(',')) {
+        this.updateWaitingFor = busy.join(',');
+        this.screen.schedule();
+        if (force) this.notice(`${APP_NAME} ${version} is installed once &${busy.join(', &')} ${busy.length === 1 ? 'is' : 'are'} done working.`);
+      }
+      clearTimeout(this.updateRetry);
+      this.updateRetry = setTimeout(() => this.maybeInstallUpdate(), 30_000);
+      this.updateRetry.unref?.();
+      return;
+    }
+    if (this.working()) return;
+    this.updateWaitingFor = null;
+    this.updating = version;
+    this.screen.schedule();
+    let r;
+    try {
+      r = await installUpdate(version);
+    } catch (e) {
+      r = { status: 'failed', version, error: e.message };
+    } finally {
+      this.updating = null;
+      this.screen.schedule();
+    }
+    if (this.exiting) return;
+    if (r.status === 'locked') return; // another window is installing it: its files changing tell this one
+    if (r.status === 'updated' || r.status === 'installed') {
+      this.pendingUpdate = null;
+      this.updateRestart = r.version;
+      if (canRestart()) {
+        this.notice(`${APP_NAME} was updated to ${r.version} (from ${VERSION}); restarting to load it. The conversation carries over.`);
+        this.sourceChanged = true;
+        this.maybeAutoReload();
+      } else {
+        this.notice(`${APP_NAME} was updated to ${r.version}: restart the program to use it.`);
+      }
+      return;
+    }
+    if (force || !this.updateQuiet) this.notice(`Could not update ${APP_NAME} to ${version}: ${r.error}`, 'warn');
   }
 
   printWelcome() {
@@ -1501,6 +1574,7 @@ export class App {
       this.runAgent(this.agent.drainNotifications());
     } else {
       this.maybeAutoReload();
+      this.maybeInstallUpdate();
     }
   }
 
@@ -2081,6 +2155,11 @@ export class App {
       left += c.dim(' · ') + c.green(`⇄ ${this.remote.viewers} watching`);
     }
     if (this.transfers.size && !flash) left += c.dim(' · ') + this.transferStatus();
+    if (!flash) {
+      if (this.updating) left += c.dim(' · ') + c.blue(`⇣ updating ${APP_NAME} to ${this.updating}…`);
+      else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`↻ ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
+      else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when &${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
+    }
     const cfg = this.config;
     const threshold = cfg.autoCompactThreshold(cfg.mainModel);
     const used = this.agent.contextEstimate;

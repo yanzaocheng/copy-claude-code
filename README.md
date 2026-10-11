@@ -28,7 +28,12 @@ npm install -g @yanzc/claude-pro
 claude-pro                 # 在任意项目目录里运行
 ```
 
-自动更新（与 Claude Code 一样）：用 npm 全局安装的版本在启动时、以及运行中**每 5 分钟**查一次 npm 上的最新版（同一台电脑上的所有会话共用这个间隔；查询绕过 npm 的 CDN 缓存），有新版就在后台 `npm install -g --prefer-online @yanzc/claude-pro@新版本`，装好后在会话空闲时自动重启加载，对话保留；同一台电脑上其他开着的会话看到文件变了，也会在空闲时自动重启。所以发布后几分钟内各个客户端就会用上新版（npm 刚发布时安装包要几分钟才能下载，期间安装失败会在 1 分钟后重试）。`/update` 立即检查；`CLAUDE_PRO_AUTO_UPDATE=0` 或 `DISABLE_AUTOUPDATER=1` 关闭。从源码运行（git 检出）的副本从不自动更新。
+自动更新（与 Claude Code 一样）：用 npm 全局安装的版本在启动时、以及运行中**每 5 分钟**查一次 npm 上的最新版（同一台电脑上的所有会话共用这个间隔，查到的新版本号也共享；查询绕过 npm 的 CDN 缓存）。
+- **不打断工作**：发现新版后先记下，底部显示 `update x.y.z ready · installs when idle`；**等这个会话和这台电脑上其他开着的会话都空闲**（没有在执行任务、没有等待回答的问题、没有后台 agent/命令/文件传输）才安装，有会话在忙就每 30 秒再看一次，本会话一轮结束时也会再试。
+- **安装中有提示**：底部显示 `⇣ updating claude-pro to x.y.z…`（`npm install -g --prefer-online`），装好后提示并自动重启加载，对话保留；重启后显示 `↻ Restarted: updated to claude-pro x.y.z`。
+- **多个终端**：同一时间只有一个会话去安装（加锁），其他会话看到程序文件变了，会提示"x.y.z 已由另一个窗口安装"，各自在空闲时重启；正在工作的会话等它的任务结束才重启。
+- npm 刚发布时安装包要几分钟才能下载，期间安装失败会在 1 分钟后重试。所以发布后一般 5–10 分钟内各个客户端就用上新版。
+- `/update` 立即检查；`CLAUDE_PRO_AUTO_UPDATE=0` 或 `DISABLE_AUTOUPDATER=1` 关闭。从源码运行（git 检出）的副本从不自动更新。
 
 从源码运行：
 

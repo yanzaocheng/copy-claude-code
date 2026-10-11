@@ -75,10 +75,12 @@ export function findPeer(peers, ref) {
 export class PeerNode {
   // onMessage(msg): msg = {id, kind: 'task'|'reply', text, inReplyTo, from: {id, name, cwd}}
   // `id`: the id this session had before a restart, so that answers on their way still find it.
-  constructor({ cwd, name, id, onMessage }) {
+  // getStatus(): {busy}, what GET /status answers (an update waits until no session of the machine is busy).
+  constructor({ cwd, name, id, onMessage, getStatus }) {
     this.cwd = cwd;
     this.wantedName = name || null;
     this.onMessage = onMessage;
+    this.getStatus = getStatus;
     this.id = /^[0-9a-f]{12}$/.test(id || '') ? id : crypto.randomBytes(6).toString('hex');
     this.token = crypto.randomBytes(16).toString('hex');
     this.name = null;
@@ -134,6 +136,12 @@ export class PeerNode {
 
   handle(req, res) {
     const reply = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    if (req.method === 'GET' && req.url === '/status') {
+      if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
+      let status = {};
+      try { status = this.getStatus?.() || {}; } catch { /* nothing to say */ }
+      return reply(200, { busy: Boolean(status.busy) });
+    }
     if (req.method !== 'POST' || req.url !== '/message') return reply(404, { error: 'not found' });
     if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
     let body = '';
@@ -149,6 +157,23 @@ export class PeerNode {
       const files = (Array.isArray(msg.files) ? msg.files : []).filter((f) => f && typeof f.path === 'string' && path.isAbsolute(f.path))
         .map((f) => ({ path: f.path, name: String(f.name || path.basename(f.path)), size: Number(f.size) || 0 }));
       try { this.onMessage?.({ id, kind: msg.kind === 'reply' ? 'reply' : 'task', text: msg.text, inReplyTo: msg.inReplyTo || null, from: msg.from, ...(files.length ? { files } : {}) }); } catch { /* the receiver's problem */ }
+    });
+  }
+
+  // Whether a session of this machine is working now. A session that does not answer (gone, or a version without
+  // /status) counts as idle: it cannot hold an update back forever.
+  status(peer) {
+    return new Promise((resolve) => {
+      const req = http.get({ host: '127.0.0.1', port: peer.port, path: '/status', timeout: 2000, headers: { authorization: `Bearer ${peer.token}` } }, (res) => {
+        let out = '';
+        res.setEncoding('utf8');
+        res.on('data', (d) => { out += d; });
+        res.on('end', () => {
+          try { resolve(res.statusCode === 200 ? { busy: Boolean(JSON.parse(out).busy) } : { busy: false }); } catch { resolve({ busy: false }); }
+        });
+      });
+      req.on('timeout', () => req.destroy());
+      req.on('error', () => resolve({ busy: false }));
     });
   }
 
