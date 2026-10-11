@@ -46,6 +46,48 @@ test('gateway and codex providers: models, windows, sub-agent and output default
   assert.throws(() => config({ CLAUDE_PRO_PROVIDER: 'nope' }).provider, /api, claude-code, gateway, codex/);
 });
 
+test('thinking made from Codex reasoning (cgw1:) goes to the Codex backend only; the session keeps it', () => {
+  const codexThinking = { type: 'thinking', thinking: '**Planning**', signature: 'cgw1:gAAAAB-enc' };
+  const claudeThinking = { type: 'thinking', thinking: 'hmm', signature: 'EqQBCkYIBxgCKkA-anthropic' };
+  const history = [
+    { role: 'user', content: 'a' },
+    { role: 'assistant', content: [codexThinking, { type: 'text', text: 'b' }] },
+    { role: 'user', content: 'c' },
+    { role: 'assistant', content: [codexThinking] },
+    { role: 'user', content: 'd' },
+    { role: 'assistant', content: [claudeThinking, { type: 'text', text: 'e' }] },
+    { role: 'user', content: 'f' },
+  ];
+  const replies = (params) => params.messages.filter((m) => m.role === 'assistant').map((m) => m.content);
+  const send = (cfg, messages) => buildParams(cfg, { model: cfg.mainModel, system: 's', messages });
+
+  const claude = config({ CLAUDE_PRO_PROVIDER: 'gateway', MAX_THINKING_TOKENS: '4000' });
+  const toClaude = send(claude, history);
+  assert.deepEqual(replies(toClaude), [[{ type: 'text', text: 'b' }], [claudeThinking, { type: 'text', text: 'e' }]], 'Codex thinking left out, Claude\'s kept');
+  assert.equal(toClaude.thinking.type, 'enabled', 'a new prompt thinks as configured');
+  assert.deepEqual(history[1].content, [codexThinking, { type: 'text', text: 'b' }], 'the session is not changed');
+  const direct = config({ CLAUDE_PRO_PROVIDER: 'claude-code' });
+  assert.equal(JSON.stringify(buildParams(direct, { model: direct.mainModel, system: 's', messages: history }, { accessToken: 'x', userId: '{}', version: '2.1.289' })).includes('cgw1:'), false);
+
+  const gpt = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol' });
+  assert.deepEqual(replies(send(gpt, history))[0], [codexThinking, { type: 'text', text: 'b' }], 'a GPT model replays it');
+  assert.deepEqual(replies(send(config({ CLAUDE_PRO_PROVIDER: 'codex' }), history))[1], [codexThinking]);
+
+  // A tool loop begun by a GPT model and carried on by Claude: no thinking until the next prompt.
+  const loop = [
+    { role: 'user', content: 'a' },
+    { role: 'assistant', content: [codexThinking, { type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+  ];
+  const first = send(claude, loop);
+  assert.deepEqual(first.messages[1].content, [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }]);
+  assert.deepEqual(first.thinking, { type: 'disabled' });
+  const carried = [...loop, { role: 'assistant', content: [{ type: 'tool_use', id: 't2', name: 'Read', input: {} }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't2', content: 'ok' }] }];
+  assert.deepEqual(send(claude, carried).thinking, { type: 'disabled' }, 'Claude\'s own steps in that loop have no thinking either');
+  const next = [...carried, { role: 'assistant', content: [{ type: 'text', text: 'done' }] }, { role: 'user', content: 'next' }];
+  assert.equal(send(claude, next).thinking.type, 'enabled');
+});
+
 test('gateway login: browser round trip, code exchange, key saved privately; requests use it', async (t) => {
   const seen = [];
   const gateway = http.createServer(async (req, res) => {

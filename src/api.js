@@ -8,6 +8,7 @@ import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, 
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { readGatewayLogin } from './gateway.js';
 import { createCodexFetch, codexModels } from './codex/client.js';
+import { SIGNATURE_PREFIX } from './codex/translate-request.js';
 
 let cached = null;
 
@@ -218,6 +219,26 @@ export function parseMaxTokensLimit(message) {
   return n >= 256 ? n : null;
 }
 
+// Thinking blocks made from Codex reasoning (a GPT model's turns, signed "cgw1:...") replay that reasoning on the
+// Codex backend only: Anthropic refuses their signatures ("Invalid `signature` in `thinking` block"), so a
+// conversation that moves from a GPT model to Claude, or to another provider, sends them without those blocks.
+// The session keeps them, for a later switch back. `inTurn`: blocks were taken out of the turn in progress (the
+// tool loop since the last prompt), whose assistant messages Anthropic wants to start with thinking when thinking
+// is on; such a turn goes on without thinking until the next prompt.
+const isCodexThinking = (b) => b?.type === 'thinking' && typeof b.signature === 'string' && b.signature.startsWith(SIGNATURE_PREFIX);
+const isPrompt = (m) => m.role === 'user' && !(Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_result'));
+function withoutCodexThinking(messages) {
+  const prompt = messages.findLastIndex(isPrompt);
+  let inTurn = false;
+  const out = messages.flatMap((m, i) => {
+    if (m.role !== 'assistant' || !Array.isArray(m.content) || !m.content.some(isCodexThinking)) return [m];
+    if (i > prompt) inTurn = true;
+    const content = m.content.filter((b) => !isCodexThinking(b));
+    return content.length ? [{ ...m, content }] : [];
+  });
+  return { messages: out, inTurn };
+}
+
 // `cacheBucket` says which prompt cache TTL applies: "main" for the conversation itself (the default), "other"
 // for sub-agents, compaction and side queries (see Config.cacheTtl). `cacheMessages: false` leaves the messages
 // unmarked: for a request whose messages are never sent twice, writing them to the cache only costs more.
@@ -229,6 +250,10 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
   const ttl = refused?.has('ttl') ? '5m' : config.cacheTtl(cacheBucket);
   const mark = (place) => (caching && !refused?.has(place) ? { ...cacheControl(ttl) } : null);
   const systemMark = mark('system');
+  // The codex provider, and the gateway for a GPT model, take the request to the Codex backend.
+  const toCodex = config.usesCodex || /^gpt-/i.test(model.id);
+  let turnLostThinking = false;
+  if (!toCodex) ({ messages, inTurn: turnLostThinking } = withoutCodexThinking(messages));
   const params = {
     model: model.id,
     max_tokens: outputCaps.has(model.id) ? Math.min(wanted, outputCaps.get(model.id)) : wanted,
@@ -251,6 +276,7 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
   const budget = config.thinkingBudget;
   if (budget === 0) params.thinking = { type: 'disabled' };
   else if (budget > 0) params.thinking = { type: 'enabled', budget_tokens: Math.min(budget, params.max_tokens - 1) };
+  if (turnLostThinking) params.thinking = { type: 'disabled' };
   return params;
 }
 
