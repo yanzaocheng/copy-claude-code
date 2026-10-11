@@ -7,7 +7,7 @@ import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { c, ESC, stringWidth, truncate, padEnd, wordWrap, colorEnabled } from './ansi.js';
-import { Screen } from './screen.js';
+import { Screen, queryCursorRow, mouseFilter } from './screen.js';
 import { Editor } from './editor.js';
 import { SelectDialog } from './dialogs.js';
 import { MarkdownStream, renderMarkdown } from './markdown.js';
@@ -223,8 +223,12 @@ export class App {
 
   async start(initialPrompt) {
     const stdin = this.stdin;
-    readline.emitKeypressEvents(stdin);
     stdin.setRawMode(true);
+    // Where the cursor is, before anything is drawn: the input box is kept on the last rows of the window from
+    // there (see screen.js). CLAUDE_PRO_PIN_INPUT=0 (here or in the settings) leaves it right below the output.
+    const pinOff = (v) => /^(0|false|no|off)$/i.test(v || '');
+    if (pinOff(process.env.CLAUDE_PRO_PIN_INPUT)) this.screen.pin = false;
+    else if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
     this.watchCopies();
@@ -238,8 +242,16 @@ export class App {
     // The conversation's id, sent to the gateway with each request (see streamMessage); it follows /clear and /resume.
     Object.defineProperty(this.runtime.config, 'sessionId', { get: () => this.store.id, configurable: true });
     this.commands = buildCommands(this);
-    // Keys typed while starting up stay buffered in stdin until we listen.
-    stdin.on('keypress', (str, key) => {
+    if (pinOff(this.config.env.CLAUDE_PRO_PIN_INPUT)) { this.screen.pin = false; this.screen.pinned = null; }
+    // What the session showed before a restart: scrolled back to in fullscreen, repainted after a resize otherwise.
+    if (Array.isArray(this.flags.restart?.screenHistory)) this.screen.history = this.flags.restart.screenHistory.filter((l) => typeof l === 'string');
+    if (this.fullscreenWanted()) this.screen.setFull(true);
+    // Keys typed while starting up stay buffered in stdin until we listen. Mouse reports (fullscreen: the wheel)
+    // are taken out before the keys are read.
+    const keys = mouseFilter(stdin, (m) => this.onMouse(m));
+    readline.emitKeypressEvents(keys);
+    keys.on('keypress', (str, key) => {
+      if (/^\x1b\[\d+;\d+R$/.test(key?.sequence || '')) return; // a late answer to the cursor position query, not a key
       try { this.onKey(str, key || {}); } catch (e) { this.logError(e); }
     });
     stdin.resume();
@@ -907,6 +919,7 @@ export class App {
       mode: this.runtime.modes.mode,
       todos: this.agent.todos,
       draft: this.editor.text,
+      screenHistory: this.screen.history.slice(-3000),
       draftCursor: this.editor.cursor,
       queue: this.queue.map((q) => ({ text: q.text, images: q.images || [] })),
       checkpoints: this.runtime.checkpoints.snapshot(),
@@ -942,6 +955,9 @@ export class App {
       if (state.checkpoints) this.runtime.checkpoints.adopt(state.checkpoints);
     }
     if (typeof state.draft === 'string' && state.draft) this.editor.set(state.draft, state.draftCursor);
+    // Fullscreen starts on an empty screen: without what the process before showed (an older version, or one
+    // that ran classic), the conversation is drawn again from the session.
+    if (this.screen.full && resumable && !Array.isArray(state.screenHistory)) this.printTranscript(this.agent.messages.slice(-80));
     this.screen.log(c.dim(`↻ Restarted${state.reason ? `: ${state.reason}` : ''}${state.continueWith ? ' · continuing' : ''}`), '');
   }
 
@@ -1054,11 +1070,32 @@ export class App {
     this.stdout.write(FOCUS_EVENTS_ON);
   }
 
+  // Fullscreen (see screen.js) unless CLAUDE_PRO_TUI=default, as Claude Code's /tui: the input box fixed at the
+  // bottom of the window, the conversation scrolled inside the program. Not in the tests that drive the App.
+  fullscreenWanted() {
+    const mode = String(this.config.env.CLAUDE_PRO_TUI || (this.noProcessExit ? 'default' : 'fullscreen')).toLowerCase();
+    return mode === 'fullscreen' && this.stdout.isTTY !== false;
+  }
+
+  // Fullscreen: the wheel scrolls the conversation (CLAUDE_PRO_SCROLL_SPEED rows a notch, 3 by default).
+  onMouse({ button }) {
+    if (!this.screen.full || this.exiting || !(button & 64) || button & 128) return;
+    const speed = Math.max(1, Math.min(20, Number(this.config.env.CLAUDE_PRO_SCROLL_SPEED) || 3));
+    this.screen.scrollBy(button & 1 ? -speed : speed);
+  }
+
   onKey(str, key) {
     if (this.exiting) return;
     if (key.sequence === '\x1b[I') { this.focused = true; return; }
     if (key.sequence === '\x1b[O') { this.focused = false; return; }
     if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
+    if (this.screen.full) {
+      const half = Math.max(1, Math.floor((this.screen.lastArea || this.screen.height) / 2));
+      if (key.name === 'pageup') { this.screen.scrollBy(half); return; }
+      if (key.name === 'pagedown') { this.screen.scrollBy(-half); return; }
+      if (key.ctrl && key.name === 'home') { this.screen.scrollBy('top'); return; }
+      if (key.ctrl && key.name === 'end') { this.screen.scrollBy('bottom'); return; }
+    }
     const dialog = this.dialogs[0];
     if (dialog) {
       dialog.handleKey(str, key);
@@ -1074,7 +1111,7 @@ export class App {
       return;
     }
     if (key.ctrl && key.name === 't') { this.showTodos = !this.showTodos; this.screen.schedule(); return; }
-    if (key.ctrl && key.name === 'l') { this.screen.clearScreen(); return; }
+    if (key.ctrl && key.name === 'l') { if (this.screen.full) this.screen.repaint(); else this.screen.clearScreen(); return; }
     if (key.ctrl && key.name === 'd' && !this.editor.text) { this.exit(0); return; }
     if (key.name === 'escape' && this.busy) { this.interrupt(); return; }
     this.exitArmed = 0;
@@ -1163,6 +1200,7 @@ export class App {
   onSubmit(value, raw, images = []) {
     const text = value.trim();
     if (!text) { this.screen.schedule(); return; }
+    if (this.screen.scrolledUp) this.screen.scrollBy('bottom'); // what was sent, and what comes of it, is in view
     appendHistory(this.cwd, raw);
     if (this.sendTypedToPeer(text)) return;
     if (this.busy) {
@@ -1216,6 +1254,7 @@ export class App {
       ['! for bash mode', 'double tap esc to clear input'],
       ['/ for commands', 'shift + tab to cycle permission modes'],
       ['@ for file paths, & for other sessions', 'ctrl + o to toggle verbose output'],
+      ['PgUp/PgDn, wheel to scroll', 'ctrl + home/end to the top/bottom'],
       ['# to memorize', 'ctrl + t to toggle todos'],
       ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
       ['alt + v to paste an image', ''],

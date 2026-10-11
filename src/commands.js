@@ -608,6 +608,27 @@ export function buildCommands(app) {
   });
 
   add({
+    name: 'tui',
+    argHint: '[fullscreen | default]',
+    description: 'The renderer: fullscreen (the input box fixed at the bottom, the conversation scrolled with the wheel or PgUp/PgDn) or default (it scrolls in the terminal)',
+    run(args) {
+      const want = args.trim().toLowerCase();
+      if (!want) {
+        out(`The ${c.bold(app.screen.full ? 'fullscreen' : 'default')} renderer is active. /tui fullscreen or /tui default switches (and is remembered).`);
+        return;
+      }
+      if (want !== 'fullscreen' && want !== 'default') { out(c.red('Use /tui fullscreen or /tui default.')); return; }
+      const file = settingsFiles(app.cwd).user;
+      updateSettingsFile(file, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_TUI: want }; });
+      reloadConfig();
+      app.screen.setFull(want === 'fullscreen');
+      out(want === 'fullscreen'
+        ? `Fullscreen: the input box stays at the bottom; scroll with the wheel, PgUp/PgDn, ctrl+Home/End. To select text, hold Shift while dragging. (Saved in ${file})`
+        : `Default renderer: the conversation scrolls in the terminal. (Saved in ${file})`);
+    },
+  });
+
+  add({
     name: 'rename',
     argHint: '<name>',
     argRequired: true,

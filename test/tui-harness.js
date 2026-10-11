@@ -26,6 +26,8 @@ export async function startTui({ cwd, cols = 100, rows = 40, flags = {} } = {}) 
   Object.assign(stdout, { isTTY: true, columns: cols, rows, getColorDepth: () => 24 });
   const stdin = new PassThrough();
   Object.assign(stdin, { isTTY: true, setRawMode() {} });
+  // what the terminal answers (the cursor position the app asks for at start-up) goes back to the app, as in a real one
+  term.onData((d) => stdin.write(d));
   const app = new App({ flags, cwd, stdin, stdout, noProcessExit: true });
   const exited = app.start('');
   await new Promise((r) => setTimeout(r, 300));

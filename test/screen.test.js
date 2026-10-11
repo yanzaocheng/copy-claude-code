@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import xterm from '@xterm/headless';
-import { Screen } from '../src/ui/screen.js';
+import { PassThrough } from 'node:stream';
+import { Screen, mouseFilter } from '../src/ui/screen.js';
 
 // The screen manager against a headless xterm, which re-flows its contents when it is resized like a real
 // terminal does. (The Windows pipeline, a ConPTY in front of the terminal, is harsher still; this checks the
@@ -156,16 +157,44 @@ test('output logged while resizing is not lost, whichever way the repaint is rea
   assert.equal(boxRows(rows).length, 1);
 });
 
-test('a short session: the output stays at the top, the box right under it, and the rows below are clean', async () => {
+test('a short session: the output stays at the top, the box on the last rows of the window, blank rows between', async () => {
   const t = setup({ cols: 80, rows: 20 });
   t.log(3);
   await t.settle();
   await t.resize(40);
   const rows = await t.rows();
   assert.deepEqual(rows.slice(0, 3), ['line 1', 'line 2', 'line 3']);
-  assert.equal(rows[3].startsWith('╭'), true, 'the box follows the output directly');
-  assert.deepEqual(boxRows(rows), [4]);
-  assert.equal(rows.slice(8).every((r) => r === ''), true, 'nothing is left over below the footer');
+  assert.equal(rows.slice(3, 16).every((r) => r === ''), true, 'blank between the output and the box');
+  assert.deepEqual(boxRows(rows), [17]);
+  assert.equal(rows.at(-1).trim(), '? for shortcuts', 'the footer is the last row of the window');
+  // new output takes the place of the blank rows, and the box stays where it is
+  t.log(2, 'more');
+  await t.settle();
+  const after = await t.rows();
+  assert.deepEqual(after.slice(0, 5), ['line 1', 'line 2', 'line 3', 'more 1', 'more 2']);
+  assert.deepEqual(boxRows(after), [17]);
+});
+
+test('pinned from the row the terminal reports: the box goes to the bottom without pushing the output above off the screen', async () => {
+  const t = setup({ cols: 60, rows: 14 });
+  t.term.write('$ claude-pro\r\n');
+  await t.flush();
+  t.screen.pinFrom(t.term.buffer.active.cursorY + 1);
+  t.log(2);
+  await t.settle();
+  let rows = await t.rows();
+  assert.deepEqual(rows.slice(0, 3), ['$ claude-pro', 'line 1', 'line 2']);
+  assert.equal(rows.at(-1).trim(), '? for shortcuts');
+  // more output than there is room: it scrolls, and the box is still on the last rows
+  t.log(20, 'later');
+  await t.settle();
+  rows = await t.rows();
+  assert.equal(rows.at(-1).trim(), '? for shortcuts');
+  assert.equal(rows.at(-5), 'later 20');
+  // closing takes the blank rows away: what comes next (the shell) goes on right below the output
+  t.screen.close();
+  await t.flush();
+  assert.equal(t.term.buffer.active.cursorY, rows.length - 4, 'the cursor is right below the last output');
 });
 
 test('a taller or shorter window is repainted too', async () => {
@@ -210,7 +239,7 @@ test('/clear forgets what was logged: a repaint afterwards does not bring it bac
   await t.resize(60);
   const all = await t.rows({ all: true });
   assert.equal(all.filter((r) => r.startsWith('old')).length, 0, 'cleared output stays cleared');
-  assert.equal(all.filter((r) => r.startsWith('new')).length, 2);
+  assert.deepEqual((await t.rows()).filter((r) => r.startsWith('new')), ['new 1', 'new 2']);
 });
 
 test('very long lines and long outputs: only a bounded history is kept, and a line wider than the screen counts for its rows', async () => {
@@ -225,4 +254,58 @@ test('very long lines and long outputs: only a bounded history is kept, and a li
   assert.equal(rows.at(-5), 'last line');
   assert.equal(rows.at(-6), 'w'.repeat(100).slice(80), 'the wrapped line takes its three rows, its last piece directly above');
   assert.equal(rows.at(-8), 'w'.repeat(40));
+});
+
+test('fullscreen: the box on the last rows of the alternate screen, the conversation scrolled inside, new output counted while scrolled up', async () => {
+  const t = setup({ cols: 60, rows: 14 });
+  t.term.write('$ the shell\r\n');
+  t.log(3, 'before');
+  await t.settle();
+  t.screen.setFull(true);
+  t.log(40);
+  await t.settle();
+  assert.equal(t.term.buffer.active.type, 'alternate');
+  let rows = await t.rows();
+  assert.equal(rows.length, 14);
+  assert.equal(rows.at(-1).trim(), '? for shortcuts');
+  assert.equal(rows.at(-5), 'line 40', 'the newest output right above the box');
+  t.screen.scrollBy(5);
+  rows = await t.rows();
+  assert.equal(rows.at(-6), 'line 34');
+  assert.match(rows.at(-5), /Jump to bottom \(ctrl\+End\) ↓/);
+  t.log(2, 'new');
+  await t.settle();
+  rows = await t.rows();
+  assert.equal(rows.at(-6), 'line 34', 'the view stays where it was');
+  assert.match(rows.at(-5), /2 new lines/);
+  t.screen.scrollBy('top');
+  assert.equal((await t.rows())[0], 'before 1', 'the top is the start of the conversation');
+  t.screen.scrollBy('bottom');
+  rows = await t.rows();
+  assert.equal(rows.at(-5), 'new 2');
+  // a resize redraws at the new width, the box still at the bottom
+  await t.resize(40, 10);
+  rows = await t.rows();
+  assert.equal(rows.length, 10);
+  assert.equal(rows.at(-1).trim(), '? for shortcuts');
+  assert.equal(rows.at(-5), 'new 2');
+  // closing gives the terminal its normal screen back, the shell's output on it
+  t.screen.close();
+  await t.flush();
+  assert.equal(t.term.buffer.active.type, 'normal');
+  assert.ok((await t.rows({ all: true })).includes('$ the shell'));
+});
+
+test('fullscreen: mouse reports are taken out of the keys, also when a report comes in two pieces', async () => {
+  const stdin = new PassThrough();
+  const mouse = [];
+  const keys = mouseFilter(stdin, (m) => mouse.push(m));
+  let text = '';
+  keys.on('data', (d) => { text += d; });
+  stdin.write('ab\x1b[<64;10;5Mc');
+  stdin.write('\x1b[<65;1');
+  stdin.write('0;5Md\x1b');
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(text, 'abcd\x1b', 'the keys, an Esc at the end included');
+  assert.deepEqual(mouse.map((m) => m.button), [64, 65]);
 });

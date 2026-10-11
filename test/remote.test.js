@@ -35,7 +35,7 @@ const { applyEvent, hydrate } = await import('../src/remote.js');
 
 // The fake gateway: the model API, and the remote control relay with a page that keeps the transcript.
 const KEY = 'gw-test-key';
-const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], files: new Map(), deleted: [], uploads: new Map(), puts: [], ranges: [], cutPut: false, cutGet: false };
+const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], files: new Map(), deleted: [], uploads: new Map(), puts: [], ranges: [], cutAt: null, cutGet: false };
 const MB = 1024 * 1024;
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 const storeFile = (name, data) => {
@@ -68,7 +68,7 @@ const server = http.createServer(async (req, res) => {
     gw.sessions.set(body.id, body);
     return json(res, 200, { id: body.id, url: `https://gw.example/#remote/${body.id}` });
   }
-  // resumable uploads: the same unfinished upload again for the same file; cutPut cuts the next chunk in the middle
+  // resumable uploads: the same unfinished upload again for the same file; cutAt cuts the chunk sent at that offset in the middle
   if (req.method === 'POST' && url.pathname === '/v1/remote/uploads') {
     const body = await readBody(req);
     let up = [...gw.uploads.values()].find((u) => u.sha256 === body.sha256 && u.size === body.size && !u.complete);
@@ -89,8 +89,8 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) chunks.push(chunk);
     if (offset !== up.data.length) return json(res, 409, { error: { message: 'wrong offset' }, received: up.data.length });
     const chunk = Buffer.concat(chunks);
-    if (gw.cutPut) { // half of it arrives, then the connection breaks
-      gw.cutPut = false;
+    if (gw.cutAt === offset) { // half of it arrives, then the connection breaks
+      gw.cutAt = null;
       up.data = Buffer.concat([up.data, chunk.subarray(0, chunk.length >> 1)]);
       return req.socket.destroy();
     }
@@ -343,14 +343,10 @@ test('big files: an upload cut off in the middle continues where the gateway sto
 
   // the second chunk is cut in the middle: after a wait it continues from what the gateway has (a 409 says where)
   gw.puts.length = 0;
-  gw.cutPut = false;
-  let put = 0;
-  const cutSecond = setInterval(() => { if (gw.puts.length === 1 && !put) { put = 1; gw.cutPut = true; } }, 1);
-  t.after(() => clearInterval(cutSecond));
+  gw.cutAt = MB;
   tui.send('/sendfile &公司 video.mp4\r');
   await tui.waitFor('Sending 1 file (3.0 MB) to &公司/proj in the background', { timeout: 5000 });
   await until('the message with the video', () => gw.messages.length === 1, 20_000);
-  clearInterval(cutSecond);
   assert.deepEqual(gw.puts.slice(0, 3), [0, MB, MB], 'the cut chunk is sent again from where it was, and told where the gateway is');
   assert.ok(gw.puts.includes(MB + MB / 2), 'then it continues from the half that arrived');
   assert.ok(sha256(gw.files.get(gw.messages[0].files[0].id).data) === sha256(video), 'the gateway has the whole video');
