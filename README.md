@@ -171,11 +171,41 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 需要真正退出再启动的只有两种情况：改了 `bin/claude-pro.js` 或 `src/supervisor.js`（运行中的监督进程是旧代码）；以及新代码启动不起来而你想强行重启。`-p`、管道、`config` 子命令不经过监督进程；`CLAUDE_PRO_NO_SUPERVISOR=1` 也可以关掉它（环境变量，不是配置项）。
 - `claude-pro --self-check` 可以单独运行那个启动检查。
 
+## 远程控制：在浏览器或手机上看执行过程、下发指令
+
+和 Claude Code 的 `/remote-control` 一样，可以在手机或另一台电脑上看着这个会话干活，并给它发指令。官方版经 Anthropic 中转，这里经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里能看到并操作自己的会话。模型请求走哪个提供方都可以，远程控制只用网关的登录。
+
+- **打开**：会话里输入 `/remote-control`（别名 `/rc`）。这台机器还没登录网关时，会先在浏览器里登录（和 `/login` 选网关一样，但**不切换**模型提供方）。终端打印这个会话在网关上的链接（`https://gw.predix.icu/user#remote/<id>`）和二维码，手机扫码即可打开（没登录时先登录，登录后直接进入这个会话）；所有会话的列表在 `/user#remote`。`/rc open` 用本机浏览器打开；再输一次 `/rc` 显示链接和连接状态；`/rc stop` 断开。**登录了网关的电脑上，交互会话启动时默认就在线**（不阻塞启动；设 `CLAUDE_PRO_ONLINE=0` 关闭，之后只有 `/rc` 才上线），所以网页列表里能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`claude-pro --rc` 启动时就上线并打印链接。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`；和网关断开时自动重连。
+- **网页上能看到**：完整对话（用户消息、流式输出的回答、可展开的思考、工具调用和结果，包括 diff 和正在运行的命令的最新几行输出）、斜杠命令和提示的输出、当前状态（正在想/运行多久/多少 token、限流暂停的倒计时）、待办列表、排队中的消息。
+- **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、批准/拒绝计划、以及 `/model`、`/rewind` 之类命令弹出的选择框。终端和网页可以交替使用，两边同步。
+- **安全**：只有同一个网关账户登录后才能看到和操作这个会话；**能登录这个网关账户的人，就能通过它在这台电脑上以完全权限执行命令**。会话内容经网关中转并暂存在网关上。
+- **省流量**：没人打开网页时只上报状态（列表里的标题、忙/闲），不上传对话；有人打开时先发一份完整快照，再实时推送。
+- **重启不断线**：自动重启（改了源码、自动更新）沿用同一个会话 id，网页显示"重启中"后接着看；网关重启丢了状态时，claude-pro 自动重新注册并补发完整对话。
+- 一个会话对应网关上的一个远程会话；多个会话各自 `/rc`。每个网关账户最多 20 个（超出时淘汰最久没活动的离线会话）；已结束的会话在列表里保留 6 小时，断开但没结束的保留 24 小时。不支持从网页上传图片。
+
+## 会话之间互发任务（本机和其他电脑）
+
+每个交互会话都有一个名字（默认是目录名，输入框右上角的 `&名字`），别的会话可以给它发任务，它做完后回答自动发回来。
+
+- **本机**：同一台电脑上开着的会话直接互通（经 127.0.0.1，不经过网络）。
+- **其他电脑**：同一个网关账户下在线的会话经网关互通。例如公司电脑上开着 claude-pro，在家里输入 `&公司 跑一下测试`，任务送到公司那台的会话，回答自动显示在家里这边。电脑名默认是主机名，用 `CLAUDE_PRO_MACHINE_NAME=公司` 改成好记的名字（支持中文）。
+- **输入 `&`** 弹出所有能发的会话（本机的和其他电脑在线的），选一个再写任务回车即可：
+  - `&名字 任务`：本机的会话；
+  - `&电脑名/名字 任务`：其他电脑上的会话；那台电脑只开着一个会话时直接 `&电脑名 任务`。
+  - `@` 只用于引用文件。
+- **发送文件**：`/sendfile &公司 C:\Users\yzc\Pictures\a.jpg C:\Users\yzc\Pictures\b.jpg`（别名 `/sf`），文件存进对方电脑的「下载」文件夹（Windows 上是系统设置的下载位置；`CLAUDE_PRO_DOWNLOAD_DIR` 可改），同名文件不覆盖、存为「名字 (1).jpg」，对方存好后把保存位置回给你。不经过模型、不花 token。路径可以带空格（不加引号也行）、可以用 `@` 补全文件名；每次最多 20 个文件、每个最多 5 GB；文件夹要先压缩。
+  - **大文件、断点续传**：文件在后台分块发送，输入框下面显示进度（`⇡ 会议录像.mp4 → &公司/proj 42% · 921.6 MB/2.1 GB`），期间可以照常使用会话。网络断了会自动等待重试（最长 1 小时），恢复后从断开的地方接着传；中途关掉了 claude-pro 或 `/sendfile stop` 停掉了，之后再 `/sendfile` 同一个文件，会接着之前传到的位置继续（24 小时内）。接收方同样边下边存，断了用续传接着下，下完校验 sha256 再改成正式文件名；接收方中途退出的话，重新上线后会自动接着下载。也可以直接对 agent 说「把这几张图发到 &公司」，它用 MessagePeer 的 files 参数发送；文件也可以和任务一起发（对方收到任务时知道文件存在哪）。其他电脑之间的文件经网关中转（存 24 小时，对方取走后即删除），同一台电脑上直接复制。文件经网关服务器中转，传输速度受网关服务器带宽限制。
+- **`&` 可以写在句子中间**：输入时在空格后面打 `&` 也会弹出会话列表（比如 `/sendfile a.jpg &`）；在发给当前 agent 的消息里提到 `&名字`，agent 会被告知那是哪个会话、怎么联系它。输入法打出全角 `＆` 也可以。
+- **`/rename 新名字`**：给当前会话改名（比如 `/rename web-server`），别的会话从此用 `&web-server` 找它；这个名字也成为对话标题（终端标签页、`/resume` 列表、网页），不再自动按话题改；`/resume` 这个对话时名字一起回来。
+- **`/peers`**：列出本机和其他电脑上在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
+- 回答会在对方这一轮做完后自动发回；对方正忙时，任务排在它当前工作之后。网关替离线的会话暂存回答（24 小时；网关重启会丢失还没送达的消息）。
+- **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时设 `CLAUDE_PRO_ONLINE=0`，或在会话里 `/rc stop`。
+
 ## 完全访问与安全网
 
 - **没有权限系统**：没有确认弹窗，没有 allow/deny 规则，也没有 `/permissions`。旧参数 `--dangerously-skip-permissions`、`--permission-mode`、`--allowedTools`、`--disallowedTools` 仍被接受但会被忽略（`--permission-mode plan` 等同于 `--plan`）；settings 里残留的 `permissions` 字段也会被忽略。
 - **计划模式（唯一的开关）**：`shift+tab`、`/plan` 或 `--plan` 进入。此时只能读和调研，改文件、跑会改东西的命令都会被挡住；模型调研完用 `ExitPlanMode` 提交计划，你批准后回到完全访问。
-- **检查点与 `/rewind`**：每条提问都会建一个检查点，Write / Edit / NotebookEdit 修改文件前会先保存原样。`/rewind` 选一条提问，再选恢复"代码和对话"、"仅代码"或"仅对话"；对话回退后，原来的提问会回填到输入框。**Bash 命令造成的改动不会被记录**，所以模型被要求优先用文件工具改文件。
+- **检查点与 `/rewind`（或在空输入框连按两次 `Esc`）**：每条提问都会建一个检查点，Write / Edit / NotebookEdit 修改文件前会先保存原样。和官方一样，菜单按时间列出这次会话的提问（最新的在最下面、默认选中），选一条后可以：**Restore code and conversation**（代码和对话都回到这条之前）、**Restore conversation**（只回退对话，文件不动）、**Restore code**（只恢复文件，对话不动）、**Summarize from here**（这条及之后的对话压缩成摘要，腾出上下文）、**Summarize up to here**（这条之前的压缩成摘要，之后的原样保留）、**Never mind**（回到列表）。回退对话或"Summarize from here"后，那条提问的原文（完整的，不截断）回填到输入框，可以改了再发，相当于删掉不想要的那段对话重新来。`/clear` 之后，菜单最上面多一项 `/resume <id> (previous session)`，可以回到 `/clear` 之前的对话（本进程内有效）。**Bash 命令造成的改动不会被记录**，所以模型被要求优先用文件工具改文件。
 - **想要护栏时用 hooks**：`PreToolUse` 钩子仍然可以拦截任何工具调用，由你自己定规则（见下）。
 - 模型自己的使用规则不受影响，系统提示里的安全条款与官方 Claude Code 现在的措辞一致：允许授权的安全测试、防御、CTF、教学，拒绝恶意用途。这一条是模型的使用规范，不是能力限制，没有去掉。
 
@@ -210,7 +240,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 上下文用量接近阈值时自动压缩（`CLAUDE_CODE_AUTO_COMPACT_WINDOW`），也可手动 `/compact`
 - 会话自动保存到 `~/.claude-pro/projects/`，`claude-pro -c` 继续上次，`claude-pro -r` 选择历史会话
 
-**斜杠命令**：`/help` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/remote-control`（`/rc`） `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（与 Claude Code 相同，两者都有时通常是同一份说明，不重复发送）。
 
@@ -260,14 +290,14 @@ claude-pro -p --plan "给出重构方案"                    # 只调研、只�
 |---|---|
 | `Enter` | 发送 |
 | `\` + `Enter` / `ctrl+j` / `alt+enter` | 换行 |
-| `Esc` | 中断当前任务；连按两次清空输入 |
+| `Esc` | 中断当前任务；连按两次：有文字时清空输入，输入框为空时打开回退菜单（同 `/rewind`） |
 | `ctrl+c` | 中断 / 清空输入 / 连按两次退出 |
 | `shift+tab` | 开关计划模式（只读） |
 | `ctrl+o` | 切换详细输出（思考过程、完整工具输出） |
 | `ctrl+t` | 显示/隐藏 todo 列表 |
 | `ctrl+l` | 清屏重绘 |
 | `alt+v` | 粘贴剪贴板图片 |
-| `↑` / `↓` | 历史记录 |
+| `↑` / `↓` | 在多行输入（包括自动折行的长文字）里上下移动光标；光标在第一行时 `↑` 先移到开头、再按才翻到上一条历史消息，`↓` 在最后一行同理 |
 | `Tab` | 补全命令 / 文件 |
 
 ## 开发
@@ -302,6 +332,8 @@ src/prompts.js        系统提示词、压缩提示词、自动记忆提示
 src/tools/*           各工具实现（含 Skill、NotebookEdit）
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
+src/remote.js         远程控制：经网关中转的客户端、对话事件模型（applyEvent，网关页面里有同一份）
+src/qr.js             终端二维码（字节模式、纠错 L、版本 1–6）
 src/commands.js       斜杠命令
 ```
 

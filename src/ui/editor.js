@@ -53,6 +53,34 @@ function wordLeft(text, i) {
   return j;
 }
 
+// How `body` is shown in a box `textW` columns wide: its rows, each with the cursor stops on it ({i: index in
+// body, col}). A long line wraps onto more rows; every index has exactly one stop (one where a row wraps is at the
+// start of the next row, the end of a line is where its newline is). The input box draws these rows, and up and
+// down move between them, so that they move through a long wrapped line too.
+export function layoutRows(body, textW) {
+  const row = () => ({ text: '', width: 0, stops: [] });
+  const rows = [row()];
+  let idx = 0;
+  for (const g of graphemes(body)) {
+    let r = rows[rows.length - 1];
+    if (g === '\n') {
+      r.stops.push({ i: idx, col: r.width });
+      rows.push(row());
+    } else {
+      const w = graphemeWidth(g);
+      if (r.width && r.width + w > textW) { r = row(); rows.push(r); }
+      r.stops.push({ i: idx, col: r.width });
+      r.text += g === '\t' ? '    ' : g;
+      r.width += w;
+    }
+    idx += g.length;
+  }
+  let last = rows[rows.length - 1];
+  if (last.width >= textW) { last = row(); rows.push(last); }
+  last.stops.push({ i: body.length, col: last.width });
+  return rows;
+}
+
 function wordRight(text, i) {
   let j = i;
   while (j < text.length && /\s/.test(text[j])) j++;
@@ -61,7 +89,8 @@ function wordRight(text, i) {
 }
 
 export class Editor {
-  constructor({ history = [], onSubmit, getSuggestions, onChange, imageFromPath } = {}) {
+  // onDoubleEscape: esc esc on an empty prompt (the App opens the rewind menu, as Claude Code does).
+  constructor({ history = [], onSubmit, getSuggestions, onChange, imageFromPath, onDoubleEscape } = {}) {
     this.text = '';
     this.cursor = 0;
     this.history = history; // oldest first
@@ -82,6 +111,9 @@ export class Editor {
     this.pendingSubmit = null;
     this.lastEscape = 0;
     this.suggestionsDismissedFor = null;
+    this.onDoubleEscape = onDoubleEscape;
+    this.textW = 76; // the width of the text in the box, as last drawn: up and down move by the rows shown
+    this.goalCol = null; // the column up and down aim for, kept while they are pressed in a row
   }
 
   get mode() {
@@ -112,6 +144,29 @@ export class Editor {
       this.cleared = { text: this.text, cursor: this.cursor, pastes: this.pastes, images: this.images, imageCounter: this.imageCounter };
     }
     this.clear();
+  }
+
+  // The rows the text is shown in (see layoutRows), and the row and column of the cursor among them.
+  place() {
+    const offset = this.mode === 'prompt' ? 0 : 1; // the ! or # is drawn as the prompt sign, not as text
+    const rows = layoutRows(this.text.slice(offset), this.textW);
+    const at = Math.max(0, this.cursor - offset);
+    let r = 0;
+    let col = 0;
+    rows.forEach((row, ri) => { for (const st of row.stops) if (st.i <= at) { r = ri; col = st.col; } });
+    return { rows, r, col, offset };
+  }
+
+  // Up (-1) or down (1) a row shown, towards the column it started from. False on the first / last row.
+  moveRow(dir) {
+    const { rows, r, col, offset } = this.place();
+    const target = r + dir;
+    if (target < 0 || target >= rows.length) return false;
+    this.goalCol ??= col;
+    let best = rows[target].stops[0];
+    for (const st of rows[target].stops) if (st.col <= this.goalCol) best = st;
+    this.set(this.text, best.i + offset);
+    return true;
   }
 
   restoreCleared() {
@@ -209,6 +264,7 @@ export class Editor {
     }
 
     const name = key.name;
+    if (!(name === 'up' || name === 'down' || (key.ctrl && (name === 'p' || name === 'n')))) this.goalCol = null;
     if (name === 'return' && !key.meta && !key.shift) {
       if (this.suggestions) {
         const item = this.acceptSuggestion();
@@ -233,33 +289,25 @@ export class Editor {
     }
     if (name === 'escape') {
       if (this.suggestions) { this.suggestionsDismissedFor = this.text; this.suggestions = null; return true; }
-      if (key.meta && this.text) { this.discard(); return true; } // ESC ESC arriving in one chunk
       const now = Date.now();
-      if (this.text && now - this.lastEscape < 800) { this.discard(); this.lastEscape = 0; return true; }
+      const twice = key.meta || now - this.lastEscape < 800; // meta: ESC ESC arriving in one chunk
+      if (twice && this.text) { this.discard(); this.lastEscape = 0; return true; }
+      if (twice && this.onDoubleEscape) { this.lastEscape = 0; this.onDoubleEscape(); return true; }
       this.lastEscape = now;
       return false;
     }
+    // Up and down move through the rows shown, a long line's wrapped rows too. On the first row up goes to the
+    // start of the text first (when there is more than one row), and only from there to the history; down likewise.
     if (name === 'up' || (key.ctrl && name === 'p')) {
       if (this.suggestions) { this.selected = (this.selected - 1 + this.suggestions.items.length) % this.suggestions.items.length; this.onChange?.(); return true; }
-      const lineStart = lineStartOf(this.text, this.cursor);
-      if (lineStart > 0) {
-        const col = this.cursor - lineStart;
-        const prevStart = lineStartOf(this.text, lineStart - 1);
-        this.set(this.text, Math.min(prevStart + col, lineStart - 1));
-        return true;
-      }
+      if (this.moveRow(-1)) return true;
+      if (this.cursor > 0 && this.place().rows.length > 1) { this.set(this.text, 0); return true; }
       return this.restoreCleared() || this.historyPrev();
     }
     if (name === 'down' || (key.ctrl && name === 'n')) {
       if (this.suggestions) { this.selected = (this.selected + 1) % this.suggestions.items.length; this.onChange?.(); return true; }
-      const lineEnd = this.text.indexOf('\n', this.cursor);
-      if (lineEnd >= 0) {
-        const lineStart = lineStartOf(this.text, this.cursor);
-        const col = this.cursor - lineStart;
-        const nextEnd = this.text.indexOf('\n', lineEnd + 1);
-        this.set(this.text, Math.min(lineEnd + 1 + col, nextEnd < 0 ? this.text.length : nextEnd));
-        return true;
-      }
+      if (this.moveRow(1)) return true;
+      if (this.cursor < this.text.length && this.place().rows.length > 1) { this.set(this.text, this.text.length); return true; }
       return this.historyNext();
     }
     if (name === 'left' || (key.ctrl && name === 'b')) {
@@ -327,6 +375,7 @@ export class Editor {
   }
 
   historyPrev() {
+    this.goalCol = null;
     if (!this.history.length) return true;
     if (this.historyIndex === null) { this.draft = this.text; this.historyIndex = this.history.length; }
     if (this.historyIndex > 0) {
@@ -337,6 +386,7 @@ export class Editor {
   }
 
   historyNext() {
+    this.goalCol = null;
     if (this.historyIndex === null) return true;
     this.historyIndex++;
     if (this.historyIndex >= this.history.length) {
@@ -357,29 +407,10 @@ export class Editor {
     const color = borderColor || (mode === 'bash' ? c.magenta : mode === 'memory' ? c.blue : c.gray);
     const promptCh = mode === 'bash' ? '!' : mode === 'memory' ? '#' : '>';
     const body = mode === 'prompt' ? this.text : this.text.slice(1);
-    const offset = mode === 'prompt' ? 0 : 1;
-    const cursorIdx = Math.max(0, this.cursor - offset);
-
-    const rows = [''];
-    const widths = [0];
-    let cur = null;
-    let idx = 0;
-    for (const g of graphemes(body)) {
-      if (idx === cursorIdx) cur = { row: rows.length - 1, col: widths[widths.length - 1] };
-      if (g === '\n') {
-        rows.push(''); widths.push(0);
-      } else {
-        const w = graphemeWidth(g);
-        if (widths[widths.length - 1] + w > textW) { rows.push(''); widths.push(0); if (idx === cursorIdx) cur = { row: rows.length - 1, col: 0 }; }
-        rows[rows.length - 1] += g === '\t' ? '    ' : g;
-        widths[widths.length - 1] += w;
-      }
-      idx += g.length;
-    }
-    if (!cur) {
-      cur = { row: rows.length - 1, col: widths[widths.length - 1] };
-      if (cur.col >= textW) { rows.push(''); widths.push(0); cur = { row: rows.length - 1, col: 0 }; }
-    }
+    this.textW = textW;
+    const { rows: laid, r, col } = this.place();
+    const rows = laid.map((row) => row.text);
+    const cur = { row: r, col };
 
     const lines = [topBorder(boxW, color, title)];
     rows.forEach((r, i) => {

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { diffLines, makeHunks, countChanges, splitLines } from '../utils/diff.js';
+import { fitImage } from '../utils/images.js';
 
 const MAX_LINES = 10_000;
 const MAX_LINE_CHARS = 20_000;
@@ -94,12 +95,20 @@ Usage:
     const ext = path.extname(file).toLowerCase();
 
     if (IMAGE_TYPES[ext]) {
-      if (stat.size > 5 * 1024 * 1024) return { isError: true, content: `Image too large (${Math.round(stat.size / 1024)}KB, max 5MB).` };
-      const data = fs.readFileSync(file).toString('base64');
+      if (stat.size > 30 * 1024 * 1024) return { isError: true, content: `Image too large (${Math.round(stat.size / 1024)}KB, max 30MB).` };
+      // Scaled to what the API takes (see utils/images.js): a full-page screenshot would otherwise make every
+      // later request of the session fail once it has many images.
+      const fit = await fitImage({ data: fs.readFileSync(file).toString('base64'), media_type: IMAGE_TYPES[ext] });
+      if (fit.error) return { isError: true, content: `Cannot show ${file}: ${fit.error}. Crop it or take a smaller screenshot.` };
       ctx.fileState.set(file, { mtimeMs: stat.mtimeMs });
+      const dims = fit.width ? `${fit.width}×${fit.height}, ` : '';
+      const kb = Math.round((fit.data.length * 3) / 4 / 1024);
       return {
-        content: [{ type: 'image', source: { type: 'base64', media_type: IMAGE_TYPES[ext], data } }],
-        display: { summary: `Read image (${Math.round(stat.size / 1024)}KB)` },
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: fit.media_type, data: fit.data } },
+          ...(fit.from ? [{ type: 'text', text: `[Scaled from ${fit.from.width}×${fit.from.height} to ${fit.width}×${fit.height} px to fit the API's image size limit. For detail, crop the area or take a smaller screenshot.]` }] : []),
+        ],
+        display: { summary: fit.from ? `Read image (${fit.from.width}×${fit.from.height}, scaled to ${fit.width}×${fit.height}, ${kb}KB)` : `Read image (${dims}${kb}KB)` },
       };
     }
     if (ext === '.ipynb') {

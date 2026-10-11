@@ -9,6 +9,7 @@ import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { readGatewayLogin, fetchGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
 import { createCodexFetch, codexModels, codexEffort, nearestEffort } from './codex/client.js';
 import { SIGNATURE_PREFIX } from './codex/translate-request.js';
+import { fitImagesIn } from './utils/images.js';
 
 let cached = null;
 
@@ -374,6 +375,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   // session id names the conversation, in the header Claude Code sends it in.
   const options = { signal, ...(config.usesGateway && config.sessionId ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) };
   let authReloaded = false;
+  let imagesFitted = false;
   const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
   const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0, overloaded: 0, overloadedWaitMs: 0 };
   let paused = null; // the plan of the pause in progress (see planRetry)
@@ -497,6 +499,16 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         const taken = refuseCache(params, err.message);
         if (taken.size) {
           for (const item of taken) refused.add(item);
+          continue;
+        }
+      }
+      // An image in the conversation is larger than the API takes (a screenshot read before images were scaled,
+      // or a session that only now has enough images for the stricter limit): scale the images in place, which
+      // fixes the conversation itself, and try again. Without this every later request of the session fails.
+      if (err.status === 400 && !imagesFitted && /image/i.test(err.message) && /dimension|pixels|exceed|too large|too big/i.test(err.message)) {
+        imagesFitted = true;
+        if (await fitImagesIn(params.messages)) {
+          if (emitted) onEvent({ type: 'reset' });
           continue;
         }
       }

@@ -52,6 +52,7 @@ export class Screen {
     this.resizeTimer = null;
     this.resizeSince = 0;
     this.closed = false;
+    this.onLog = null;
     this.titleProvider = null; // () => the terminal title (tab label) to show now
     this.title = null; // what was last sent
     this.titleInherited = false; // the process before this one in the session already saved the shell's title
@@ -86,8 +87,10 @@ export class Screen {
 
   setLive(fn) { this.renderLive = fn; this.schedule(); }
 
-  // Append lines (strings, may contain \n) to the static log.
+  // Append lines (strings, may contain \n) to the static log. `onLog(items)` is told about each call (the remote
+  // control mirrors what the terminal prints).
   log(...items) {
+    if (this.onLog) { try { this.onLog(items); } catch { /* the listener's problem */ } }
     for (const item of items) {
       if (Array.isArray(item)) this.staticQueue.push(...item);
       else this.staticQueue.push(String(item));

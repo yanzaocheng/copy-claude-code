@@ -88,6 +88,44 @@ sequenceDiagram
 
 `Restart` 工具只在能重启的会话里才构建（子 agent 永远没有），系统提示词里也只有这时才有"你自己的源码"一节。`childEnv()` 会删掉这三个环境变量，Bash 工具启动的子进程不会误以为自己是可重启的会话。
 
+### 3.1.2 远程控制
+
+登录了网关的电脑上交互会话默认上线（见 3.1.3；`CLAUDE_PRO_ONLINE=0` 关闭），`/remote-control`（`/rc`）和 `--rc` 也会把交互会话接到**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）。和官方经 Anthropic 中转一样，会话只发出站请求、不监听端口；鉴权用 `/login` 存下的网关 API key（`readGatewayLogin`），与模型请求走哪个提供方无关，没有登录时 `/rc` 先做浏览器登录（`loginWithBrowser`，不切换提供方）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+
+- **协议**（Bearer = 网关 API key）：
+  - `POST /v1/remote/sessions {id, name, title, cwd, host, model, version}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（终端打印并做成二维码）。
+  - `GET /v1/remote/sessions/:id/commands`（SSE）：连着就算在线。收到 `{type:'viewers',count}`（页面数，页脚显示）、`{type:'snapshot'}`（网关要完整快照）、`{cid,type:'send'|'interrupt'|'dialog',body}`（页面下发的命令）。50 秒没有任何数据（网关每 15 秒 ping）视为断开；断开后 1s、2s、4s… 最长 30s 重连，404 表示网关忘了这个会话，先重新注册。
+  - `POST …/results {cid, ok, …|error}`：命令的结果，网关拿它回复页面的请求（返回 `{ok, delivered}`）。
+  - 网关的错误是 `{type:"error", error:{type, message}}`；注册时一个账户已有 20 个在线会话返回 429，id 被别的账户占用返回 409。
+  - `POST …/events {messages:[…]}`：按顺序的 `{t:'snapshot',seq,items,status}`、`{t:'batch',events}`、`{t:'status',status}`、`{t:'bye',restarting}`。网关只存"最新快照 + 之后的事件 + 最新状态"并转发给页面，不需要理解内容。
+- **事件模型**：页面看到的是一串条目（`user`、`text`、`thinking`、`tool`、`output`、`summary`），由事件 `user/start/delta/stop/tool/progress/sub/done/output` 更新。归约函数 `applyEvent(state, ev)` 和 `hydrate(items)` 是自包含的，网关页面里有同一份拷贝（codex-gateway 的 `src/user-remote.js` 顶部，改事件语义时两边一起改）。页面渲染在网关那边，它的 CSP 不允许内联样式：ANSI 颜色等用 `data-*` 属性再由脚本设置。每个事件带递增 `seq`，快照带当时的 `seq`，页面丢弃不大于它的事件。
+- **上传**：事件攒 150ms 一批，一次只有一个 POST 在路上（保证顺序）；运行中工具的输出（`toolProgress`）只在发送时取最后 8 行。需要快照的时候（刚连上、网关要求、`resync`、上一个 POST 失败、距上次快照超过 500 个事件、有人开始看）发快照代替事件：`snapshotItems` 取最近的条目（最多 400 个、序列化后不超过 1.5 MB，因为网关每个 POST 最多 2 MB、超出返回 413；过长的文本和输出截去中间），并且是**拷贝**（POST 可能排在前一个后面晚些才序列化，那时活的条目已经变了，快照 seq 之后的事件会被重复应用）；失败的 POST 不重发，下一份快照包含了丢掉的一切。没人看（`viewers === 0`）时不上传事件，只在列表用到的字段（忙/闲、标题、模型、目录、名字）变化时发状态，最多每 3 秒一次；有人看时每 500ms 比较一次状态，变了就发。状态由 `App.remoteStatus()` 计算（忙/动词/用时/token、限流倒计时、待办、排队、打开的对话框、模型、目录、标题）。
+- **App 的接法**（[`src/ui/repl.js`](src/ui/repl.js)）：`Screen.log` 的每次调用都通过 `screen.onLog` 转成 `output` 事件（命令输出、提示、错误原样带 ANSI，页面转成 HTML）；已经用专门事件表达的打印（用户消息回显 `echoUser`、流式 Markdown、思考、工具头和结果、欢迎框、恢复会话时重印的历史）改走 `logLocal()`，它在打印期间把 `remoteMuted` 加一，不会重复。`streamEvent` 发 `start/delta/stop`，`toolStart` 发 `tool`，进度 `toolProgress`、子 agent 的工具 `sub`，结束/拒绝/中断时 `remoteToolDone()` 发一次 `done`（用 `renderToolResult` 按 100 列排版）。`/clear`（`newSession`）、`/resume`（`loadSession`）、`/rewind` 恢复对话时 `resync()`：按 `agent.messages` 重建条目（`transcriptItems`）并发新快照。新增会改变对话显示的地方时，要么发事件、要么 resync，并把对应的终端打印改成 `logLocal`。
+- **从页面下发**：`remoteSend` 等同在输入框敲回车（`onSubmit`：忙时排队、`/命令`、`!`、`#`、`@会话` 都照常）；忙时的 `/命令`、有对话框打开时的普通消息直接拒绝（错误作为结果回给页面）。对话框通过 `remoteDialog()` 暴露（`SelectDialog` 的标题、问题、选项，按下标回答，因为选项值不一定是字符串；计划审批附带完整计划 `dialog.markdown`），`answerDialog` 校验 `id` 仍是当前对话框再 `resolve`。`remoteInterrupt` 等同 Ctrl+C 的第一下（取消对话框并中断）。
+- **退出与重启**：`close({restarting})` 把剩下的消息和 `{t:'bye',restarting}` 一起发出，进程等它最多 1.5 秒再退出。重启后的新进程用同一个 id 注册（`persistent`：网关暂时连不上也不放弃，后台重试），网关上的页面看到同一个会话回来并收到新快照。
+- **二维码**：[`src/qr.js`](src/qr.js)（字节模式、纠错 L、版本 1–6、按罚分选掩码，已与 `qrcode` 包逐模块比对一致），有颜色时用黑白前景/背景色画，与终端主题无关。
+- 测试：[`test/remote.test.js`](test/remote.test.js) 在无头终端里驱动真实 App，假网关同时扮演中转和页面：页面发命令跑一轮（工具调用和回答以事件到达）、在页面上回答 `AskUserQuestion`、忙时的命令和过期的对话框被拒绝、网关忘掉会话后自动重新注册并补发对话、`/clear` 重置、`/rc stop` 发 bye、被拒绝的 key 直接报错。
+
+### 3.1.3 会话之间的消息（本机和其他电脑）
+
+本机的会话经 [`src/peers.js`](src/peers.js) 的 `PeerNode` 互发（`CONFIG_DIR/peers/<id>.json` 登记、127.0.0.1 上的小 HTTP 服务）；同一网关账户下其他电脑上的会话经网关，复用远程控制那条连接（`RemoteControl`）：
+
+- **在线**：登录了网关的电脑上，交互会话默认在启动时连上网关（`App.autoStartRemote`，后台进行、不阻塞启动；`CLAUDE_PRO_ONLINE=0` 关闭）。注册时带 `machine`（`machineName()`：`CLAUDE_PRO_MACHINE_NAME` 或主机名）和 `peerId`（本机 PeerNode 的 id，列表里据此去掉本机已经能直接联系的会话）。`/rc stop` 之后 `remoteStopped`，重启状态里记 `{off: true}`，重启后保持离线。
+- **列表**：`GET /v1/remote/sessions` → 同账户的会话（在线的在前）。`App.refreshRemotePeers()` 只留在线、未结束、不是自己、不在本机的，变成 `{id, name, machine, cwd, remote: true, label: 'machine/name'}` 存在 `remotePeers`；连上时、每 60 秒、输入 `&` 时（超过 10 秒没刷新）、发送时找不到名字时刷新。
+- **寻址**：`resolvePeer(local, remote, ref)`：本机名字优先；然后 `machine/name`、只有一个远端会话叫这个名字、只有一个会话的电脑名、（模型发的才有）id 前缀；多个匹配时报歧义。用户输入的前缀是 `&`（`@` 只用于文件）：`suggest()` 在输入开头是 `&` 时给出本机和远端的会话（`peerSuggestions`），`sendTypedToPeer` 发送。
+- **发送**：`POST /v1/remote/sessions/:目标/messages {from: 自己的 id, kind, text, inReplyTo}` → `{id, delivered}`（不重试：任务发两次会做两次）。网关按发送方的注册信息填 `from`，推到目标命令流：`{type:'peer', cid, kind, text, inReplyTo, from:{id, name, machine, host, cwd}}`。task 发给不在线的会话返回 409；reply 进目标的信箱（内存，24 小时，100 条 / 4 MB），目标重连时（viewers 之后）按顺序重推。
+- **接收**：`RemoteControl.peerMessage` 按 `cid` 去重（重推的消息只确认），交给 `App.onPeerMessage`（`from.name` 是 `machine/name`，`from.remote = true`），然后用 `POST …/results {cid, ok: true}` 确认，确认后网关从信箱删除。之后的流程和本机消息相同：任务排队成一轮，`answerPeers` 在这一轮结束后把最终文本作为 reply 发回，远端的经网关（`remote.sendPeer`），本机的经 PeerNode。
+- **文件**：`/sendfile`（`App.sendFiles`：解析 `&目标` 和路径，没加引号的带空格路径取能拼成已存在文件的最长连续词）和 MessagePeer 的 `files` 都走 `sendToPeer(target, text, {files})`，`filesToSend`（[`src/utils/downloads.js`](src/utils/downloads.js)）先检查：最多 20 个、每个 5 GB、不能是文件夹。远端：逐个 `remote.uploadFile`（[`src/transfer.js`](src/transfer.js)：先流式算 sha256，`POST /v1/remote/uploads {name, size, sha256}` 得到 `{id, received, chunkSize}`——网关对同一账户同 sha256 和 size 的未完成上传返回原来那个，所以再发一次同一个文件就是续传；然后按 `x-upload-offset` 一块块 `PUT`，每次只读一块进内存；409 带回网关实际的 `received`（一块传到一半断了时网关可能收下了一部分），404 重新开始，422 表示文件在发送中变了；网络类错误（无响应、超时、5xx、429、408）按 1、2、4…30 秒等待重试，自上次成功起最多 1 小时）得到 `{id, name, size, sha256}`，消息带 `files: [{id}]`，网关推送时按自己的元数据填 `files`；本机：消息里带 `{path, name, size}`（接收方只接受绝对路径）。接收方 `App.receiveFiles` 不管忙不忙立刻处理：远端的 `downloadFile` 流式写进下载文件夹里以文件 id 命名的 `.part`，断了用 `Range: bytes=N-` 接着下（60 秒收不到数据也算断），下完校验 sha256、`moveUnique`（`linkSync` 保证不覆盖同名文件）改成正式文件名，然后 `deleteFile`；本机的 `copyUnique`（`COPYFILE_EXCL`）。带文件的消息由 `RemoteControl.peerMessage` 等 `onPeerMessage` 返回的 promise 结束后才确认，所以接收方中途退出的话网关会在重连时重推，新进程从 `.part` 接着下。下载前用 `statfsSync` 检查剩余空间。发送和接收都在后台进行（`sendToPeer` 的 `background`，`/sendfile` 和 MessagePeer 都用），`startTransfer` 记在 `transfers` 里，页脚显示第一个的进度（`transferStatus`），`/sendfile stop` 中止发送；写进下载文件夹（`downloadsDir`：Windows 读注册表 Shell Folders 里的 Downloads，其他系统 ~/Downloads 或 xdg-user-dir；`CLAUDE_PRO_DOWNLOAD_DIR` 优先），同名时加「 (1)」，文件名经 `safeFileName` 清理（只取 basename、去掉非法字符和保留名）。只有文件没有文字的任务：立刻回复保存位置（`replyToPeer`），不跑模型，并给模型留一条 reminder；带文字的任务：把保存位置附在任务后面照常跑一轮。粘贴到 `/sendfile` 里的图片路径不转成图片附件。
+- **`&` 补全**：`suggest()` 在光标前是 `(行首|空白)&词` 时都给出会话（`peerSuggestions`，替换范围是这个词），所以 `/sendfile a.jpg &公` 也能补全；全角 `＆` 同样处理。行首的 `&名字 任务` 直接发送；其他位置的 `&名字` 由 `peerMentions` 解析后作为 system-reminder 告诉模型是哪个会话、可以用 MessagePeer（含 files）联系它。附带的图片如果来自文件（`source`），把路径也告诉模型，模型才能把它当文件发出去。
+- **名字**：`/rename`（`App.renameSession`）改本机 PeerNode 的名字（`setName` 在本机重名时加 -2），没有 PeerNode 时记在 `sessionName`；同时作为对话标题 `customTitle`（`sessionLabel()` 优先用它，`refreshTopic` 不再改标题），写进会话文件的 meta `name`（`/resume` 时恢复名字和标题）；再向网关注册一次（网关用注册时的 name 填 `from`），并推一次状态（网关列表用状态里的 name）。名字允许任何文字的字母（`cleanName` 用 `\p{L}\p{M}\p{N}`）。
+- 测试：[`test/remote.test.js`](test/remote.test.js) 里假网关列出另一台电脑的会话：输入 `&` 弹出它、`&公司 …` 发任务、回答显示并被确认、那边发来的任务跑完后经网关回答、重推的任务只确认不再跑、`/rename` 重新注册新名字；`/sendfile` 上传文件（含不加引号的带空格路径）、`&` 在行中补全、收到的文件存进下载文件夹且不覆盖同名文件、只有文件时直接确认不跑模型；大文件：上传一块传到一半断开后按网关的 409 接着传、再发同一个文件接着未完成的上传、下载断开后用 Range 接着下且存好后才确认。
+
+### 3.1.4 输入框的光标与回退菜单
+
+- **可视行**：[`src/ui/editor.js`](src/ui/editor.js) 的 `layoutRows(body, textW)` 把文字按输入框宽度排成显示的行，每行带光标停靠点 `{i, col}`（每个下标恰好一个停靠点：折行处的字在下一行行首，换行符处是上一行行尾）。`render` 用它画输入框，`moveRow` 用它上下移动，所以自动折行的长行也能逐行移动；连续上下移动时 `goalCol` 记住起始列。第一行按上：文字不止一行且光标不在开头时先到开头，再按才 `historyPrev`；最后一行按下同理。`textW` 是上次绘制时的宽度。
+- **双击 Esc**：输入框有文字时清空（`discard`，按上可找回）；为空时调用 `onDoubleEscape` → `App.openRewind()`（忙时 Esc 先中断，不会打开）。Node 的按键解析在 Esc 之后要等约 500ms 判断它是不是组合键的开头，连按的两个 Esc 常常合成一个带 `meta` 的 escape，两种都算连按。
+- **回退菜单**（`/rewind`，[`src/commands.js`](src/commands.js)）：按时间列出检查点（最新的在最下、默认选中，`SelectDialog` 的 `selected`），`/clear` 前的对话（`app.previousSession`，在 `/clear` 里记下，`loadSession` 清掉）在最上面。动作：恢复代码和对话 / 对话 / 代码（`rewind()`）、Summarize from here / up to here（`Agent.summarizePart(index, {part: 'after'|'before'})`：整段对话加上 `partialCompactPrompt` 作为一次摘要请求，走 `requestSummary` 以复用缓存；被总结的部分换成一条 `partialSummaryMessage`，其余逐字保留；然后 `CheckpointStore.summarized` 让被总结的回合不能再回退对话、把之后的回合的 `messageIndex` 前移）、Never mind（回到列表）。回填输入框的是 `promptAt(agent, entry)`：检查点所在的那条用户消息的完整文字（标签只存前 200 字）。
+
 ### 3.2 交互式与非交互式
 
 - 交互式终端进入 [`src/ui/repl.js`](src/ui/repl.js)，负责输入编辑、Markdown 渲染、流式输出、快捷命令和中断。
@@ -434,6 +472,7 @@ flowchart TD
 | [`src/session.js`](src/session.js) | JSONL 会话、工具结果、自动记忆目录 |
 | [`src/checkpoints.js`](src/checkpoints.js) | 文件快照与回滚 |
 | [`src/ui/`](src/ui/) | 终端屏幕、编辑器、Markdown、对话 UI |
+| [`src/remote.js`](src/remote.js) / [`src/qr.js`](src/qr.js) | 远程控制：经网关中转的客户端、事件归约（网关页面里有同一份）、终端二维码 |
 | [`src/print.js`](src/print.js) | 非交互输出协议 |
 | [`test/`](test/) | 单元、Agent、UI、OAuth 和集成测试 |
 

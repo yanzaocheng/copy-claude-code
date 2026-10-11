@@ -12,7 +12,7 @@ process.env.CLAUDE_PRO_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'claud
 const { Config, CONFIG_DIR, loadConfig } = await import('../src/config.js');
 const { ModeManager } = await import('../src/modes.js');
 const { Agent } = await import('../src/agent.js');
-const { CheckpointStore, rewind } = await import('../src/checkpoints.js');
+const { CheckpointStore, rewind, promptAt } = await import('../src/checkpoints.js');
 const { ReadTool, WriteTool } = await import('../src/tools/files.js');
 const { loadSkills, renderSkill } = await import('../src/agents.js');
 const { makeSkillTool } = await import('../src/tools/skill.js');
@@ -166,6 +166,46 @@ test('agent: Write/Edit calls are checkpointed per prompt and /rewind undoes the
   assert.equal(read(f), 'old');
   assert.equal(fs.existsSync(path.join(dir, 'created.txt')), false);
   assert.equal(agent.messages.length, 0);
+});
+
+test('rewind menu: summarize up to here or from here keeps the rest word for word, and the checkpoints follow', async () => {
+  const dir = tmp();
+  const cfg = makeConfig(dir);
+  const store = new CheckpointStore(path.join(dir, '.snaps'));
+  const agent = new Agent({ config: cfg, modes: new ModeManager(), checkpoints: store, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const long = `third prompt ${'x'.repeat(300)}`;
+  let n = 0;
+  agent.callModel = async () => reply([{ type: 'text', text: `answer ${++n}` }]);
+  for (const p of ['first prompt', 'second prompt', long]) await agent.run(p);
+  assert.equal(agent.messages.length, 6);
+  const [, second, third] = store.list().slice().reverse();
+  assert.equal(promptAt(agent, third), long, 'the whole prompt, not the 200-character label');
+
+  const asked = [];
+  agent.requestSummary = async (messages) => {
+    asked.push(messages.at(-1).content.at(-1).text);
+    return reply([{ type: 'text', text: '<summary>the first exchange</summary>' }]);
+  };
+  await agent.summarizePart(second.messageIndex, { part: 'before', label: second.label });
+  assert.match(asked[0], /BEFORE the user's message that begins "second prompt"/);
+  assert.equal(agent.messages.length, 5);
+  assert.match(agent.messages[0].content[0].text, /^\[Summarized conversation\] The earlier part[\s\S]*the first exchange$/);
+  assert.equal(agent.messages[1].content[0].text, 'second prompt', 'the rest word for word');
+  store.summarized(second.id, 'before', second.messageIndex);
+  assert.equal(store.get(1).conversationValid, false, 'the summarized turn can no longer be rewound to');
+  assert.equal(third.messageIndex, 3, 'the later turns moved up');
+  assert.equal(promptAt(agent, third), long);
+
+  agent.requestSummary = async () => reply([{ type: 'text', text: '<summary>the third exchange</summary>' }]);
+  await agent.summarizePart(third.messageIndex, { part: 'after', label: third.label });
+  assert.equal(agent.messages.length, 4);
+  assert.equal(agent.messages[1].content[0].text, 'second prompt');
+  assert.match(agent.messages[3].content[0].text, /The later part[\s\S]*the third exchange$/);
+  store.summarized(third.id, 'after', third.messageIndex);
+  assert.equal(store.get(third.id).conversationValid, false);
+  assert.equal(store.get(second.id).conversationValid, true);
+  rewind(agent, store, second.id, 'conversation');
+  assert.equal(agent.messages.length, 1, 'only the summary of the first exchange is left');
 });
 
 test('plan mode blocks edits through the agent; full access allows them', async () => {

@@ -151,6 +151,23 @@ Write the summary in the same language the user has been using.
 Do NOT call any tools. Respond with text only.${instructions ? `\n\nAdditional instructions from the user for this summary:\n${instructions}` : ''}`;
 }
 
+// The instruction for /rewind's "Summarize from here" (part 'after') and "Summarize up to here" ('before'): only
+// that part of the conversation is summarized, the rest stays in it word for word.
+export function partialCompactPrompt(part, label, instructions = '') {
+  const at = label ? `the user's message that begins "${String(label).slice(0, 200)}"` : 'the point the user chose';
+  const scope = part === 'before'
+    ? `Summarize ONLY the part of the conversation BEFORE ${at}. That message and everything after it stay in the conversation word for word: do not summarize them. The summary replaces only what comes before that message, so it has to carry everything from that earlier part that the rest of the conversation builds on.`
+    : `Summarize ONLY the part of the conversation that starts with ${at} (that message included) and goes on to the end. Everything before that message stays in the conversation word for word: do not summarize it. The summary replaces only that later part.`;
+  return compactPrompt(`${scope}${instructions ? `\n${instructions}` : ''}`);
+}
+
+// The message that stands in the conversation for the part a partial summary replaced.
+export function partialSummaryMessage(part, summary) {
+  return part === 'before'
+    ? `[Summarized conversation] The earlier part of this conversation was summarized at the user's request; the messages after this one are as they were. The summary of the earlier part:\n${summary}`
+    : `[Summarized conversation] The later part of this conversation, from the user's message where this summary stands to where it was, was summarized at the user's request. The summary of that part:\n${summary}`;
+}
+
 export function continuationMessage(summary, { auto }) {
   return `This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:
 ${summary}${auto ? '\n\nPlease continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.' : ''}`;

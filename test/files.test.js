@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { ReadTool, EditTool, WriteTool } from '../src/tools/files.js';
+import { imageSize } from '../src/utils/images.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-files-'));
 const ctxFor = (dir) => ({ cwd: dir, projectRoot: dir, fileState: new Map() });
@@ -162,4 +164,55 @@ test('Read never returns more than 400k characters, and then says exactly where 
   assert.match(out, /output cut at 400000 characters: line 20 is the last one shown;/);
   assert.match(out, /showing lines 1-20\./);
   assert.ok(out.includes('\t20x') && !out.includes('\t21x'));
+});
+
+// A PNG of the given size (a pattern, so that it does not compress to nothing).
+function makePng(w, h) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const stride = 1 + w * 3;
+  const raw = Buffer.alloc(stride * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) raw[y * stride + 1 + x * 3] = (x * 7 + y) & 255;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+test('imageSize reads PNG, JPEG, GIF and WebP headers', () => {
+  assert.deepEqual(imageSize(makePng(31, 17)), { width: 31, height: 17 });
+  const gif = Buffer.from('GIF89a\x40\x01\xf0\x00\x00\x00', 'latin1');
+  assert.deepEqual(imageSize(gif), { width: 320, height: 240 });
+  // JPEG: SOI, an APP0 segment, then SOF0 with height 600 and width 800
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x03, 0x20, 0x03, 0, 0, 0, 0]);
+  assert.deepEqual(imageSize(jpeg), { width: 800, height: 600 });
+  const webp = Buffer.alloc(30);
+  webp.write('RIFF', 0, 'latin1');
+  webp.write('WEBPVP8X', 8, 'latin1');
+  webp.writeUIntLE(1919, 24, 3);
+  webp.writeUIntLE(4999, 27, 3);
+  assert.deepEqual(imageSize(webp), { width: 1920, height: 5000 });
+  assert.equal(imageSize(Buffer.from('not an image at all')), null);
+});
+
+test('Read scales a tall screenshot to what the API takes, and says so; a small image is sent as it is', { skip: process.platform !== 'win32' && 'scaling uses System.Drawing here' }, async () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, 'tall.png'), makePng(600, 3400));
+  fs.writeFileSync(path.join(dir, 'small.png'), makePng(300, 200));
+  const tall = await ReadTool.call({ file_path: path.join(dir, 'tall.png') }, ctxFor(dir));
+  assert.ok(!tall.isError, tall.content);
+  assert.deepEqual(imageSize(Buffer.from(tall.content[0].source.data, 'base64')), { width: 277, height: 1568 });
+  assert.match(tall.content[1].text, /Scaled from 600×3400 to 277×1568/);
+  assert.match(tall.display.summary, /600×3400, scaled to 277×1568/);
+  const small = await ReadTool.call({ file_path: path.join(dir, 'small.png') }, ctxFor(dir));
+  assert.equal(small.content.length, 1);
+  assert.equal(small.content[0].source.data, makePng(300, 200).toString('base64'));
 });

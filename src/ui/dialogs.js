@@ -19,7 +19,8 @@ function box(lines, width, color) {
 
 export class SelectDialog {
   // options: [{label, value, description?}]
-  constructor({ title, body = [], question, options, color = c.permission, multi = false, footer, onResolve, cancelValue = null, otherOption = false }) {
+  // selected: the option highlighted at first.
+  constructor({ title, body = [], question, options, color = c.permission, multi = false, footer, onResolve, cancelValue = null, otherOption = false, selected = 0 }) {
     this.title = title;
     this.body = body;
     this.question = question;
@@ -29,7 +30,7 @@ export class SelectDialog {
     this.footer = footer;
     this.onResolve = onResolve;
     this.cancelValue = cancelValue;
-    this.selected = 0;
+    this.selected = Math.max(0, Math.min(selected, this.options.length - 1));
     this.checked = new Set();
     this.other = null; // Editor when typing a custom answer
   }

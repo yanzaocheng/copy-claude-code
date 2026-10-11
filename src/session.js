@@ -74,6 +74,8 @@ export class SessionStore {
   message(message) { this.append({ type: 'message', message, at: Date.now() }); }
   // What the conversation is about now (the tab title); the newest one wins when the session is loaded.
   setTopic(topic) { this.append({ type: 'meta', topic, at: Date.now() }); }
+  // The name the user gave the conversation with /rename (null: none again); it wins over the topic.
+  setName(name) { this.append({ type: 'meta', name, at: Date.now() }); }
   reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
   // The system prompt this conversation runs behind, kept so that a resumed one continues behind the same prompt
   // and so with the prompt cache it already has (see runtime.resumeSystemPrompt). Written when it first appears
@@ -110,6 +112,7 @@ export class SessionStore {
     return {
       messages, times, lastAt, meta, title,
       topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,
+      name: typeof meta.name === 'string' && meta.name.trim() ? meta.name : null,
       systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,
     };
   }
@@ -124,7 +127,7 @@ export class SessionStore {
       let title = null, count = 0;
       try {
         const loaded = SessionStore.load(file);
-        title = loaded.topic || loaded.title; // what it was about last, else its first message
+        title = loaded.name || loaded.topic || loaded.title; // its name, else what it was about last, else its first message
         count = loaded.messages.length;
       } catch { /* ignore */ }
       return { id: f.slice(0, -6), file, mtime: st.mtimeMs, title: title || '(no prompt)', count };

@@ -132,6 +132,17 @@ export class CheckpointStore {
     this.writeIndex();
   }
 
+  // Part of the conversation was summarized at checkpoint `id` (see Agent.summarizePart), which started at message
+  // `index`: the turns summarized can no longer be rewound to (their files can still be restored), and with the
+  // earlier part summarized the later turns moved up to just after the one summary message.
+  summarized(id, part, index) {
+    for (const e of this.entries) {
+      if (part === 'after' ? e.id >= id : e.id < id) e.conversationValid = false;
+      else if (part === 'before') e.messageIndex = e.messageIndex - index + 1;
+    }
+    this.writeIndex();
+  }
+
   // The conversation was compacted or replaced: it can no longer be rewound to older points,
   // but file snapshots remain valid.
   markConversationStale() {
@@ -152,6 +163,14 @@ export class CheckpointStore {
   }
 }
 
+// The prompt a checkpoint started with, whole: its label is cut at 200 characters, the message is not.
+export function promptAt(agent, entry) {
+  const msg = agent.messages[entry.messageIndex];
+  const text = msg?.role !== 'user' ? null : typeof msg.content === 'string' ? msg.content : msg.content?.find?.((b) => b.type === 'text')?.text;
+  const head = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return text && head(text) === head(entry.label) ? text : entry.label;
+}
+
 // Apply a rewind to a running agent. mode: 'both' | 'code' | 'conversation'.
 // Returns {restore, prompt, conversation}: what was restored, the prompt text (so the UI can put it
 // back in the input box) and whether the conversation was cut.
@@ -161,7 +180,7 @@ export function rewind(agent, store, id, mode = 'both') {
   if (mode !== 'code' && !entry.conversationValid) {
     throw new Error('The conversation was compacted after this point, so it can no longer be rewound to it. You can still restore the code.');
   }
-  const out = { restore: null, prompt: entry.label, conversation: false };
+  const out = { restore: null, prompt: promptAt(agent, entry), conversation: false };
   if (mode !== 'conversation') {
     out.restore = store.restoreCode(id);
     // Files changed behind the agent's back: make it read them again before editing.

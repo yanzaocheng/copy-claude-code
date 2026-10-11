@@ -1,0 +1,395 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+// Remote control (/remote-control) through the gateway: the real App in a headless terminal connects out to a fake
+// gateway, which plays both the relay and the page. A command from the page runs a turn whose text and tool calls
+// come back as events, a question the model asks is answered from the page, and a gateway that forgets the session
+// gets it registered again with the whole conversation.
+const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-config-'));
+let lastAnswer = null;
+
+const frames = (events) => events.map((ev) => `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`).join('');
+const textReply = (text) => frames([
+  { type: 'message_start', message: { model: 'mock', usage: { input_tokens: 1, output_tokens: 0 } } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+  { type: 'message_stop' },
+]);
+const toolReply = (id, name, input) => frames([
+  { type: 'message_start', message: { model: 'mock', usage: { input_tokens: 1, output_tokens: 0 } } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name, input: {} } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 3 } },
+  { type: 'message_stop' },
+]);
+
+const { applyEvent, hydrate } = await import('../src/remote.js');
+
+// The fake gateway: the model API, and the remote control relay with a page that keeps the transcript.
+const KEY = 'gw-test-key';
+const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], files: new Map(), deleted: [], uploads: new Map(), puts: [], ranges: [], cutPut: false, cutGet: false };
+const MB = 1024 * 1024;
+const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
+const storeFile = (name, data) => {
+  const id = `f${gw.files.size + 1}xxxxxxxxxxxxxxx`;
+  gw.files.set(id, { id, name, size: data.length, sha256: sha256(data), data });
+  return { id, name, size: data.length, sha256: sha256(data) };
+};
+const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (d) => { b += d; }); req.on('end', () => resolve(b ? JSON.parse(b) : {})); });
+const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/v1/messages') {
+    const body = await readBody(req);
+    const last = body.messages.at(-1);
+    const blocks = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : last.content;
+    const result = blocks.find((b) => b.type === 'tool_result');
+    const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (result?.tool_use_id === 'toolu_bash') res.end(textReply('All done.'));
+    else if (result?.tool_use_id === 'toolu_ask') { lastAnswer = typeof result.content === 'string' ? result.content : JSON.stringify(result.content); res.end(textReply('Got it.')); }
+    else if (/ask me/.test(text)) res.end(toolReply('toolu_ask', 'AskUserQuestion', { questions: [{ question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] }] }));
+    else res.end(toolReply('toolu_bash', 'Bash', { command: 'echo remote-ok', description: 'Say ok' }));
+    return;
+  }
+  if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, { error: { message: 'Missing or invalid gateway API key' } });
+  if (req.method === 'POST' && url.pathname === '/v1/remote/sessions') {
+    const body = await readBody(req);
+    gw.registrations++;
+    gw.sessions.set(body.id, body);
+    return json(res, 200, { id: body.id, url: `https://gw.example/#remote/${body.id}` });
+  }
+  // resumable uploads: the same unfinished upload again for the same file; cutPut cuts the next chunk in the middle
+  if (req.method === 'POST' && url.pathname === '/v1/remote/uploads') {
+    const body = await readBody(req);
+    let up = [...gw.uploads.values()].find((u) => u.sha256 === body.sha256 && u.size === body.size && !u.complete);
+    if (!up) {
+      up = { id: `u${gw.uploads.size + 1}xxxxxxxxxxxxxxx`, name: body.name, size: body.size, sha256: body.sha256, data: Buffer.alloc(0) };
+      gw.uploads.set(up.id, up);
+    }
+    return json(res, 200, { id: up.id, received: up.data.length, chunkSize: MB });
+  }
+  const upload = /^\/v1\/remote\/uploads\/([\w-]+)$/.exec(url.pathname);
+  if (upload) {
+    const up = gw.uploads.get(upload[1]);
+    if (!up) return json(res, 404, { error: { message: 'no such upload' } });
+    if (req.method === 'GET') return json(res, 200, { id: up.id, size: up.size, received: up.data.length, complete: Boolean(up.complete) });
+    const offset = Number(req.headers['x-upload-offset']);
+    gw.puts.push(offset);
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    if (offset !== up.data.length) return json(res, 409, { error: { message: 'wrong offset' }, received: up.data.length });
+    const chunk = Buffer.concat(chunks);
+    if (gw.cutPut) { // half of it arrives, then the connection breaks
+      gw.cutPut = false;
+      up.data = Buffer.concat([up.data, chunk.subarray(0, chunk.length >> 1)]);
+      return req.socket.destroy();
+    }
+    up.data = Buffer.concat([up.data, chunk]);
+    if (up.data.length < up.size) return json(res, 200, { received: up.data.length });
+    if (sha256(up.data) !== up.sha256) return json(res, 422, { error: { message: 'checksum' } });
+    up.complete = true;
+    gw.files.set(up.id, { id: up.id, name: up.name, size: up.size, sha256: up.sha256, data: up.data });
+    return json(res, 200, { received: up.size, complete: true, file: { id: up.id, name: up.name, size: up.size, sha256: up.sha256 } });
+  }
+  // downloads with Range; cutGet breaks the next one after the first megabyte
+  const file = /^\/v1\/remote\/files\/([\w-]+)$/.exec(url.pathname);
+  if (file) {
+    const stored = gw.files.get(file[1]);
+    if (!stored) return json(res, 404, { error: { message: 'no such file' } });
+    if (req.method === 'DELETE') { gw.deleted.push(stored.id); return json(res, 200, { ok: true }); }
+    const from = Number(/^bytes=(\d+)-$/.exec(req.headers.range || '')?.[1] || 0);
+    gw.ranges.push(req.headers.range || null);
+    const body = stored.data.subarray(from);
+    res.writeHead(from ? 206 : 200, { 'content-type': 'application/octet-stream', 'content-length': body.length, 'x-file-sha256': stored.sha256, ...(from ? { 'content-range': `bytes ${from}-${stored.size - 1}/${stored.size}` } : {}) });
+    if (gw.cutGet) {
+      gw.cutGet = false;
+      res.write(body.subarray(0, MB));
+      return setTimeout(() => res.socket.destroy(), 50);
+    }
+    return res.end(body);
+  }
+  if (req.method === 'GET' && url.pathname === '/v1/remote/sessions') {
+    const own = [...gw.sessions.values()].map((p) => ({ id: p.id, name: p.name, machine: p.machine, cwd: p.cwd, peerId: p.peerId, online: true, ended: false }));
+    return json(res, 200, { data: [...own, ...gw.others] });
+  }
+  const m = /^\/v1\/remote\/sessions\/([\w-]+)\/(commands|events|results|messages)$/.exec(url.pathname);
+  if (!m) return json(res, 404, { error: 'not found' });
+  if (m[2] === 'messages') {
+    const body = await readBody(req);
+    gw.messages.push({ to: m[1], ...body });
+    return json(res, 200, { ok: true, id: `m${gw.messages.length}`, delivered: true });
+  }
+  if (!gw.sessions.has(m[1])) return json(res, 404, { error: 'no such session' });
+  if (m[2] === 'commands') {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    res.write(`data: ${JSON.stringify({ type: 'viewers', count: 1 })}\n\n`);
+    gw.stream = res;
+    req.on('close', () => { if (gw.stream === res) gw.stream = null; });
+    return;
+  }
+  const body = await readBody(req);
+  if (m[2] === 'results') { gw.acks.push(body.cid); gw.pending.get(body.cid)?.(body); gw.pending.delete(body.cid); return json(res, 200, { ok: true }); }
+  const page = gw.page;
+  for (const msg of body.messages) {
+    if (msg.t === 'snapshot') { page.state = hydrate(msg.items); page.seq = msg.seq; page.status = msg.status; page.snapshots++; }
+    if (msg.t === 'status') page.status = msg.status;
+    if (msg.t === 'bye') page.byes.push(msg);
+    if (msg.t === 'batch') for (const ev of msg.events) if (ev.seq > page.seq) { page.seq = ev.seq; applyEvent(page.state, ev); }
+  }
+  return json(res, 200, { ok: true });
+});
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+const base = `http://127.0.0.1:${server.address().port}`;
+
+// What the page sends, as the gateway passes it on: resolves with the session's result.
+const command = (type, body = {}) => new Promise((resolve, reject) => {
+  if (!gw.stream) { reject(new Error('the session is not connected')); return; }
+  const cid = `c${++gw.cid}`;
+  gw.pending.set(cid, resolve);
+  gw.stream.write(`data: ${JSON.stringify({ cid, type, body })}\n\n`);
+});
+
+fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: { email: 'me@example.com' } }));
+Object.assign(process.env, {
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: base, CLAUDE_PRO_GATEWAY_URL: base,
+  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '1', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: 'auto', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '0',
+});
+const { startTui } = await import('./tui-harness.js');
+const { qrMatrix } = await import('../src/qr.js');
+
+test.after(() => server.close());
+
+const until = async (what, check, timeout = 20_000) => {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > timeout) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+
+test('remote control through the gateway: the page follows a turn it started, answers a question, and survives a forgetful gateway', async (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
+  const tui = await startTui({ cwd, flags: { remoteControl: true } });
+  t.after(() => tui.close());
+  const page = gw.page;
+  await until('the snapshot', () => page.snapshots >= 1 && gw.stream);
+  const [session] = [...gw.sessions.values()];
+  assert.match(session.id, /^[\w-]{8,64}$/);
+  assert.equal(session.cwd, cwd.replace(/\\/g, '/'));
+  await tui.waitFor('⇄ 1 watching', { timeout: 5000, all: false });
+
+  assert.deepEqual(await command('send', { text: 'run it' }), { cid: 'c1', ok: true, queued: false });
+  await until('the reply', () => page.state.items.some((i) => i.k === 'text' && i.text === 'All done.') && page.status && !page.status.busy);
+  await tui.waitFor('All done.', { timeout: 5000 });
+  assert.match(await tui.snapshot({ all: true }), /> run it/, 'the message shows in the terminal as if typed there');
+  assert.deepEqual(page.state.items.map((i) => i.k).filter((k) => k !== 'output'), ['user', 'tool', 'text']);
+  const tool = page.state.items.find((i) => i.k === 'tool');
+  assert.equal(tool.status, 'done');
+  assert.match(tool.head, /Bash/);
+  assert.match(tool.lines.join('\n'), /remote-ok/);
+
+  assert.equal((await command('send', { text: 'ask me' })).ok, true);
+  await until('the question', () => page.status?.dialog?.options);
+  const dialog = page.status.dialog;
+  assert.match(dialog.question, /Which color\?/);
+  assert.deepEqual(dialog.options.map((o) => o.label), ['Red', 'Blue', 'Other (type your own answer)']);
+  assert.match((await command('send', { text: '/help' })).error, /Commands wait/, 'a command waits for the turn');
+  assert.equal((await command('dialog', { id: dialog.id + 1, index: 1 })).ok, false, 'only the open question');
+  assert.equal((await command('dialog', { id: dialog.id, index: 1 })).ok, true);
+  await until('the answer', () => page.state.items.some((i) => i.k === 'text' && i.text === 'Got it.') && !page.status.busy);
+  assert.match(lastAnswer, /"Which color\?"="Blue"/);
+
+  // The gateway restarts and forgets everything: the session registers again and sends the whole conversation.
+  const kinds = page.state.items.map((i) => i.k).filter((k) => k !== 'output');
+  const registrations = gw.registrations;
+  gw.sessions.clear();
+  gw.page.state = hydrate([]);
+  gw.stream?.destroy();
+  await until('a new registration and snapshot', () => gw.registrations > registrations && gw.stream && page.state.items.length > 0, 15_000);
+  assert.deepEqual(page.state.items.map((i) => i.k).filter((k) => k !== 'output'), kinds);
+
+  // /clear starts the page over too.
+  const snapshots = page.snapshots;
+  tui.send('/clear\r');
+  await until('the reset', () => page.snapshots > snapshots && page.state.items.length === 0);
+
+  // /rc stop says goodbye.
+  tui.send('/rc stop\r');
+  await until('the bye', () => page.byes.length === 1);
+  assert.equal(page.byes[0].restarting, false);
+});
+
+test('sessions on other computers: &computer sends a task through the gateway, the answer comes back, and a task from there is answered there', async (t) => {
+  const office = { id: 'office-session-1', name: 'proj', machine: '公司', host: 'OFFICE-PC', cwd: 'D:/work/proj', online: true, ended: false };
+  gw.others = [office, { id: 'gone-1', name: 'old', machine: '公司', cwd: 'D:/old', online: false, ended: true }];
+  gw.sessions.clear(); // the sessions of the tests before are gone
+  t.after(() => { gw.others = []; });
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')), flags: { remoteControl: true } });
+  t.after(() => tui.close());
+  await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
+  assert.equal(tui.app.remotePeers[0].label, '公司/proj', 'only the online session of the other computer');
+  const me = tui.app.remote.id;
+  assert.equal(gw.sessions.get(me).machine.length > 0, true, 'the session tells the gateway its computer');
+
+  // typing & lists the sessions; &公司 is the only session on that computer
+  tui.send('&');
+  await tui.waitFor('&公司/proj', { timeout: 5000, all: false });
+  tui.send('\x7f');
+  gw.messages.length = 0;
+  tui.send('&公司 run the tests\r');
+  await until('the task', () => gw.messages.length === 1);
+  assert.deepEqual(gw.messages[0], { to: office.id, from: me, kind: 'task', text: 'run the tests' });
+  await tui.waitFor('Sent to &公司/proj', { timeout: 5000 });
+  const push = (msg) => gw.stream.write(`data: ${JSON.stringify({ type: 'peer', ...msg })}\n\n`);
+  const from = { id: office.id, name: 'proj', machine: '公司', cwd: office.cwd };
+  push({ cid: 'r1', kind: 'reply', inReplyTo: 'm1', text: 'All 12 tests pass.', from });
+  await tui.waitFor('&公司/proj answered:', { timeout: 5000 });
+  await until('the acknowledgement', () => gw.acks.includes('r1'));
+
+  // a task from the other computer runs here, and its answer goes back to it through the gateway
+  push({ cid: 't1', kind: 'task', text: 'run it', from });
+  await until('the answer', () => gw.messages.length === 2, 20_000);
+  assert.deepEqual(gw.messages[1], { to: office.id, from: me, kind: 'reply', text: 'All done.', inReplyTo: 't1' });
+  assert.match(await tui.snapshot({ all: true }), /task from &公司\/proj: run it/);
+  // sent again (say the acknowledgement was lost): acknowledged, not run twice
+  push({ cid: 't1', kind: 'task', text: 'run it', from });
+  await until('the second acknowledgement', () => gw.acks.filter((c) => c === 't1').length === 2);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(tui.app.busy, false);
+  assert.equal(gw.messages.length, 2);
+
+  // /rename: the new name at the gateway (registered again), and as the title
+  const registrations = gw.registrations;
+  tui.send('/rename web-server\r');
+  await tui.waitFor('This session is now &web-server', { timeout: 5000 });
+  await until('the new registration', () => gw.registrations > registrations && gw.sessions.get(me).name === 'web-server');
+  assert.equal(tui.app.sessionLabel(), 'web-server');
+  tui.send('/rc stop\r');
+  await until('offline', () => tui.app.remote === null);
+});
+
+test('files: /sendfile uploads them for a session on another computer, and files sent here land in the Downloads folder, never over a file', async (t) => {
+  const office = { id: 'office-session-1', name: 'proj', machine: '公司', host: 'OFFICE-PC', cwd: 'D:/work/proj', online: true, ended: false };
+  gw.others = [office];
+  gw.sessions.clear();
+  gw.messages.length = 0;
+  const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-downloads-'));
+  process.env.CLAUDE_PRO_DOWNLOAD_DIR = downloads;
+  t.after(() => { gw.others = []; delete process.env.CLAUDE_PRO_DOWNLOAD_DIR; });
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
+  fs.writeFileSync(path.join(cwd, 'a.txt'), 'hello');
+  fs.writeFileSync(path.join(cwd, 'photo 2.jpg'), Buffer.from([0xff, 0xd8, 1, 2, 3]));
+  const tui = await startTui({ cwd, flags: { remoteControl: true } });
+  t.after(() => tui.close());
+  await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
+
+  // & in the middle of the line lists the sessions too
+  tui.send('/sendfile a.txt &公');
+  await tui.waitFor('&公司/proj', { timeout: 5000, all: false });
+  tui.send('\x7f'.repeat(20));
+
+  // a path with a space, not quoted
+  tui.send(`/sendfile &公司 a.txt ${path.join(cwd, 'photo 2.jpg')}\r`);
+  await until('the message with the files', () => gw.messages.length === 1);
+  const sent = gw.messages[0];
+  assert.equal(sent.to, office.id);
+  assert.equal(sent.kind, 'task');
+  assert.equal(sent.text, '');
+  assert.deepEqual(sent.files.map((x) => gw.files.get(x.id).name), ['a.txt', 'photo 2.jpg']);
+  assert.equal(gw.files.get(sent.files[0].id).data.toString(), 'hello');
+  await tui.waitFor('Sent 2 files', { timeout: 5000 });
+
+  // files from the other computer: saved (next to a file of the same name, not over it), then confirmed
+  fs.writeFileSync(path.join(downloads, '报告.txt'), 'old');
+  const ref = storeFile('报告.txt', Buffer.from('内容'));
+  gw.stream.write(`data: ${JSON.stringify({ type: 'peer', cid: 'x1', kind: 'task', text: '', files: [ref], from: { id: office.id, name: 'proj', machine: '公司', cwd: office.cwd } })}\n\n`);
+  await until('the confirmation', () => gw.messages.length === 2);
+  const reply = gw.messages[1];
+  assert.equal(reply.kind, 'reply');
+  assert.equal(reply.inReplyTo, 'x1');
+  assert.match(reply.text, /Saved 1 file in the Downloads folder/);
+  assert.equal(fs.readFileSync(path.join(downloads, '报告.txt'), 'utf8'), 'old');
+  assert.equal(fs.readFileSync(path.join(downloads, '报告 (1).txt'), 'utf8'), '内容');
+  assert.ok(reply.text.includes(path.join(downloads, '报告 (1).txt')));
+  await until('the file is taken off the gateway', () => gw.deleted.includes(ref.id));
+  assert.equal(tui.app.busy, false, 'files alone do not start a turn');
+});
+
+test('big files: an upload cut off in the middle continues where the gateway stopped, sending again continues an unfinished upload, a download cut off continues with a range', async (t) => {
+  const office = { id: 'office-session-1', name: 'proj', machine: '公司', host: 'OFFICE-PC', cwd: 'D:/work/proj', online: true, ended: false };
+  gw.others = [office];
+  gw.sessions.clear();
+  gw.messages.length = 0;
+  const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-downloads-'));
+  process.env.CLAUDE_PRO_DOWNLOAD_DIR = downloads;
+  t.after(() => { gw.others = []; delete process.env.CLAUDE_PRO_DOWNLOAD_DIR; });
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
+  const video = crypto.randomBytes(3 * MB + 123);
+  fs.writeFileSync(path.join(cwd, 'video.mp4'), video);
+  const tui = await startTui({ cwd, flags: { remoteControl: true } });
+  t.after(() => tui.close());
+  await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
+
+  // the second chunk is cut in the middle: after a wait it continues from what the gateway has (a 409 says where)
+  gw.puts.length = 0;
+  gw.cutPut = false;
+  let put = 0;
+  const cutSecond = setInterval(() => { if (gw.puts.length === 1 && !put) { put = 1; gw.cutPut = true; } }, 1);
+  t.after(() => clearInterval(cutSecond));
+  tui.send('/sendfile &公司 video.mp4\r');
+  await tui.waitFor('Sending 1 file (3.0 MB) to &公司/proj in the background', { timeout: 5000 });
+  await until('the message with the video', () => gw.messages.length === 1, 20_000);
+  clearInterval(cutSecond);
+  assert.deepEqual(gw.puts.slice(0, 3), [0, MB, MB], 'the cut chunk is sent again from where it was, and told where the gateway is');
+  assert.ok(gw.puts.includes(MB + MB / 2), 'then it continues from the half that arrived');
+  assert.ok(sha256(gw.files.get(gw.messages[0].files[0].id).data) === sha256(video), 'the gateway has the whole video');
+  await tui.waitFor('Sent 1 file (3.0 MB) to &公司/proj', { timeout: 5000 });
+
+  // an upload left unfinished (another day, another process): sending the same file continues it
+  const other = crypto.randomBytes(2 * MB);
+  fs.writeFileSync(path.join(cwd, 'other.bin'), other);
+  gw.uploads.set('u-old-xxxxxxxxxxxxxx', { id: 'u-old-xxxxxxxxxxxxxx', name: 'other.bin', size: other.length, sha256: sha256(other), data: other.subarray(0, MB) });
+  gw.puts.length = 0;
+  tui.send('/sendfile &公司 other.bin\r');
+  await until('the second message', () => gw.messages.length === 2, 20_000);
+  assert.deepEqual(gw.puts, [MB], 'only the part the gateway did not have');
+
+  // a download cut after the first megabyte continues with a range, and the message is acknowledged once saved
+  const ref = storeFile('clip.mp4', video);
+  gw.cutGet = true;
+  gw.ranges.length = 0;
+  gw.stream.write(`data: ${JSON.stringify({ type: 'peer', cid: 'big1', kind: 'task', text: '', files: [ref], from: { id: office.id, name: 'proj', machine: '公司', cwd: office.cwd } })}\n\n`);
+  await until('the confirmation', () => gw.messages.length === 3, 20_000);
+  assert.deepEqual(gw.ranges, [null, `bytes=${MB}-`]);
+  assert.ok(fs.readFileSync(path.join(downloads, 'clip.mp4')).equals(video));
+  assert.deepEqual(fs.readdirSync(downloads), ['clip.mp4'], 'no .part file left behind');
+  await until('the acknowledgement', () => gw.acks.includes('big1'));
+});
+
+test('remote control: a key the gateway refuses is reported, not retried', async (t) => {
+  fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: 'revoked', account: {} }));
+  t.after(() => fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: {} })));
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')) });
+  t.after(() => tui.close());
+  tui.send('/rc\r');
+  await tui.waitFor('Could not start remote control: Missing or invalid gateway API key', { timeout: 10_000 });
+  assert.equal(tui.app.remote, null);
+});
+
+test('QR codes: versions 1 to 6 by length, null beyond', () => {
+  assert.equal(qrMatrix('hi').length, 21);
+  assert.equal(qrMatrix(`https://gw.predix.icu/#remote/${'a'.repeat(12)}`).length, 29);
+  assert.equal(qrMatrix('x'.repeat(134)).length, 41);
+  assert.equal(qrMatrix('x'.repeat(135)), null);
+});

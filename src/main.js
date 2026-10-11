@@ -22,6 +22,7 @@ Options:
   --system-prompt <text>           Replace the system prompt
   --verbose                        Show thinking and full tool output
   --no-mcp                         Do not start MCP servers
+  --remote-control, --rc           Online at the gateway from the start, and print the link and QR code (same as /remote-control)
   -v, --version                    Print version
   -h, --help                       Show help
 
@@ -67,6 +68,7 @@ function parseArgs(argv) {
       case '--system-prompt': flags.systemPrompt = next(); break;
       case '--verbose': flags.verbose = true; break;
       case '--no-mcp': flags.noMcp = true; break;
+      case '--remote-control': case '--rc': flags.remoteControl = true; break;
       case '-v': case '--version': flags.version = true; break;
       case '-h': case '--help': flags.help = true; break;
       default:

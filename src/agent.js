@@ -4,11 +4,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
-import { compactPrompt, continuationMessage, PLAN_MODE_REMINDER, SUMMARY_SYSTEM } from './prompts.js';
+import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, PLAN_MODE_REMINDER, SUMMARY_SYSTEM } from './prompts.js';
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
 import { CacheStats } from './cache.js';
 import { resolvePath } from './utils/paths.js';
+import { fitImagesIn } from './utils/images.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -688,6 +689,8 @@ export class Agent {
       }
       result = { isError: true, content: `Error: ${err.message}` };
     }
+    // Images from any tool (MCP servers, say) fit what the API takes before they join the conversation.
+    if (Array.isArray(result.content)) await fitImagesIn(result.content);
     handle.done?.(result);
     let content = typeof result.content === 'string' ? (result.content || '(no output)') : result.content;
     if (this.hooks?.has('PostToolUse')) {
@@ -737,6 +740,40 @@ export class Agent {
     const res = await call({ system: SUMMARY_SYSTEM, effort: null });
     this.recordUsage({ ...res, cache: { ...res.cache, caching: false } }, 'summary'); // made to miss: not a miss to report
     return res;
+  }
+
+  // Summarise part of the conversation, as /rewind's "Summarize from here" ('after': the messages from `index` on)
+  // and "Summarize up to here" ('before': those before it) do: that part is replaced by its summary, the rest stays
+  // word for word. `index` is where a prompt of the user starts a turn (a checkpoint's messageIndex); `label` is
+  // that prompt, to tell the model where the part begins or ends. The request is the conversation's own with the
+  // instruction at its end, so it reads the conversation from the cache (see requestSummary).
+  async summarizePart(index, { part, label = '', instructions = '', signal } = {}) {
+    const before = this.messages.slice(0, index);
+    const after = this.messages.slice(index);
+    if (!(part === 'before' ? before : after).length) throw new Error('There is nothing in that part of the conversation to summarize.');
+    this.io.compactStart?.(false, this);
+    const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: partialCompactPrompt(part, label, instructions) }] }]);
+    let res;
+    try {
+      res = await this.requestSummary(messages, { signal, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
+    } catch (err) {
+      this.io.compactEnd?.(null, this, err);
+      throw err;
+    }
+    const summary = Agent.summaryOf(res);
+    if (!summary) {
+      const err = new Error(res.stopReason === 'max_tokens' ? 'The summary was cut off by the output token limit.' : 'The model returned an empty summary.');
+      this.io.compactEnd?.(null, this, err);
+      throw err;
+    }
+    const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary) }] };
+    this.replaceMessages(part === 'before' ? [note, ...after] : [...before, note]);
+    if (part === 'after') this.todos = []; // what they were about may be summarized away; the model keeps them in the summary
+    this.lastContextTokens = estimateTokens(this.messages) + estimateTokens(this.toolSchemas()) + 2000;
+    this.tokensSinceUsage = 0;
+    this.postCompactTokens = null;
+    this.io.compactEnd?.(summary, this, null, { part });
+    return summary;
   }
 
   // Summarise the conversation and replace it with the summary.

@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { c, ESC, stringWidth, truncate, padEnd, wordWrap } from './ansi.js';
+import { c, ESC, stringWidth, truncate, padEnd, wordWrap, colorEnabled } from './ansi.js';
 import { Screen } from './screen.js';
 import { Editor } from './editor.js';
 import { SelectDialog } from './dialogs.js';
@@ -28,8 +28,13 @@ import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce }
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
+import { fitImagesIn } from '../utils/images.js';
+import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
+import { copyUnique } from '../transfer.js';
 import { checkForUpdate } from '../updater.js';
-import { PeerNode, peersEnabled, findPeer, peerMessagePrompt } from '../peers.js';
+import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
+import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
+import { qrLines } from '../qr.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -174,12 +179,32 @@ export class App {
     this.peers = null; // this session as seen by the other sessions on the machine (see peers.js)
     this.turnPeers = []; // tasks from other sessions that the running turn answers: [{msg}]
     this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
+    this.remote = null; // the browser page that watches and steers this session (see remote.js), when it is on
+    this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
+    this.remoteDialogs = 0;
+    this.remoteStarting = null;
+    this.remoteStopped = false; // /rc stop: offline until /rc, also after a restart
+    this.sessionName = flags?.restart?.peerName || null; // this session's name when the sessions of this computer do not know it (CLAUDE_PRO_PEERS=0)
+    this.customTitle = null; // the conversation's name given with /rename: the title, instead of the topic
+    this.remotePeers = []; // the account's sessions on other computers, as last listed by the gateway (see peers.js)
+    this.remotePeersAt = 0;
+    this.remotePeersLoading = null;
+    this.remotePeersTimer = null;
+    this.transfers = new Map(); // files on their way to or from other sessions, for the footer
+    this.transferSeq = 0;
     this.fileIndex = new FileIndex(cwd, () => this.runtime?.config);
     this.store = new SessionStore(cwd);
+    // What the terminal prints goes to the remote page too, except what it is told about as events.
+    this.screen.onLog = (items) => {
+      if (!this.remote || this.remoteMuted) return;
+      this.remote.output(items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/)));
+    };
     this.editor = new Editor({
       history: loadHistory(cwd),
       onSubmit: (value, raw, images) => { try { this.onSubmit(value, raw, images); } catch (e) { this.logError(e); } },
+      onDoubleEscape: () => this.openRewind(),
       imageFromPath: (p) => {
+        if (/^\s*\/(sendfile|sf)\b/i.test(this.editor?.text || '')) return null; // a file to send, not to show the model
         const r = imageFromFile(resolvePath(p, this.cwd));
         if (r.error && !/not found|Not a file/.test(r.error)) this.flash(r.error, 'warn');
         if (r.image) this.flashMessage = null;
@@ -230,6 +255,7 @@ export class App {
     if (restart) this.resumeAfterRestart(restart, resumable);
     else if (this.flags.resumeFile) this.loadSession(this.flags.resumeFile, this.flags.resumeId);
     else if (this.flags.resume) await this.commands.get('resume').run('');
+    this.autoStartRemote(restart);
 
     this.screen.setLive((w) => this.renderLive(w));
     this.spinnerTimer = setInterval(() => { if (this.busy || this.active.length) this.screen.schedule(); }, 120);
@@ -248,6 +274,7 @@ export class App {
   // What the session is about now: the topic the small model named last, or else the first thing asked
   // (kept when the conversation is compacted afterwards). Cleared by /clear, replaced by /resume.
   sessionLabel() {
+    if (this.customTitle) return this.customTitle;
     if (this.topic) return this.topic;
     if (!this.firstPrompt) {
       const first = this.agent?.messages.find((m) => m.role === 'user' && firstUserText(m));
@@ -272,7 +299,7 @@ export class App {
   // answer, and when there is none (a rate limit, no network) the title just stays as it is.
   refreshTopic(message) {
     const text = String(message ?? '').trim();
-    if (!text || /^(1|true|yes)$/i.test(this.config.env.CLAUDE_PRO_DISABLE_TOPIC_TITLE || '')) return;
+    if (!text || this.customTitle || /^(1|true|yes)$/i.test(this.config.env.CLAUDE_PRO_DISABLE_TOPIC_TITLE || '')) return;
     const store = this.store;
     const seq = ++this.topicSeq;
     const current = this.topic;
@@ -327,6 +354,8 @@ export class App {
     this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
     this.peers?.close();
+    clearInterval(this.remotePeersTimer);
+    const remoteClosed = this.remote?.close({ restarting: restart });
     const u = this.agent?.totalUsage();
     if (!restart && u && u.requests) {
       this.screen.log(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
@@ -335,7 +364,11 @@ export class App {
     this.restoreTerminal({ handOver: restart });
     this.stdin.pause();
     this.resolveExit?.(code);
-    if (!this.noProcessExit) setTimeout(() => process.exit(code), 50).unref();
+    if (!this.noProcessExit) {
+      // with remote control on, the gateway is told first (at most a second and a half; see RemoteControl.close)
+      if (remoteClosed) remoteClosed.finally(() => process.exit(code));
+      else setTimeout(() => process.exit(code), 50).unref();
+    }
   }
 
   // ---------------------------------------------------------------- other sessions (see peers.js)
@@ -352,18 +385,162 @@ export class App {
     }
   }
 
-  // `byModel`: the MessagePeer tool sent it, so the answer goes to the model; otherwise the user typed
-  // `@name ...` and the answer is only shown (and noted for the model).
-  async sendToPeer(name, text, { byModel = false } = {}) {
-    if (!this.peers) throw new Error('Talking to other sessions is off in this session.');
-    const r = await this.peers.send(name, { text });
-    if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
-    return r;
+  // This session's name for the others.
+  peerLabel() { return this.peers?.name || this.sessionName || cleanName(path.basename(this.cwd)) || 'claude-pro'; }
+
+  // /rename: the session's name, for the other sessions (&name, here and at the gateway) and as the conversation's
+  // title (the tab, /resume, the web page), instead of the topic. Returns the name it got: name-2... when another
+  // session on this computer has it.
+  renameSession(name) {
+    const clean = cleanName(name);
+    const got = this.peers ? this.peers.setName(clean) : (this.sessionName = clean);
+    this.customTitle = got;
+    this.store.setName(got);
+    this.remote?.register().catch(() => { /* the gateway takes it at the next registration */ });
+    this.remote?.flush();
+    this.screen.schedule();
+    return got;
+  }
+
+  // `target`: a peer entry, or what names one (see resolvePeer): a session on this computer, or one on another
+  // computer, reached through the gateway. `byModel`: the MessagePeer tool sent it, so the answer goes to the
+  // model; otherwise the user typed `@name ...` and the answer is only shown (and noted for the model).
+  // `files`: paths of files on this computer to send along (see utils/downloads.js); the other session saves
+  // them in its Downloads folder.
+  //
+  // `background`: with files, return as soon as they are checked and the session is found, and send in the
+  // background (progress in the footer; a finished or failed sending is reported in the transcript).
+  async sendToPeer(target, text, { byModel = false, files: paths = [], background = false } = {}) {
+    const files = paths.length ? filesToSend(paths) : [];
+    let peer = target && typeof target === 'object' ? target : null;
+    if (!peer) {
+      const local = this.peers?.peers() || [];
+      let found = resolvePeer(local, this.remotePeers, target);
+      if (!found.peer && !found.error && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), target);
+      if (!found.peer) {
+        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/login, then /rc).';
+        throw new Error(found.error || `No running session called "${String(target).replace(/^[@&]/, '')}". /peers lists them.${offline}`);
+      }
+      peer = found.peer;
+    }
+    if (peer.remote && !this.remote) throw new Error(`&${peer.label} is on another computer, and this session is not online at the gateway (/rc connects it).`);
+    if (!peer.remote && !this.peers) throw new Error('Talking to other sessions on this computer is off (CLAUDE_PRO_PEERS=0).');
+    const send = async () => {
+      let r;
+      if (peer.remote) {
+        const uploaded = [];
+        if (files.length) {
+          const job = this.startTransfer('up', files, peer);
+          try {
+            for (const f of files) uploaded.push(await this.remote.uploadFile(f, { signal: job.signal, onProgress: (p) => job.progress(f, p) }));
+          } finally {
+            job.end();
+          }
+        }
+        r = { ...(await this.remote.sendPeer(peer.id, { text, files: uploaded })), peer };
+      } else {
+        r = await this.peers.send(peer, { text, files });
+      }
+      r.files = files;
+      if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
+      return r;
+    };
+    if (!background || !files.length) return await send();
+    const label = peer.label || peer.name;
+    const what = `${files.length} file${files.length === 1 ? '' : 's'} (${formatBytes(files.reduce((n, f) => n + f.size, 0))})`;
+    send().then(
+      () => this.screen.log(c.dim(`  ⎿  Sent ${what} to &${label}; it saves them in its Downloads folder and confirms`), ''),
+      (e) => {
+        const why = e.name === 'AbortError'
+          ? `Stopped sending ${what} to &${label}. Send the same files again to continue where it stopped.`
+          : `Could not send ${what} to &${label}: ${e.message}${peer.remote ? ' (sending the same files again continues where it stopped)' : ''}`;
+        this.notice(why, 'warn');
+        if (byModel) this.agent.addReminder(`The files you sent with MessagePeer did not go out: ${why}`);
+      },
+    );
+    return { peer, files, background: true };
+  }
+
+  // A sending or receiving of files, shown in the footer while it runs: {signal, progress(file, p), end()}.
+  startTransfer(direction, files, peer) {
+    const id = ++this.transferSeq;
+    const controller = new AbortController();
+    const total = files.reduce((n, f) => n + (Number(f.size) || 0), 0);
+    const t = { direction, label: peer.label || peer.name, names: files.map((f) => f.name), total, done: new Map(), phase: 'starting', retryIn: 0, at: Date.now(), controller, shown: 0 };
+    this.transfers.set(id, t);
+    this.screen.schedule();
+    return {
+      signal: controller.signal,
+      progress: (file, p) => {
+        t.done.set(file, p.phase === 'hashing' || p.phase === 'checking' ? 0 : p.done);
+        t.phase = p.phase;
+        t.file = file.name;
+        t.retryIn = p.phase === 'waiting' ? Date.now() + (p.retryIn || 0) : 0;
+        if (p.phase === 'hashing' || p.phase === 'checking') t.hashed = p.total ? p.done / p.total : 0;
+        if (Date.now() - t.shown > 250) { t.shown = Date.now(); this.screen.schedule(); }
+      },
+      end: () => { this.transfers.delete(id); this.screen.schedule(); },
+    };
+  }
+
+  // The footer's word on the files on their way.
+  transferStatus() {
+    const all = [...this.transfers.values()];
+    if (!all.length) return '';
+    const t = all[0];
+    const done = [...t.done.values()].reduce((n, v) => n + v, 0);
+    const pct = t.total ? Math.floor((done / t.total) * 100) : 0;
+    const arrow = t.direction === 'up' ? '⇡' : '⇣';
+    const name = truncate(t.names.length === 1 ? t.names[0] : `${t.names.length} files`, 24);
+    const where = t.direction === 'up' ? `→ &${t.label}` : `← &${t.label}`;
+    let state;
+    if (t.phase === 'waiting') state = c.yellow(`${pct}% · network down, retrying…`);
+    else if (t.phase === 'hashing') state = c.dim(`preparing ${Math.floor((t.hashed || 0) * 100)}%`);
+    else if (t.phase === 'checking') state = c.dim('checking');
+    else state = c.dim(`${pct}% · ${formatBytes(done)}/${formatBytes(t.total)}`);
+    return `${c.blue(`${arrow} ${name}`)} ${c.dim(where)} ${state}${all.length > 1 ? c.dim(` +${all.length - 1}`) : ''}`;
+  }
+
+  // The account's sessions on other computers that are online now, from the gateway (what was known stays when
+  // it cannot be asked). Sessions of this computer are left out: they are reached directly.
+  refreshRemotePeers() {
+    if (!this.remote?.registered) return Promise.resolve(this.remotePeers);
+    this.remotePeersLoading ??= (async () => {
+      try {
+        const near = new Set([this.peers?.id, ...(this.peers?.peers() || []).map((p) => p.id)].filter(Boolean));
+        const list = await this.remote.sessions();
+        this.remotePeers = list
+          .filter((p) => p.online && !p.ended && p.id !== this.remote?.id && !near.has(p.peerId))
+          .map((p) => {
+            const machine = p.machine || p.host || 'computer';
+            const name = p.name || 'session';
+            return { id: p.id, name, machine, cwd: p.cwd || '', remote: true, label: `${machine}/${name}`, busy: Boolean(p.busy), title: p.title || '' };
+          });
+        this.remotePeersAt = Date.now();
+      } catch { /* the gateway cannot be asked now */ } finally {
+        this.remotePeersLoading = null;
+      }
+      return this.remotePeers;
+    })();
+    return this.remotePeersLoading;
+  }
+
+  // This session and the others, here and on the other computers (for /peers and ListPeers).
+  async listAllPeers() {
+    if (this.remote) await this.refreshRemotePeers();
+    const name = this.peerLabel();
+    return {
+      me: { name, cwd: this.agent?.cwd || this.cwd, label: `${machineName(this.config.env)}/${name}` },
+      local: this.peers?.peers() || [],
+      remote: this.remotePeers,
+      online: Boolean(this.remote?.online),
+    };
   }
 
   onPeerMessage(msg) {
     if (this.exiting) return;
-    const from = c.bold(`@${msg.from.name}`);
+    if (msg.files?.length && !msg.received) return this.receiveFiles(msg).catch((e) => this.logError(e)); // the gateway keeps the message until this is done
+    const from = c.bold(`&${msg.from.name}`);
     const width = this.width - 1;
     if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
       // the answer to something the user sent: shown, and noted for the model, without a turn of its own
@@ -371,31 +548,317 @@ export class App {
       this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} (${msg.from.cwd}), which answered:\n${msg.text}`);
       return;
     }
-    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${msg.text}`;
+    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} &${msg.from.name}: ${msg.text}`;
     const item = { text: peerMessagePrompt(msg), images: [], display, peer: msg.kind === 'task' ? msg : null };
     if (this.busy) { this.queue.push(item); this.screen.schedule(); return; }
     this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });
   }
 
+  // Files another session sent: saved in the Downloads folder (never over a file that is there) at once, whatever
+  // this session is doing. Files alone are answered right away with where they are, without a turn of the model;
+  // with a task, the task runs as usual and is told where they are.
+  async receiveFiles(msg) {
+    msg.received = true;
+    let dir;
+    try { dir = await downloadsDir(this.config.env); } catch { dir = path.join(os.homedir(), 'Downloads'); }
+    const saved = [];
+    const failed = [];
+    const remote = this.remote;
+    const job = msg.from.remote ? this.startTransfer('down', msg.files, msg.from) : null;
+    try {
+      for (const f of msg.files) {
+        try {
+          let file;
+          if (msg.from.remote) {
+            if (!remote) throw new Error('this session is not online at the gateway');
+            file = await remote.downloadFile(f, dir, { signal: job.signal, onProgress: (p) => job.progress(f, p) });
+            remote.deleteFile(f.id);
+          } else {
+            file = await copyUnique(f.path, dir, f.name);
+          }
+          saved.push({ path: file, size: fs.statSync(file).size });
+        } catch (e) {
+          failed.push(`${f.name}: ${e.message}`);
+        }
+      }
+    } finally {
+      job?.end();
+    }
+    this.screen.log(
+      `${c.blue('✉')} ${c.bold(`&${msg.from.name}`)} ${c.dim(`sent ${msg.files.length} file${msg.files.length === 1 ? '' : 's'}${saved.length ? `, saved in ${dir}:` : ':'}`)}`,
+      ...saved.map((s) => `  ${path.basename(s.path)} ${c.dim(formatBytes(s.size))}`),
+      ...failed.map((f) => c.red(`  ✗ ${f}`)),
+      '',
+    );
+    const where = `the Downloads folder of ${machineName(this.config.env)} (${dir})`;
+    const report = [
+      saved.length ? `Saved ${saved.length} file${saved.length === 1 ? '' : 's'} in ${where}:\n${saved.map((s) => `- ${s.path}`).join('\n')}` : '',
+      failed.length ? `Could not save:\n${failed.map((f) => `- ${f}`).join('\n')}` : '',
+    ].filter(Boolean).join('\n\n');
+    if (msg.kind === 'task' && !msg.text.trim()) {
+      this.agent.addReminder(`Another claude-pro session, ${msg.from.name}, sent files to this computer. ${report}`);
+      this.replyToPeer(msg, report);
+      return;
+    }
+    msg.text = `${msg.text}\n\n[Files that came with this message. ${report}]`;
+    this.onPeerMessage(msg);
+  }
+
+  // Send `text` as the answer to `msg`, a message of another session: here, or through the gateway.
+  replyToPeer(msg, text) {
+    const done = () => this.screen.log(c.dim(`  ⎿  Answer sent to &${msg.from.name}`));
+    const failed = (e) => this.notice(`Could not send the answer to &${msg.from.name}: ${e.message}`, 'warn');
+    if (msg.from.remote) { // from another computer: back through the gateway
+      if (!this.remote) { this.notice(`This session is no longer online at the gateway: the answer to &${msg.from.name} was not sent.`, 'warn'); return; }
+      this.remote.sendPeer(msg.from.id, { kind: 'reply', text, inReplyTo: msg.id }).then(done, failed);
+      return;
+    }
+    if (!this.peers) return;
+    // by id, or by name: a session that was restarted by older code comes back with a new id
+    const running = this.peers.peers();
+    const peer = findPeer(running, msg.from.id) || running.find((p) => p.name === msg.from.name && p.cwd === msg.from.cwd);
+    if (!peer) { this.notice(`&${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); return; }
+    this.peers.send(peer, { text, kind: 'reply', inReplyTo: msg.id }).then(done, failed);
+  }
+
+  // /sendfile &session file...: files on this computer to another session (here or on another computer), which
+  // saves them in its Downloads folder and confirms. Paths may be quoted, @-mentions, or have spaces unquoted.
+  async sendFiles(args) {
+    if (/^\s*(stop|cancel)\s*$/i.test(args)) {
+      const ups = [...this.transfers.values()].filter((t) => t.direction === 'up');
+      for (const t of ups) t.controller.abort();
+      this.screen.log(c.dim(ups.length ? `  ⎿  Stopping ${ups.length} sending${ups.length === 1 ? '' : 's'}` : '  ⎿  Nothing is being sent'));
+      return;
+    }
+    const tokens = [...String(args).matchAll(/@?"([^"]+)"|@?'([^']+)'|(\S+)/g)].map((m) => ({ text: m[1] ?? m[2] ?? m[3], quoted: m[3] === undefined }));
+    const targets = tokens.filter((t) => !t.quoted && /^[&＆]./u.test(t.text));
+    if (targets.length !== 1) {
+      this.notice(targets.length ? 'Send to one session at a time.' : 'Usage: /sendfile &session file... (type & for the list of sessions)', 'warn');
+      return;
+    }
+    const exists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+    const rest = tokens.filter((t) => t !== targets[0]);
+    const paths = [];
+    for (let i = 0; i < rest.length;) {
+      if (rest[i].quoted) { paths.push(resolvePath(rest[i].text, this.cwd)); i++; continue; }
+      // the longest run of words that is a file: a path with spaces that was not quoted
+      let j = i + 1;
+      for (let k = rest.length; k > i + 1; k--) {
+        if (rest.slice(i, k).some((t) => t.quoted)) continue;
+        if (exists(resolvePath(rest.slice(i, k).map((t) => t.text).join(' ').replace(/^@/, ''), this.cwd))) { j = k; break; }
+      }
+      paths.push(resolvePath(rest.slice(i, j).map((t) => t.text).join(' ').replace(/^@/, ''), this.cwd));
+      i = j;
+    }
+    let files;
+    try { files = filesToSend(paths); } catch (e) { this.notice(e.message, 'warn'); return; }
+    const total = files.reduce((n, f) => n + f.size, 0);
+    const what = `${files.length} file${files.length === 1 ? '' : 's'} (${formatBytes(total)})`;
+    try {
+      const r = await this.sendToPeer(targets[0].text, '', { files: paths, background: true });
+      const label = r.peer.label || r.peer.name;
+      this.screen.log(c.dim(`  ⎿  Sending ${what} to &${label} in the background (progress below; /sendfile stop stops it${r.peer.remote ? ', and sending the same files again later continues where it stopped' : ''})`));
+    } catch (e) {
+      this.notice(`Could not send the files: ${e.message}`, 'warn');
+    }
+  }
+
   // The turn that handled tasks of other sessions ended: send each its answer.
   answerPeers(result, error) {
     const tasks = this.turnPeers.splice(0);
-    if (!tasks.length || !this.peers) return;
+    if (!tasks.length) return;
     const text = error ? `The session failed before finishing: ${error.message || error}`
-      : result?.interrupted ? `The user of ${this.peers.name} interrupted the work before it was finished.${result.text ? `\n\nWhat it had written:\n${result.text}` : ''}`
+      : result?.interrupted ? `The user of ${this.peerLabel()} interrupted the work before it was finished.${result.text ? `\n\nWhat it had written:\n${result.text}` : ''}`
         : (result?.text || '(no answer text)');
     // One answer per session, to its last message: several messages from it that waited for this turn were all
     // handled in it, and sending the whole answer once for each would hand that session the same text again and again.
     const lastOfEach = new Map();
     for (const msg of tasks) lastOfEach.set(`${msg.from.id}|${msg.from.name}|${msg.from.cwd}`, msg);
-    for (const msg of lastOfEach.values()) {
-      // by id, or by name: a session that was restarted by older code comes back with a new id
-      const running = this.peers.peers();
-      const peer = findPeer(running, msg.from.id) || running.find((p) => p.name === msg.from.name && p.cwd === msg.from.cwd);
-      if (!peer) { this.notice(`@${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); continue; }
-      this.peers.send(peer, { text, kind: 'reply', inReplyTo: msg.id })
-        .then(() => this.screen.log(c.dim(`  ⎿  Answer sent to @${msg.from.name}`)), (e) => this.notice(`Could not send the answer to @${msg.from.name}: ${e.message}`, 'warn'));
+    for (const msg of lastOfEach.values()) this.replyToPeer(msg, text);
+  }
+
+  // ---------------------------------------------------------------- remote control (see remote.js)
+
+  // Print to the terminal only: the remote page is told about this as an event of its own.
+  logLocal(...items) {
+    this.remoteMuted++;
+    try { this.screen.log(...items); } finally { this.remoteMuted--; }
+  }
+
+  // A message of the user in the transcript (typed here, on the remote page, or sent by another session).
+  echoUser(text, images = 0) {
+    this.logLocal(renderUserMessage(text, this.width));
+    this.remote?.emit({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
+  }
+
+  // Online at the gateway (see remote.js) from the start: by itself when this computer is logged in to the gateway
+  // (CLAUDE_PRO_ONLINE=0 turns that off), with --rc (which prints the link too), and after a restart as before (with
+  // the same id, so that open pages and messages on their way find it again). It does not hold up the start. Never
+  // in the tests and the self-check, which drive the App themselves.
+  autoStartRemote(restart) {
+    const carried = restart?.remote;
+    if (carried?.off) { this.remoteStopped = true; return; }
+    const explicit = Boolean(this.flags.remoteControl);
+    if (this.noProcessExit && !explicit) return;
+    if (!explicit && !carried?.id && !(onlineEnabled(this.config.env) && readGatewayLogin(this.config.gatewayUrl))) return;
+    this.startRemote({ id: carried?.id, quiet: !explicit || Boolean(carried?.id), persistent: !explicit }).catch((e) => {
+      this.notice(`${explicit ? 'Remote control could not start' : 'This session could not go online at the gateway'}: ${e.message}${e.code === 'NO_GATEWAY_LOGIN' ? '' : ' (/rc tries again)'}`, 'warn');
+    });
+  }
+
+  // Connect this session to the gateway (see remote.js): the web page and the sessions on the account's other
+  // computers reach it from then on. Needs the gateway login of /login (the provider can be another one); throws
+  // {code: 'NO_GATEWAY_LOGIN'} without it. `persistent`: a gateway that cannot be reached now is tried again in
+  // the background instead of failing.
+  startRemote({ id, quiet = false, persistent = quiet } = {}) {
+    if (this.remote) return Promise.resolve(this.remote);
+    this.remoteStarting ??= this.connectRemote({ id, quiet, persistent }).finally(() => { this.remoteStarting = null; });
+    return this.remoteStarting;
+  }
+
+  async connectRemote({ id, quiet, persistent }) {
+    const login = readGatewayLogin(this.config.gatewayUrl);
+    if (!login) throw Object.assign(new Error(`it goes through the gateway ${this.config.gatewayUrl}, and this machine is not logged in to it: run /rc to log in`), { code: 'NO_GATEWAY_LOGIN' });
+    const remote = new RemoteControl({
+      gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
+      id,
+      handlers: {
+        info: () => ({ name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '', cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION }),
+        seed: () => transcriptItems(this.agent.messages, { tools: this.runtime.tools, ctx: this.agent.makeCtx(), cwd: this.cwd }),
+        status: () => this.remoteStatus(),
+        send: (text) => this.remoteSend(text),
+        interrupt: () => this.remoteInterrupt(),
+        answer: (body) => this.answerDialog(body),
+        peerMessage: (msg) => this.onPeerMessage(msg),
+        changed: () => {
+          this.screen.schedule();
+          if (remote.online && Date.now() - this.remotePeersAt > 10_000) this.refreshRemotePeers();
+        },
+      },
+    });
+    remote.account = login.account?.email || login.account?.name || null;
+    await remote.start({ persistent });
+    if (this.exiting) { remote.close(); return remote; }
+    this.remote = remote;
+    this.remoteStopped = false;
+    this.remotePeersTimer ??= setInterval(() => { if (this.remote?.online) this.refreshRemotePeers(); }, 60_000);
+    this.remotePeersTimer.unref?.();
+    if (!quiet) this.logLocal(this.remoteInfo({ fresh: true }));
+    this.screen.schedule();
+    return remote;
+  }
+
+  stopRemote() {
+    this.remote?.close();
+    this.remote = null;
+    this.remotePeers = [];
+    this.remoteStopped = true;
+    this.screen.schedule();
+  }
+
+  // Where the session is on the gateway (and a QR code of it, for a phone), for the terminal.
+  remoteInfo({ fresh = false } = {}) {
+    const r = this.remote;
+    const state = !r.online ? (fresh ? c.dim(' · connecting') : c.yellow(' · not connected now, retrying')) : r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
+    const lines = [`${c.green('⇄')} ${c.bold('This session is online at the gateway')}${r.account ? ` (${r.account})` : ''}${state}. In a browser:`];
+    lines.push(`    ${c.blue(r.url || r.base)}`);
+    const qr = r.url ? qrLines(r.url, { color: colorEnabled }) : null;
+    if (qr) lines.push('', c.dim('    Scan with a phone (log in to the gateway there):'), ...qr.map((l) => '    ' + l));
+    const notes = [
+      `It is under 远程控制 in the gateway's user pages (${r.base}), for this gateway account only. Messages typed there go in as if typed here (/commands and !shell too); questions and plan approvals can be answered there; Stop = Esc.`,
+      `Sessions on your other computers send it tasks with &${machineName(this.config.env)}/${this.peerLabel()} (or &${machineName(this.config.env)} when it is the only session on this computer); /peers lists them all, /rename names this one.`,
+      'Whoever can log in to this gateway account, or holds one of its API keys, can run anything on this computer through it.',
+      '/rc stop takes this session offline · /rc open opens the page in the browser here',
+    ];
+    lines.push('', ...notes.flatMap((n) => wordWrap(n, Math.max(20, this.width - 4))).map((l) => c.dim(`  ${l.trimEnd()}`)), '');
+    return lines;
+  }
+
+  // The state the page shows below the transcript; sent whenever it changes.
+  remoteStatus() {
+    const cfg = this.config;
+    const { model, effort } = modelInfo(cfg);
+    const w = this.rateWait;
+    let rateWait = null;
+    if (w) {
+      const label = w.label.charAt(0).toUpperCase() + w.label.slice(1);
+      rateWait = {
+        text: w.waitingForLogin ? 'Waiting for the Claude Code login to be renewed' : `${w.overloaded ? label : `${label} reached`}${w.polling ? ' · checking again' : ` · resumes at ${formatClock(w.resumeAt)}`}`,
+        resumeIn: w.resumeAt - Date.now(),
+      };
     }
+    return {
+      busy: this.busy,
+      verb: this.status || (this.thinking ? 'Thinking' : this.verb),
+      elapsed: this.busy ? Date.now() - this.turnStart : 0,
+      tokens: this.turnTokens,
+      aborting: Boolean(this.controller?.signal.aborted),
+      rateWait,
+      todos: (this.agent.todos || []).map((t) => ({ content: t.content, status: t.status })),
+      queue: this.queue.map((q) => q.display ?? q.text),
+      dialog: this.remoteDialog(),
+      mode: this.runtime.modes.mode,
+      model,
+      effort: effort || defaultEffort(cfg.mainModel.id, cfg),
+      title: this.sessionLabel() || path.basename(this.cwd),
+      cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'),
+      name: this.peerLabel(),
+      tasks: this.runtime.tasks.running().length,
+      restarting: Boolean(this.restartRequest),
+    };
+  }
+
+  // The dialog open in the terminal, for the page to answer (options by index: values need not be strings).
+  remoteDialog() {
+    const d = this.dialogs[0];
+    if (!d) return null;
+    d.remoteId ??= ++this.remoteDialogs;
+    const base = { id: d.remoteId, title: d.title || '', question: d.question || '', body: d.body || [], markdown: d.markdown || null };
+    if (!Array.isArray(d.options)) return base;
+    return { ...base, multi: Boolean(d.multi), options: d.options.map((o) => ({ label: String(o.label ?? ''), description: o.description || '', other: o.value === '__other__' })) };
+  }
+
+  answerDialog({ id, index, indices, text, cancel } = {}) {
+    const d = this.dialogs[0];
+    if (!d || d.remoteId !== id) throw new Error('That question is no longer open.');
+    if (cancel) { d.resolve(d.cancelValue); return {}; }
+    if (!Array.isArray(d.options)) throw new Error('This dialog can only be answered in the terminal.');
+    const valueAt = (i) => {
+      const o = d.options[i];
+      if (!Number.isInteger(i) || !o || o.value === '__other__') throw new Error('No such option.');
+      return o.value;
+    };
+    if (typeof text === 'string') {
+      if (!text.trim()) throw new Error('Type an answer first.');
+      d.resolve(d.multi ? [...(indices || []).map(valueAt), text.trim()] : text.trim());
+    } else if (d.multi) {
+      if (!indices?.length) throw new Error('Choose at least one option.');
+      d.resolve(indices.map(valueAt));
+    } else {
+      d.resolve(valueAt(index));
+    }
+    this.screen.schedule();
+    return {};
+  }
+
+  // A message from the page: as if typed in the input box.
+  remoteSend(text) {
+    const value = String(text ?? '').replace(/\r\n/g, '\n');
+    if (!value.trim()) throw new Error('The message is empty.');
+    if (this.exiting) throw new Error('The session is ending.');
+    if (this.busy && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
+    if (this.dialogs.length && !this.busy) throw new Error('A question is open: answer it first.');
+    const queued = this.busy;
+    this.onSubmit(value, value);
+    this.screen.schedule();
+    return { queued };
+  }
+
+  remoteInterrupt() {
+    for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
+    this.interrupt();
+    this.screen.schedule();
+    return {};
   }
 
   // ---------------------------------------------------------------- restarting (see restart.js)
@@ -448,8 +911,9 @@ export class App {
       queue: this.queue.map((q) => ({ text: q.text, images: q.images || [] })),
       checkpoints: this.runtime.checkpoints.snapshot(),
       restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), now],
-      peerName: this.peers?.name,
+      peerName: this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
+      remote: this.remote?.handoff() || (this.remoteStopped ? { off: true } : null),
     };
     try {
       writeRestartState(state);
@@ -571,7 +1035,7 @@ export class App {
       lines.push(c.dim(` MCP: ${ok}/${mcp.length} servers connected${ok < mcp.length ? ' · /mcp for details' : ''}`));
     }
     lines.push('', c.dim(' Tips for getting started:'), c.dim(' 1. Ask questions, edit files, or run commands'), c.dim(' 2. Be as specific as you would with another engineer for the best results'), c.dim(` 3. Run /init to create a CLAUDE.md file with instructions for ${APP_NAME}`), '');
-    this.screen.log(lines);
+    this.logLocal(lines);
   }
 
   // ---------------------------------------------------------------- input
@@ -661,18 +1125,39 @@ export class App {
       const quoted = m[2] !== undefined;
       const q = quoted ? m[2] : m[3];
       const files = this.fileIndex.search(q);
-      // At the start of the message `@name` sends it to another session.
-      const peers = !quoted && m.index === 0 && this.peers
-        ? this.peers.peers().filter((p) => p.name.toLowerCase().startsWith(q.toLowerCase()))
-          .map((p) => ({ value: '@' + p.name, label: `@${p.name}`, description: `session · ${displayPath(p.cwd, this.cwd)}` }))
-        : [];
-      if (!files.length && !peers.length) return null;
+      if (!files.length) return null;
       // A name with spaces has to be quoted for the mention to be read back as one file. A directory
       // leaves the quote open, so that completion goes on inside it; a file closes it.
       const value = (f) => (quoted || /\s/.test(f) ? (f.endsWith('/') ? `@"${f}` : `@"${f}"`) : '@' + f);
-      return { items: [...peers, ...files.map((f) => ({ value: value(f), label: f, noSpace: f.endsWith('/') }))], from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
+      return { items: files.map((f) => ({ value: value(f), label: f, noSpace: f.endsWith('/') })), from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
     }
+    // `&name`: the other sessions, on this computer and (through the gateway) on the account's others. At the start
+    // it sends them the message; elsewhere it names them (/sendfile, or for the model).
+    const amp = /(^|\s)[&＆]([^\s&＆]*)$/u.exec(before);
+    if (amp) return this.peerSuggestions(amp[2], cursor, amp.index === 0 && !amp[1]);
     return null;
+  }
+
+  peerSuggestions(q, cursor, atStart = true) {
+    if (this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
+      this.refreshRemotePeers().then(() => {
+        if (!/[&＆][^\s&＆]*$/u.test(this.editor.text.slice(0, this.editor.cursor))) return;
+        this.editor.refreshSuggestions();
+        this.screen.schedule();
+      });
+    }
+    const lq = q.toLowerCase();
+    const items = [
+      ...(this.peers?.peers() || []).filter((p) => p.name.toLowerCase().startsWith(lq))
+        .map((p) => ({ value: '&' + p.name, label: `&${p.name}`, description: `this computer · ${displayPath(p.cwd, this.cwd)}` })),
+      ...this.remotePeers.filter((p) => [p.label, p.name, p.machine].some((v) => v.toLowerCase().startsWith(lq)))
+        .map((p) => ({ value: '&' + p.label, label: `&${p.label}`, description: `${p.machine} · ${p.cwd}${p.busy ? ' · busy' : ''}` })),
+    ];
+    if (!items.length) {
+      if (!q && atStart) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/login to the gateway reaches your other computers)');
+      return null;
+    }
+    return { items, from: cursor - q.length - 1, to: cursor };
   }
 
   onSubmit(value, raw, images = []) {
@@ -695,7 +1180,7 @@ export class App {
       const args = text.slice(1 + name.length).trim();
       const cmd = this.commands.get(name.toLowerCase()) || [...this.commands.values()].find((x) => x.aliases?.includes(name.toLowerCase()));
       if (cmd) {
-        this.screen.log(renderUserMessage(text, this.width));
+        this.echoUser(text);
         Promise.resolve(cmd.run(args, rest)).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
         return;
       }
@@ -706,15 +1191,21 @@ export class App {
     this.startTurn(value);
   }
 
-  // `@name message`, name being another session: the message goes to that session, as a task for it.
+  // `&name message`: the message goes to that session, as a task for it. A session on another computer of the
+  // gateway account: `&machine/name message`, or `&machine message` when that computer runs one session.
   sendTypedToPeer(text) {
-    const m = /^@([\w.-]+)\s+([\s\S]+)$/.exec(text);
-    if (!m || !this.peers) return false;
-    const peer = findPeer(this.peers.peers(), m[1]);
-    if (!peer || peer.name.toLowerCase() !== m[1].toLowerCase()) return false;
-    this.screen.log(renderUserMessage(text, this.width));
-    this.sendToPeer(peer, m[2].trim()).then(
-      () => this.screen.log(c.dim(`  ⎿  Sent to @${peer.name} (${displayPath(peer.cwd, this.cwd)}); its answer will be shown here`), ''),
+    if (!/^[&＆]/u.test(text)) return false;
+    const m = /^[&＆](\S+)(?:\s+([\s\S]*))?$/u.exec(text);
+    const task = m?.[2]?.trim();
+    if (!m || !task) { this.notice('Type the task after the name: &name task (/peers lists the sessions).', 'warn'); return true; }
+    this.echoUser(text);
+    const found = resolvePeer(this.peers?.peers() || [], this.remotePeers, m[1], { ids: false });
+    if (found.ambiguous) { this.notice(found.error, 'warn'); return true; }
+    this.sendToPeer(found.peer || m[1], task).then(
+      ({ peer }) => {
+        const where = peer.remote ? `on ${peer.machine}: ${peer.cwd}` : displayPath(peer.cwd, this.cwd);
+        this.screen.log(c.dim(`  ⎿  Sent to &${peer.label || peer.name} (${where}); its answer will be shown here`), '');
+      },
       (e) => this.notice(e.message, 'warn'),
     );
     return true;
@@ -724,7 +1215,7 @@ export class App {
     const rows = [
       ['! for bash mode', 'double tap esc to clear input'],
       ['/ for commands', 'shift + tab to cycle permission modes'],
-      ['@ for file paths or sessions', 'ctrl + o to toggle verbose output'],
+      ['@ for file paths, & for other sessions', 'ctrl + o to toggle verbose output'],
       ['# to memorize', 'ctrl + t to toggle todos'],
       ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
       ['alt + v to paste an image', ''],
@@ -799,16 +1290,41 @@ export class App {
   // `topic`: what to name the conversation's topic after (default: the message as shown).
   // `peers`: tasks of other sessions that this turn answers.
   async startTurn(prompt, { echo = true, display, images = [], topic, peers = [] } = {}) {
-    if (echo) this.screen.log(renderUserMessage(display ?? prompt, this.width));
+    if (echo) this.echoUser(display ?? prompt, images.length);
     this.refreshTopic(topic ?? display ?? prompt);
     let content;
     try {
-      content = [{ type: 'text', text: prompt }, ...images.map(imageBlock), ...(await this.attachments(prompt))];
+      const sources = images.map((i) => i.source).filter(Boolean);
+      content = [
+        { type: 'text', text: prompt },
+        ...images.map(imageBlock),
+        ...(sources.length ? [{ type: 'text', text: `(The attached image${sources.length === 1 ? ' is the file' : 's are the files'} ${sources.join(', ')})` }] : []),
+        ...(await this.attachments(prompt)),
+        ...(await this.peerMentions(prompt)),
+      ];
+      await fitImagesIn(content); // a dropped or attached image file at full size would be refused later
     } catch (e) {
       this.logError(e); // nobody awaits this method: an error left to escape would end the program
       return;
     }
     await this.runAgent(content, { peers });
+  }
+
+  // What `&name` in a message the user wrote stands for, told to the model: which session, and how to reach it.
+  async peerMentions(prompt) {
+    const refs = [...new Set([...String(prompt).matchAll(/(?:^|\s)[&＆]([^\s&＆,，。;；:：!！?？、)）]+)/gu)].map((m) => m[1]))];
+    if (!refs.length) return [];
+    const local = this.peers?.peers() || [];
+    const notes = [];
+    for (const ref of refs) {
+      let found = resolvePeer(local, this.remotePeers, ref, { ids: false });
+      if (!found.peer && !found.ambiguous && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), ref, { ids: false });
+      const p = found.peer;
+      if (p) notes.push(`&${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
+      else if (found.ambiguous) notes.push(found.error);
+    }
+    if (!notes.length) return [];
+    return [{ type: 'text', text: `<system-reminder>The user refers to other sessions: ${notes.join('; ')}. MessagePeer (to: the name in quotes) sends a session a task; its files parameter sends files of this computer along, which the session saves in its computer's Downloads folder (files without a message are only saved and confirmed).</system-reminder>` }];
   }
 
   // alt+v (ctrl+v where the terminal passes it through): attach an image from the clipboard.
@@ -986,8 +1502,16 @@ export class App {
   // `quiet`: do not print the transcript (a restart: it is still on screen).
   loadSession(file, id, { quiet = false } = {}) {
     const loaded = SessionStore.load(file);
+    this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
     this.store = new SessionStore(this.cwd, id);
     this.topic = loaded.topic;
+    this.customTitle = loaded.name;
+    // a conversation that was given a name brings it back: the other sessions reach this one by it again
+    if (loaded.name && loaded.name !== this.peerLabel()) {
+      if (this.peers) this.peers.setName(loaded.name);
+      else this.sessionName = loaded.name;
+      this.remote?.register().catch(() => {});
+    }
     this.firstPrompt = loaded.title;
     this.agent.messages = loaded.messages;
     this.agent.restoreFileState(loaded.messages, loaded.times);
@@ -997,9 +1521,11 @@ export class App {
     this.store.systemPrompt = loaded.systemPrompt;
     this.runtime.resumeSystemPrompt(loaded.systemPrompt);
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
+    this.remote?.resync();
     if (quiet) return;
-    this.screen.log(c.dim(`Resumed session ${id} (${loaded.messages.length} messages)`), '');
-    this.printTranscript(loaded.messages.slice(-30));
+    this.logLocal(c.dim(`Resumed session ${id} (${loaded.messages.length} messages)`), '');
+    this.remoteMuted++;
+    try { this.printTranscript(loaded.messages.slice(-30)); } finally { this.remoteMuted--; }
   }
 
   printTranscript(messages) {
@@ -1022,7 +1548,9 @@ export class App {
   newSession() {
     this.store = new SessionStore(this.cwd);
     this.topic = null;
+    this.customTitle = null;
     this.firstPrompt = null;
+    this.remote?.resync();
   }
 
   // ---------------------------------------------------------------- dialogs
@@ -1046,8 +1574,8 @@ export class App {
     const md = renderMarkdown(plan, { width: this.width - 8 });
     const max = Math.max(8, this.screen.height - 14);
     const body = md.length > max ? [...md.slice(0, max), c.dim(`… +${md.length - max} lines (the full plan is printed above)`)] : md;
-    if (md.length > max) this.screen.log(c.plan(`${DOT} Plan:`), ...md.map((l) => '  ' + l), '');
-    const choice = await this.showDialog(new SelectDialog({
+    if (md.length > max) this.logLocal(c.plan(`${DOT} Plan:`), ...md.map((l) => '  ' + l), '');
+    const dialog = new SelectDialog({
       title: 'Ready to code?',
       body: ["Here is the plan:", '', ...body],
       question: 'Would you like to proceed?',
@@ -1057,8 +1585,9 @@ export class App {
         { label: 'Yes, start coding', value: 'full' },
         { label: 'No, keep planning', value: 'reject' },
       ],
-    }));
-    return choice;
+    });
+    dialog.markdown = plan; // the remote page shows the whole plan
+    return await this.showDialog(dialog);
   }
 
   async askQuestion(q) {
@@ -1086,7 +1615,9 @@ export class App {
         if (ev.block.type === 'text') {
           this.flushThinking();
           this.md = new MarkdownStream({ width: w, firstPrefix: `${DOT} `, indent: '  ' });
+          this.remote?.emit({ t: 'start', kind: 'text' });
         } else if (ev.block.type === 'thinking') {
+          this.remote?.emit({ t: 'start', kind: 'thinking' });
           this.thinking = { start: Date.now(), text: '', md: this.verbose ? new MarkdownStream({ width: w, firstPrefix: c.dim('✻ '), indent: '  ', style: (s) => c.dim(c.italic(s)) }) : null };
         } else if (ev.block.type === 'tool_use') {
           this.flushThinking();
@@ -1097,16 +1628,18 @@ export class App {
         this.turnTokens += estimateTokens(ev.text);
         if (this.md) {
           const lines = this.md.write(ev.text);
-          if (lines.length) this.screen.log(lines);
+          if (lines.length) this.logLocal(lines);
+          this.remote?.emit({ t: 'delta', kind: 'text', text: ev.text });
         }
         break;
       case 'thinking':
         this.turnTokens += estimateTokens(ev.text);
         if (this.thinking) {
           this.thinking.text += ev.text;
+          this.remote?.emit({ t: 'delta', kind: 'thinking', text: ev.text });
           if (this.thinking.md) {
             const lines = this.thinking.md.write(ev.text);
-            if (lines.length) this.screen.log(lines);
+            if (lines.length) this.logLocal(lines);
           }
         }
         break;
@@ -1119,9 +1652,10 @@ export class App {
       case 'block_stop':
         if (ev.block.type === 'text' && this.md) {
           const lines = this.md.end();
-          if (lines.length) this.screen.log(lines);
-          this.screen.log('');
+          if (lines.length) this.logLocal(lines);
+          this.logLocal('');
           this.md = null;
+          this.remote?.emit({ t: 'stop' });
         } else if (ev.block.type === 'thinking') {
           this.flushThinking();
         } else if (ev.block.type === 'tool_use') {
@@ -1136,6 +1670,7 @@ export class App {
         this.rateLimitEvent(ev);
         break;
       case 'reset':
+        if (this.md || this.thinking) this.remote?.emit({ t: 'stop' });
         this.md = null;
         this.thinking = null;
         this.pendingToolBlocks.clear();
@@ -1164,13 +1699,14 @@ export class App {
     const t = this.thinking;
     if (!t) return;
     this.thinking = null;
+    this.remote?.emit({ t: 'stop' });
     if (t.md) {
       const lines = t.md.end();
-      if (lines.length) this.screen.log(lines);
-      this.screen.log('');
+      if (lines.length) this.logLocal(lines);
+      this.logLocal('');
     } else if (t.text.trim()) {
       const secs = Math.max(1, Math.round((Date.now() - t.start) / 1000));
-      this.screen.log(c.dim(c.italic(`✻ Thought for ${secs}s (ctrl+o to show thinking)`)), '');
+      this.logLocal(c.dim(c.italic(`✻ Thought for ${secs}s (ctrl+o to show thinking)`)), '');
     }
   }
 
@@ -1178,8 +1714,9 @@ export class App {
     this.flushThinking();
     if (this.md) {
       const lines = this.md.end();
-      if (lines.length) this.screen.log(lines, '');
+      if (lines.length) this.logLocal(lines, '');
       this.md = null;
+      this.remote?.emit({ t: 'stop' });
     }
     this.pendingToolBlocks.clear();
   }
@@ -1192,16 +1729,18 @@ export class App {
     if (!this.isMain(agent)) return {};
     const entry = { tu, tool, input, status: 'running', progress: '', sub: [], subCount: 0, ctx: agent.makeCtx(), started: Date.now() };
     this.active.push(entry);
+    this.remote?.emit({ t: 'tool', id: tu.id, head: toolHeader(tool, input, entry.ctx, { width: REMOTE_WIDTH, dot: false }) });
     this.screen.schedule();
     return {
       progress: (p) => {
-        if (typeof p === 'string') entry.progress = p;
-        else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; }
+        if (typeof p === 'string') { entry.progress = p; this.remote?.toolProgress(tu.id, entry); }
+        else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; this.remote?.emit({ t: 'sub', id: tu.id, head: p.header }); }
         this.screen.schedule();
       },
       done: (result) => {
         entry.result = result;
         entry.status = result.isError ? 'error' : 'done';
+        this.remoteToolDone(entry);
         this.flushActive();
       },
     };
@@ -1211,7 +1750,20 @@ export class App {
     if (!this.isMain(agent)) return;
     const ctx = agent.makeCtx();
     const entry = { tu, tool, input: tu.input, status: 'rejected', rejected: true, rejectMessage: message, ctx };
-    this.screen.log(toolHeader(tool, tu.input, ctx, { status: 'rejected', width: this.width }), renderToolResult(entry, { width: this.width, cwd: this.cwd }), '');
+    if (this.remote) {
+      this.remote.emit({ t: 'tool', id: tu.id, head: toolHeader(tool, tu.input, ctx, { width: REMOTE_WIDTH, dot: false }) });
+      this.remoteToolDone(entry);
+    }
+    this.logLocal(toolHeader(tool, tu.input, ctx, { status: 'rejected', width: this.width }), renderToolResult(entry, { width: this.width, cwd: this.cwd }), '');
+  }
+
+  // A tool call finished (or was refused, or interrupted): its result on the remote page, once.
+  remoteToolDone(entry) {
+    if (!this.remote || !entry.tu?.id || entry.remoteDone) return;
+    entry.remoteDone = true;
+    let lines = [];
+    try { lines = renderToolResult(entry, { width: REMOTE_WIDTH, cwd: this.cwd }); } catch { /* shown without */ }
+    this.remote.emit({ t: 'done', id: entry.tu.id, status: entry.result?.isError || entry.rejected ? 'error' : 'done', lines });
   }
 
   // Move finished tool entries (in call order) from the live region to the transcript.
@@ -1220,7 +1772,8 @@ export class App {
       const e = this.active.shift();
       if (e.status === 'running') { e.status = 'error'; e.result = { isError: true, content: 'Interrupted', interrupted: true }; }
       const status = e.result?.isError ? 'error' : 'done';
-      this.screen.log(toolHeader(e.tool, e.input, e.ctx, { status, width: this.width }), renderToolResult(e, { verbose: this.verbose, width: this.width, cwd: this.cwd }), '');
+      this.remoteToolDone(e);
+      this.logLocal(toolHeader(e.tool, e.input, e.ctx, { status, width: this.width }), renderToolResult(e, { verbose: this.verbose, width: this.width, cwd: this.cwd }), '');
     }
     this.screen.schedule();
   }
@@ -1263,7 +1816,7 @@ export class App {
   takeQueued() {
     if (!this.queue.length) return [];
     const items = this.queue.splice(0);
-    for (const q of items) this.screen.log(renderUserMessage(q.display ?? q.text, this.width));
+    for (const q of items) this.echoUser(q.display ?? q.text, q.images?.length);
     this.turnPeers.push(...items.map((q) => q.peer).filter(Boolean));
     this.refreshTopic(items.map((q) => q.display ?? q.text).join('\n\n'));
     // Content blocks for the agent: each queued message's text followed by its images.
@@ -1289,12 +1842,20 @@ export class App {
     else if (ev.type === 'rate_limit_wait' || ev.type === 'rate_limit_resume') this.rateLimitEvent(ev);
   }
 
-  compactEnd(summary, agent, err) {
+  compactEnd(summary, agent, err, { part } = {}) {
     if (!this.isMain(agent)) return;
     this.status = null;
     if (err) return;
     this.lastSummary = summary;
-    this.screen.log(c.dim('✻ Conversation compacted (the summary is in context; /context to see usage)'), '');
+    const what = part === 'before' ? 'The earlier part of the conversation was summarized' : part === 'after' ? 'The conversation from that message on was summarized' : 'Conversation compacted';
+    this.screen.log(c.dim(`✻ ${what} (the summary is in context; /context to see usage)`), '');
+  }
+
+  // esc esc on an empty prompt: the rewind menu, as in Claude Code (/rewind). Not while a turn runs (esc stops it).
+  openRewind() {
+    if (this.busy || this.dialogs.length || this.exiting) return;
+    if (!this.runtime.checkpoints.list().length && !this.previousSession) { this.flash('Nothing to rewind yet: every prompt you send makes a point to go back to'); return; }
+    Promise.resolve(this.commands.get('rewind').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
   }
 
   notice(text, kind = 'info') {
@@ -1414,7 +1975,8 @@ export class App {
     const dir = this.agent?.cwd || this.cwd;
     const home = os.homedir();
     const shown = dir.toLowerCase().startsWith(home.toLowerCase()) ? '~' + dir.slice(home.length) : dir;
-    return { left: shown.replace(/\\/g, '/'), right: this.peers ? `@${this.peers.name}` : '' };
+    const name = this.peers || this.remote ? `&${this.peerLabel()}` : '';
+    return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online ? `⇄ ${name}` : name };
   }
 
   footer(w) {
@@ -1428,6 +1990,10 @@ export class App {
     else if (this.editor.mode === 'bash') left = c.magenta('  ! for bash mode');
     else if (this.editor.mode === 'memory') left = c.blue('  # to memorize');
     else left = c.dim('  ? for shortcuts');
+    if (this.remote?.online && this.remote.viewers && !flash && !(this.exitArmed && Date.now() - this.exitArmed < 1500)) {
+      left += c.dim(' · ') + c.green(`⇄ ${this.remote.viewers} watching`);
+    }
+    if (this.transfers.size && !flash) left += c.dim(' · ') + this.transferStatus();
     const cfg = this.config;
     const threshold = cfg.autoCompactThreshold(cfg.mainModel);
     const used = this.agent.contextEstimate;

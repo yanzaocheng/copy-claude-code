@@ -6,7 +6,7 @@ import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd, openBrowser } from './gateway.js';
 import { codexLoginSummary, codexModels, codexEfforts } from './codex/client.js';
 import { readClaudeCodeLogin } from './claude-code.js';
 import { SessionStore } from './session.js';
@@ -18,7 +18,8 @@ import { estimateTokens } from './agent.js';
 import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath } from './utils/paths.js';
-import { rewind } from './checkpoints.js';
+import { cleanName, machineName } from './peers.js';
+import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -111,8 +112,11 @@ export function buildCommands(app) {
     aliases: ['reset', 'new'],
     description: 'Clear conversation history and free up context',
     run() {
+      // the conversation it ends stays one esc esc away (the rewind menu), until the end of this process
+      const previous = app.agent.messages.length ? { file: app.store.file, id: app.store.id } : null;
       app.agent.resetConversation();
       app.newSession();
+      if (previous) app.previousSession = previous;
       app.runtime.invalidateSystemPrompt();
       app.screen.clearScreen();
       app.printWelcome();
@@ -577,20 +581,84 @@ export function buildCommands(app) {
     name: 'peers',
     aliases: ['sessions'],
     argHint: '[name NEW-NAME]',
-    description: 'List the other sessions on this machine (send one a task with @name ...), or rename this one',
-    run(args) {
-      const node = app.peers;
-      if (!node) { out(c.dim('Talking to other sessions is off (CLAUDE_PRO_PEERS=0).')); return; }
+    description: 'List the other sessions, on this computer and (through the gateway) on your other computers; send one a task with &name ...',
+    async run(args) {
       const [action, ...rest] = args.split(/\s+/).filter(Boolean);
-      if (action === 'name' && rest.length) { out(`This session is now ${c.bold('@' + node.setName(rest.join('-')))}`); app.screen.schedule(); return; }
-      const peers = node.peers();
+      if (action === 'name' && rest.length) { out(`This session is now ${c.bold('&' + app.renameSession(rest.join('-')))}`); return; }
+      const { me, local, remote, online } = await app.listAllPeers();
       out([
-        `This session: ${c.bold('@' + node.name)} ${c.dim(displayPath(node.cwd, app.cwd))}`,
-        ...(peers.length
-          ? peers.map((p) => `${c.bold('@' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`)
-          : [c.dim('No other session is running. Start claude-pro in another terminal.')]),
-        c.dim('Type "@name task" to send a task to a session; its answer is shown here. The agent can use ListPeers / MessagePeer too.'),
+        `This session: ${c.bold('&' + me.name)} ${c.dim(displayPath(me.cwd, app.cwd))}${online ? c.dim(` · from other computers: &${me.label}`) : ''}`,
+        ...local.map((p) => `${c.bold('&' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`),
+        ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('&' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
+        ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
+        c.dim(online
+          ? 'Type "&" for the list, "&name task" to send a task; its answer is shown here. On another computer: "&computer/name task", or "&computer task" when it runs one session. /sendfile &name file... sends files (saved in its Downloads folder). /rename names this session. The agent can use ListPeers / MessagePeer too.'
+          : 'Type "&" for the list, "&name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login, then /rc).'),
       ]);
+    },
+  });
+
+  add({
+    name: 'sendfile',
+    aliases: ['sf'],
+    argHint: '&session <file...>',
+    argRequired: true,
+    description: 'Send files to another session, on this computer or on another one: it saves them in its Downloads folder',
+    async run(args) { await app.sendFiles(args); },
+  });
+
+  add({
+    name: 'rename',
+    argHint: '<name>',
+    argRequired: true,
+    description: 'Name this session: the other sessions send it tasks with &name, and it is the title (tab, /resume, the web page)',
+    run(args) {
+      const name = args.trim();
+      if (!name) { out(`This session is ${c.bold('&' + app.peerLabel())}. /rename NAME gives it another name.`); return; }
+      const got = app.renameSession(name);
+      const note = got !== cleanName(name) ? c.dim(' (another session on this computer has that name)') : '';
+      out(`This session is now ${c.bold('&' + got)}${note}${app.remote ? c.dim(` · from your other computers: &${machineName(app.config.env)}/${got}`) : ''}`);
+    },
+  });
+
+  add({
+    name: 'remote-control',
+    aliases: ['rc'],
+    argHint: '[stop | open]',
+    description: 'Watch and steer this session from a browser or phone, through the gateway (its 远程控制 page): prints the link and a QR code',
+    async run(args) {
+      const action = args.trim().toLowerCase();
+      if (/^(stop|off|disconnect)$/.test(action)) {
+        if (!app.remote) { out(c.dim('Remote control is not on.')); return; }
+        app.stopRemote();
+        out('Remote control is off: the gateway no longer reaches this session.');
+        return;
+      }
+      if (app.remote) log(app.remoteInfo());
+      else {
+        const url = app.runtime.config.gatewayUrl;
+        // It goes through the gateway account: log in to it first (in the browser) when this machine is not; the
+        // provider of the model requests stays what it is.
+        if (!readGatewayLogin(url)) {
+          pendingLogin?.abort();
+          const controller = new AbortController();
+          pendingLogin = controller;
+          try {
+            await loginWithBrowser({
+              url,
+              signal: controller.signal,
+              onUrl: (page) => out([`Remote control goes through the gateway ${c.bold(url)}: log in to it in your browser. If it does not open, visit:`, c.blue(page), c.dim('Waiting for the browser (10 minutes at most)…')]),
+            });
+          } catch (e) {
+            if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
+            return;
+          } finally {
+            if (pendingLogin === controller) pendingLogin = null;
+          }
+        }
+        try { await app.startRemote(); } catch (e) { out(c.red(`Could not start remote control: ${e.message}`)); return; }
+      }
+      if (action === 'open' && app.remote.url && !openBrowser(app.remote.url)) out(c.yellow(`Could not open a browser: open ${app.remote.url}`));
     },
   });
 
@@ -608,35 +676,79 @@ export function buildCommands(app) {
   add({
     name: 'rewind',
     aliases: ['checkpoint'],
-    description: 'Undo: restore files and/or the conversation to before an earlier prompt',
+    description: 'Go back to an earlier prompt (or esc esc): restore the code and/or the conversation, or summarize part of it',
     async run() {
       const store = app.runtime.checkpoints;
-      const entries = store.list().slice(0, 30);
-      if (!entries.length) { out(c.dim('No checkpoints yet: one is created for every prompt you send.')); return; }
-      const id = await app.showDialog(new SelectDialog({
-        title: 'Rewind',
-        question: 'Go back to before which prompt?',
-        color: c.blue,
-        options: entries.map((e) => {
+      // Like Claude Code: the prompts of the session, the newest at the bottom and highlighted; above them the
+      // conversation before a /clear of this process. "Never mind" comes back to this list.
+      let entry;
+      let mode;
+      for (;;) {
+        const entries = store.list().slice(0, 30).reverse();
+        const previous = app.previousSession;
+        if (!entries.length && !previous) { out(c.dim('No checkpoints yet: one is created for every prompt you send.')); return; }
+        const options = entries.map((e) => {
           const n = store.filesSince(e.id).length;
           return {
             label: truncate(e.label || '(empty prompt)', 60),
             value: e.id,
-            description: `${new Date(e.time).toLocaleTimeString()} · ${n ? `${n} file${n === 1 ? '' : 's'} changed since` : 'no file changes since'}`,
+            description: `${new Date(e.time).toLocaleTimeString()} · ${n ? `${n} file${n === 1 ? '' : 's'} changed since` : 'no file changes since'}${e.conversationValid ? '' : ' · conversation compacted since'}`,
           };
-        }),
-      }));
-      if (!id) return;
-      const entry = store.get(id);
-      const files = store.filesSince(id);
-      const options = [];
-      if (files.length && entry.conversationValid) options.push({ label: 'Restore code and conversation', value: 'both', description: `${files.length} file(s) go back and the chat continues from before this prompt` });
-      if (files.length) options.push({ label: 'Restore code only', value: 'code', description: `${files.length} file(s) go back; the conversation stays as it is` });
-      if (entry.conversationValid) options.push({ label: files.length ? 'Restore conversation only' : 'Rewind the conversation', value: 'conversation', description: 'Files are left as they are' });
-      if (!options.length) { out(c.dim('Nothing to restore for that prompt (the conversation was compacted and no files changed).')); return; }
-      options.push({ label: 'Never mind', value: 'cancel' });
-      const mode = await app.showDialog(new SelectDialog({ title: 'Rewind', question: `To before: ${c.bold(truncate(entry.label || '(empty prompt)', 60))}`, color: c.blue, options, cancelValue: 'cancel' }));
-      if (!mode || mode === 'cancel') return;
+        });
+        if (previous) options.unshift({ label: `/resume ${previous.id.slice(0, 8)} (previous session)`, value: 'previous', description: 'the conversation before /clear' });
+        const id = await app.showDialog(new SelectDialog({
+          title: 'Rewind',
+          question: 'Go back to which prompt? (the code and/or the conversation as they were before it)',
+          color: c.blue,
+          options,
+          selected: options.length - 1,
+        }));
+        if (!id) return;
+        if (id === 'previous') {
+          app.agent.resetConversation();
+          app.loadSession(previous.file, previous.id);
+          return;
+        }
+        entry = store.get(id);
+        const files = store.filesSince(id);
+        const valid = entry.conversationValid;
+        const actions = [];
+        if (files.length && valid) actions.push({ label: 'Restore code and conversation', value: 'both', description: `${files.length} file(s) go back and the chat continues from before this prompt` });
+        if (valid) actions.push({ label: 'Restore conversation', value: 'conversation', description: files.length ? 'the chat continues from before this prompt; files stay as they are' : 'the chat continues from before this prompt' });
+        if (files.length) actions.push({ label: 'Restore code', value: 'code', description: `${files.length} file(s) go back; the conversation stays as it is` });
+        if (valid) actions.push({ label: 'Summarize from here', value: 'summarize-after', description: 'this prompt and everything after it become a summary, to free context' });
+        if (valid && entry.messageIndex > 0) actions.push({ label: 'Summarize up to here', value: 'summarize-before', description: 'everything before this prompt becomes a summary; the rest stays as it is' });
+        if (!actions.length) { out(c.dim('Nothing to restore for that prompt (the conversation was compacted and no files changed).')); return; }
+        actions.push({ label: 'Never mind', value: 'cancel', description: 'back to the list' });
+        mode = await app.showDialog(new SelectDialog({ title: 'Rewind', question: `At: ${c.bold(truncate(entry.label || '(empty prompt)', 60))}`, color: c.blue, options: actions, cancelValue: 'cancel' }));
+        if (mode && mode !== 'cancel') break;
+      }
+      const id = entry.id;
+      if (mode.startsWith('summarize-')) {
+        const part = mode === 'summarize-after' ? 'after' : 'before';
+        const prompt = promptAt(app.agent, entry);
+        const index = entry.messageIndex;
+        app.busy = true;
+        app.controller = new AbortController();
+        app.turnStart = Date.now();
+        app.turnTokens = 0;
+        try {
+          await app.agent.summarizePart(index, { part, label: entry.label, signal: app.controller.signal });
+          store.summarized(id, part, index);
+          app.remote?.resync();
+          if (part === 'after' && prompt) app.editor.set(prompt); // as Claude Code does: the prompt to send again or edit
+        } catch (e) {
+          if (!app.controller.signal.aborted) out(c.red(`Could not summarize: ${e.message}`));
+          else out(c.red('Summarizing interrupted'));
+        } finally {
+          app.busy = false;
+          app.controller = null;
+          app.status = null;
+          app.rateWait = null;
+          app.sendWhatWaited();
+        }
+        return;
+      }
       let result;
       try { result = rewind(app.agent, store, id, mode); } catch (e) { out(c.red(e.message)); return; }
       const lines = [];
@@ -647,6 +759,7 @@ export function buildCommands(app) {
         lines.push(...r.skipped.slice(0, 5).map((f) => c.red(`  skipped: ${f}`)));
       }
       if (result.conversation) lines.push(`Conversation rewound to before: ${truncate(result.prompt, 60)}`);
+      if (result.conversation) app.remote?.resync();
       out(lines);
       if (result.conversation && result.prompt) app.editor.set(result.prompt);
     },

@@ -184,3 +184,38 @@ test('Agent.assistantText is empty when nothing was written', () => {
   agent.messages.push({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
   assert.equal(agent.assistantText(), '');
 });
+
+test('an image the API refuses as too large is scaled in the conversation itself, and the request goes through', { skip: process.platform !== 'win32' && 'scaling uses System.Drawing here' }, async (t) => {
+  const zlib = await import('node:zlib');
+  const { imageSize } = await import('../src/utils/images.js');
+  // a 400×3200 PNG, as a full-page screenshot read before images were scaled would be
+  const w = 400, h = 3200, stride = 1 + w * 3;
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.alloc(stride * h))), chunk('IEND', Buffer.alloc(0))]);
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } };
+  const messages = [
+    { role: 'user', content: 'look' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'a.png' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r1', content: [image] }] },
+  ];
+  const sent = [];
+  mockFetch(t, async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body.messages[2].content[0].content[0].source.data);
+    return sent.length === 1
+      ? errorResponse(400, 'messages.2.content.0.image.source.base64.data: At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels')
+      : okResponse('seen');
+  });
+  const cfg = configWith({ CLAUDE_PRO_MAX_RETRIES: '0' });
+  const res = await streamMessage(cfg, { model: cfg.mainModel, system: 's', messages });
+  assert.equal(res.message.content[0].text, 'seen');
+  assert.equal(sent.length, 2);
+  assert.deepEqual(imageSize(Buffer.from(sent[1], 'base64')), { width: 196, height: 1568 });
+  assert.equal(image.source.data, sent[1], 'the conversation holds the scaled image from now on');
+});
