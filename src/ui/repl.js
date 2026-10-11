@@ -17,7 +17,7 @@ import {
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
-import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, rememberChoice } from '../config.js';
+import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { readGatewayLogin } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
@@ -463,14 +463,13 @@ export class App {
   // In the process a restart started: take up the session where the one before it left it.
   resumeAfterRestart(state, resumable) {
     const cfg = this.config;
-    const kept = {};
-    if (state.modelOverride) cfg.modelOverride = kept.model = state.modelOverride;
-    if (state.effortOverride) cfg.effortOverride = kept.effort = state.effortOverride;
+    // The model and effort the session had, none chosen included: the remembered /model and /effort are shared by
+    // every window on this machine, and another one may have changed them since (an update restarts them all).
+    // A restart is not a choice either, so it leaves what is remembered as it is.
+    if ('modelOverride' in state) cfg.modelOverride = state.modelOverride || null;
+    if ('effortOverride' in state) cfg.effortOverride = state.effortOverride || null;
     // The Effort tool's level holds for the request the restart continues, not for the user's next one.
     if (state.effortBoost) { cfg.effortBoost = state.effortBoost; cfg.effortBoostKeepNext = Boolean(state.continueWith); }
-    // These were chosen with /model and /effort, which are kept for later sessions. One made by a version of
-    // the program that did not keep them yet is saved now.
-    try { rememberChoice(cfg.provider, kept); } catch { /* it still holds for this session */ }
     if (state.mode === 'plan') this.runtime.modes.setMode('plan');
     this.restarts = (Array.isArray(state.restarts) ? state.restarts : []).filter((t) => Number.isFinite(t));
     if (resumable) {

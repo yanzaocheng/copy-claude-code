@@ -70,3 +70,17 @@ test('/clear and /resume leave the conversation they come from intact and resuma
   assert.deepEqual(listed.map((s) => [s.id, s.count]), [[second, 2]], 'the conversation that was left is still there, complete');
   assert.ok(texts(SessionStore.load(listed[0].file).messages).some((x) => x.includes('second question')));
 });
+
+test('a restart keeps the session\'s own model and effort, not what another window chose meanwhile', async (t) => {
+  const { rememberChoice, rememberedChoices } = await import('../src/config.js');
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-switch-')) });
+  t.after(() => { rememberChoice('api', { model: null, effort: null }); return tui.close(); });
+  // Another window chose these with /model and /effort; the restarted process started with them.
+  rememberChoice('api', { model: 'gpt-6.1-sol', effort: 'low' });
+  const cfg = tui.app.config;
+  Object.assign(cfg, { modelOverride: 'gpt-6.1-sol', effortOverride: 'low' });
+  tui.app.resumeAfterRestart({ modelOverride: null, effortOverride: 'high' }, false);
+  assert.equal(cfg.modelOverride, null, 'this session had no model chosen: it stays on the configured one');
+  assert.equal(cfg.effortOverride, 'high');
+  assert.deepEqual(rememberedChoices('api'), { model: 'gpt-6.1-sol', effort: 'low' }, 'a restart chooses nothing');
+});
