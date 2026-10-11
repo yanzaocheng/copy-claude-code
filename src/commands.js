@@ -15,7 +15,7 @@ import { INIT_PROMPT } from './prompts.js';
 import { loadCustomCommands, renderSkill, expandCommandBody, expandShellEmbeds } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
-import { quickQuery, cacheRefusals, defaultEffort, effortToSend } from './api.js';
+import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath } from './utils/paths.js';
 import { rewind } from './checkpoints.js';
@@ -23,8 +23,10 @@ import { canRestart, runSelfCheck } from './restart.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);
-// The levels /effort offers for a model: gateway metadata first, then the local Codex cache, else EFFORTS.
+// The levels /effort offers for a model: Claude's own (as in Claude Code); for a GPT model the gateway's metadata,
+// else the local Codex cache; EFFORTS for other models (an Anthropic-compatible API may take any of them).
 const effortLevels = (modelId, modelInfo = null) => {
+  if (/^claude-/i.test(modelId)) return CLAUDE_EFFORTS;
   const remote = gatewayEfforts(modelInfo);
   if (remote.length) return remote;
   return isGpt(modelId) && codexEfforts(modelId).length ? codexEfforts(modelId) : EFFORTS;

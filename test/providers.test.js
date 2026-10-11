@@ -42,6 +42,8 @@ test('gateway and codex providers: models, windows, sub-agent and output default
   assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol', CLAUDE_CODE_EFFORT_LEVEL: 'none' }), 'low', 'a level the GPT model does not take goes out as the nearest one');
   assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_CODE_EFFORT_LEVEL: 'ultra' }), 'max', 'ultra, chosen on a GPT model, is max on Claude');
   assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_CODE_EFFORT_LEVEL: 'high' }), 'high');
+  assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_CODE_EFFORT_LEVEL: 'none' }), 'low', 'Claude takes low … max, not OpenAI\'s none');
+  assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' }), 'xhigh');
 
   const cx = config({ CLAUDE_PRO_PROVIDER: 'codex' });
   assert.equal(cx.mainModel.id, 'gpt-6.1-sol');

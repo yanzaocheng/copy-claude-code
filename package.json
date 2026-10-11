@@ -1,6 +1,6 @@
 {
   "name": "@yanzc/claude-pro",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "claude-pro: a self-implemented coding agent for Anthropic-compatible APIs or local Claude Code subscription login. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
   "repository": {

@@ -174,6 +174,9 @@ function clampEffort(effort, supported) {
   return supported.reduce((best, s) => (Math.abs(EFFORTS.indexOf(s) - want) < Math.abs(EFFORTS.indexOf(best) - want) ? s : best), supported[0]);
 }
 
+// The level of `supported` nearest to `effort` (on the scale none … ultra); `effort` itself when it is supported.
+export const nearestEffort = (effort, supported) => clampEffort(effort, supported);
+
 // The effort levels a GPT model takes, from the local Codex models cache ([] when it is not listed there):
 // gpt-6.1-sol takes low … ultra, but not none or minimal.
 export const codexEfforts = (modelId, env = process.env) => codexModels(env).models.find((m) => m.slug === modelId)?.efforts || [];

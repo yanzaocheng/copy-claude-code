@@ -7,7 +7,7 @@ import { refreshClaudeCodeLogin, canRenewLogin } from './oauth.js';
 import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { readGatewayLogin, fetchGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
-import { createCodexFetch, codexModels, codexEffort } from './codex/client.js';
+import { createCodexFetch, codexModels, codexEffort, nearestEffort } from './codex/client.js';
 import { SIGNATURE_PREFIX } from './codex/translate-request.js';
 
 let cached = null;
@@ -212,11 +212,15 @@ export function defaultEffort(modelId, config = null) {
   return null;
 }
 
+// The effort levels Claude takes, as Claude Code's /effort offers them. OpenAI's none and minimal and the ultra of
+// some GPT models are not among them; a level chosen on a GPT model stays chosen after a switch to Claude.
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 // The level a request for this model carries when `effort` is chosen: the nearest one the model takes. A GPT model
-// lists its own (the gateway's /v1/models, else the local Codex models cache). Claude has no "ultra", the level
-// above max that some GPT models take, which stays chosen when the user switches from such a model to Claude.
+// lists its own (the gateway's /v1/models, else the local Codex models cache); Claude takes CLAUDE_EFFORTS.
 export function effortToSend(config, modelId, effort) {
   if (!effort) return effort;
+  if (/^claude-/i.test(modelId)) return nearestEffort(effort, CLAUDE_EFFORTS);
   if (!/^gpt-/i.test(modelId)) return effort === 'ultra' ? 'max' : effort;
   const info = gatewayModelInfo(config, modelId);
   return info ? gatewayEffort(info, effort) : codexEffort(modelId, effort, codexEnv(config));
