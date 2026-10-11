@@ -43,9 +43,12 @@ export function memoryFiles(cwd) {
   }
   for (const d of dirs) {
     if (d === os.homedir()) continue; // home is covered by the user memory
+    const before = files.length;
     add(path.join(d, 'CLAUDE.md'), 'project');
     add(path.join(d, '.claude', 'CLAUDE.md'), 'project');
-    add(path.join(d, 'AGENTS.md'), 'project');
+    // As in Claude Code, AGENTS.md stands in for a missing CLAUDE.md: where both exist they are usually copies of
+    // each other (one for Claude, one for Codex), and loading both would send the instructions twice.
+    if (files.length === before) add(path.join(d, 'AGENTS.md'), 'project');
     add(path.join(d, 'CLAUDE.local.md'), 'local');
   }
   return files;

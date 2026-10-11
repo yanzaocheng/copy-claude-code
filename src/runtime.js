@@ -101,8 +101,10 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     return true;
   };
 
-  runtime.spawnSubagent = async ({ def, prompt, description, ctx }) => {
-    const model = def.model ? config.resolveModel(def.model) : config.subagentModel;
+  // `model` and `effort`: what the Task call asked for, over the agent definition's own, over the session's.
+  runtime.spawnSubagent = async ({ def, prompt, description, ctx, model: modelSpec, effort }) => {
+    const spec = modelSpec || def.model;
+    const model = spec ? config.resolveModel(spec) : config.subagentModel;
     const subIo = io.subagentIo ? io.subagentIo({ def, description, parentCtx: ctx }) : {};
     // The main agent is depth 0; an agent below the nesting limit may start sub-agents itself.
     const depth = (ctx.depth ?? ctx.agent?.depth ?? 0) + 1;
@@ -120,6 +122,8 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       cwd: ctx.cwd,
       name: def.name,
       hooks,
+      effort: effort || def.effort,
+      compactWindow: def.autoCompactWindow,
     });
     let result;
     try {

@@ -24,7 +24,7 @@ import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { ripgrepPath } from '../utils/shell.js';
-import { describePause, formatClock, humanDuration, shouldAnnounce } from '../ratelimit.js';
+import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
@@ -625,7 +625,7 @@ export class App {
       return;
     }
     if (this.busy) { this.interrupt(); return; }
-    if (this.editor.text) { this.editor.clear(); this.screen.schedule(); return; }
+    if (this.editor.text) { this.editor.discard(); this.screen.schedule(); return; }
     if (Date.now() - this.exitArmed < 1500) { this.exit(0); return; }
     this.exitArmed = Date.now();
     this.screen.schedule();
@@ -1149,12 +1149,12 @@ export class App {
   rateLimitEvent(ev) {
     if (ev.type === 'rate_limit_resume') {
       this.rateWait = null;
-      this.notice('The limit has cleared; continuing.');
+      this.notice(resumeText(ev));
       return;
     }
     // Say it once; later waits of the same pause only move the countdown (unless the reset moved a lot).
     const prev = this.rateWait;
-    this.rateWait = { resumeAt: ev.resumeAt, label: ev.label, polling: ev.polling, waitingForLogin: Boolean(ev.waitingForLogin) };
+    this.rateWait = { resumeAt: ev.resumeAt, label: ev.label, polling: ev.polling, waitingForLogin: Boolean(ev.waitingForLogin), overloaded: Boolean(ev.overloaded) };
     if (shouldAnnounce(prev, ev)) this.notice(`${describePause(ev)} Esc cancels.`, 'warn');
     this.screen.schedule();
   }
@@ -1238,7 +1238,7 @@ export class App {
       }
       if (ev.type === 'rate_limit_resume') {
         paused = null;
-        app.notice(`[${def.name}] The limit has cleared; continuing.`);
+        app.notice(`[${def.name}] ${resumeText(ev)}`);
       }
     };
     return {
@@ -1321,7 +1321,7 @@ export class App {
       if (w.waitingForLogin) return c.yellow(`${frame} Waiting for the Claude Code login to be renewed · checking again in ${left}`) + ' ' + esc;
       const label = w.label.charAt(0).toUpperCase() + w.label.slice(1);
       const when = w.polling ? `checking again in ${left}` : `resumes at ${formatClock(w.resumeAt)} (in ${left})`;
-      return c.yellow(`${frame} ${label} reached · ${when}`) + ' ' + esc;
+      return c.yellow(`${frame} ${w.overloaded ? label : `${label} reached`} · ${when}`) + ' ' + esc;
     }
     const secs = formatDuration(Date.now() - this.turnStart);
     const verb = this.status || (this.thinking ? 'Thinking' : this.verb);

@@ -124,3 +124,30 @@ test('NotebookEdit: replace, insert, delete, and read-first rule', async () => {
   const missing = await NotebookEditTool.call({ notebook_path: file, cell_id: 'nope', new_source: 'x' }, ctx);
   assert.equal(missing.isError, true);
 });
+
+test('Read allow_large: past the usual limits while the context has room, refused when it has not', async () => {
+  const dir = tmp();
+  const cfg = makeConfig(dir); // the mock model: 200K window, auto-compaction at 160K
+  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [ReadTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const ctx = agent.makeCtx();
+  const head = (r) => String(r.content).slice(0, 300);
+  const long = path.join(dir, 'long.txt'); // 10,500 short lines (about 21K tokens): past the 10,000 line default
+  fs.writeFileSync(long, 'x\n'.repeat(10_500));
+  const all = await ReadTool.call({ file_path: long, allow_large: true }, ctx);
+  assert.ok(!all.isError && all.content.includes(' 10500\tx') && !all.content.includes('showing lines'), head(all));
+  const big = path.join(dir, 'big.txt'); // 8,501 lines, about 515K characters numbered (about 129K tokens)
+  fs.writeFileSync(big, `${'y'.repeat(50)}\n`.repeat(8500) + `${'z'.repeat(30_000)}\n`);
+  const plain = await ReadTool.call({ file_path: big }, ctx);
+  assert.ok(/exceeds the maximum allowed size.*allow_large: true/s.test(plain.content), head(plain));
+  const r = await ReadTool.call({ file_path: big, allow_large: true }, ctx);
+  assert.ok(!r.isError, head(r));
+  assert.ok(/^  8501\tz{30000}$/m.test(r.content), 'every line, and the long one whole');
+  assert.ok(!/truncated|showing lines|output cut/.test(r.content));
+  assert.equal(ctx.fileState.get(big).partial, false);
+  const again = await ReadTool.call({ file_path: big, allow_large: true }, ctx); // in the same batch: the room is held
+  assert.equal(again.isError, true);
+  assert.match(again.content, /does not fit in the context left \(about [\d,]+ tokens before auto-compaction\)/);
+  agent.pushMessage({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: r.content }] });
+  assert.equal(agent.heldTokens, 0);
+  assert.ok(agent.contextRoom() < 40_000, 'the result now counts in the context itself');
+});

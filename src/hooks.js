@@ -4,12 +4,16 @@
 //              "PostToolUse": [...], "UserPromptSubmit": [...], "Stop": [...] }
 // The event payload is passed as JSON on stdin (like Claude Code) and in $CLAUDE_PRO_HOOK_INPUT; $CLAUDE_PROJECT_DIR is set too.
 // Exit code 0: fine (stdout is kept as extra context). Exit code 2: block, stderr goes to the model.
-// Any other non-zero exit code is reported as a warning and ignored.
+// Any other non-zero exit code, a hook that cannot start and one that times out are reported as a warning and
+// let through, unless the hook says "onFailure": "block" (as in Claude Code): then they block like exit code 2.
+// <system-reminder> tags in a hook's output are escaped, so that it cannot pass itself off as the harness.
 
 import { spawnShell, killTree, findShell, watchShell } from './utils/shell.js';
 import { stripAnsi } from './ui/ansi.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+export const escapeReminders = (text) => String(text).replace(/<(\/?\s*system-reminder)/gi, '&lt;$1');
 
 function matches(matcher, name) {
   if (!matcher || matcher === '*') return true;
@@ -69,11 +73,18 @@ export class HookRunner {
         const r = await runCommand(this.shell, h.command, { cwd, payload: full, timeout: h.timeout ? h.timeout * 1000 : DEFAULT_TIMEOUT_MS, signal });
         if (r.code === 2) {
           result.blocked = true;
-          result.message = r.err || r.out || `Blocked by ${event} hook: ${h.command}`;
+          result.message = escapeReminders(r.err || r.out || `Blocked by ${event} hook: ${h.command}`);
           return result;
         }
-        if (r.code !== 0) result.warnings.push(`${event} hook "${h.command}" exited with ${r.code}${r.err ? `: ${r.err.split('\n')[0]}` : ''}`);
-        else if (r.out) result.context.push(r.out);
+        if (r.code !== 0) {
+          const failure = `${event} hook "${h.command}" exited with ${r.code}${r.err ? `: ${r.err.split('\n')[0]}` : ''}`;
+          if (h.onFailure === 'block' && !signal?.aborted) {
+            result.blocked = true;
+            result.message = escapeReminders(`${failure}\n(The hook failed and is set to block on failure.)`);
+            return result;
+          }
+          result.warnings.push(failure);
+        } else if (r.out) result.context.push(escapeReminders(r.out));
       }
     }
     return result;

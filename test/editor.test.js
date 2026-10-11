@@ -21,6 +21,28 @@ test('editor: up and down move between lines and keep the column; the first and 
   assert.equal(e.cursor, 5);
 });
 
+test('editor: a draft cleared with esc esc comes back with up, pasted text included, even after a sent message', () => {
+  const sent = [];
+  const e = new Editor({ history: ['older'], onSubmit: (value) => sent.push(value) });
+  e.insert('fix this: ');
+  e.insertPaste('a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl');
+  const draft = e.text;
+  e.handleKey('', key('escape', { meta: true }));
+  assert.equal(e.text, '');
+  e.set('another message');
+  e.submit();
+  e.handleKey('', key('up'));
+  assert.equal(e.text, draft, 'the cleared draft first');
+  assert.match(e.expanded(), /fix this: a\nb\n/, 'with its pasted text');
+  e.handleKey('', key('up'));
+  assert.equal(e.text, 'another message', 'then the history');
+  e.handleKey('', key('down'));
+  assert.equal(e.text, draft);
+  e.clear();
+  e.handleKey('', key('up'));
+  assert.equal(e.text, 'another message', 'brought back once');
+});
+
 test('editor: home, ctrl-a and ctrl-u work on the current line', () => {
   const e = new Editor();
   e.set('first\nsecond line', 9);

@@ -3,7 +3,7 @@
 
 import { createRuntime } from './runtime.js';
 import { SessionStore } from './session.js';
-import { describePause, shouldAnnounce } from './ratelimit.js';
+import { describePause, resumeText, shouldAnnounce } from './ratelimit.js';
 import { c } from './ui/ansi.js';
 
 export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, stderr = process.stderr }) {
@@ -21,7 +21,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
       }
       if (ev.type === 'rate_limit_resume') {
         paused = null;
-        err(c.yellow(`${who}The limit has cleared; continuing.`));
+        err(c.yellow(`${who}${resumeText(ev)}`));
       }
     };
   };

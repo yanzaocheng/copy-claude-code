@@ -144,6 +144,8 @@ test('out of the box: the subscription login caches the conversation for an hour
   assert.equal(sub().cacheTtl('main'), '1h');
   assert.equal(sub().cacheTtl('other'), '5m', 'sub-agents, compaction and side queries stay at 5 minutes');
   assert.equal(makeConfig().cacheTtl('main'), '5m', 'an API key or another endpoint: 5 minutes');
+  const gw = (env = {}) => makeConfig({ CLAUDE_PRO_PROVIDER: 'gateway', ...env });
+  assert.deepEqual([gw().cacheTtl('main'), gw().cacheTtl('other'), gw({ FORCE_PROMPT_CACHING_5M: '1' }).cacheTtl('main')], ['1h', '5m', '5m'], 'the gateway as the subscription');
   assert.equal(sub({ FORCE_PROMPT_CACHING_5M: '1' }).cacheTtl('main'), '5m', 'FORCE still wins');
   assert.equal(sub({ CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }).cacheTtl('main'), '5m', 'so does the conversation\'s own setting');
   assert.equal(sub({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }).cacheTtl('other'), '1h');
@@ -824,10 +826,17 @@ test('through createRuntime: sub-agents share the snapshot, and their usage is t
   rt.invalidateSystemPrompt(); // /clear or a compaction: the snapshot is taken again
   await run('three');
   assert.match(systems[2], /b\.txt/);
+  // the Task call's model and effort win over the definition's, and the definition's over the session's
+  const bodies = [];
+  mockFetch(t, async (url, init) => { bodies.push(bodyOf(init)); return replyWith({ usage: usageOf(700, 0) }); });
+  const def = { name: 'probe', prompt: 'You probe.', tools: [], effort: 'high', model: 'opus' };
+  await rt.spawnSubagent({ def, prompt: 'p', description: 'p', ctx: { cwd: dir, depth: 0 }, model: 'claude-haiku-5-5', effort: 'low' });
+  await rt.spawnSubagent({ def, prompt: 'p', description: 'p', ctx: { cwd: dir, depth: 0 } });
+  assert.deepEqual(bodies.map((b) => [b.model, b.output_config?.effort]), [['claude-haiku-5-5', 'low'], [rt.config.resolveModel('opus').id, 'high']]);
   // a sub-agent that fails is billed too
   mockFetch(t, async () => rejected('boom'));
   await assert.rejects(() => run('four'), /boom/);
-  assert.equal(rt.agent.subUsage.runs, 4);
+  assert.equal(rt.agent.subUsage.runs, 6);
 });
 
 test('an automatic compaction that keeps failing does not fail the turns, and stops after 3 failures in a row', async (t) => {

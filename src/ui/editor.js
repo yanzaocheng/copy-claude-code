@@ -99,10 +99,30 @@ export class Editor {
 
   clear() {
     this.set('');
-    this.pastes.clear();
-    this.images.clear();
+    this.pastes = new Map();
+    this.images = new Map();
     this.imageCounter = 0;
     this.historyIndex = null;
+  }
+
+  // Clear a draft the user threw away (ctrl+c, esc esc), as Claude Code does: up on the empty prompt brings it back,
+  // with its pasted text and images, even after other messages were sent meanwhile.
+  discard() {
+    if (this.text.trim()) {
+      this.cleared = { text: this.text, cursor: this.cursor, pastes: this.pastes, images: this.images, imageCounter: this.imageCounter };
+    }
+    this.clear();
+  }
+
+  restoreCleared() {
+    const d = this.cleared;
+    if (!d || this.text || this.historyIndex !== null) return false;
+    this.cleared = null;
+    this.pastes = d.pastes;
+    this.images = d.images;
+    this.imageCounter = d.imageCounter;
+    this.set(d.text, d.cursor);
+    return true;
   }
 
   insertImage(image) {
@@ -213,9 +233,9 @@ export class Editor {
     }
     if (name === 'escape') {
       if (this.suggestions) { this.suggestionsDismissedFor = this.text; this.suggestions = null; return true; }
-      if (key.meta && this.text) { this.clear(); return true; } // ESC ESC arriving in one chunk
+      if (key.meta && this.text) { this.discard(); return true; } // ESC ESC arriving in one chunk
       const now = Date.now();
-      if (this.text && now - this.lastEscape < 800) { this.clear(); this.lastEscape = 0; return true; }
+      if (this.text && now - this.lastEscape < 800) { this.discard(); this.lastEscape = 0; return true; }
       this.lastEscape = now;
       return false;
     }
@@ -228,7 +248,7 @@ export class Editor {
         this.set(this.text, Math.min(prevStart + col, lineStart - 1));
         return true;
       }
-      return this.historyPrev();
+      return this.restoreCleared() || this.historyPrev();
     }
     if (name === 'down' || (key.ctrl && name === 'n')) {
       if (this.suggestions) { this.selected = (this.selected + 1) % this.suggestions.items.length; this.onChange?.(); return true; }

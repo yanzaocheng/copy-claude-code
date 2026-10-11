@@ -56,7 +56,7 @@ export const KNOWN_KEYS = {
   DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000; lowered automatically if the API allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
-  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login, as in Claude Code, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
+  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login, as in Claude Code, and with the gateway, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
   ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
   FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
@@ -69,6 +69,9 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests (0 = no retries at all, which also turns off the rate limit wait)',
   CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: 'Longest total time to wait for a rate limit (e.g. the 5-hour window) to reset before continuing by itself (default 21600000 = 6 hours; 0 = report the error instead of waiting)',
   CLAUDE_PRO_RATE_LIMIT_POLL_MS: 'When a rate limit does not say when it resets, try again at most this far apart (default 300000 = 5 minutes)',
+  CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS: 'First wait before retrying a request refused as overloaded (529); doubled at each retry (default 1000)',
+  CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS: 'Longest wait between retries of an overloaded (529) request (default 32000)',
+  CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS: 'How long to keep retrying an overloaded (529) API once the usual retries are used up, before reporting the error (default: CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 hours; 0 = give up after the retries)',
   BASH_DEFAULT_TIMEOUT_MS: 'Default timeout for Bash commands (default 600000 = 10 minutes)',
   BASH_MAX_TIMEOUT_MS: 'Maximum timeout the model may request for Bash commands (default 3600000 = 1 hour)',
   BASH_MAX_OUTPUT_LENGTH: 'Max characters of Bash output returned to the model; the full text is saved to a file (default 60000)',
@@ -254,10 +257,10 @@ export class Config {
 
   aliasTarget(alias) {
     if (this.usesClaudeCode) {
-      return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-4-5-20251001' }[alias] || null;
+      return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
     }
     // The gateway prices models by their undated names.
-    if (this.usesGateway) return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-4-5' }[alias] || null;
+    if (this.usesGateway) return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
     if (this.usesCodex) {
       // No Claude here: the big aliases mean the Codex model, haiku the small one when the Codex install has it.
       if (alias === 'haiku') return codexModels(this.env).models.some((m) => m.slug === 'gpt-6-luna') ? 'gpt-6-luna' : this.codexModelSpec;
@@ -281,7 +284,7 @@ export class Config {
       const inner = this.resolveModel(aliased);
       return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
-    const nativeOneM = this.claudeIds && /^claude-(?:sonnet-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
+    const nativeOneM = this.claudeIds && /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
     // OpenAI models (the codex provider, gpt-6.1-sol on the gateway): the window the Codex install reports,
     // else the 272K of the current GPT models.
     if (/^gpt-/i.test(name)) {
@@ -337,7 +340,9 @@ export class Config {
       : normalizeTtl(this.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL) || normalizeTtl(this.settings?.subagentPromptCacheTtl);
     if (own) return own;
     if (isOn(this.env.ENABLE_PROMPT_CACHING_1H)) return '1h';
-    return bucket === 'main' && this.usesClaudeCode ? '1h' : '5m';
+    // The gateway too: measured on its usage records (533 Opus requests), pauses of 5 to 60 minutes rewrote the whole
+    // conversation 9 times at 1.25x, $14.77; writing every turn at 2x instead costs $2.80 more.
+    return bucket === 'main' && (this.usesClaudeCode || this.usesGateway) ? '1h' : '5m';
   }
   // DISABLE_PROMPT_CACHING turns it off for everything; the per-model variables only for the model that
   // their alias resolves to (a different version pinned as the model keeps its caching), wherever it runs.
@@ -354,15 +359,20 @@ export class Config {
   get maxRetries() { return int(this.env.CLAUDE_PRO_MAX_RETRIES, 6); }
   get rateLimitMaxWait() { return Math.max(0, int(this.env.CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 * 3_600_000)); }
   get rateLimitPoll() { return Math.max(1000, int(this.env.CLAUDE_PRO_RATE_LIMIT_POLL_MS, 300_000)); }
+  // An overloaded API (529): the backoff, and how long to keep trying once the retries are used up (see planRetry).
+  get overloadedRetryBaseDelay() { return Math.max(100, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS, 1000)); }
+  get overloadedRetryMaxDelay() { return Math.max(this.overloadedRetryBaseDelay, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS, 32_000)); }
+  get overloadedMaxWait() { return Math.max(0, int(this.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS, this.rateLimitMaxWait)); }
 
-  // Effective window for compaction: the configured auto-compact window capped by the model window.
-  compactWindow(model = this.mainModel) {
-    const configured = int(this.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, 0);
+  // Effective window for compaction: the configured auto-compact window capped by the model window. `own`: a
+  // sub-agent's autoCompactWindow, which takes the place of the configured one.
+  compactWindow(model = this.mainModel, own = 0) {
+    const configured = own > 0 ? own : int(this.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, 0);
     return configured > 0 ? Math.min(configured, model.contextWindow) : model.contextWindow;
   }
   get autoCompactEnabled() { return !/^(1|true|yes)$/i.test(this.env.DISABLE_AUTOCOMPACT || ''); }
-  autoCompactThreshold(model = this.mainModel) {
-    const window = this.compactWindow(model);
+  autoCompactThreshold(model = this.mainModel, own = 0) {
+    const window = this.compactWindow(model, own);
     const pct = int(this.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 0);
     if (pct > 0 && pct <= 100) return Math.floor(window * pct / 100);
     // Leave room for the summary itself and the next response (replies rarely come close to the

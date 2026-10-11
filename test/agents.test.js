@@ -52,7 +52,11 @@ test('loadAgents: files with a BOM, block scalar descriptions and list-style too
   write(dir, '.claude/agents/bom.md', '---\nname: bom-agent\ndescription: Saved with a BOM\n---\nDo things.', { bom: true });
   write(dir, '.claude/agents/block.md', '---\nname: block-agent\ndescription: |\n  Use this agent to review code.\n  It reads carefully.\ntools: [Read, "Grep"]\nmodel: inherit\n---\nReview.');
   write(dir, '.claude/agents/incomplete.md', '---\nname: no-description\n---\nx');
+  write(dir, '.claude/agents/quick.md', '---\nname: quick\ndescription: Quick lookups\neffort: Low\nautoCompactWindow: 100000\n---\nLook.');
+  write(dir, '.claude/agents/odd.md', '---\nname: odd\ndescription: Odd values\neffort: turbo\nautoCompactWindow: lots\n---\nx');
   const agents = loadAgents(dir);
+  assert.deepEqual([agents.get('quick').effort, agents.get('quick').autoCompactWindow], ['low', 100_000]);
+  assert.deepEqual([agents.get('odd').effort, agents.get('odd').autoCompactWindow], [null, 0], 'values it does not know are left out');
   assert.equal(agents.get('bom-agent').description, 'Saved with a BOM');
   assert.equal(agents.get('bom-agent').prompt, 'Do things.');
   assert.equal(agents.get('block-agent').description, 'Use this agent to review code.\nIt reads carefully.');

@@ -33,6 +33,17 @@ test('Grep scanner: globs that only exclude keep every other file (they used to 
   assert.deepEqual(files(dir, await grep(dir, { pattern: 'needle', glob: '!build/**,!*.md' })), ['src/a.js']);
 });
 
+test('Grep takes file_path for path and grep\'s -l / -c flags as output modes', async () => {
+  const dir = fixture({ 'a.js': 'needle\nneedle\n', 'b.js': 'needle\n' });
+  const norm = (input) => GrepTool.normalizeInput({ ...input });
+  const one = norm({ pattern: 'needle', file_path: path.join(dir, 'a.js'), '-c': true, '-r': true });
+  assert.deepEqual([one.path, one.output_mode], [path.join(dir, 'a.js'), 'count']);
+  assert.match((await GrepTool.call(one, { cwd: os.tmpdir(), config: { env: { CLAUDE_PRO_RIPGREP_PATH: 'off' } } })).content, /:2/);
+  assert.equal(norm({ pattern: 'x', '-l': true }).output_mode, 'files_with_matches');
+  assert.equal(norm({ pattern: 'x', '-c': true, output_mode: 'content' }).output_mode, 'content', 'an output_mode given wins');
+  assert.equal(norm({ pattern: 'x', path: 'p', file_path: 'f' }).path, 'p');
+});
+
 test('Grep scanner: glob forms behave like ripgrep --glob', async () => {
   const dir = fixture({
     'src/a.js': 'needle\n', 'src/b.ts': 'needle\n', 'src/deep/c.js': 'needle\n', 'top.js': 'needle\n', 'node_modules/pkg/i.js': 'needle\n',

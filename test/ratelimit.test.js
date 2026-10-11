@@ -10,7 +10,7 @@ import { ModeManager } from '../src/modes.js';
 import { GlobTool } from '../src/tools/search.js';
 import { endpoint } from '../src/oauth.js';
 import {
-  parseRateLimit, planRetry, humanDuration, formatClock, describePause, shouldAnnounce, sleepUntil, timing,
+  parseRateLimit, planRetry, humanDuration, formatClock, describePause, shouldAnnounce, sleepUntil, timing, resumeText,
 } from '../src/ratelimit.js';
 
 endpoint.url = 'http://127.0.0.1:9/never-reached'; // no test may reach the real token endpoint
@@ -777,4 +777,36 @@ test('after a pause the quick retries start over', async (t) => {
   const res = await streamMessage(config, request(config));
   assert.equal(res.message.content[0].text, 'made it');
   assert.equal(call, 7);
+});
+
+test('planRetry: an overloaded API backs off as configured, then pauses at the longest delay within its own budget', () => {
+  const e529 = { status: 529, retryable: true, message: 'Overloaded', retryAfterMs: null };
+  const state = fresh();
+  const config = cfg({ maxRetries: 3, overloadedRetryBaseDelay: 1000, overloadedRetryMaxDelay: 32_000, overloadedMaxWait: 100_000 });
+  const plans = [];
+  for (let p = plan(e529, state, config); p.action === 'wait'; p = plan(e529, state, config)) plans.push(p);
+  assert.deepEqual(plans.map((p) => [p.kind, p.delayMs]), [
+    ['retry', 1000], ['retry', 2000], ['retry', 4000],
+    ['rate_limit', 8000], ['rate_limit', 16_000], ['rate_limit', 32_000], ['rate_limit', 32_000],
+  ]);
+  assert.ok(plans.slice(3).every((p) => p.overloaded && p.polling));
+  assert.match(plan(e529, state, config).message, /still overloaded after \d+ retries and 1m 28s of waiting/);
+  assert.match(describePause({ ...plans[3], resumeAt: NOW + 8000 }, NOW), /^The API is overloaded/);
+  assert.deepEqual([2, 3].map(() => plan({ ...e529, status: 500, overloaded: true }, fresh(), cfg({ overloadedRetryBaseDelay: 5000 })).delayMs), [5000, 5000], 'a mid-stream overloaded_error and its own base delay');
+  assert.equal(plan(e529, { ...fresh(), overloaded: 3 }, config, { allowWait: false }).action, 'throw', 'side queries do not pause');
+});
+
+test('a stream that keeps answering 529 is waited out and then goes on', async (t) => {
+  fakeClock(t);
+  const busy = () => new Response(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }), { status: 529, headers: { 'content-type': 'application/json' } });
+  let call = 0;
+  mockFetch(t, async () => (++call <= 6 ? busy() : okResponse('made it')));
+  const config = configWith({ CLAUDE_PRO_MAX_RETRIES: '2' });
+  const events = [];
+  const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
+  assert.equal(res.message.content[0].text, 'made it');
+  const waits = events.filter((ev) => /retry|rate_limit/.test(ev.type));
+  assert.deepEqual(waits.map((ev) => ev.type), ['retry', 'retry', 'rate_limit_wait', 'rate_limit_wait', 'rate_limit_wait', 'rate_limit_wait', 'rate_limit_resume']);
+  assert.equal(waits.at(-1).overloaded, true);
+  assert.match(resumeText(waits.at(-1)), /answering again/);
 });

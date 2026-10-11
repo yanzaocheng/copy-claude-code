@@ -385,6 +385,14 @@ Usage:
     },
     required: ['pattern'],
   },
+  // What a model used to grep (or to the Read tool) sometimes sends, taken as meant, as Claude Code does, instead of
+  // searching the working directory when it named a file_path: -l and -c pick the output mode, -r is the default.
+  normalizeInput(input) {
+    if (input.path == null && typeof input.file_path === 'string') input.path = input.file_path;
+    if (input.output_mode == null && input['-c']) input.output_mode = 'count';
+    else if (input.output_mode == null && input['-l']) input.output_mode = 'files_with_matches';
+    return input;
+  },
   summarize(input, ctx) {
     let s = `pattern: "${input.pattern}"`;
     if (input.path) s += `, path: "${displayPath(resolvePath(input.path, ctx.cwd), ctx.cwd)}"`;

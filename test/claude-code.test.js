@@ -55,7 +55,8 @@ test('subscription aliases resolve to Claude IDs independently of existing API c
   const cfg = new Config({ CLAUDE_PRO_PROVIDER: 'claude-code', ANTHROPIC_MODEL: 'deepseek-flash', ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash' }, {}, {}, process.cwd());
   assert.equal(cfg.mainModel.id, 'claude-sonnet-5-5');
   assert.equal(cfg.subagentModel.id, 'claude-sonnet-5-5');
-  assert.equal(cfg.smallModel.id, 'claude-haiku-4-5-20251001');
+  assert.equal(cfg.smallModel.id, 'claude-haiku-5-5');
+  assert.equal(cfg.smallModel.contextWindow, 1_000_000);
   assert.equal(cfg.resolveModel('opus').id, 'claude-opus-5-5');
   assert.equal(cfg.mainModel.contextWindow, 1_000_000);
   const flags = loadConfig({ flags: { provider: 'claude-code', model: 'claude-sonnet-4-6' } });

@@ -32,7 +32,7 @@ test('gateway and codex providers: models, windows, sub-agent and output default
   assert.equal(gw.mainModel.id, 'claude-opus-5-5');
   assert.equal(gw.mainModel.contextWindow, 1_000_000);
   assert.equal(gw.subagentModel.id, 'claude-sonnet-5-5');
-  assert.equal(gw.smallModel.id, 'claude-haiku-4-5');
+  assert.equal(gw.smallModel.id, 'claude-haiku-5-5');
   assert.equal(gw.maxOutputTokens, 32_000, 'a smaller balance hold per request');
   assert.equal(gw.gatewayUrl, 'https://gw.predix.icu');
   const gpt = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol' });

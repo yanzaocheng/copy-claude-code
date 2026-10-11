@@ -301,11 +301,12 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
 }
 
 export class APIError extends Error {
-  constructor(message, { status, retryable, promptTooLong, retryAfterMs = null, rateLimit = null } = {}) {
+  constructor(message, { status, retryable, promptTooLong, retryAfterMs = null, rateLimit = null, overloaded = false } = {}) {
     super(message);
     this.status = status;
     this.retryable = retryable;
     this.promptTooLong = promptTooLong;
+    this.overloaded = overloaded; // 529 / overloaded_error: waited out with its own backoff (see planRetry)
     this.retryAfterMs = retryAfterMs; // what the server's Retry-After header asked for
     this.rateLimit = rateLimit; // what the rate limit headers say (see ratelimit.js)
   }
@@ -325,7 +326,8 @@ function describeError(err, config) {
   if (status === 402 && config?.usesGateway) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (or run /login to check the balance). ${msg}`;
   const retryable = !status || status === 408 || status === 409 || status === 429 || status >= 500;
   const header = typeof err?.headers?.get === 'function' ? err.headers.get('retry-after') : err?.headers?.['retry-after'];
-  return new APIError(msg, { status, retryable, promptTooLong, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()) });
+  const overloaded = status === 529 || (err?.error?.error?.type || err?.error?.type) === 'overloaded_error';
+  return new APIError(msg, { status, retryable, promptTooLong, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()), overloaded });
 }
 
 // Our own aborts are named AbortError and the SDK's is an APIUserAbortError. The message test only
@@ -365,16 +367,17 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   const params = buildParams(config, request, login);
   let authReloaded = false;
   const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
-  const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0 };
-  let paused = false;
+  const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0, overloaded: 0, overloadedWaitMs: 0 };
+  let paused = null; // the plan of the pause in progress (see planRetry)
   for (;;) {
     let emitted = false;
     const startedAt = Date.now(); // the cache TTL counts from the start of the request, not from the end of the reply
     try {
       const stream = await client.messages.create(params, { signal });
       if (paused) {
-        paused = false;
-        onEvent({ type: 'rate_limit_resume', waitedMs: retryState.waitedMs });
+        const overloaded = paused.overloaded;
+        paused = null;
+        onEvent({ type: 'rate_limit_resume', waitedMs: overloaded ? retryState.overloadedWaitMs : retryState.waitedMs, ...(overloaded ? { overloaded } : {}) });
       }
       const blocks = [];
       const jsonBufs = [];
@@ -428,7 +431,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
             if (ev.usage) usage = { ...usage, ...Object.fromEntries(Object.entries(ev.usage).filter(([, v]) => v != null)) };
             break;
           case 'error':
-            throw Object.assign(new Error(ev.error?.message || 'stream error'), { status: ev.error?.type === 'rate_limit_error' ? 429 : 500 });
+            throw Object.assign(new Error(ev.error?.message || 'stream error'), { status: { rate_limit_error: 429, overloaded_error: 529 }[ev.error?.type] || 500 });
           default:
             break;
         }
@@ -498,10 +501,13 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       }
       if (emitted) onEvent({ type: 'reset' });
       if (plan.kind === 'rate_limit') {
-        paused = true;
+        paused = plan;
         onEvent({
           type: 'rate_limit_wait', error: err, delayMs: plan.delayMs, resumeAt: plan.resumeAt, resetAt: plan.resetAt,
-          label: plan.label, polling: plan.polling, waitedMs: retryState.waitedMs, maxWaitMs: config.rateLimitMaxWait,
+          label: plan.label, polling: plan.polling,
+          ...(plan.overloaded
+            ? { overloaded: true, waitedMs: retryState.overloadedWaitMs, maxWaitMs: config.overloadedMaxWait }
+            : { waitedMs: retryState.waitedMs, maxWaitMs: config.rateLimitMaxWait }),
           loginExpiresAt: loginExpiryToWarnAbout(config, login),
         });
         await sleepUntil(plan.resumeAt, signal);

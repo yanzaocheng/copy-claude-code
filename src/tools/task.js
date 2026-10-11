@@ -3,6 +3,7 @@
 // background tasks.
 
 import { taskResultText } from '../tasks.js';
+import { EFFORTS } from '../agents.js';
 
 // Wait for `promise`, at most `ms`, or until `signal` aborts. The timer is always cleared so a
 // finished wait never keeps the process alive.
@@ -52,16 +53,24 @@ Usage notes:
         prompt: { type: 'string', description: 'The task for the agent to perform' },
         subagent_type: { type: 'string', description: 'The type of specialized agent to use for this task' },
         run_in_background: { type: 'boolean', description: 'Run the agent in the background and return immediately with a task id' },
+        model: { type: 'string', description: 'Optional model for this agent: sonnet, opus, haiku or a full model id. Defaults to the agent definition\'s model, else the sub-agent default. A smaller model is cheaper and faster for simple searches.' },
+        effort: { type: 'string', enum: EFFORTS, description: 'Optional effort level for this agent (default: the agent definition\'s, else the session\'s). Low suits quick lookups, high or above hard reasoning.' },
       },
       required: ['description', 'prompt', 'subagent_type'],
     },
-    summarize(input) { return `${input.description || ''}${input.run_in_background ? ' (background)' : ''}`; },
+    summarize(input) {
+      const on = [input.model, input.effort].filter(Boolean).join(' · ');
+      return `${input.description || ''}${on ? ` (${on})` : ''}${input.run_in_background ? ' (background)' : ''}`;
+    },
     label(input) { return input.subagent_type && input.subagent_type !== 'general-purpose' ? input.subagent_type : 'Task'; },
     async call(input, ctx) {
       const def = agents.get(input.subagent_type) || agents.get('general-purpose');
       if (!agents.has(input.subagent_type) && input.subagent_type) {
         return { isError: true, content: `Agent type '${input.subagent_type}' not found. Available agents: ${[...agents.keys()].join(', ')}` };
       }
+      const effort = input.effort ? String(input.effort).toLowerCase() : undefined;
+      if (effort && !EFFORTS.includes(effort)) return { isError: true, content: `Unknown effort '${input.effort}'. Use one of: ${EFFORTS.join(', ')}.` };
+      const choice = { model: input.model?.trim() || undefined, effort };
       if (input.run_in_background) {
         if (!ctx.tasks) return { isError: true, content: 'Background agents are not available here; run the task in the foreground.' };
         // The task outlives this turn, so it gets its own signal and no live progress display.
@@ -69,7 +78,7 @@ Usage notes:
         const task = ctx.tasks.start({
           description: input.description || def.name,
           subagentType: def.name,
-          run: (signal) => ctx.spawnSubagent({ def, prompt: input.prompt, description: input.description, ctx: { ...base, signal } }),
+          run: (signal) => ctx.spawnSubagent({ def, prompt: input.prompt, description: input.description, ctx: { ...base, signal }, ...choice }),
         });
         return {
           content: `Started background agent ${task.id} (${def.name}): ${input.description}. Its final report will arrive in a <task-notification> when it finishes. Continue with other work; use TaskOutput with task_id "${task.id}" only if you need to wait for it.`,
@@ -77,7 +86,7 @@ Usage notes:
         };
       }
       const started = Date.now();
-      const { text, toolUses, tokens } = await ctx.spawnSubagent({ def, prompt: input.prompt, description: input.description, ctx });
+      const { text, toolUses, tokens } = await ctx.spawnSubagent({ def, prompt: input.prompt, description: input.description, ctx, ...choice });
       const secs = Math.round((Date.now() - started) / 100) / 10;
       const kTok = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
       return {

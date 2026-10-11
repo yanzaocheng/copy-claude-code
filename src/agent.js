@@ -168,8 +168,10 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn }) {
+  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn, effort, compactWindow = 0 }) {
     this.config = config;
+    this.effort = effort || undefined; // a sub-agent's own effort level; undefined: the session's (config.effort)
+    this.compactWindow = compactWindow; // a sub-agent's own auto-compact window (tokens); 0: the session's
     this.depth = depth; // 0 for the main agent, +1 for every level of sub-agent
     this.hooks = hooks;
     this.tasks = tasks; // background tasks (sub-agents started with run_in_background)
@@ -191,6 +193,7 @@ export class Agent {
     this.cwd = cwd;
     this.lastContextTokens = 0;
     this.tokensSinceUsage = 0;
+    this.heldTokens = 0; // room taken by tool results not yet in the conversation (see takeContext)
     // What this agent's own requests used. `requests` counts the turns' requests; the summary requests of
     // compactions are counted apart (`compactions`) and their tokens are in the totals like any others.
     this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0 };
@@ -216,9 +219,26 @@ export class Agent {
 
   get contextEstimate() { return this.lastContextTokens + this.tokensSinceUsage; }
 
+  // Tokens the context can still take before it reaches the auto-compaction threshold: what a Read with allow_large
+  // may use (a larger one would be compacted away right after it was read).
+  contextRoom() {
+    return this.config.autoCompactThreshold(this.model, this.compactWindow) - this.contextEstimate - this.heldTokens;
+  }
+
+  // Claim room for a tool result that is about to be added. Read-only tools run in parallel, so what each one
+  // took is held until their results are in the conversation. Returns {ok, tokens, room}.
+  takeContext(value) {
+    const tokens = estimateTokens(value);
+    const room = this.contextRoom();
+    if (tokens > room) return { ok: false, tokens, room };
+    this.heldTokens += tokens;
+    return { ok: true, tokens, room };
+  }
+
   pushMessage(msg) {
     this.messages.push(msg);
     this.lastActivityAt = Date.now();
+    if (msg.role === 'user') this.heldTokens = 0; // the results that held room are counted from here on
     if (msg.role === 'user') this.tokensSinceUsage += estimateTokens(msg.content);
     this.io.messageAdded?.(msg, this);
   }
@@ -473,7 +493,7 @@ export class Agent {
   shouldAutoCompact() {
     if (!this.config.autoCompactEnabled || this.messages.length <= 2) return false;
     if (this.compactFailures >= MAX_COMPACT_FAILURES) return false;
-    const threshold = this.config.autoCompactThreshold(this.model);
+    const threshold = this.config.autoCompactThreshold(this.model, this.compactWindow);
     if (this.contextEstimate < threshold) return false;
     // Right after a compaction the base context (system prompt, tools, summary) may itself be
     // near a very small window; require real growth so we don't compact on every step.
@@ -545,6 +565,7 @@ export class Agent {
       messages: normalizeMessages(this.messages),
       tools: this.toolSchemas(),
       cacheBucket: this.isSubagent ? 'other' : 'main',
+      ...(this.effort ? { effort: this.effort } : {}),
     }, { signal, onEvent: (ev) => this.io.streamEvent?.(ev, this) });
     this.lastContextTokens = contextTokens(res.usage);
     this.tokensSinceUsage = 0;
@@ -618,7 +639,7 @@ export class Agent {
     const fail = (content, extra = {}) => ({ block: { type: 'tool_result', tool_use_id: tu.id, is_error: true, content }, ...extra });
     const tool = map.get(tu.name);
     if (!tool) return fail(`Error: No such tool available: ${tu.name}`);
-    const input = tu.input || {};
+    const input = tool.normalizeInput && tu.input && typeof tu.input === 'object' ? tool.normalizeInput({ ...tu.input }) : (tu.input || {});
     if (input.__invalid_json !== undefined) {
       return fail('Error: the tool input was not valid JSON (it may have been truncated by the output token limit). Try again with a smaller input, e.g. write large files in several steps.');
     }
@@ -705,7 +726,7 @@ export class Agent {
   // the request is too long by the size of the instruction) the plainer request is made: a short system prompt
   // and no effort, which cannot share the cache, but is smaller and cannot be led astray by the main prompt.
   async requestSummary(messages, { signal, onEvent }) {
-    const call = (request) => streamMessage(this.config, { model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', ...request }, { signal, onEvent });
+    const call = (request) => streamMessage(this.config, { model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', ...(this.effort ? { effort: this.effort } : {}), ...request }, { signal, onEvent });
     try {
       const res = await call({ system: this.currentSystem() });
       this.recordUsage(res, 'summary');

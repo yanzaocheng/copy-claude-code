@@ -161,6 +161,11 @@ function limitMessage(err, rl, state, budget, now, why) {
 //    that reset, as long as it fits in the budget (rateLimitMaxWait, default 6 hours);
 //  - a short announced wait: a few quick retries, counted like any other;
 //  - nothing announced: back off 1s, 2s, 4s ... up to rateLimitPoll (5 minutes) between attempts, within the budget.
+//
+// An overloaded API (529, overloaded_error) backs off from CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS (1s) to
+// CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS (32s), as in Claude Code. When the usual retries are used up it does not
+// give up but pauses and tries again at the longest delay, like Claude Code's unattended retry mode, for at most
+// overloadedMaxWait (CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS, by default the rate limit budget) in all.
 export function planRetry(err, state, config, { now = Date.now(), rand = Math.random, allowWait = true } = {}) {
   if (!err.retryable) return { action: 'throw' };
   const maxRetries = config.maxRetries;
@@ -170,6 +175,22 @@ export function planRetry(err, state, config, { now = Date.now(), rand = Math.ra
     const delayMs = retryDelay(attempt, retryAfterMs, rand);
     return { action: 'wait', kind: 'retry', delayMs, resumeAt: now + delayMs, attempt, maxRetries: max };
   };
+
+  if ((err.status === 529 || err.overloaded) && maxRetries > 0) {
+    // Its own count: a pause starts the quick retries over (see streamMessage), and this one must not.
+    const n = state.overloaded = (state.overloaded || 0) + 1;
+    const base = config.overloadedRetryBaseDelay ?? 1000;
+    const cap = Math.max(base, config.overloadedRetryMaxDelay ?? 32_000);
+    const delayMs = Math.max(Math.min(cap, base * 2 ** (n - 1)) + Math.floor(rand() * 500), Math.min(err.retryAfterMs ?? 0, MAX_RETRY_AFTER_MS));
+    if (n <= maxRetries) return { action: 'wait', kind: 'retry', delayMs, resumeAt: now + delayMs, attempt: n, maxRetries };
+    const allowed = allowWait ? (config.overloadedMaxWait ?? budget) : 0;
+    const waited = state.overloadedWaitMs || 0;
+    if (waited + delayMs > allowed) {
+      return { action: 'throw', message: `${err.message} (the API was still overloaded after ${n - 1} retries${waited ? ` and ${humanDuration(waited)} of waiting` : ''})` };
+    }
+    state.overloadedWaitMs = waited + delayMs;
+    return { action: 'wait', kind: 'rate_limit', overloaded: true, delayMs, resumeAt: now + delayMs, resetAt: null, label: 'API overloaded', polling: true, attempt: n, maxRetries: null };
+  }
 
   if (err.status === 429 && allowWait && maxRetries > 0 && budget > 0) {
     const known = rl?.waitMs ?? null;
@@ -223,6 +244,7 @@ export function describePause(ev, now = Date.now()) {
   }
   const label = capitalize(ev.label || 'rate limit');
   const left = humanDuration(Math.max(0, ev.resumeAt - now));
+  if (ev.overloaded) return `The API is overloaded and kept refusing the request. Trying again at ${formatClock(ev.resumeAt, now)} (in ${left}), and every so often after that, then continuing automatically.`;
   const text = ev.polling
     ? `${label} reached and the server gave no reset time. Checking again at ${formatClock(ev.resumeAt, now)} (in ${left}), and every few minutes after that, then continuing automatically.`
     : `${label} reached. Pausing until ${formatClock(ev.resumeAt, now)} (in ${left}), then continuing automatically.`;
@@ -237,6 +259,8 @@ export function describePause(ev, now = Date.now()) {
 // announced reset moves a little between waits: those only continue the pause already announced,
 // unless the reset moved by more than two minutes. Waiting for the login to be renewed is a different
 // kind of wait from waiting for the limit, and always worth saying when it begins.
+export const resumeText = (ev) => (ev?.overloaded ? 'The API is answering again; continuing.' : 'The limit has cleared; continuing.');
+
 export function shouldAnnounce(prev, ev) {
   if (!prev) return true;
   if (Boolean(prev.waitingForLogin) !== Boolean(ev.waitingForLogin)) return true;

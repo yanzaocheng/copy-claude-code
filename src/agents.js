@@ -6,6 +6,8 @@ import path from 'node:path';
 import { CONFIG_DIR } from './config.js';
 
 const READ_ONLY_TOOLS = ['Glob', 'Grep', 'Read', 'Bash', 'WebFetch', 'WebSearch', 'BashOutput'];
+// The effort levels a Task call or an agent definition may ask for (as Claude Code's Agent tool takes them).
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export const BUILTIN_AGENTS = [
   {
@@ -83,11 +85,14 @@ export function loadAgents(cwd) {
       try {
         const parsed = parseFrontmatter(fs.readFileSync(path.join(dir, f), 'utf8'));
         if (!parsed?.meta.name || !parsed.meta.description) continue;
+        const window = parseInt(parsed.meta.autoCompactWindow, 10);
         agents.set(parsed.meta.name, {
           name: parsed.meta.name,
           description: parsed.meta.description,
           tools: parsed.meta.tools ? toolList(parsed.meta.tools) : '*',
           model: parsed.meta.model && parsed.meta.model !== 'inherit' ? parsed.meta.model : null,
+          effort: EFFORTS.includes(parsed.meta.effort?.toLowerCase()) ? parsed.meta.effort.toLowerCase() : null,
+          autoCompactWindow: window > 0 ? window : 0,
           prompt: parsed.body,
           source: path.join(dir, f),
         });

@@ -32,9 +32,9 @@ function readText(file, buf = fs.readFileSync(file)) {
   return { text, bom: text !== raw, crlf: crlfCount > 0 && crlfCount >= bareLfCount };
 }
 
-export function numberLines(lines, start) {
+export function numberLines(lines, start, maxLineChars = MAX_LINE_CHARS) {
   return lines.map((l, i) => {
-    const line = l.length > MAX_LINE_CHARS ? l.slice(0, MAX_LINE_CHARS) + '… [line truncated]' : l;
+    const line = l.length > maxLineChars ? l.slice(0, maxLineChars) + '… [line truncated]' : l;
     return `${String(start + i).padStart(6)}\t${line}`;
   }).join('\n');
 }
@@ -63,6 +63,7 @@ Usage:
 - By default, it reads up to ${MAX_LINES} lines starting from the beginning of the file
 - You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
 - Any lines longer than ${MAX_LINE_CHARS} characters will be truncated
+- A file whose numbered text is longer than ${MAX_OUTPUT_CHARS} characters is refused (or cut there with offset/limit). When you need a large file whole, in one call, pass allow_large: true: then there is no line, character or line length limit, only the room left in the context, and a read that does not fit is refused. Prefer offset/limit or Grep when part of the file will do.
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool can read images (PNG, JPG, GIF, WEBP) and Jupyter notebooks (.ipynb)
 - This tool can only read files, not directories. To list a directory, use ls via the Bash tool.
@@ -74,6 +75,7 @@ Usage:
       file_path: { type: 'string', description: 'The absolute path to the file to read' },
       offset: { type: 'number', description: 'The line number to start reading from. Only provide if the file is too large to read at once' },
       limit: { type: 'number', description: 'The number of lines to read. Only provide if the file is too large to read at once.' },
+      allow_large: { type: 'boolean', description: 'Read past the usual size limits in one call (the whole file, or the whole offset/limit range, with long lines kept whole), when you need all of it and the context has room. Refused if it would not fit in the context left.' },
     },
     required: ['file_path'],
   },
@@ -125,19 +127,27 @@ Usage:
       seen(true);
       return { content: `<system-reminder>Warning: the file exists but is shorter than the provided offset (${start}). The file has ${lines.length} lines.</system-reminder>`, display: { summary: 'Read 0 lines' } };
     }
-    const limit = Math.max(1, Math.floor(input.limit || MAX_LINES));
+    // allow_large: no line, character or line length limit, only the room left in the context (see Agent.takeContext).
+    const large = input.allow_large === true;
+    const limit = Math.max(1, Math.floor(input.limit || (large ? Infinity : MAX_LINES)));
     const slice = lines.slice(start - 1, start - 1 + limit);
-    let content = numberLines(slice, start);
-    if (content.length > MAX_OUTPUT_CHARS && !input.limit) {
-      return { isError: true, content: `File content (${Math.round(content.length / 1024)}KB) exceeds the maximum allowed size. Use the offset and limit parameters to read specific portions of the file, or use the Grep tool to search for specific content.` };
+    let content = numberLines(slice, start, large ? Infinity : MAX_LINE_CHARS);
+    if (large) {
+      const fit = ctx.agent?.takeContext?.(content);
+      if (fit && !fit.ok) {
+        const n = (t) => t.toLocaleString('en-US');
+        return { isError: true, content: `File content (about ${n(fit.tokens)} tokens) does not fit in the context left (about ${n(Math.max(0, fit.room))} tokens before auto-compaction). Read the parts you need with offset and limit, or use the Grep tool to search for specific content.` };
+      }
+    } else if (content.length > MAX_OUTPUT_CHARS && !input.limit) {
+      return { isError: true, content: `File content (${Math.round(content.length / 1024)}KB) exceeds the maximum allowed size. Use the offset and limit parameters to read specific portions of the file, or use the Grep tool to search for specific content. If you need the whole file at once, pass allow_large: true.` };
     }
     let cut = false;
     let end = start + slice.length - 1;
-    if (content.length > HARD_MAX_CHARS) {
+    if (!large && content.length > HARD_MAX_CHARS) {
       const kept = content.slice(0, HARD_MAX_CHARS);
       const whole = kept.endsWith('\n'); // the cut fell between two lines
       end = start + (kept.match(/\n/g) || []).length - (whole ? 1 : 0); // the last line shown
-      content = `${kept}${whole ? '' : '\n'}… [output cut at ${HARD_MAX_CHARS} characters: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit]`;
+      content = `${kept}${whole ? '' : '\n'}… [output cut at ${HARD_MAX_CHARS} characters: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit, or pass allow_large: true to read it all at once]`;
       cut = true;
     }
     seen(cut || start > 1 || end < lines.length);
