@@ -45,11 +45,12 @@ export function findPeer(peers, ref) {
 
 export class PeerNode {
   // onMessage(msg): msg = {id, kind: 'task'|'reply', text, inReplyTo, from: {id, name, cwd}}
-  constructor({ cwd, name, onMessage }) {
+  // `id`: the id this session had before a restart, so that answers on their way still find it.
+  constructor({ cwd, name, id, onMessage }) {
     this.cwd = cwd;
     this.wantedName = name || null;
     this.onMessage = onMessage;
-    this.id = crypto.randomBytes(6).toString('hex');
+    this.id = /^[0-9a-f]{12}$/.test(id || '') ? id : crypto.randomBytes(6).toString('hex');
     this.token = crypto.randomBytes(16).toString('hex');
     this.name = null;
     this.server = null;

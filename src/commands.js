@@ -6,8 +6,8 @@ import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, formatUsd } from './gateway.js';
-import { codexLoginSummary, codexModels } from './codex/client.js';
+import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, gatewayEffort, formatUsd } from './gateway.js';
+import { codexLoginSummary, codexModels, codexEfforts, codexEffort } from './codex/client.js';
 import { readClaudeCodeLogin } from './claude-code.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
@@ -15,13 +15,20 @@ import { INIT_PROMPT } from './prompts.js';
 import { loadCustomCommands, renderSkill, expandCommandBody, expandShellEmbeds } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
-import { quickQuery, cacheRefusals } from './api.js';
+import { quickQuery, cacheRefusals, defaultEffort } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath } from './utils/paths.js';
 import { rewind } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const isGpt = (modelId) => /^gpt-/i.test(modelId);
+// The levels /effort offers for a model: gateway metadata first, then the local Codex cache, else EFFORTS.
+const effortLevels = (modelId, modelInfo = null) => {
+  const remote = gatewayEfforts(modelInfo);
+  if (remote.length) return remote;
+  return isGpt(modelId) && codexEfforts(modelId).length ? codexEfforts(modelId) : EFFORTS;
+};
 
 export function buildCommands(app) {
   const commands = new Map();
@@ -217,7 +224,18 @@ export function buildCommands(app) {
         } else {
           opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ label: `${a} ${c.dim(`→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}`)}`, value: a })));
         }
-        if (cfg.usesGateway) opts.push({ label: `gpt-6.1-sol ${c.dim('(OpenAI, through the gateway\'s Codex login)')}`, value: 'gpt-6.1-sol' });
+        if (cfg.usesGateway) {
+          // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
+          const login = readGatewayLogin(cfg.gatewayUrl);
+          let served = null;
+          try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
+          const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
+          for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
+            if (aliased.has(m.id)) continue;
+            const note = /^gpt-/i.test(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name;
+            opts.push({ label: `${m.id}${note ? ` ${c.dim(`(${note})`)}` : ''}`, value: m.id });
+          }
+        }
         if (cfg.provider === 'api' && cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ label: `${cfg.env.CLAUDE_CODE_SUBAGENT_MODEL} ${c.dim('(sub-agent model)')}`, value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL });
         choice = await app.showDialog(new SelectDialog({ title: 'Select model', question: `Current: ${c.bold(cfg.mainModel.label)}. Any name works too: /model <name>`, options: opts }));
         if (!choice) return;
@@ -235,25 +253,43 @@ export function buildCommands(app) {
 
   add({
     name: 'effort',
-    argHint: `[${EFFORTS.join('|')}|auto|default]`,
+    get argHint() {
+      const cfg = app.runtime.config;
+      const login = cfg.usesGateway ? readGatewayLogin(cfg.gatewayUrl) : null;
+      return `[${effortLevels(cfg.mainModel.id, cachedGatewayModel(login, cfg.mainModel.id)).join('|')}|auto|default]`;
+    },
     description: 'Set reasoning effort (output_config.effort; kept for later sessions)',
     async run(args) {
       const cfg = app.runtime.config;
+      const id = cfg.mainModel.id;
+      let modelInfo = null;
+      if (cfg.usesGateway && isGpt(id)) {
+        const login = readGatewayLogin(cfg.gatewayUrl);
+        try { if (login) modelInfo = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
+      }
+      const levels = effortLevels(id, modelInfo);
       let choice = args.trim().toLowerCase();
       if (!choice) {
         const configured = (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase() || 'auto';
+        const fallback = defaultEffort(id, cfg);
+        // A level this GPT model does not take goes out as the nearest one it does.
+        const sent = cfg.effort && isGpt(id)
+          ? modelInfo ? gatewayEffort(modelInfo, cfg.effort) : codexEffort(id, cfg.effort)
+          : cfg.effort;
+        const current = !cfg.effort ? c.bold(`auto (${fallback ? `model default: ${fallback}` : 'not sent'})`)
+          : `${c.bold(cfg.effort)}${sent !== cfg.effort ? c.yellow(` (${id} does not take it: sent as ${sent})`) : ''}`;
         choice = await app.showDialog(new SelectDialog({
-          title: 'Reasoning effort',
-          question: `Current: ${c.bold(cfg.effort || 'auto (not sent)')}`,
+          title: `Reasoning effort · ${id}`,
+          question: `Current: ${current}`,
           options: [
-            ...EFFORTS.map((e) => ({ label: e, value: e })),
-            { label: 'auto (use API default)', value: 'auto' },
+            ...levels.map((e) => ({ label: e, value: e })),
+            { label: `auto ${c.dim(fallback ? `(model default: ${fallback})` : '(use API default)')}`, value: 'auto' },
             { label: `default ${c.dim(`(configured: ${configured})`)}`, value: 'default' },
           ],
         }));
         if (!choice) return;
       }
-      if (choice !== 'auto' && choice !== 'default' && !EFFORTS.includes(choice)) { out(c.red(`Unknown effort "${choice}". Use one of: ${EFFORTS.join(', ')}, auto, default`)); return; }
+      if (choice !== 'auto' && choice !== 'default' && !levels.includes(choice)) { out(c.red(`${id} does not take effort "${choice}". Use one of: ${levels.join(', ')}, auto, default`)); return; }
       const forget = choice === 'default';
       const wanted = (forget ? (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '') : choice).trim().toLowerCase();
       const next = wanted && wanted !== 'auto' && wanted !== 'default' ? wanted : null;

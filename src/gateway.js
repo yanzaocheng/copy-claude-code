@@ -67,6 +67,39 @@ export async function fetchGatewayAccount({ url, apiKey }, { fetchImpl = globalT
   return body.account;
 }
 
+// The models the gateway serves (GET /v1/models), fetched once per gateway and key. The reasoning fields are
+// optional so older gateways still work; when present they are kept with the model for /effort and requests.
+const modelLists = new Map();
+export async function fetchGatewayModels({ url, apiKey }, { fetchImpl = globalThis.fetch, signal } = {}) {
+  const key = `${normalizeGatewayUrl(url)}\n${apiKey}`;
+  if (modelLists.has(key)) return modelLists.get(key);
+  const body = await gatewayJson(`${normalizeGatewayUrl(url)}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal }, fetchImpl);
+  const list = (body.data || []).filter((m) => typeof m?.id === 'string').map((m) => ({
+    ...m,
+    supported_reasoning_levels: (Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : Array.isArray(m.reasoning_levels) ? m.reasoning_levels : [])
+      .map((r) => typeof r === 'string' ? r : r?.effort || r?.name).filter(Boolean),
+    default_reasoning_level: typeof m.default_reasoning_level === 'string' ? m.default_reasoning_level
+      : m.default_reasoning_level?.effort || m.default_effort || null,
+  }));
+  modelLists.set(key, list);
+  return list;
+}
+
+export function cachedGatewayModel(login, modelId) {
+  if (!login?.url || !login?.apiKey) return null;
+  return modelLists.get(`${normalizeGatewayUrl(login.url)}\n${login.apiKey}`)?.find((m) => m.id === modelId) || null;
+}
+
+const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+export function gatewayEfforts(model) { return model?.supported_reasoning_levels || []; }
+export function gatewayDefaultEffort(model) { return model?.default_reasoning_level || null; }
+export function gatewayEffort(model, effort) {
+  const supported = gatewayEfforts(model);
+  if (!effort || !supported.length || supported.includes(effort)) return effort;
+  const want = EFFORT_ORDER.indexOf(effort);
+  return supported.reduce((best, item) => (Math.abs(EFFORT_ORDER.indexOf(item) - want) < Math.abs(EFFORT_ORDER.indexOf(best) - want) ? item : best), supported[0]);
+}
+
 const PAGE = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;line-height:1.6"><h2>${title}</h2><p>${text}</p></body>`;
 
 // Log in through the browser. `onUrl(url)` is told the login page's address (to show it, for when the browser

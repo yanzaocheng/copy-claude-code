@@ -90,10 +90,23 @@ test('thinking made from Codex reasoning (cgw1:) goes to the Codex backend only;
 
 test('gateway login: browser round trip, code exchange, key saved privately; requests use it', async (t) => {
   const seen = [];
+  const bodies = [];
   const gateway = http.createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
     seen.push(`${req.method} ${req.url.split('?')[0]} ${req.headers.authorization || ''}`);
+    if (req.url === '/v1/models') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [
+        { id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5' },
+        { id: 'gpt-6.1-sol', display_name: 'GPT-6.1 Sol', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }, { effort: 'max' }], default_reasoning_level: 'high' },
+        { id: 'gpt-6-luna', display_name: 'GPT-6 Luna', supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_reasoning_level: 'medium' },
+      ] }));
+      return;
+    }
+    if (req.url.startsWith('/v1/messages')) {
+      bodies.push(JSON.parse(body));
+    }
     if (req.url === '/cli/token') {
       const { code, state } = JSON.parse(body);
       const ok = code === 'cli_code_1' && state;
@@ -143,6 +156,21 @@ test('gateway login: browser round trip, code exchange, key saved privately; req
   const res = await streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] });
   assert.equal(res.message.content[0].text, 'hi');
   assert.ok(seen.includes('POST /v1/messages Bearer gw_live_test'), seen.join('\n'));
+
+  // Two GPT conversations use the gateway's per-model metadata, not the local Codex cache or each other's context.
+  const sol = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: url, CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol', CLAUDE_CODE_EFFORT_LEVEL: 'ultra' });
+  await streamMessage(sol, { model: sol.mainModel, system: 'sol context', messages: [{ role: 'user', content: 'sol question' }] });
+  assert.deepEqual(bodies.at(-1).output_config, { effort: 'max' }, 'unsupported ultra is clamped to the gateway model maximum');
+  assert.equal(bodies.at(-1).model, 'gpt-6.1-sol');
+  assert.equal(bodies.at(-1).system[0].text, 'sol context');
+  assert.equal(bodies.at(-1).messages.at(-1).content.at(-1).text, 'sol question');
+  const luna = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: url, CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6-luna' });
+  await streamMessage(luna, { model: luna.mainModel, system: 'luna context', messages: [{ role: 'user', content: 'luna question' }] });
+  assert.deepEqual(bodies.at(-1).output_config, { effort: 'medium' }, 'the second model gets its own gateway default');
+  assert.equal(bodies.at(-1).model, 'gpt-6-luna');
+  assert.equal(bodies.at(-1).system[0].text, 'luna context');
+  assert.equal(bodies.at(-1).messages.at(-1).content.at(-1).text, 'luna question');
+  assert.equal(seen.filter((line) => line.startsWith('GET /v1/models')).length, 1, 'metadata is cached per gateway login, not fetched per conversation');
 
   clearGatewayLogin();
   await assert.rejects(streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }), /Not logged in to the gateway .*\/login/);

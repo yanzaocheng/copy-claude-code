@@ -6,7 +6,7 @@ import { readClaudeCodeLogin, claudeCodeHeaders, CLAUDE_CODE_API_URL, CLAUDE_COD
 import { refreshClaudeCodeLogin, canRenewLogin } from './oauth.js';
 import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
-import { readGatewayLogin } from './gateway.js';
+import { readGatewayLogin, fetchGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
 import { createCodexFetch, codexModels } from './codex/client.js';
 import { SIGNATURE_PREFIX } from './codex/translate-request.js';
 
@@ -195,12 +195,18 @@ const noEffort = new Set();
 export const effortSupported = (modelId) => !noEffort.has(modelId);
 
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
-// the other models that take one; for a GPT model, its default in the local Codex install's models cache. null for
+// the other models that take one; for a GPT model, the gateway's metadata or the local Codex models cache. null for
 // a model that takes none or is not known.
-export function defaultEffort(modelId) {
+export function defaultEffort(modelId, config = null) {
   const id = String(modelId || '');
   if (!effortSupported(id)) return null;
-  if (/^gpt-/i.test(id)) return codexModels().models.find((m) => m.slug === id)?.defaultEffort || null;
+  if (/^gpt-/i.test(id)) {
+    if (config?.usesGateway) {
+      const login = readGatewayLogin(config.gatewayUrl);
+      return gatewayDefaultEffort(cachedGatewayModel(login, id)) || codexModels(config.env).models.find((m) => m.slug === id)?.defaultEffort || null;
+    }
+    return codexModels(config?.env).models.find((m) => m.slug === id)?.defaultEffort || null;
+  }
   if (/^claude-(?:opus|haiku)-5-5(?:-|$)/i.test(id)) return 'medium';
   if (/^claude-(?:fable|mythos|opus-(?:5|4-[5-8])|sonnet-(?:5|4-6))(?:-|$)/i.test(id)) return 'high';
   return null;
@@ -269,9 +275,10 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
     const toolMark = mark('tools');
     params.tools = tools.map((t, i) => (i === tools.length - 1 && toolMark ? { ...t, cache_control: toolMark } : t));
   }
-  // A GPT model with no effort set gets its default from the local Codex models cache, sent explicitly, so that
-  // the gateway (whose own default is its Codex config) uses what the footer shows.
-  const eff = (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id) : null);
+  // A GPT model with no effort set gets its default from the gateway's model metadata (or the local Codex cache
+  // when using the Codex provider), sent explicitly so that the footer and backend use the same level.
+  let eff = (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id, config) : null);
+  if (config.usesGateway && /^gpt-/i.test(model.id)) eff = gatewayEffort(cachedGatewayModel(readGatewayLogin(config.gatewayUrl), model.id), eff);
   if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
   const budget = config.thinkingBudget;
   if (budget === 0) params.thinking = { type: 'disabled' };
@@ -332,6 +339,14 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   // A token that has expired (or is about to) is renewed first, as the official client does.
   if (config.usesClaudeCode) await renewLogin(config, signal);
   let login = config.usesClaudeCode ? readClaudeCodeLogin(config) : null;
+  // Load gateway model metadata before the synchronous parameter builder; the cache is keyed by gateway and key,
+  // so changing accounts or gateway URLs cannot leak a model's effort levels into another context.
+  if (config.usesGateway && /^gpt-/i.test(request.model?.id)) {
+    const gatewayLogin = readGatewayLogin(config.gatewayUrl);
+    if (gatewayLogin) {
+      try { await fetchGatewayModels(gatewayLogin, { signal }); } catch (e) { if (e.name === 'AbortError' || signal?.aborted) throw e; }
+    }
+  }
   let client = getClient(config, login);
   const params = buildParams(config, request, login);
   let authReloaded = false;

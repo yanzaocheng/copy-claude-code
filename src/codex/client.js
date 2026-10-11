@@ -174,6 +174,13 @@ function clampEffort(effort, supported) {
   return supported.reduce((best, s) => (Math.abs(EFFORTS.indexOf(s) - want) < Math.abs(EFFORTS.indexOf(best) - want) ? s : best), supported[0]);
 }
 
+// The effort levels a GPT model takes, from the local Codex models cache ([] when it is not listed there):
+// gpt-6.1-sol takes low … ultra, but not none or minimal.
+export const codexEfforts = (modelId, env = process.env) => codexModels(env).models.find((m) => m.slug === modelId)?.efforts || [];
+
+// The level the Codex backend gets for a chosen one: the nearest the model takes.
+export const codexEffort = (modelId, effort, env = process.env) => clampEffort(effort, codexEfforts(modelId, env));
+
 // An Anthropic-shaped error response, which the SDK turns into an APIError with this status.
 function errorResponse(status, type, message, headers = {}) {
   return new Response(JSON.stringify({ type: 'error', error: { type, message } }), { status, headers: { 'content-type': 'application/json', ...headers } });

@@ -18,7 +18,7 @@ import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
 import { defaultEffort, effortSupported, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, rememberChoice } from '../config.js';
-import { readGatewayLogin } from '../gateway.js';
+import { readGatewayLogin, cachedGatewayModel, gatewayEffort } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -30,6 +30,7 @@ import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
 import { checkForUpdate } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, peerMessagePrompt } from '../peers.js';
+import { codexEffort } from '../codex/client.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -38,7 +39,13 @@ export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '
 // is left out when none is sent (auto) and for a model that does not take one.
 export function modelInfo(config) {
   const model = config.mainModel;
-  const effort = config.effort && effortSupported(model.id) ? config.effort : null;
+  // A GPT model gets the nearest level it takes; gateway metadata wins over the local Codex cache.
+  const gatewayModel = config.usesGateway && /^gpt-/i.test(model.id)
+    ? cachedGatewayModel(readGatewayLogin(config.gatewayUrl), model.id) : null;
+  const chosen = config.effort && /^gpt-/i.test(model.id)
+    ? gatewayModel ? gatewayEffort(gatewayModel, config.effort) : codexEffort(model.id, config.effort)
+    : config.effort;
+  const effort = chosen && effortSupported(model.id) ? chosen : null;
   return { model: modelTag(model), effort };
 }
 
@@ -341,7 +348,7 @@ export class App {
   async startPeer() {
     if (this.noProcessExit || !peersEnabled()) return;
     try {
-      this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, onMessage: (msg) => this.onPeerMessage(msg) }).start();
+      this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, id: this.flags.restart?.peerId, onMessage: (msg) => this.onPeerMessage(msg) }).start();
     } catch (e) {
       this.peers = null;
       this.notice(`Other sessions cannot reach this one: ${e.message}`, 'warn');
@@ -381,7 +388,9 @@ export class App {
       : result?.interrupted ? `The user of ${this.peers.name} interrupted the work before it was finished.${result.text ? `\n\nWhat it had written:\n${result.text}` : ''}`
         : (result?.text || '(no answer text)');
     for (const msg of tasks) {
-      const peer = findPeer(this.peers.peers(), msg.from.id);
+      // by id, or by name: a session that was restarted by older code comes back with a new id
+      const running = this.peers.peers();
+      const peer = findPeer(running, msg.from.id) || running.find((p) => p.name === msg.from.name && p.cwd === msg.from.cwd);
       if (!peer) { this.notice(`@${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); continue; }
       this.peers.send(peer, { text, kind: 'reply', inReplyTo: msg.id })
         .then(() => this.screen.log(c.dim(`  ⎿  Answer sent to @${msg.from.name}`)), (e) => this.notice(`Could not send the answer to @${msg.from.name}: ${e.message}`, 'warn'));
@@ -439,6 +448,7 @@ export class App {
       checkpoints: this.runtime.checkpoints.snapshot(),
       restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), now],
       peerName: this.peers?.name,
+      peerId: this.peers?.id,
     };
     try {
       writeRestartState(state);
@@ -1430,7 +1440,7 @@ export class App {
     // and the notice alone when they do not (a context warning matters more than the model's name).
     const { model, effort } = modelInfo(cfg);
     // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
-    const level = effort || defaultEffort(cfg.mainModel.id);
+    const level = effort || defaultEffort(cfg.mainModel.id, cfg);
     const info = c.dim(level ? `${model} · effort ${level}` : model);
     const room = w - stringWidth(left) - 1;
     const right = [notice && info ? `${notice}${c.dim(' · ')}${info}` : '', notice, info].find((r) => r && stringWidth(r) < room) || '';
