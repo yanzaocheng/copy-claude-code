@@ -22,7 +22,9 @@ export const ListPeersTool = {
 
 export const MessagePeerTool = {
   name: 'MessagePeer',
-  description: `Send a task or a question to another claude-pro session running on this machine (ListPeers lists them). The other session's agent works on it in its own conversation and directory, and the final text of its answer comes back to you later as a <peer-message kind="reply"> message: you do not wait for it here. Use it to delegate work that belongs to another session's project or context, or to ask it something only it knows. Write the message so that it stands on its own: the other agent has not seen your conversation.`,
+  description: `Send a task or a question to another claude-pro session running on this machine (ListPeers lists them). The other session's agent works on it in its own conversation and directory, and the final text of its answer comes back to you later as a <peer-message kind="reply"> message: you do not wait for it here. Use it to delegate work that belongs to another session's project or context, or to ask it something only it knows. Write the message so that it stands on its own: the other agent has not seen your conversation.
+
+Send it once and wait for the answer: do not send reminders or "please report" follow-ups while the other session works. Messages that arrive while it is busy are handled together after what it is doing, so they only add to its work; the answer comes by itself when it is done.`,
   input_schema: {
     type: 'object',
     properties: {

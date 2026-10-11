@@ -69,11 +69,26 @@ export async function fetchGatewayAccount({ url, apiKey }, { fetchImpl = globalT
 
 // The models the gateway serves (GET /v1/models), fetched once per gateway and key. The reasoning fields are
 // optional so older gateways still work; when present they are kept with the model for /effort and requests.
+// Every GPT request waits for it the first time, so it gives up after a few seconds, and after a failure it is not
+// asked again for a minute: a gateway whose /v1/models fails must not slow down every request.
 const modelLists = new Map();
-export async function fetchGatewayModels({ url, apiKey }, { fetchImpl = globalThis.fetch, signal } = {}) {
+const modelListFailures = new Map(); // key -> {at, error}
+const MODELS_TIMEOUT_MS = 5000;
+const MODELS_RETRY_MS = 60_000;
+export async function fetchGatewayModels({ url, apiKey }, { fetchImpl = globalThis.fetch, signal, timeoutMs = MODELS_TIMEOUT_MS } = {}) {
   const key = `${normalizeGatewayUrl(url)}\n${apiKey}`;
   if (modelLists.has(key)) return modelLists.get(key);
-  const body = await gatewayJson(`${normalizeGatewayUrl(url)}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal }, fetchImpl);
+  const failed = modelListFailures.get(key);
+  if (failed && Date.now() - failed.at < MODELS_RETRY_MS) throw failed.error;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  let body;
+  try {
+    body = await gatewayJson(`${normalizeGatewayUrl(url)}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout }, fetchImpl);
+  } catch (e) {
+    if (!signal?.aborted) modelListFailures.set(key, { at: Date.now(), error: e });
+    throw e;
+  }
+  modelListFailures.delete(key);
   const list = (body.data || []).filter((m) => typeof m?.id === 'string').map((m) => ({
     ...m,
     supported_reasoning_levels: (Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : Array.isArray(m.reasoning_levels) ? m.reasoning_levels : [])

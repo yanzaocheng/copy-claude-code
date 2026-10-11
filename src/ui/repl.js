@@ -16,9 +16,9 @@ import {
 } from './render.js';
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
-import { defaultEffort, effortSupported, quickQuery } from '../api.js';
+import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, rememberChoice } from '../config.js';
-import { readGatewayLogin, cachedGatewayModel, gatewayEffort } from '../gateway.js';
+import { readGatewayLogin } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -30,7 +30,6 @@ import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard } from '../utils/clipboard.js';
 import { checkForUpdate } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, peerMessagePrompt } from '../peers.js';
-import { codexEffort } from '../codex/client.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -39,13 +38,9 @@ export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '
 // is left out when none is sent (auto) and for a model that does not take one.
 export function modelInfo(config) {
   const model = config.mainModel;
-  // A GPT model gets the nearest level it takes; gateway metadata wins over the local Codex cache.
-  const gatewayModel = config.usesGateway && /^gpt-/i.test(model.id)
-    ? cachedGatewayModel(readGatewayLogin(config.gatewayUrl), model.id) : null;
-  const chosen = config.effort && /^gpt-/i.test(model.id)
-    ? gatewayModel ? gatewayEffort(gatewayModel, config.effort) : codexEffort(model.id, config.effort)
-    : config.effort;
-  const effort = chosen && effortSupported(model.id) ? chosen : null;
+  // What the requests carry: the nearest level the model takes (none goes out as low on gpt-6.1-sol, ultra as max on Claude).
+  const sent = effortToSend(config, model.id, config.effort);
+  const effort = sent && effortSupported(model.id) ? sent : null;
   return { model: modelTag(model), effort };
 }
 
@@ -387,7 +382,11 @@ export class App {
     const text = error ? `The session failed before finishing: ${error.message || error}`
       : result?.interrupted ? `The user of ${this.peers.name} interrupted the work before it was finished.${result.text ? `\n\nWhat it had written:\n${result.text}` : ''}`
         : (result?.text || '(no answer text)');
-    for (const msg of tasks) {
+    // One answer per session, to its last message: several messages from it that waited for this turn were all
+    // handled in it, and sending the whole answer once for each would hand that session the same text again and again.
+    const lastOfEach = new Map();
+    for (const msg of tasks) lastOfEach.set(`${msg.from.id}|${msg.from.name}|${msg.from.cwd}`, msg);
+    for (const msg of lastOfEach.values()) {
       // by id, or by name: a session that was restarted by older code comes back with a new id
       const running = this.peers.peers();
       const peer = findPeer(running, msg.from.id) || running.find((p) => p.name === msg.from.name && p.cwd === msg.from.cwd);

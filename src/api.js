@@ -7,7 +7,7 @@ import { refreshClaudeCodeLogin, canRenewLogin } from './oauth.js';
 import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { readGatewayLogin, fetchGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
-import { createCodexFetch, codexModels } from './codex/client.js';
+import { createCodexFetch, codexModels, codexEffort } from './codex/client.js';
 import { SIGNATURE_PREFIX } from './codex/translate-request.js';
 
 let cached = null;
@@ -197,19 +197,29 @@ export const effortSupported = (modelId) => !noEffort.has(modelId);
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
 // the other models that take one; for a GPT model, the gateway's metadata or the local Codex models cache. null for
 // a model that takes none or is not known.
+// The environment that says where the Codex install is: CODEX_HOME may be set in the shell only.
+const codexEnv = (config) => ({ ...process.env, ...(config?.env || {}) });
+const gatewayModelInfo = (config, id) => (config?.usesGateway ? cachedGatewayModel(readGatewayLogin(config.gatewayUrl), id) : null);
+
 export function defaultEffort(modelId, config = null) {
   const id = String(modelId || '');
   if (!effortSupported(id)) return null;
   if (/^gpt-/i.test(id)) {
-    if (config?.usesGateway) {
-      const login = readGatewayLogin(config.gatewayUrl);
-      return gatewayDefaultEffort(cachedGatewayModel(login, id)) || codexModels(config.env).models.find((m) => m.slug === id)?.defaultEffort || null;
-    }
-    return codexModels(config?.env).models.find((m) => m.slug === id)?.defaultEffort || null;
+    return gatewayDefaultEffort(gatewayModelInfo(config, id)) || codexModels(codexEnv(config)).models.find((m) => m.slug === id)?.defaultEffort || null;
   }
   if (/^claude-(?:opus|haiku)-5-5(?:-|$)/i.test(id)) return 'medium';
   if (/^claude-(?:fable|mythos|opus-(?:5|4-[5-8])|sonnet-(?:5|4-6))(?:-|$)/i.test(id)) return 'high';
   return null;
+}
+
+// The level a request for this model carries when `effort` is chosen: the nearest one the model takes. A GPT model
+// lists its own (the gateway's /v1/models, else the local Codex models cache). Claude has no "ultra", the level
+// above max that some GPT models take, which stays chosen when the user switches from such a model to Claude.
+export function effortToSend(config, modelId, effort) {
+  if (!effort) return effort;
+  if (!/^gpt-/i.test(modelId)) return effort === 'ultra' ? 'max' : effort;
+  const info = gatewayModelInfo(config, modelId);
+  return info ? gatewayEffort(info, effort) : codexEffort(modelId, effort, codexEnv(config));
 }
 
 // Pull the allowed maximum out of an error such as
@@ -277,8 +287,7 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
   }
   // A GPT model with no effort set gets its default from the gateway's model metadata (or the local Codex cache
   // when using the Codex provider), sent explicitly so that the footer and backend use the same level.
-  let eff = (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id, config) : null);
-  if (config.usesGateway && /^gpt-/i.test(model.id)) eff = gatewayEffort(cachedGatewayModel(readGatewayLogin(config.gatewayUrl), model.id), eff);
+  const eff = effortToSend(config, model.id, (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id, config) : null));
   if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
   const budget = config.thinkingBudget;
   if (budget === 0) params.thinking = { type: 'disabled' };
@@ -344,7 +353,8 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   if (config.usesGateway && /^gpt-/i.test(request.model?.id)) {
     const gatewayLogin = readGatewayLogin(config.gatewayUrl);
     if (gatewayLogin) {
-      try { await fetchGatewayModels(gatewayLogin, { signal }); } catch (e) { if (e.name === 'AbortError' || signal?.aborted) throw e; }
+      // A gateway that does not answer costs at most a few seconds once (see fetchGatewayModels), not the request.
+      try { await fetchGatewayModels(gatewayLogin, { signal }); } catch { if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] }); }
     }
   }
   let client = getClient(config, login);

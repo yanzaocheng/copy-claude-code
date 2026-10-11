@@ -15,7 +15,7 @@ process.env.CODEX_HOME = codexHome;
 
 const { Config } = await import('../src/config.js');
 const { streamMessage, buildParams } = await import('../src/api.js');
-const { loginWithBrowser, readGatewayLogin, gatewayLoginFile, clearGatewayLogin } = await import('../src/gateway.js');
+const { loginWithBrowser, readGatewayLogin, gatewayLoginFile, clearGatewayLogin, fetchGatewayModels } = await import('../src/gateway.js');
 const { createCodexFetch } = await import('../src/codex/client.js');
 
 const jwt = (payload) => `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.sig`;
@@ -38,6 +38,10 @@ test('gateway and codex providers: models, windows, sub-agent and output default
   const gpt = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol' });
   assert.deepEqual([gpt.mainModel.id, gpt.mainModel.contextWindow, gpt.subagentModel.id], ['gpt-6.1-sol', 272_000, 'gpt-6.1-sol']);
   assert.deepEqual(buildParams(gpt, { model: gpt.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }).output_config, { effort: 'low' }, 'the model default is sent');
+  const effortOf = (env) => { const c = config(env); return buildParams(c, { model: c.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }).output_config?.effort; };
+  assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol', CLAUDE_CODE_EFFORT_LEVEL: 'none' }), 'low', 'a level the GPT model does not take goes out as the nearest one');
+  assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_CODE_EFFORT_LEVEL: 'ultra' }), 'max', 'ultra, chosen on a GPT model, is max on Claude');
+  assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_CODE_EFFORT_LEVEL: 'high' }), 'high');
 
   const cx = config({ CLAUDE_PRO_PROVIDER: 'codex' });
   assert.equal(cx.mainModel.id, 'gpt-6.1-sol');
@@ -171,6 +175,14 @@ test('gateway login: browser round trip, code exchange, key saved privately; req
   assert.equal(bodies.at(-1).system[0].text, 'luna context');
   assert.equal(bodies.at(-1).messages.at(-1).content.at(-1).text, 'luna question');
   assert.equal(seen.filter((line) => line.startsWith('GET /v1/models')).length, 1, 'metadata is cached per gateway login, not fetched per conversation');
+
+  // A /v1/models that fails is not asked again on every request.
+  let asked = 0;
+  const failing = async () => { asked++; return new Response('{}', { status: 500 }); };
+  const other = { url: 'https://models-fail.example', apiKey: 'k' };
+  await assert.rejects(fetchGatewayModels(other, { fetchImpl: failing }));
+  await assert.rejects(fetchGatewayModels(other, { fetchImpl: failing }));
+  assert.equal(asked, 1);
 
   clearGatewayLogin();
   await assert.rejects(streamMessage(cfg, { model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }), /Not logged in to the gateway .*\/login/);

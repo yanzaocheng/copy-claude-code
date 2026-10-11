@@ -6,8 +6,8 @@ import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, gatewayEffort, formatUsd } from './gateway.js';
-import { codexLoginSummary, codexModels, codexEfforts, codexEffort } from './codex/client.js';
+import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { codexLoginSummary, codexModels, codexEfforts } from './codex/client.js';
 import { readClaudeCodeLogin } from './claude-code.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
@@ -15,7 +15,7 @@ import { INIT_PROMPT } from './prompts.js';
 import { loadCustomCommands, renderSkill, expandCommandBody, expandShellEmbeds } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
-import { quickQuery, cacheRefusals, defaultEffort } from './api.js';
+import { quickQuery, cacheRefusals, defaultEffort, effortToSend } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath } from './utils/paths.js';
 import { rewind } from './checkpoints.js';
@@ -272,10 +272,8 @@ export function buildCommands(app) {
       if (!choice) {
         const configured = (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase() || 'auto';
         const fallback = defaultEffort(id, cfg);
-        // A level this GPT model does not take goes out as the nearest one it does.
-        const sent = cfg.effort && isGpt(id)
-          ? modelInfo ? gatewayEffort(modelInfo, cfg.effort) : codexEffort(id, cfg.effort)
-          : cfg.effort;
+        // A level this model does not take goes out as the nearest one it does.
+        const sent = effortToSend(cfg, id, cfg.effort);
         const current = !cfg.effort ? c.bold(`auto (${fallback ? `model default: ${fallback}` : 'not sent'})`)
           : `${c.bold(cfg.effort)}${sent !== cfg.effort ? c.yellow(` (${id} does not take it: sent as ${sent})`) : ''}`;
         choice = await app.showDialog(new SelectDialog({
