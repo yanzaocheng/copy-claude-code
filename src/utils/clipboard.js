@@ -164,6 +164,35 @@ export async function writeClipboard(text) {
   return false;
 }
 
+// The text on the system clipboard ('' when there is none), for a right click in the fullscreen renderer, which
+// gets the mouse instead of the terminal: Windows PowerShell (written out as UTF-8), pbpaste on macOS,
+// wl-paste / xclip / xsel elsewhere.
+export async function readClipboardText() {
+  const tries = process.platform === 'win32'
+    ? [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$t = Get-Clipboard -Raw; if ($t) { $b = [Text.Encoding]::UTF8.GetBytes($t); $o = [Console]::OpenStandardOutput(); $o.Write($b, 0, $b.Length) }']]]
+    : process.platform === 'darwin'
+      ? [['pbpaste', []]]
+      : [['wl-paste', ['--no-newline']], ['xclip', ['-selection', 'clipboard', '-o']], ['xsel', ['--clipboard', '--output']]];
+  for (const [cmd, args] of tries) {
+    const text = await new Promise((resolve) => {
+      const chunks = [];
+      let child;
+      try {
+        child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch {
+        resolve(null);
+        return;
+      }
+      const timer = setTimeout(() => child.kill(), 10_000);
+      child.stdout.on('data', (d) => chunks.push(d));
+      child.on('error', () => { clearTimeout(timer); resolve(null); });
+      child.on('close', (code) => { clearTimeout(timer); resolve(code === 0 ? Buffer.concat(chunks).toString('utf8') : null); });
+    });
+    if (text !== null) return text;
+  }
+  return '';
+}
+
 // Returns {image} on success, {error: string} on failure, or {error: null} when the clipboard has no image.
 export async function readClipboardImage({ source } = {}) {
   if (process.platform === 'win32') return readWindows(source);

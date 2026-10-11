@@ -28,7 +28,7 @@ npm install -g @yanzc/claude-pro
 claude-pro                 # 在任意项目目录里运行
 ```
 
-自动更新（与 Claude Code 一样）：用 npm 全局安装的版本每 6 小时最多查一次 npm 上的最新版，有新版就在后台 `npm install -g @yanzc/claude-pro@新版本`，装好后在会话空闲时自动重启加载，对话保留。`/update` 立即检查；`CLAUDE_PRO_AUTO_UPDATE=0` 或 `DISABLE_AUTOUPDATER=1` 关闭。从源码运行（git 检出）的副本从不自动更新。
+自动更新（与 Claude Code 一样）：用 npm 全局安装的版本在启动时、以及运行中**每 5 分钟**查一次 npm 上的最新版（同一台电脑上的所有会话共用这个间隔；查询绕过 npm 的 CDN 缓存），有新版就在后台 `npm install -g --prefer-online @yanzc/claude-pro@新版本`，装好后在会话空闲时自动重启加载，对话保留；同一台电脑上其他开着的会话看到文件变了，也会在空闲时自动重启。所以发布后几分钟内各个客户端就会用上新版（npm 刚发布时安装包要几分钟才能下载，期间安装失败会在 1 分钟后重试）。`/update` 立即检查；`CLAUDE_PRO_AUTO_UPDATE=0` 或 `DISABLE_AUTOUPDATER=1` 关闭。从源码运行（git 检出）的副本从不自动更新。
 
 从源码运行：
 
@@ -234,7 +234,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
 - `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
-- **全屏模式（默认，和 Claude Code 的 `/tui fullscreen` 一样）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 `CLAUDE_PRO_SCROLL_SPEED` 行，默认 3）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开就复制到剪贴板；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时 `Ctrl+C` 是复制（不会中断任务）。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底；`CLAUDE_PRO_PIN_INPUT=0` 让它紧跟在输出下面），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
+- **全屏模式（默认，和 Claude Code 的 `/tui fullscreen` 一样）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 `CLAUDE_PRO_SCROLL_SPEED` 行，默认 3）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开就复制到剪贴板；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时 `Ctrl+C` 是复制（不会中断任务）。**右键**和在终端里一样：有选中时复制，没有时把剪贴板的文字粘贴进输入框（和 `Ctrl+V` 相同）。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底；`CLAUDE_PRO_PIN_INPUT=0` 让它紧跟在输出下面），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
 - `ctrl+c` 或连按两次 `Esc` 清掉的草稿不会丢：在空输入框按 `↑` 找回（连同粘贴的文本和图片），中间发过别的消息也可以
 - `@文件` 补全并附加内容：走的就是 `Read` 工具，等于模型自己读了这个文件。最多带前 2000 行（被截断时会明确告诉模型，并把该文件记为"只读了一部分"，之后 `Write` 不会去覆盖没给它看过的行）；图片作为图片附加；二进制文件和超过 512KB 的文本会被跳过并提示原因；`@目录` 列出目录内容
 - `alt+v` 粘贴剪贴板里的图片（截图用 `Win+Shift+S`），输入框里显示为 `[Image #1]`；超过 1568px 的图会自动缩小。把图片文件拖进终端（或粘贴图片路径）也会作为图片附加

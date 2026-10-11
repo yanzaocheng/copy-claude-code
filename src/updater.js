@@ -1,6 +1,8 @@
 // Auto-update, as in Claude Code: an interactive session installed with `npm i -g claude-pro` looks for a newer
-// version on the npm registry (at most once every few hours), installs it in the background, and the session
-// then loads it with a restart once it is idle (the conversation carries over). A git checkout (the
+// version on the npm registry (when it starts and every few minutes while it runs; the sessions of a machine share
+// the interval), installs it in the background, and the session then loads it with a restart once it is idle (the
+// conversation carries over). The other sessions of the machine see the files change and restart too (see
+// App.startSourceWatch). A git checkout (the
 // development copy) is never touched. Off with CLAUDE_PRO_AUTO_UPDATE=0 or DISABLE_AUTOUPDATER=1.
 
 import fs from 'node:fs';
@@ -12,7 +14,8 @@ import { CONFIG_DIR, INSTALL_DIR, VERSION } from './config.js';
 // The name on npm (scoped: npm refused plain `claude-pro` as too close to another package's name).
 export const PACKAGE_NAME = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).name;
 const STATE_FILE = path.join(CONFIG_DIR, 'update-check.json');
-const CHECK_EVERY_MS = 6 * 3600_000;
+export const CHECK_EVERY_MS = 5 * 60_000; // a release reaches the running sessions within minutes
+const RETRY_FAILED_MS = 60_000; // a release's tarball can take minutes to be downloadable after it is published
 
 export function autoUpdateEnabled(env = process.env) {
   if (/^(1|true|yes)$/i.test(env.DISABLE_AUTOUPDATER || '')) return false;
@@ -44,7 +47,9 @@ function writeState(s) { try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs
 
 export function latestVersion({ timeoutMs = 10_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const req = https.get(`https://registry.npmjs.org/${PACKAGE_NAME.replace('/', '%2f')}/latest`, { headers: { accept: 'application/json' }, timeout: timeoutMs }, (res) => {
+    // past the registry's CDN cache, which can answer with the version before the one just published
+    const url = `https://registry.npmjs.org/${PACKAGE_NAME.replace('/', '%2f')}/latest?t=${Date.now()}`;
+    const req = https.get(url, { headers: { accept: 'application/json', 'cache-control': 'no-cache' }, timeout: timeoutMs }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (d) => { body += d; });
@@ -86,8 +91,12 @@ export async function checkForUpdate({ force = false, env = process.env, onInsta
     return { status: 'failed', version: latest, error: `this copy (${INSTALL_DIR}) is not the global npm install; update it with npm yourself` };
   }
   onInstalling?.(latest);
-  const r = await runNpm(['install', '-g', `${PACKAGE_NAME}@${latest}`]);
-  if (!r.ok) return { status: 'failed', version: latest, error: r.output.split('\n').slice(-5).join('\n') };
+  // --prefer-online: not npm's own cache of the package's versions, which may not know this one yet
+  const r = await runNpm(['install', '-g', '--prefer-online', `${PACKAGE_NAME}@${latest}`]);
+  if (!r.ok) {
+    writeState({ ...readState(), checkedAt: Date.now() - CHECK_EVERY_MS + RETRY_FAILED_MS }); // again in a minute
+    return { status: 'failed', version: latest, error: r.output.split('\n').slice(-5).join('\n') };
+  }
   writeState({ checkedAt: Date.now(), installed: latest });
   return { status: 'updated', version: latest };
 }

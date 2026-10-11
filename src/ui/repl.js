@@ -27,11 +27,11 @@ import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
-import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard } from '../utils/clipboard.js';
+import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn } from '../utils/images.js';
 import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
 import { copyUnique } from '../transfer.js';
-import { checkForUpdate } from '../updater.js';
+import { checkForUpdate, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
 import { qrLines } from '../qr.js';
@@ -143,12 +143,16 @@ class FileIndex {
 }
 
 export class App {
-  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false }) {
+  // `noProcessExit`: the tests, which drive the App themselves; it never ends the process, and it has no peers, no
+  // gateway connection, no update checks and the default renderer. `selfCheck` (see selfcheck.js): it never ends the
+  // process either, but otherwise starts as a session does, so that code only a real start runs is checked too.
+  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false }) {
     this.flags = flags;
     this.cwd = cwd;
     this.stdin = stdin;
     this.stdout = stdout;
-    this.noProcessExit = noProcessExit;
+    this.noProcessExit = noProcessExit || selfCheck;
+    this.driven = noProcessExit;
     this.screen = new Screen(stdout);
     this.busy = false;
     this.controller = null;
@@ -249,6 +253,7 @@ export class App {
     // Keys typed while starting up stay buffered in stdin until we listen. Mouse reports (fullscreen: the wheel)
     // are taken out before the keys are read.
     const keys = mouseFilter(stdin, (m) => this.onMouse(m));
+    this.keys = keys;
     readline.emitKeypressEvents(keys);
     keys.on('keypress', (str, key) => {
       if (/^\x1b\[\d+;\d+R$/.test(key?.sequence || '')) return; // a late answer to the cursor position query, not a key
@@ -279,7 +284,12 @@ export class App {
     }
     this.fileIndex.refresh();
     this.startSourceWatch();
-    if (!this.noProcessExit && !this.flags.restart) this.autoUpdate();
+    if (!this.driven) {
+      if (!this.flags.restart) this.autoUpdate();
+      // and every few minutes while it runs, so that a release reaches a session that stays open for days
+      this.updateTimer = setInterval(() => { if (!this.exiting) this.autoUpdate({ quiet: true }); }, CHECK_EVERY_MS);
+      this.updateTimer.unref?.();
+    }
     return new Promise((resolve) => { this.resolveExit = resolve; });
   }
 
@@ -388,7 +398,7 @@ export class App {
   // Register this session so that the other sessions on the machine can send it tasks. Not in the tests
   // (which drive the App themselves) and not with CLAUDE_PRO_PEERS=0.
   async startPeer() {
-    if (this.noProcessExit || !peersEnabled()) return;
+    if (this.driven || !peersEnabled()) return;
     try {
       this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, id: this.flags.restart?.peerId, onMessage: (msg) => this.onPeerMessage(msg) }).start();
     } catch (e) {
@@ -706,12 +716,12 @@ export class App {
   // Online at the gateway (see remote.js) from the start: by itself when this computer is logged in to the gateway
   // (CLAUDE_PRO_ONLINE=0 turns that off), with --rc (which prints the link too), and after a restart as before (with
   // the same id, so that open pages and messages on their way find it again). It does not hold up the start. Never
-  // in the tests and the self-check, which drive the App themselves.
+  // in the tests, which drive the App themselves, nor in the self-check, which sets CLAUDE_PRO_ONLINE=0.
   autoStartRemote(restart) {
     const carried = restart?.remote;
     if (carried?.off) { this.remoteStopped = true; return; }
     const explicit = Boolean(this.flags.remoteControl);
-    if (this.noProcessExit && !explicit) return;
+    if (this.driven && !explicit) return;
     if (!explicit && !carried?.id && !(onlineEnabled(this.config.env) && readGatewayLogin(this.config.gatewayUrl))) return;
     this.startRemote({ id: carried?.id, quiet: !explicit || Boolean(carried?.id), persistent: !explicit }).catch((e) => {
       this.notice(`${explicit ? 'Remote control could not start' : 'This session could not go online at the gateway'}: ${e.message}${e.code === 'NO_GATEWAY_LOGIN' ? '' : ' (/rc tries again)'}`, 'warn');
@@ -1000,7 +1010,8 @@ export class App {
 
   // A newer version on npm is installed in the background (see updater.js) and loaded by a restart once the
   // session is idle. `force`: the /update command, which also says when there is nothing to do.
-  async autoUpdate({ force = false } = {}) {
+  // `quiet`: a periodic check, which says nothing when the install fails (it is tried again in a minute).
+  async autoUpdate({ force = false, quiet = false } = {}) {
     if (this.updating) { if (force) this.notice('An update is already being installed.'); return; }
     let r;
     try {
@@ -1016,7 +1027,7 @@ export class App {
       if (canRestart()) { this.sourceChanged = true; if (!this.busy) this.maybeAutoReload(); }
       else this.notice('Restart the program to use it.');
     } else if (r.status === 'failed') {
-      if (force || r.version) this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
+      if (force || (r.version && !quiet)) this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
     } else if (force) {
       this.notice(r.status === 'dev' ? `This copy runs from a source checkout (${INSTALL_DIR}): update it with git.` : `${APP_NAME} ${VERSION} is the latest version.`);
     }
@@ -1073,7 +1084,7 @@ export class App {
   // Fullscreen (see screen.js) unless CLAUDE_PRO_TUI=default, as Claude Code's /tui: the input box fixed at the
   // bottom of the window, the conversation scrolled inside the program. Not in the tests that drive the App.
   fullscreenWanted() {
-    const mode = String(this.config.env.CLAUDE_PRO_TUI || (this.noProcessExit ? 'default' : 'fullscreen')).toLowerCase();
+    const mode = String(this.config.env.CLAUDE_PRO_TUI || (this.driven ? 'default' : 'fullscreen')).toLowerCase();
     return mode === 'fullscreen' && this.stdout.isTTY !== false;
   }
 
@@ -1085,6 +1096,22 @@ export class App {
       if (m.button & 128) return;
       const speed = Math.max(1, Math.min(20, Number(this.config.env.CLAUDE_PRO_SCROLL_SPEED) || 3));
       this.screen.scrollBy(m.button & 1 ? -speed : speed);
+      return;
+    }
+    // A right click, which the terminal no longer gets: what it did there. With a selection it copies it;
+    // without one it pastes the clipboard's text, as the terminal's own paste (ctrl+v) arrives, so that it is
+    // handled the same way (long text folded, an image path attached, into a dialog's answer box).
+    if ((m.button & 3) === 2 && !(m.button & 32) && !m.release) {
+      if (this.screen.selection) {
+        this.copyText(this.screen.selectedText());
+        this.screen.clearSelection();
+        return;
+      }
+      readClipboardText().then((text) => {
+        if (!text || this.exiting) return;
+        const clean = text.replace(/\x1b\[20[01]~/g, '').replace(/\r\n|\n/g, '\r');
+        this.keys.write(`\x1b[200~${clean}\x1b[201~`);
+      });
       return;
     }
     const r = this.screen.mouse(m);
