@@ -179,15 +179,28 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 ## 远程控制：在浏览器或手机上看执行过程、下发指令
 
-和 Claude Code 的 `/remote-control` 一样，可以在手机或另一台电脑上看着这个会话干活，并给它发指令。官方版经 Anthropic 中转，这里经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里能看到并操作自己的会话。模型请求走哪个提供方都可以，远程控制只用网关的登录。
+和 Claude Code 的 `/remote-control` 一样，可以在手机或另一台电脑上看着会话干活，并给它发指令；这里**不用任何命令或设置**。官方版经 Anthropic 中转，这里经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里按电脑分组列出自己的会话，可以查看、操作，也可以在某台电脑上新建会话（见下面"从网页新建会话"）。模型请求走哪个提供方都可以，远程控制只用网关的登录。
 
-- **打开**：会话里输入 `/remote-control`（别名 `/rc`）。这台机器还没登录网关时，会先在浏览器里登录（和 `/login` 选网关一样，但**不切换**模型提供方）。终端打印这个会话在网关上的链接（`https://gw.predix.icu/user#remote/<id>`）和二维码，手机扫码即可打开（没登录时先登录，登录后直接进入这个会话）；所有会话的列表在 `/user#remote`。`/rc open` 用本机浏览器打开；再输一次 `/rc` 显示链接和连接状态；`/rc stop` 断开。**登录了网关的电脑上，交互会话启动时默认就在线**（不阻塞启动；设 `CLAUDE_PRO_ONLINE=0` 关闭，之后只有 `/rc` 才上线），所以网页列表里能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`claude-pro --rc` 启动时就上线并打印链接。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`；和网关断开时自动重连。
+- **默认在线**：这台电脑登录了网关（`/login` 选网关）以后，每个交互会话启动时自动连上网关（不阻塞启动，断开后自动重连），网页上能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`/login` 登录成功后当前会话**马上上线**（不用重启），并打印它的链接；`/logout` 后马上下线；在别的窗口登录或退出，这个窗口几秒内跟上。想让模型请求走 Claude 订阅：先 `/login` 选网关登录，再 `/login` 选 Claude 订阅，网关登录保留，会话照样在线。
+- **链接和二维码**：`/status` 显示这个会话的远程状态（在线、连接中、没登录、key 被拒…）、它在网关上的链接（`https://gw.predix.icu/user#remote/<id>`）和二维码，手机扫码即可打开（没登录时先登录，登录后直接进入这个会话）。所有会话的列表在 `/user#remote`。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`。
 - **网页上能看到**：完整对话（用户消息、流式输出的回答、可展开的思考、工具调用和结果，包括 diff 和正在运行的命令的最新几行输出）、斜杠命令和提示的输出、当前状态（正在想/运行多久/多少 token、限流暂停的倒计时）、待办列表、排队中的消息。
 - **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、批准/拒绝计划、以及 `/model`、`/rewind` 之类命令弹出的选择框。终端和网页可以交替使用，两边同步。
 - **安全**：只有同一个网关账户登录后才能看到和操作这个会话；**能登录这个网关账户的人，就能通过它在这台电脑上以完全权限执行命令**。会话内容经网关中转并暂存在网关上。
 - **省流量**：没人打开网页时只上报状态（列表里的标题、忙/闲），不上传对话；有人打开时先发一份完整快照，再实时推送。
 - **重启不断线**：自动重启（改了源码、自动更新）沿用同一个会话 id，网页显示"重启中"后接着看；网关重启丢了状态时，claude-pro 自动重新注册并补发完整对话。
-- 一个会话对应网关上的一个远程会话；多个会话各自 `/rc`。每个网关账户最多 20 个（超出时淘汰最久没活动的离线会话）；已结束的会话在列表里保留 6 小时，断开但没结束的保留 24 小时。不支持从网页上传图片。
+- 一个会话对应网关上的一个远程会话。每个网关账户最多 20 个（超出时淘汰最久没活动的离线会话）；已结束的会话在列表里保留 6 小时，断开但没结束的保留 24 小时。不支持从网页上传图片。
+- 不想在线：`/logout`（这台电脑的会话和电脑服务都会下线）。
+
+### 从网页新建会话（电脑服务 `claude-pro host`）
+
+在网关"远程控制"页点**新建会话**，选一台电脑、浏览它的目录（上面列出最近用过的目录）、点创建：那台电脑上弹出一个新的终端窗口，在选的目录里运行 claude-pro，网页直接打开这个会话。一台电脑可以开很多个。
+
+- **终端窗口**：Windows 用 Windows Terminal（没装时是普通控制台窗口）；macOS 用"终端"；Linux 桌面上用 x-terminal-emulator / gnome-terminal / konsole / xterm 里第一个有的；没有桌面的 Linux 开一个 tmux 会话（`tmux attach -t claude-pro-<id>` 可以接上，网页照常用）。
+- **靠电脑服务**：每台电脑一个后台进程（`claude-pro host`），用 `/login` 存下的网关 key 连到网关，只发出站请求。**不用手动启动**：登录了网关的会话启动时，发现它没在运行就在后台把它拉起来（不弹窗口），会话关掉后它继续运行，所以电脑上没开着 claude-pro 也能从网页新建。设 `CLAUDE_PRO_HOST=0` 就不自动拉起。
+- **开机自动启动**：`claude-pro host install`（Windows 在"启动"文件夹放一个不弹窗口的 .vbs；macOS 是 LaunchAgent；Linux 桌面是自动启动项，没有桌面时是 systemd 用户服务，要不登录也运行就 `loginctl enable-linger`）；`claude-pro host uninstall` 撤销。
+- **其他命令**：`claude-pro host status`（是否在运行、在线、日志位置）；`claude-pro host stop`（停掉，并把这台电脑从网页列表里去掉；之后会话不再自动拉起它，`claude-pro host start` 才重新启动）；`claude-pro host`（在前台运行，看日志调试用）。日志在 `~/.claude-pro/host.log`，状态在 `~/.claude-pro/host.json`。
+- **跟着登录走**：`/logout` 后服务从网页列表下线并等待；重新 `/login`（也可以是另一个账户）后自动注册上。claude-pro 升级或源码改动后，服务一两分钟内自己换成新版本。
+- **安全**：和远程控制一样，能登录这个网关账户的人，可以在这台电脑上任意目录打开会话、以完全权限执行命令。
 
 ## 会话之间互发任务（本机和其他电脑）
 
@@ -205,7 +218,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - **`/rename 新名字`**：给当前会话改名（比如 `/rename web-server`），别的会话从此用 `&web-server` 找它；这个名字也成为对话标题（终端标签页、`/resume` 列表、网页），不再自动按话题改；`/resume` 这个对话时名字一起回来。
 - **`/peers`**：列出本机和其他电脑上在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
 - 回答会在对方这一轮做完后自动发回；对方正忙时，任务排在它当前工作之后。网关替离线的会话暂存回答（24 小时；网关重启会丢失还没送达的消息）。
-- **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时设 `CLAUDE_PRO_ONLINE=0`，或在会话里 `/rc stop`。
+- **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时 `/logout`。
 
 ## 完全访问与安全网
 
@@ -247,7 +260,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 上下文用量接近阈值时自动压缩（`CLAUDE_CODE_AUTO_COMPACT_WINDOW`），也可手动 `/compact`
 - 会话自动保存到 `~/.claude-pro/projects/`，`claude-pro -c` 继续上次，`claude-pro -r` 选择历史会话
 
-**斜杠命令**：`/help` `/tui` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/remote-control`（`/rc`） `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/tui` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（与 Claude Code 相同，两者都有时通常是同一份说明，不重复发送）。
 

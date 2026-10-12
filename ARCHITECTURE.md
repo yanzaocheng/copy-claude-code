@@ -90,10 +90,12 @@ sequenceDiagram
 
 ### 3.1.2 远程控制
 
-登录了网关的电脑上交互会话默认上线（见 3.1.3；`CLAUDE_PRO_ONLINE=0` 关闭），`/remote-control`（`/rc`）和 `--rc` 也会把交互会话接到**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）。和官方经 Anthropic 中转一样，会话只发出站请求、不监听端口；鉴权用 `/login` 存下的网关 API key（`readGatewayLogin`），与模型请求走哪个提供方无关，没有登录时 `/rc` 先做浏览器登录（`loginWithBrowser`，不切换提供方）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），`CLAUDE_PRO_ONLINE=0` 只给自检和测试用。和官方经 Anthropic 中转一样，会话只发出站请求、不监听端口；鉴权用 `/login` 存下的网关 API key（`readGatewayLogin`），与模型请求走哪个提供方无关。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+
+- **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者有 `--remote-id`（网页经电脑服务打开的会话，见 3.1.5：用网关给的 id 立即上线，不看 `CLAUDE_PRO_ONLINE`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线并打印链接，同时 `ensureHost()`），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒）、会话页面链接和二维码，以及电脑服务的状态（`describeHost`）。
 
 - **协议**（Bearer = 网关 API key）：
-  - `POST /v1/remote/sessions {id, name, title, cwd, host, model, version}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（终端打印并做成二维码）。
+  - `POST /v1/remote/sessions {id, name, title, cwd, host, machine, peerId, model, version}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url；`--remote-id` 给定时用它），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（`/status` 显示并做成二维码）。
   - `GET /v1/remote/sessions/:id/commands`（SSE）：连着就算在线。收到 `{type:'viewers',count}`（页面数，页脚显示）、`{type:'snapshot'}`（网关要完整快照）、`{cid,type:'send'|'interrupt'|'dialog',body}`（页面下发的命令）。50 秒没有任何数据（网关每 15 秒 ping）视为断开；断开后 1s、2s、4s… 最长 30s 重连，404 表示网关忘了这个会话，先重新注册。
   - `POST …/results {cid, ok, …|error}`：命令的结果，网关拿它回复页面的请求（返回 `{ok, delivered}`）。
   - 网关的错误是 `{type:"error", error:{type, message}}`；注册时一个账户已有 20 个在线会话返回 429，id 被别的账户占用返回 409。
@@ -103,14 +105,14 @@ sequenceDiagram
 - **App 的接法**（[`src/ui/repl.js`](src/ui/repl.js)）：`Screen.log` 的每次调用都通过 `screen.onLog` 转成 `output` 事件（命令输出、提示、错误原样带 ANSI，页面转成 HTML）；已经用专门事件表达的打印（用户消息回显 `echoUser`、流式 Markdown、思考、工具头和结果、欢迎框、恢复会话时重印的历史）改走 `logLocal()`，它在打印期间把 `remoteMuted` 加一，不会重复。`streamEvent` 发 `start/delta/stop`，`toolStart` 发 `tool`，进度 `toolProgress`、子 agent 的工具 `sub`，结束/拒绝/中断时 `remoteToolDone()` 发一次 `done`（用 `renderToolResult` 按 100 列排版）。`/clear`（`newSession`）、`/resume`（`loadSession`）、`/rewind` 恢复对话时 `resync()`：按 `agent.messages` 重建条目（`transcriptItems`）并发新快照。新增会改变对话显示的地方时，要么发事件、要么 resync，并把对应的终端打印改成 `logLocal`。
 - **从页面下发**：`remoteSend` 等同在输入框敲回车（`onSubmit`：忙时排队、`/命令`、`!`、`#`、`@会话` 都照常）；忙时的 `/命令`、有对话框打开时的普通消息直接拒绝（错误作为结果回给页面）。对话框通过 `remoteDialog()` 暴露（`SelectDialog` 的标题、问题、选项，按下标回答，因为选项值不一定是字符串；计划审批附带完整计划 `dialog.markdown`），`answerDialog` 校验 `id` 仍是当前对话框再 `resolve`。`remoteInterrupt` 等同 Ctrl+C 的第一下（取消对话框并中断）。
 - **退出与重启**：`close({restarting})` 把剩下的消息和 `{t:'bye',restarting}` 一起发出，进程等它最多 1.5 秒再退出。重启后的新进程用同一个 id 注册（`persistent`：网关暂时连不上也不放弃，后台重试），网关上的页面看到同一个会话回来并收到新快照。
-- **二维码**：[`src/qr.js`](src/qr.js)（字节模式、纠错 L、版本 1–6、按罚分选掩码，已与 `qrcode` 包逐模块比对一致），有颜色时用黑白前景/背景色画，与终端主题无关。
-- 测试：[`test/remote.test.js`](test/remote.test.js) 在无头终端里驱动真实 App，假网关同时扮演中转和页面：页面发命令跑一轮（工具调用和回答以事件到达）、在页面上回答 `AskUserQuestion`、忙时的命令和过期的对话框被拒绝、网关忘掉会话后自动重新注册并补发对话、`/clear` 重置、`/rc stop` 发 bye、被拒绝的 key 直接报错。
+- **二维码**：[`src/qr.js`](src/qr.js)（字节模式、纠错 L、版本 1–6、按罚分选掩码，已与 `qrcode` 包逐模块比对一致），有颜色时用黑白前景/背景色画，与终端主题无关。`/status` 在会话在线时把页面链接画成二维码。
+- 测试：[`test/remote.test.js`](test/remote.test.js) 在无头终端里驱动真实 App（`CLAUDE_PRO_ONLINE=1`），假网关同时扮演中转和页面：登录了就自动上线、页面发命令跑一轮（工具调用和回答以事件到达）、在页面上回答 `AskUserQuestion`、忙时的命令和过期的对话框被拒绝、网关忘掉会话后自动重新注册并补发对话、`/clear` 重置、`/status` 显示链接/状态/二维码、`/logout` 发 bye 下线、`/login` 立即重新上线、别的窗口退出登录后 `syncRemote` 下线；`--remote-id`/`--name` 用给定的 id 和名字上线（`CLAUDE_PRO_ONLINE=0` 也上线）；被拒绝的 key 只报一次、不再重试，换了登录才上线。
 
 ### 3.1.3 会话之间的消息（本机和其他电脑）
 
 本机的会话经 [`src/peers.js`](src/peers.js) 的 `PeerNode` 互发（`CONFIG_DIR/peers/<id>.json` 登记、127.0.0.1 上的小 HTTP 服务）；同一网关账户下其他电脑上的会话经网关，复用远程控制那条连接（`RemoteControl`）：
 
-- **在线**：登录了网关的电脑上，交互会话默认在启动时连上网关（`App.autoStartRemote`，后台进行、不阻塞启动；`CLAUDE_PRO_ONLINE=0` 关闭）。注册时带 `machine`（`machineName()`：`CLAUDE_PRO_MACHINE_NAME` 或主机名）和 `peerId`（本机 PeerNode 的 id，列表里据此去掉本机已经能直接联系的会话）。`/rc stop` 之后 `remoteStopped`，重启状态里记 `{off: true}`，重启后保持离线。
+- **在线**：登录了网关的电脑上，交互会话启动时连上网关（见 3.1.2 的"上线与下线"）。注册时带 `machine`（`machineName()`：`CLAUDE_PRO_MACHINE_NAME` 或主机名；电脑服务注册时用同一个值，网页据此把会话归到电脑下）和 `peerId`（本机 PeerNode 的 id，列表里据此去掉本机已经能直接联系的会话）。
 - **列表**：`GET /v1/remote/sessions` → 同账户的会话（在线的在前）。`App.refreshRemotePeers()` 只留在线、未结束、不是自己、不在本机的，变成 `{id, name, machine, cwd, remote: true, label: 'machine/name'}` 存在 `remotePeers`；连上时、每 60 秒、输入 `&` 时（超过 10 秒没刷新）、发送时找不到名字时刷新。
 - **寻址**：`resolvePeer(local, remote, ref)`：本机名字优先；然后 `machine/name`、只有一个远端会话叫这个名字、只有一个会话的电脑名、（模型发的才有）id 前缀；多个匹配时报歧义。用户输入的前缀是 `&`（`@` 只用于文件）：`suggest()` 在输入开头是 `&` 时给出本机和远端的会话（`peerSuggestions`），`sendTypedToPeer` 发送。
 - **发送**：`POST /v1/remote/sessions/:目标/messages {from: 自己的 id, kind, text, inReplyTo}` → `{id, delivered}`（不重试：任务发两次会做两次）。网关按发送方的注册信息填 `from`，推到目标命令流：`{type:'peer', cid, kind, text, inReplyTo, from:{id, name, machine, host, cwd}}`。task 发给不在线的会话返回 409；reply 进目标的信箱（内存，24 小时，100 条 / 4 MB），目标重连时（viewers 之后）按顺序重推。
@@ -125,6 +127,29 @@ sequenceDiagram
 - **可视行**：[`src/ui/editor.js`](src/ui/editor.js) 的 `layoutRows(body, textW)` 把文字按输入框宽度排成显示的行，每行带光标停靠点 `{i, col}`（每个下标恰好一个停靠点：折行处的字在下一行行首，换行符处是上一行行尾）。`render` 用它画输入框，`moveRow` 用它上下移动，所以自动折行的长行也能逐行移动；连续上下移动时 `goalCol` 记住起始列。第一行按上：文字不止一行且光标不在开头时先到开头，再按才 `historyPrev`；最后一行按下同理。`textW` 是上次绘制时的宽度。
 - **双击 Esc**：输入框有文字时清空（`discard`，按上可找回）；为空时调用 `onDoubleEscape` → `App.openRewind()`（忙时 Esc 先中断，不会打开）。Node 的按键解析在 Esc 之后要等约 500ms 判断它是不是组合键的开头，连按的两个 Esc 常常合成一个带 `meta` 的 escape，两种都算连按。
 - **回退菜单**（`/rewind`，[`src/commands.js`](src/commands.js)）：按时间列出检查点（最新的在最下、默认选中，`SelectDialog` 的 `selected`），`/clear` 前的对话（`app.previousSession`，在 `/clear` 里记下，`loadSession` 清掉）在最上面。动作：恢复代码和对话 / 对话 / 代码（`rewind()`）、Summarize from here / up to here（`Agent.summarizePart(index, {part: 'after'|'before'})`：整段对话加上 `partialCompactPrompt` 作为一次摘要请求，走 `requestSummary` 以复用缓存；被总结的部分换成一条 `partialSummaryMessage`，其余逐字保留；然后 `CheckpointStore.summarized` 让被总结的回合不能再回退对话、把之后的回合的 `messageIndex` 前移）、Never mind（回到列表）。回填输入框的是 `promptAt(agent, entry)`：检查点所在的那条用户消息的完整文字（标签只存前 200 字）。
+
+### 3.1.5 电脑服务（claude-pro host）：从网页新建会话
+
+网关"远程控制"页按电脑分组列出会话，并能在某台电脑的某个目录里新建会话：那台电脑上弹出一个终端窗口运行 claude-pro，会话一启动就用网关给的 id 上线，网页直接接上。为此每台电脑（每个 `CONFIG_DIR`）常驻一个后台进程，[`src/host.js`](src/host.js)。它和会话一样只发出站请求，鉴权用 gateway.json 的 API key。
+
+- **协议**（Bearer = 网关 API key；host 的 id 规则同会话 id）：
+  - `POST /v1/remote/hosts {id, machine, host, platform, version, home, terminal}` → `{id, ok}`。`id` 第一次生成后存在 `host.json` 里一直沿用；`machine` 是 `machineName(config.env)`，和会话注册时完全一样（网页按它分组）；`terminal` 是给人看的终端名（`Windows Terminal`、`Windows console`、`Terminal.app`、`gnome-terminal`、`tmux`…，打不开终端时为空）。注册返回 404 说明网关还不支持电脑（老网关），记一次日志、5 分钟后再试。
+  - `GET /v1/remote/hosts/:id/commands`（SSE）：连着就算在线。帧和会话的命令流一样，50 秒没有数据视为断开；断开后 1、2、4…30 秒重连，404 表示网关忘了这台电脑（重启了），先重新注册。401/403：key 被拒，记下，10 分钟内不再用这个 key 重试（换了登录立即重试）。
+  - `POST /v1/remote/hosts/:id/results {cid, ok: true, …} | {cid, ok: false, error}`：结果；错误是给用户看的中文（"目录不存在：…"、"不是目录：…"、"没有权限读取：…"、"无法用 Windows Terminal 打开终端：…"）。
+  - `DELETE /v1/remote/hosts/:id`：从网页列表移除。`claude-pro host stop` 在进程结束后调用；登录变了（`/logout`、换账号）时服务用旧 key 调用。普通断线不调。
+- **list `{path}`**：`listDirectory`。`""`/`~` 是 home；Windows 上 `D:` 是盘根、正斜杠也可以（`normalizeDir`，盘符大写）；不是绝对路径就报错。只列目录（指向目录的符号链接/junction 也算，但打不开的跳过；Windows 在 home 里指向 AppData 的兼容 junction，如 "Application Data"、各语言的「开始」菜单，也跳过，和资源管理器一样）；按名字不分大小写、数字按数值排序，`.` 开头的排后面；最多 1000 个（`truncated`）。`roots`：Windows 上存在的盘符（每个最多等 1.5 秒，缓存 30 秒），其他系统 `["/"]`。`recent`：`recentDirectories()`，每个项目目录读最新会话文件的第一行（`{type:'meta', cwd}`），新的在前，只留还存在的，最多 15 个，缓存 30 秒。
+- **open `{sessionId, cwd, create, name}`**：校验 id 和绝对路径；目录不存在时 `create` 才递归创建；`name` 经 `cleanName`。用 `terminalFor()` 选终端、`launchCommand()` 拼命令、`runLaunch()` 执行，命令行是 `process.execPath` + 本仓库的 `bin/claude-pro.js` + `--remote-id <id> [--name <name>]`（源码运行和 npm 安装都对）：
+  - Windows Terminal（`wt.exe` 是"应用执行别名"，`existsSync` 看不见，`findCommand` 用 `lstat`）：`wt -w new -d <cwd> node [--env-file=…] bin …`，每个参数里的 `;` 转成 `\;`（wt 的命令分隔符）。wt 新开的窗口用 Windows Terminal 自己的环境变量，不继承调用者的，所以服务把自己环境里的 `CLAUDE_PRO_*`、`ANTHROPIC_*`、`CLAUDE_CODE_*`、`CLAUDE_CONFIG_DIR`（`passedEnv()`：不含 TOKEN/KEY/SECRET/PASSWORD/HEADERS 和监督进程的变量）写进 `CONFIG_DIR/launch/<id>.env`，用 `node --env-file` 带过去（值用单引号或反引号，Node 的 dotenv 解析不转义里面的反斜杠；双引号会把 `C:\Users\nick` 里的 `\n` 变成换行）。这些文件 10 分钟后在下次打开时删除。
+  - 没有 wt：PowerShell `Start-Process`（新控制台窗口；若系统默认终端是 Windows Terminal 就在它里面）。参数用 `quoteWindowsArg` 按 C 运行库规则拼成一个字符串，经环境变量交给脚本；PowerShell 本身隐藏、**不能 detached**（没有控制台的 PowerShell 直接以 0 退出、什么都不做）；出错时脚本只把 `$_.Exception.Message` 以 UTF-8 写到 stdout（否则是系统代码页的 CLIXML）。
+  - macOS：`osascript` 让 Terminal.app `do script "cd '<cwd>' && exec env K=V … 'node' 'bin' …"`（单引号转义后再按 AppleScript 字符串转义）。
+  - Linux 有 `DISPLAY`/`WAYLAND_DISPLAY`：`x-terminal-emulator`/`gnome-terminal`/`konsole`/`xterm` 里第一个有的，经 `sh -c 'cd "$0" && exec "$@"'` 进入目录；没有桌面时 `tmux new-session -d -s claude-pro-<id> -c <cwd>`；都没有就报错。环境变量用 `env K=V` 前缀带过去。
+  - `runLaunch`：会退出的命令（wt、PowerShell、osascript、tmux）等它退出，非 0 时把最后一行输出作为错误；终端本身（Linux 桌面）只等 1.5 秒看它有没有立刻失败，并且不接管它的输出（关掉的管道会让它写 stderr 时收到 SIGPIPE）。
+- **生命周期**：`claude-pro host`（= `host run`，前台，日志打到终端，Ctrl+C 停）；`host start` 以 detached、`windowsHide` 方式起 `host run --background`（日志写 `CONFIG_DIR/host.log`，超过 1 MB 轮换成 `host.log.1`），等它的心跳出现再返回；`host stop` 结束进程、写 `disabled: true`、调用 DELETE；`host status`；`host install`/`uninstall`（开机/登录后执行 `host start`：Windows 在启动文件夹写一个 UTF-16 的 `.vbs`，窗口样式 0；macOS LaunchAgent（`AbandonProcessGroup`）；Linux 有桌面时写 XDG autostart，否则写 systemd 用户服务（`Type=oneshot` + `RemainAfterExit`，所以后台进程留在服务的 cgroup 里不被杀））。`CLAUDE_PRO_CONFIG_DIR` 不是默认值时，这些文件名带它的哈希，并把它带进启动环境。
+  - **只跑一个**：`host.lock`（`wx` 创建，内容是 pid）。锁的进程不在了，或者锁旧了而 `host.json` 的心跳（每 20 秒）也超过 90 秒，就接管（pid 可能已被别的程序复用）。`hostRunning()` = pid 活着且心跳不超过 90 秒。
+  - **会话拉起**：`App.ensureHost()`（启动 3 秒后、`/login` 成功后）：登录了网关、`CLAUDE_PRO_ONLINE`/`CLAUDE_PRO_HOST` 不是 0、不是测试驱动的 App、不是自检、没有 `NODE_TEST_CONTEXT` 时，调用 `ensureHost()`：没在运行、没被 `host stop` 停掉、30 秒内没人刚拉起过（`spawnedAt`，防两个会话同时启动时各拉一个；真重了也只有一个拿到锁）就 `startHostInBackground()`。拉起时去掉监督进程的三个环境变量，否则服务打开的会话会以为自己已经在监督进程下，不能重启。
+  - **跟随登录**：每 5 秒 `checkLogin()` 读 gateway.json（按配置的网关地址）；没了就用旧 key DELETE 并等待；换了 key 或地址就用旧 key DELETE、用新 key 重新注册。
+  - **换成新版本**：每 60 秒算一次 `codeFingerprint()`（`bin/`、`src/` 下 .js/.json 的名字、大小、修改时间，加 package.json）；后台运行的服务发现变了并且下一次检查仍是同一个值（文件写完了）、没有命令在处理时，释放锁、`startHostInBackground()` 起新版本再退出。前台运行的只在日志里提示一次。
+- 测试：[`test/host.test.js`](test/host.test.js)：假网关下注册的字段、list（只列目录含 junction、排序、点开头在后、parent/sep/roots/recent、各种错误）、open（不存在且没 `create` 报错、`create` 创建、wt 命令行里的 id 和名字、坏 id、不是目录、终端打不开时的错误）、网关忘了它后重新注册、换账号时旧 key DELETE 新 key 注册、退出登录时 DELETE 并不再注册、被拒的 key 不反复重试、文件变了后台服务重启、老网关（注册 404）5 分钟后再试；各平台的启动命令；路径规范化、Windows 参数引号、传递的环境变量；真实进程：第二个 `host run` 拿不到锁、`status`、`stop`（之后 `disabled`、会话不再拉起）、`start` 后台运行写日志再 `stop`。Windows 上另外手动验证过：经服务真的打开 Windows Terminal（目录名带空格和 `;`），里面的会话 0.6 秒内用给定 id 和名字注册、经网页命令 `/exit` 后窗口关闭；没有 wt 时的 PowerShell 窗口；`host install` 写的 .vbs 由 `wscript` 运行时隐藏启动服务。
 
 ### 3.2 交互式与非交互式
 
@@ -481,6 +506,7 @@ flowchart TD
 | [`src/checkpoints.js`](src/checkpoints.js) | 文件快照与回滚 |
 | [`src/ui/`](src/ui/) | 终端屏幕、编辑器、Markdown、对话 UI |
 | [`src/remote.js`](src/remote.js) / [`src/qr.js`](src/qr.js) | 远程控制：经网关中转的客户端、事件归约（网关页面里有同一份）、终端二维码 |
+| [`src/host.js`](src/host.js) | 电脑服务 `claude-pro host`：让网关网页列目录、在这台电脑上打开新会话的终端窗口；单实例、后台运行、开机启动（3.1.5） |
 | [`src/print.js`](src/print.js) | 非交互输出协议 |
 | [`test/`](test/) | 单元、Agent、UI、OAuth 和集成测试 |
 

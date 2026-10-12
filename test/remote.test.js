@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-// Remote control (/remote-control) through the gateway: the real App in a headless terminal connects out to a fake
+// Remote control through the gateway: the real App in a headless terminal connects out to a fake
 // gateway, which plays both the relay and the page. A command from the page runs a turn whose text and tool calls
 // come back as events, a question the model asks is answered from the page, and a gateway that forgets the session
 // gets it registered again with the whole conversation.
@@ -62,6 +62,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, { error: { message: 'Missing or invalid gateway API key' } });
+  if (url.pathname === '/v1/account') return json(res, 200, { account: { email: 'me@example.com', balance_usd: 5 } });
   if (req.method === 'POST' && url.pathname === '/v1/remote/sessions') {
     const body = await readBody(req);
     gw.registrations++;
@@ -164,6 +165,7 @@ Object.assign(process.env, {
   CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: base, CLAUDE_PRO_GATEWAY_URL: base,
   ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '1', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
   CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: 'auto', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '0',
+  CLAUDE_PRO_ONLINE: '1', // a session the tests drive goes online (when logged in) only with this
 });
 const { startTui } = await import('./tui-harness.js');
 const { qrMatrix } = await import('../src/qr.js');
@@ -180,7 +182,7 @@ const until = async (what, check, timeout = 20_000) => {
 
 test('remote control through the gateway: the page follows a turn it started, answers a question, and survives a forgetful gateway', async (t) => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
-  const tui = await startTui({ cwd, flags: { remoteControl: true } });
+  const tui = await startTui({ cwd, flags: {} });
   t.after(() => tui.close());
   const page = gw.page;
   await until('the snapshot', () => page.snapshots >= 1 && gw.stream);
@@ -224,10 +226,47 @@ test('remote control through the gateway: the page follows a turn it started, an
   tui.send('/clear\r');
   await until('the reset', () => page.snapshots > snapshots && page.state.items.length === 0);
 
-  // /rc stop says goodbye.
-  tui.send('/rc stop\r');
+  // /status: the page's link, the state, a QR code for a phone, the name, the computer service.
+  tui.send('/status\r');
+  const status = await tui.waitFor('Computer service', { timeout: 5000 });
+  assert.match(status, /Remote control\s+online as me@example\.com · 1 page open now/);
+  assert.ok(status.includes(`https://gw.example/#remote/${session.id}`));
+  assert.match(status, /Scan with a phone/);
+  assert.match(status, /Name\s+&claude-pro-remote-/);
+
+  // /logout: offline at once, with a goodbye; /login: online again at once, without a restart.
+  tui.send('/logout\r');
   await until('the bye', () => page.byes.length === 1);
   assert.equal(page.byes[0].restarting, false);
+  await tui.waitFor('This session is offline there now.', { timeout: 5000 });
+  assert.equal(tui.app.remote, null);
+  fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: { email: 'me@example.com' } }));
+  const before = gw.registrations;
+  tui.send('/login gateway\r');
+  await tui.waitFor('This session is online at the gateway: https://gw.example/#remote/', { timeout: 10_000 });
+  assert.ok(gw.registrations > before && tui.app.remote?.online);
+
+  // logged out in another window: this one follows (the timer does what syncRemote does)
+  fs.rmSync(path.join(configDir, 'gateway.json'));
+  await tui.app.syncRemote();
+  assert.equal(tui.app.remote, null);
+  await until('the second bye', () => page.byes.length === 2);
+  tui.send('/status\r');
+  await tui.waitFor('offline: this computer is not logged in to the gateway', { timeout: 5000 });
+  fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: { email: 'me@example.com' } }));
+});
+
+test('a session the web page opened (claude-pro host): --remote-id is its id at the gateway, --name its name, online even with CLAUDE_PRO_ONLINE=0', async (t) => {
+  gw.sessions.clear();
+  process.env.CLAUDE_PRO_ONLINE = '0';
+  t.after(() => { process.env.CLAUDE_PRO_ONLINE = '1'; });
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')), flags: { remoteId: 'from-the-page-1', name: '前端 web' } });
+  t.after(() => tui.close());
+  await until('the registration', () => gw.sessions.has('from-the-page-1') && gw.stream);
+  assert.equal(tui.app.remote.id, 'from-the-page-1');
+  assert.equal(gw.sessions.get('from-the-page-1').name, '前端-web', 'the name, as /rename makes it');
+  assert.equal(tui.app.sessionLabel(), '前端-web');
+  await tui.waitFor('⇄ &前端-web', { timeout: 5000, all: false });
 });
 
 test('sessions on other computers: &computer sends a task through the gateway, the answer comes back, and a task from there is answered there', async (t) => {
@@ -235,7 +274,7 @@ test('sessions on other computers: &computer sends a task through the gateway, t
   gw.others = [office, { id: 'gone-1', name: 'old', machine: '公司', cwd: 'D:/old', online: false, ended: true }];
   gw.sessions.clear(); // the sessions of the tests before are gone
   t.after(() => { gw.others = []; });
-  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')), flags: { remoteControl: true } });
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')), flags: {} });
   t.after(() => tui.close());
   await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
   assert.equal(tui.app.remotePeers[0].label, '公司/proj', 'only the online session of the other computer');
@@ -275,8 +314,6 @@ test('sessions on other computers: &computer sends a task through the gateway, t
   await tui.waitFor('This session is now &web-server', { timeout: 5000 });
   await until('the new registration', () => gw.registrations > registrations && gw.sessions.get(me).name === 'web-server');
   assert.equal(tui.app.sessionLabel(), 'web-server');
-  tui.send('/rc stop\r');
-  await until('offline', () => tui.app.remote === null);
 });
 
 test('files: /sendfile uploads them for a session on another computer, and files sent here land in the Downloads folder, never over a file', async (t) => {
@@ -290,7 +327,7 @@ test('files: /sendfile uploads them for a session on another computer, and files
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
   fs.writeFileSync(path.join(cwd, 'a.txt'), 'hello');
   fs.writeFileSync(path.join(cwd, 'photo 2.jpg'), Buffer.from([0xff, 0xd8, 1, 2, 3]));
-  const tui = await startTui({ cwd, flags: { remoteControl: true } });
+  const tui = await startTui({ cwd, flags: {} });
   t.after(() => tui.close());
   await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
 
@@ -337,7 +374,7 @@ test('big files: an upload cut off in the middle continues where the gateway sto
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
   const video = crypto.randomBytes(3 * MB + 123);
   fs.writeFileSync(path.join(cwd, 'video.mp4'), video);
-  const tui = await startTui({ cwd, flags: { remoteControl: true } });
+  const tui = await startTui({ cwd, flags: {} });
   t.after(() => tui.close());
   await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
 
@@ -373,14 +410,22 @@ test('big files: an upload cut off in the middle continues where the gateway sto
   await until('the acknowledgement', () => gw.acks.includes('big1'));
 });
 
-test('remote control: a key the gateway refuses is reported, not retried', async (t) => {
+test('remote control: a key the gateway refuses is reported once, not retried until the login changes', async (t) => {
   fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: 'revoked', account: {} }));
   t.after(() => fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: {} })));
   const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')) });
   t.after(() => tui.close());
-  tui.send('/rc\r');
-  await tui.waitFor('Could not start remote control: Missing or invalid gateway API key', { timeout: 10_000 });
+  await tui.waitFor('This session could not go online at the gateway: Missing or invalid gateway API key', { timeout: 10_000 });
   assert.equal(tui.app.remote, null);
+  const registrations = gw.registrations;
+  assert.equal(await tui.app.syncRemote(), null, 'the same key: not tried again');
+  tui.send('/status\r');
+  await tui.waitFor('the gateway refused this computer\'s key', { timeout: 5000 });
+  // a new login: online
+  fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: {} }));
+  assert.ok((await tui.app.syncRemote())?.registered);
+  assert.equal(gw.registrations, registrations + 1);
+  await until('online', () => tui.app.remote?.online);
 });
 
 test('QR codes: versions 1 to 6 by length, null beyond', () => {

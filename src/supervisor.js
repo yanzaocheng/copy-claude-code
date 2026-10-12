@@ -42,7 +42,7 @@ export function sessionEntry(entry, platform = process.platform) {
 export function shouldSupervise(argv, env = process.env, isTty = (fd) => tty.isatty(fd)) {
   if (env[ENV_SUPERVISED] || /^(1|true|yes)$/i.test(env.CLAUDE_PRO_NO_SUPERVISOR || '')) return false;
   if (!isTty(0) || !isTty(1)) return false;
-  if (argv[0] === 'config') return false;
+  if (argv[0] === 'config' || argv[0] === 'host') return false;
   return !argv.some((a) => NOT_INTERACTIVE.has(a));
 }
 

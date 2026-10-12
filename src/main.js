@@ -22,20 +22,27 @@ Options:
   --system-prompt <text>           Replace the system prompt
   --verbose                        Show thinking and full tool output
   --no-mcp                         Do not start MCP servers
-  --remote-control, --rc           Online at the gateway from the start, and print the link and QR code (same as /remote-control)
+  --name <name>                    Name this session, as /rename does (other sessions reach it with &name)
+  --remote-id <id>                 Go online at the gateway at once with this id (the gateway's web page opens
+                                   sessions this way, through claude-pro host)
   -v, --version                    Print version
   -h, --help                       Show help
 
 There are no permission prompts: every tool runs immediately (full access). File edits are
 checkpointed per prompt, and /rewind in a session undoes them. The old flags
 --dangerously-skip-permissions, --permission-mode, --allowedTools and --disallowedTools
-are accepted and ignored (--permission-mode plan is the same as --plan).
+are accepted and ignored (--permission-mode plan is the same as --plan), and so is
+--remote-control (--rc): a session is online at the gateway whenever this computer is logged in to it.
 
 Commands:
   claude-pro config list                  Show effective configuration and where each value comes from
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
+  claude-pro host [start|stop|status|install|uninstall]   The computer service: lets the gateway's web page
+                                          open sessions on this computer (claude-pro host --help)
 `;
+
+const REMOTE_ID = /^[A-Za-z0-9_-]{8,64}$/;
 
 function parseArgs(argv) {
   const flags = {};
@@ -68,7 +75,14 @@ function parseArgs(argv) {
       case '--system-prompt': flags.systemPrompt = next(); break;
       case '--verbose': flags.verbose = true; break;
       case '--no-mcp': flags.noMcp = true; break;
-      case '--remote-control': case '--rc': flags.remoteControl = true; break;
+      case '--remote-control': case '--rc': break; // online by default now
+      case '--name': flags.name = next(); break;
+      case '--remote-id': {
+        const id = next();
+        if (!REMOTE_ID.test(id || '')) { process.stderr.write(`--remote-id takes 8 to 64 letters, digits, _ or -, not "${id ?? ''}"\n`); process.exit(2); }
+        flags.remoteId = id;
+        break;
+      }
       case '-v': case '--version': flags.version = true; break;
       case '-h': case '--help': flags.help = true; break;
       default:
@@ -147,6 +161,7 @@ function readStdin({ optional }) {
 export async function main(argv) {
   const cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
+  if (argv[0] === 'host') return (await import('./host.js')).hostCommand(argv.slice(1));
   if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }

@@ -1,4 +1,4 @@
-// QR codes in the terminal: /remote-control prints one, so that a phone opens the session by pointing its camera
+// QR codes in the terminal: /status prints one of the session's page, so that a phone opens it by pointing its camera
 // at the screen. Byte mode, error correction level L, versions 1-6 (up to 134 bytes, which a URL with a token
 // fits in easily); the mask is chosen with the standard penalty rules.
 

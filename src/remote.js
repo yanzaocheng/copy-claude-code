@@ -1,5 +1,6 @@
 // Remote control: watch and steer an interactive session from a browser (a phone, another computer), as Claude
-// Code's /remote-control does with claude.ai. The session never listens on the network: it connects out to the
+// Code's /remote-control does with claude.ai; here every session of a computer logged in to the gateway is online
+// there, without a command. The session never listens on the network: it connects out to the
 // codex-gateway the user is logged in to (with the gateway API key of /login), which relays between it and the
 // gateway's user pages ("远程控制", for the same account only). See the protocol in ARCHITECTURE.md (3.1.2).
 // The same connection carries the messages of the account's sessions on other computers (`@公司 ...`, see peers.js).
@@ -185,7 +186,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export const newRemoteId = () => crypto.randomBytes(9).toString('base64url');
 
-// Whether an interactive session logged in to the gateway goes online there by itself (CLAUDE_PRO_ONLINE=0: only with /rc).
+// Whether an interactive session logged in to the gateway goes online there (it does unless CLAUDE_PRO_ONLINE=0,
+// which only the self-check and the tests set).
 export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(env.CLAUDE_PRO_ONLINE || '');
 
 export class RemoteControl {

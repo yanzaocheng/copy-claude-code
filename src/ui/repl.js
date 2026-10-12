@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { c, ESC, stringWidth, truncate, padEnd, wordWrap, colorEnabled } from './ansi.js';
+import { c, ESC, stringWidth, truncate, padEnd, wordWrap } from './ansi.js';
 import { Screen, queryCursorRow, mouseFilter } from './screen.js';
 import { Editor, topBorder } from './editor.js';
 import { SelectDialog } from './dialogs.js';
@@ -18,7 +18,7 @@ import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
-import { readGatewayLogin, formatUsd } from '../gateway.js';
+import { readGatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -34,7 +34,7 @@ import { copyUnique } from '../transfer.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
-import { qrLines } from '../qr.js';
+import { ensureHost as startHostIfNeeded, hostEnabled } from '../host.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -187,7 +187,8 @@ export class App {
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
-    this.remoteStopped = false; // /rc stop: offline until /rc, also after a restart
+    this.remoteRefused = null; // a gateway key the gateway refused: not tried again by itself (a new /login is)
+    this.selfCheck = selfCheck;
     this.sessionName = flags?.restart?.peerName || null; // this session's name when the sessions of this computer do not know it (CLAUDE_PRO_PEERS=0)
     this.customTitle = null; // the conversation's name given with /rename: the title, instead of the topic
     this.remotePeers = []; // the account's sessions on other computers, as last listed by the gateway (see peers.js)
@@ -279,6 +280,7 @@ export class App {
     if (restart) this.resumeAfterRestart(restart, resumable);
     else if (this.flags.resumeFile) this.loadSession(this.flags.resumeFile, this.flags.resumeId);
     else if (this.flags.resume) await this.commands.get('resume').run('');
+    if (!restart && this.flags.name?.trim()) this.renameSession(this.flags.name); // --name, as /rename does
     this.autoStartRemote(restart);
 
     this.screen.setLive((w) => this.renderLive(w));
@@ -300,6 +302,11 @@ export class App {
       // and every few minutes while it runs, so that a release reaches a session that stays open for days
       this.updateTimer = setInterval(() => { if (!this.exiting) this.autoUpdate({ quiet: true }); }, CHECK_EVERY_MS);
       this.updateTimer.unref?.();
+      // online or offline as this computer's gateway login changes (/login or /logout in another window)
+      this.loginTimer = setInterval(() => this.syncRemote(), 10_000);
+      this.loginTimer.unref?.();
+      // the computer service (a process of its own, see host.js), once the session is up
+      setTimeout(() => this.ensureHost(), 3000).unref?.();
     }
     return new Promise((resolve) => { this.resolveExit = resolve; });
   }
@@ -388,6 +395,7 @@ export class App {
     this.runtime?.mcp.close();
     this.peers?.close();
     clearInterval(this.remotePeersTimer);
+    clearInterval(this.loginTimer);
     const remoteClosed = this.remote?.close({ restarting: restart });
     const u = this.agent?.totalUsage();
     if (!restart && u && u.requests) {
@@ -451,12 +459,12 @@ export class App {
       let found = resolvePeer(local, this.remotePeers, target);
       if (!found.peer && !found.error && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), target);
       if (!found.peer) {
-        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/login, then /rc).';
+        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/login).';
         throw new Error(found.error || `No running session called "${String(target).replace(/^[@&]/, '')}". /peers lists them.${offline}`);
       }
       peer = found.peer;
     }
-    if (peer.remote && !this.remote) throw new Error(`&${peer.label} is on another computer, and this session is not online at the gateway (/rc connects it).`);
+    if (peer.remote && !this.remote) throw new Error(`&${peer.label} is on another computer, and this session is not online at the gateway (/status says why).`);
     if (!peer.remote && !this.peers) throw new Error('Talking to other sessions on this computer is off (CLAUDE_PRO_PEERS=0).');
     const send = async () => {
       let r;
@@ -724,34 +732,68 @@ export class App {
     this.remote?.emit({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
   }
 
-  // Online at the gateway (see remote.js) from the start: by itself when this computer is logged in to the gateway
-  // (CLAUDE_PRO_ONLINE=0 turns that off), with --rc (which prints the link too), and after a restart as before (with
-  // the same id, so that open pages and messages on their way find it again). It does not hold up the start. Never
-  // in the tests, which drive the App themselves, nor in the self-check, which sets CLAUDE_PRO_ONLINE=0.
+  // Whether this session should be online at the gateway (see remote.js): whenever this computer is logged in to
+  // it. CLAUDE_PRO_ONLINE=0 keeps it off (the self-check sets it); the tests, which drive the App themselves, go
+  // online only with CLAUDE_PRO_ONLINE=1.
+  onlineWanted() {
+    const env = this.config.env;
+    if (!onlineEnabled(env)) return false;
+    if (this.driven && !/^(1|true|yes|on)$/i.test(env.CLAUDE_PRO_ONLINE || '')) return false;
+    return Boolean(readGatewayLogin(this.config.gatewayUrl));
+  }
+
+  // Online at the gateway from the start, without holding the start up: when this computer is logged in to it; with
+  // --remote-id (a session the gateway's web page opened through claude-pro host: online at once, with the id the
+  // page waits for); and after a restart as before (with the same id, so that open pages and messages on their way
+  // find it again).
   autoStartRemote(restart) {
-    const carried = restart?.remote;
-    if (carried?.off) { this.remoteStopped = true; return; }
-    const explicit = Boolean(this.flags.remoteControl);
-    if (this.driven && !explicit) return;
-    if (!explicit && !carried?.id && !(onlineEnabled(this.config.env) && readGatewayLogin(this.config.gatewayUrl))) return;
-    this.startRemote({ id: carried?.id, quiet: !explicit || Boolean(carried?.id), persistent: !explicit }).catch((e) => {
-      this.notice(`${explicit ? 'Remote control could not start' : 'This session could not go online at the gateway'}: ${e.message}${e.code === 'NO_GATEWAY_LOGIN' ? '' : ' (/rc tries again)'}`, 'warn');
+    const id = restart?.remote?.id || this.flags.remoteId || null;
+    if (!id && !this.onlineWanted()) return;
+    this.startRemote({ id }).catch((e) => {
+      if (e.code === 'NO_GATEWAY_LOGIN' && !this.flags.remoteId) return;
+      this.notice(`This session could not go online at the gateway: ${e.message}`, 'warn');
     });
   }
 
   // Connect this session to the gateway (see remote.js): the web page and the sessions on the account's other
-  // computers reach it from then on. Needs the gateway login of /login (the provider can be another one); throws
-  // {code: 'NO_GATEWAY_LOGIN'} without it. `persistent`: a gateway that cannot be reached now is tried again in
-  // the background instead of failing.
-  startRemote({ id, quiet = false, persistent = quiet } = {}) {
+  // computers reach it from then on. Needs the gateway login of /login (the provider of the model requests can be
+  // another one); throws {code: 'NO_GATEWAY_LOGIN'} without it. A gateway that cannot be reached now is tried
+  // again in the background; one that refuses the key throws, and that key is not tried again (see syncRemote).
+  startRemote({ id } = {}) {
     if (this.remote) return Promise.resolve(this.remote);
-    this.remoteStarting ??= this.connectRemote({ id, quiet, persistent }).finally(() => { this.remoteStarting = null; });
+    this.remoteStarting ??= this.connectRemote({ id }).finally(() => { this.remoteStarting = null; });
     return this.remoteStarting;
   }
 
-  async connectRemote({ id, quiet, persistent }) {
+  // Online or offline as this computer's gateway login is now: after /login and /logout, and every few seconds (a
+  // login or a logout in another window, another account). Resolves with the connection, or null.
+  syncRemote() {
+    if (this.exiting) return Promise.resolve(null);
+    if (this.remoteStarting) return this.remoteStarting.catch(() => null);
     const login = readGatewayLogin(this.config.gatewayUrl);
-    if (!login) throw Object.assign(new Error(`it goes through the gateway ${this.config.gatewayUrl}, and this machine is not logged in to it: run /rc to log in`), { code: 'NO_GATEWAY_LOGIN' });
+    const r = this.remote;
+    // logged out, or another account: not this account's session any more
+    if (r && (!login || login.apiKey !== r.apiKey || normalizeGatewayUrl(login.url || this.config.gatewayUrl) !== normalizeGatewayUrl(r.base))) this.stopRemote();
+    if (this.remote) return Promise.resolve(this.remote);
+    if (!login || login.apiKey === this.remoteRefused || !(this.flags.remoteId || this.onlineWanted())) return Promise.resolve(null);
+    return this.startRemote().catch((e) => {
+      this.notice(`This session could not go online at the gateway: ${e.message}`, 'warn');
+      return null;
+    });
+  }
+
+  // The computer service (see host.js): started in the background when none runs, so that the gateway's web page can
+  // open sessions on this computer even when no session is open. Not in the tests nor in the self-check.
+  ensureHost() {
+    const env = this.config.env;
+    if (this.driven || this.selfCheck || process.env.NODE_TEST_CONTEXT || this.exiting) return;
+    if (!onlineEnabled(env) || !hostEnabled(env) || !readGatewayLogin(this.config.gatewayUrl)) return;
+    try { startHostIfNeeded(); } catch { /* the next session tries again */ }
+  }
+
+  async connectRemote({ id }) {
+    const login = readGatewayLogin(this.config.gatewayUrl);
+    if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login logs in)`), { code: 'NO_GATEWAY_LOGIN' });
     const remote = new RemoteControl({
       gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
       id,
@@ -770,13 +812,17 @@ export class App {
       },
     });
     remote.account = login.account?.email || login.account?.name || null;
-    await remote.start({ persistent });
+    try {
+      await remote.start({ persistent: true });
+    } catch (e) {
+      if (e.status === 401 || e.status === 403) this.remoteRefused = login.apiKey;
+      throw e;
+    }
     if (this.exiting) { remote.close(); return remote; }
     this.remote = remote;
-    this.remoteStopped = false;
+    this.remoteRefused = null;
     this.remotePeersTimer ??= setInterval(() => { if (this.remote?.online) this.refreshRemotePeers(); }, 60_000);
     this.remotePeersTimer.unref?.();
-    if (!quiet) this.logLocal(this.remoteInfo({ fresh: true }));
     this.screen.schedule();
     return remote;
   }
@@ -785,26 +831,24 @@ export class App {
     this.remote?.close();
     this.remote = null;
     this.remotePeers = [];
-    this.remoteStopped = true;
     this.screen.schedule();
   }
 
-  // Where the session is on the gateway (and a QR code of it, for a phone), for the terminal.
-  remoteInfo({ fresh = false } = {}) {
+  // This session at the gateway, for /status: {text, url} (url: its page, once registered).
+  remoteState() {
     const r = this.remote;
-    const state = !r.online ? (fresh ? c.dim(' · connecting') : c.yellow(' · not connected now, retrying')) : r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
-    const lines = [`${c.green('⇄')} ${c.bold('This session is online at the gateway')}${r.account ? ` (${r.account})` : ''}${state}. In a browser:`];
-    lines.push(`    ${c.blue(r.url || r.base)}`);
-    const qr = r.url ? qrLines(r.url, { color: colorEnabled }) : null;
-    if (qr) lines.push('', c.dim('    Scan with a phone (log in to the gateway there):'), ...qr.map((l) => '    ' + l));
-    const notes = [
-      `It is under 远程控制 in the gateway's user pages (${r.base}), for this gateway account only. Messages typed there go in as if typed here (/commands and !shell too); questions and plan approvals can be answered there; Stop = Esc.`,
-      `Sessions on your other computers send it tasks with &${machineName(this.config.env)}/${this.peerLabel()} (or &${machineName(this.config.env)} when it is the only session on this computer); /peers lists them all, /rename names this one.`,
-      'Whoever can log in to this gateway account, or holds one of its API keys, can run anything on this computer through it.',
-      '/rc stop takes this session offline · /rc open opens the page in the browser here',
-    ];
-    lines.push('', ...notes.flatMap((n) => wordWrap(n, Math.max(20, this.width - 4))).map((l) => c.dim(`  ${l.trimEnd()}`)), '');
-    return lines;
+    if (r) {
+      const who = r.account ? ` as ${r.account}` : '';
+      const pages = r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
+      const text = r.online ? `${c.green('online')}${who}${pages}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
+      return { text, url: r.url };
+    }
+    if (this.remoteStarting) return { text: 'connecting…', url: null };
+    const login = readGatewayLogin(this.config.gatewayUrl);
+    if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login)`), url: null };
+    if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/logout, then /login)'), url: null };
+    if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)'), url: null };
+    return { text: c.dim('offline'), url: null };
   }
 
   // The state the page shows below the transcript; sent whenever it changes.
@@ -954,7 +998,7 @@ export class App {
       restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), now],
       peerName: this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
-      remote: this.remote?.handoff() || (this.remoteStopped ? { off: true } : null),
+      remote: this.remote?.handoff() || null,
     };
     try {
       writeRestartState(state);

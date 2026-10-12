@@ -2,11 +2,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { c, padEnd, truncate } from './ui/ansi.js';
+import { c, padEnd, truncate, colorEnabled } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd, openBrowser } from './gateway.js';
+import { loginWithBrowser, readGatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { codexLoginSummary, codexModels, codexEfforts } from './codex/client.js';
 import { readClaudeCodeLogin } from './claude-code.js';
 import { SessionStore } from './session.js';
@@ -21,6 +21,8 @@ import { displayPath } from './utils/paths.js';
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
+import { describeHost } from './host.js';
+import { qrLines } from './qr.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);
@@ -327,6 +329,16 @@ export function buildCommands(app) {
   };
   const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
   let pendingLogin = null;
+  // Logged in to the gateway: this session goes online there at once (remote control, the other computers'
+  // sessions), and the computer service starts (the web page opens new sessions through it).
+  const goOnline = async () => {
+    const remote = await app.syncRemote();
+    app.ensureHost();
+    if (!remote) return;
+    out(remote.url
+      ? `${c.green('⇄')} This session is online at the gateway: ${c.blue(remote.url)} ${c.dim('(/status shows it, with a QR code for a phone)')}`
+      : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
+  };
 
   add({
     name: 'login',
@@ -381,6 +393,7 @@ export function buildCommands(app) {
           const account = await fetchGatewayAccount(saved);
           const note = switchProvider('gateway');
           out([`Using the gateway ${c.bold(url)}: ${cfg.mainModel.label}${note}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
+          await goOnline();
           return;
         } catch (e) {
           if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
@@ -398,6 +411,7 @@ export function buildCommands(app) {
         });
         const note = switchProvider('gateway');
         out([`Logged in to the gateway ${c.bold(url)}: ${cfg.mainModel.label}${note}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
+        await goOnline();
       } catch (e) {
         if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
       } finally {
@@ -408,11 +422,15 @@ export function buildCommands(app) {
 
   add({
     name: 'logout',
-    description: 'Forget the gateway login of this machine',
+    description: 'Forget the gateway login of this machine (its sessions go offline there)',
     run() {
       const cfg = app.runtime.config;
       const had = clearGatewayLogin();
-      out(had ? `Logged out of the gateway ${cfg.gatewayUrl}.${cfg.usesGateway ? ' Run /login to log in again or choose another provider.' : ''}` : c.dim('There was no gateway login. (The Claude and Codex subscription logins belong to their own CLIs.)'));
+      const wasOnline = Boolean(app.remote);
+      app.stopRemote(); // the other sessions of this computer and its computer service follow within seconds
+      out(had
+        ? `Logged out of the gateway ${cfg.gatewayUrl}.${wasOnline ? ' This session is offline there now.' : ''}${cfg.usesGateway ? ' Run /login to log in again or choose another provider.' : ''}`
+        : c.dim('There was no gateway login. (The Claude and Codex subscription logins belong to their own CLIs.)'));
     },
   });
 
@@ -449,9 +467,31 @@ export function buildCommands(app) {
         row('ripgrep', hasRipgrep(cfg) ? 'yes' : 'no (using JS fallback)'),
         row('Memory', mem.length ? mem.map((m) => m.file).join(', ') : c.dim('none')),
         row('MCP servers', mcp.length ? mcp.map((m) => `${m.name} (${m.status})`).join(', ') : c.dim('none')),
+        '',
+        ...remoteLines(row),
       ], '');
     },
   });
+
+  // /status about the gateway: this session there (its page, and a QR code of it for a phone), its name for the
+  // sessions on the other computers, and the computer service.
+  function remoteLines(row) {
+    const cfg = app.runtime.config;
+    const remote = app.remoteState();
+    const me = app.peerLabel();
+    const lines = [
+      row('Remote control', remote.text),
+      ...(remote.url ? [row('', c.blue(remote.url))] : []),
+      row('Name', `&${me} ${c.dim(`(on your other computers: &${machineName(cfg.env)}/${me}; /rename changes it)`)}`),
+      row('Computer service', describeHost(cfg.env)),
+    ];
+    const qr = remote.url && app.remote?.online ? qrLines(remote.url, { color: colorEnabled }) : null;
+    if (qr) {
+      lines.push('', c.dim('  Scan with a phone to open this session (log in to the gateway there):'), ...qr.map((l) => `    ${l}`));
+      lines.push(c.dim(`  Whoever can log in to this gateway account, or holds one of its API keys, can run anything on this computer through it.`));
+    }
+    return lines;
+  }
 
   add({
     name: 'cost',
@@ -594,7 +634,7 @@ export function buildCommands(app) {
         ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
           ? 'Type "&" for the list, "&name task" to send a task; its answer is shown here. On another computer: "&computer/name task", or "&computer task" when it runs one session. /sendfile &name file... sends files (saved in its Downloads folder). /rename names this session. The agent can use ListPeers / MessagePeer too.'
-          : 'Type "&" for the list, "&name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login, then /rc).'),
+          : 'Type "&" for the list, "&name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login; /status says why it is not).'),
       ]);
     },
   });
@@ -640,47 +680,6 @@ export function buildCommands(app) {
       const got = app.renameSession(name);
       const note = got !== cleanName(name) ? c.dim(' (another session on this computer has that name)') : '';
       out(`This session is now ${c.bold('&' + got)}${note}${app.remote ? c.dim(` · from your other computers: &${machineName(app.config.env)}/${got}`) : ''}`);
-    },
-  });
-
-  add({
-    name: 'remote-control',
-    aliases: ['rc'],
-    argHint: '[stop | open]',
-    description: 'Watch and steer this session from a browser or phone, through the gateway (its 远程控制 page): prints the link and a QR code',
-    async run(args) {
-      const action = args.trim().toLowerCase();
-      if (/^(stop|off|disconnect)$/.test(action)) {
-        if (!app.remote) { out(c.dim('Remote control is not on.')); return; }
-        app.stopRemote();
-        out('Remote control is off: the gateway no longer reaches this session.');
-        return;
-      }
-      if (app.remote) log(app.remoteInfo());
-      else {
-        const url = app.runtime.config.gatewayUrl;
-        // It goes through the gateway account: log in to it first (in the browser) when this machine is not; the
-        // provider of the model requests stays what it is.
-        if (!readGatewayLogin(url)) {
-          pendingLogin?.abort();
-          const controller = new AbortController();
-          pendingLogin = controller;
-          try {
-            await loginWithBrowser({
-              url,
-              signal: controller.signal,
-              onUrl: (page) => out([`Remote control goes through the gateway ${c.bold(url)}: log in to it in your browser. If it does not open, visit:`, c.blue(page), c.dim('Waiting for the browser (10 minutes at most)…')]),
-            });
-          } catch (e) {
-            if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
-            return;
-          } finally {
-            if (pendingLogin === controller) pendingLogin = null;
-          }
-        }
-        try { await app.startRemote(); } catch (e) { out(c.red(`Could not start remote control: ${e.message}`)); return; }
-      }
-      if (action === 'open' && app.remote.url && !openBrowser(app.remote.url)) out(c.yellow(`Could not open a browser: open ${app.remote.url}`));
     },
   });
 
