@@ -601,6 +601,37 @@ test('compaction and its plain fallback are "other" requests: they never get the
   assert.equal(JSON.stringify(bodies[1]).includes('"ttl"'), false, 'the summary request does not');
   assert.equal(bodies[2].system[0].text, SUMMARY_SYSTEM);
   assert.equal(JSON.stringify(bodies[2]).includes('"ttl"'), false, 'nor does the plain one');
+  assert.equal(JSON.stringify(bodies[2].messages).includes('cache_control'), false, 'the plain one cannot read the history from the cache, so it does not write it either');
+});
+
+test('a compaction after the cache ran out sends the history as plain input: no later request starts with it', async (t) => {
+  const bodies = [];
+  mockFetch(t, async (url, init) => {
+    bodies.push(bodyOf(init));
+    return bodies.length === 1 ? replyWith({ text: 'hi', usage: usageOf(0, 12_000) }) : replyWith({ text: '<summary>S</summary>' });
+  });
+  const agent = makeAgent(makeConfig());
+  await agent.run('hello');
+  assert.equal(agent.cacheExpired(), false, 'just written');
+  agent.cache.expiresAt = Date.now() - 1; // the TTL has passed since that request
+  assert.equal(agent.cacheExpired(), true);
+  await agent.compact();
+  const compaction = bodies[1];
+  assert.equal(compaction.system[0].text, 'MAIN SYSTEM', 'still the shared request');
+  assert.equal(JSON.stringify(compaction.messages).includes('cache_control'), false, 'the history is not written to the cache');
+  assert.ok(compaction.system[0].cache_control, 'the system prompt keeps its marker: the next turn reads it');
+  assert.ok(compaction.tools.at(-1).cache_control, 'and so do the tools');
+  // a resumed or restarted conversation: nothing measured in this process, the time of its last message decides
+  const resumed = makeAgent(makeConfig());
+  resumed.messages = [{ role: 'user', content: 'hello' }];
+  assert.equal(resumed.cacheExpired(), false, 'not knowing counts as warm');
+  resumed.lastActivityAt = Date.now() - 60_000;
+  assert.equal(resumed.cacheExpired(), false, 'a minute ago, with the 5-minute TTL');
+  resumed.lastActivityAt = Date.now() - 10 * 60_000;
+  assert.equal(resumed.cacheExpired(), true, 'ten minutes ago');
+  const hour = makeAgent(makeConfig({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }));
+  hour.lastActivityAt = Date.now() - 10 * 60_000;
+  assert.equal(hour.cacheExpired(), false, 'the conversation\'s own TTL counts');
 });
 
 test('a sub-agent\'s own compaction does not end the main conversation\'s checkpoints', async (t) => {

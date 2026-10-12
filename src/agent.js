@@ -7,7 +7,7 @@ import { streamMessage, contextTokens, isAbort } from './api.js';
 import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, PLAN_MODE_REMINDER, SUMMARY_SYSTEM } from './prompts.js';
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
-import { CacheStats } from './cache.js';
+import { CacheStats, TTL_MS } from './cache.js';
 import { resolvePath } from './utils/paths.js';
 import { fitImagesIn } from './utils/images.js';
 
@@ -357,6 +357,14 @@ export class Agent {
     this.lastContextTokens = Math.max(0, this.lastContextTokens - out.tokens);
     this.io.notice?.(`Back after ${Math.round(idle / 60_000)} minutes, with the prompt cache expired: cleared ${out.results} old tool results and the earlier thinking (about ${Math.round(out.tokens / 1000)}k tokens). The last ${IDLE_CLEARING.keep} results are kept; files are read again when needed.`);
     return out;
+  }
+
+  // Is the conversation's prompt cache known to have run out? From the last request of this process when there was
+  // one, else (a resumed or restarted conversation) from when the last message was added, which is after its
+  // request started: that guess errs towards warm. Not knowing counts as warm.
+  cacheExpired(now = Date.now()) {
+    if (this.cache.expected != null) return now >= this.cache.expiresAt;
+    return this.lastActivityAt > 0 && now - this.lastActivityAt >= TTL_MS[this.config.cacheTtl('main')];
   }
 
   // A new request from the user goes back to the effort the user chose, after the Effort tool changed it for
@@ -728,8 +736,12 @@ export class Agent {
   // the biggest request there is). Only if that does not give a summary (the model went on calling tools, or
   // the request is too long by the size of the instruction) the plainer request is made: a short system prompt
   // and no effort, which cannot share the cache, but is smaller and cannot be led astray by the main prompt.
+  // The messages are marked for the cache only where that can be read: no request after the summary starts with
+  // this history, so writing it (25% over the plain input price) pays only for reading what is already there.
+  // When the cache is known to have run out, and in the plain request, only the tools and system prompt are marked.
   async requestSummary(messages, { signal, onEvent }) {
-    const call = (request) => streamMessage(this.config, { model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', ...(this.effort ? { effort: this.effort } : {}), ...request }, { signal, onEvent });
+    const cacheMessages = !this.cacheExpired();
+    const call = (request) => streamMessage(this.config, { model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', cacheMessages, ...(this.effort ? { effort: this.effort } : {}), ...request }, { signal, onEvent });
     try {
       const res = await call({ system: this.currentSystem() });
       this.recordUsage(res, 'summary');
@@ -737,7 +749,7 @@ export class Agent {
     } catch (err) {
       if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
     }
-    const res = await call({ system: SUMMARY_SYSTEM, effort: null });
+    const res = await call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false });
     this.recordUsage({ ...res, cache: { ...res.cache, caching: false } }, 'summary'); // made to miss: not a miss to report
     return res;
   }
