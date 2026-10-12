@@ -67,7 +67,7 @@ export function makeBashTool(config) {
     name: 'Bash',
     description: `Executes a given ${isCmd ? 'cmd.exe' : 'bash'} command with an optional timeout. The working directory persists between commands; shell state (variables, functions) does not.
 
-This tool is for terminal operations like git, npm, docker, running builds and tests. For reading, writing, editing, searching and finding files use the specialized tools instead; a script is fine for a mechanical change across many files (Bash changes are not checkpointed, so make sure git can bring the files back).
+This tool is for terminal operations like git, npm, docker, running builds and tests. For file work use the dedicated tools instead of shell commands: Read, not cat/head/tail; Edit, not sed/awk; Write, not echo or heredoc redirection; Glob and Grep, not find and grep. A script is fine for a mechanical change across many files, once you know git can bring them back (Bash changes are not checkpointed).
 
 Before executing the command:
 1. If the command will create new directories or files, first verify the parent directory exists (e.g. with ls).
@@ -80,12 +80,11 @@ Usage notes:
 - If the output exceeds ${config.bashMaxOutput} characters, the middle is cut from what is returned to you, and the full output is saved to a file whose path is included so you can read it with Read or Grep.
 - You can use the \`run_in_background\` parameter to run the command in the background (dev servers, watchers, long builds). Use BashOutput to read its output later and KillShell to stop it. Never use \`&\` at the end of the command for this.
 - Commands run non-interactively: stdin is closed unless you pass the \`stdin\` parameter, whose text is fed to the command (answers to prompts, data for a script, a heredoc-free way to pipe input). Do not run commands that wait for keyboard interaction (use flags like --yes, and avoid interactive editors, \`git rebase -i\`, \`git add -i\`).
-- Avoid using search/read commands like \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` for file work; use Glob, Grep, Read, Edit and Write instead.
 - When issuing multiple commands: if they are independent, make multiple Bash tool calls in parallel in a single message; if they depend on each other, chain them with '&&'.
 - Try to maintain your current working directory by using absolute paths and avoiding \`cd\`.${os.platform() === 'win32' && !isCmd ? '\n- This is Git Bash on Windows: use Unix syntax (forward slashes, /dev/null, $VAR). Windows paths like C:/Users/... also work.' : ''}
 
 # Committing changes with git
-Only create commits when the user asks or the project's instructions (CLAUDE.md) say when to commit. When committing: run git status, git diff and git log in parallel to understand the change and the repo's message style; stage only relevant files (never secrets such as .env); write a concise message focused on the "why"; pass the message via a HEREDOC. Do not force push, skip hooks (--no-verify), amend commits, change git config or push unless the user asked for that.`,
+When you commit (the system prompt says when): run git status, git diff and git log in parallel to understand the change and the repo's message style; stage only relevant files (never secrets such as .env); write a concise message focused on the "why"; pass the message via a HEREDOC. Do not force push, skip hooks (--no-verify), amend commits, change git config or push unless the user asked for that.`,
     input_schema: {
       type: 'object',
       properties: {

@@ -822,7 +822,8 @@ test('the own-code section: fix yourself in a source checkout, only report in an
   const base = { cwd, model: { id: 'mock' }, shellName: 'bash', snapshot: { date: '2026-01-01', git: null } };
   const checkout = mainSystemPrompt({ ...base, selfRestart: true });
   assert.match(checkout, /# Your own source code/);
-  assert.match(checkout, /call the Restart tool/);
+  assert.match(checkout, /use the Restart tool/);
+  assert.doesNotMatch(checkout, /npm run check/, 'how to verify there is that repository\'s CLAUDE.md\'s business');
   const installed = mainSystemPrompt({ ...base, installedCopy: true });
   assert.match(installed, /# Your own code\n.*an installed copy, e\.g\. from npm/);
   assert.match(installed, /Do not edit your own files there/);
