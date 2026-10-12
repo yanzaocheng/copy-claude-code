@@ -31,6 +31,7 @@ const { SUMMARY_SYSTEM, subagentSystemPrompt } = await import('../src/prompts.js
 const { environmentBlock, takeEnvSnapshot } = await import('../src/context.js');
 const { SessionStore } = await import('../src/session.js');
 const { createRuntime } = await import('../src/runtime.js');
+const { PROMPT_CODE_VERSION: CODE } = await import('../src/prompts.js');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cache-'));
 let port = 20_000; // every test talks to an "endpoint" of its own: what an endpoint refuses is remembered per endpoint
@@ -736,6 +737,7 @@ test('the session file keeps the system prompt; the newest wins, and the same on
   assert.equal(lines.filter((l) => l.systemPrompt).length, 2);
   const loaded = SessionStore.load(store.file);
   assert.equal(loaded.systemPrompt, 'PROMPT TWO');
+  assert.equal(loaded.promptCode, CODE, 'with the fingerprint of the code that built it');
   assert.equal(loaded.messages.length, 1);
   assert.equal(loaded.title, 'hello');
   const bare = new SessionStore(cwd);
@@ -788,7 +790,7 @@ test('a resumed conversation continues behind its own system prompt; a note brin
   const built = rt.systemPrompt();
   const saved = built.replace(/Today's date: \d{4}-\d{2}-\d{2}/, "Today's date: 2020-01-02").replace('Recent commits:', 'Recent commits (old):');
   rt.invalidateSystemPrompt();
-  assert.equal(rt.resumeSystemPrompt(saved), true);
+  assert.equal(rt.resumeSystemPrompt(saved, CODE), true);
   assert.equal(rt.systemPrompt(), saved, 'the saved prompt, not a freshly built one');
   assert.equal(rt.agent.reminders.length, 1);
   assert.match(rt.agent.reminders[0], /2020-01-02/);
@@ -797,15 +799,20 @@ test('a resumed conversation continues behind its own system prompt; a note brin
   const rt2 = await runtimeIn(tmp());
   const today = rt2.systemPrompt();
   rt2.invalidateSystemPrompt();
-  assert.equal(rt2.resumeSystemPrompt(today), true);
+  assert.equal(rt2.resumeSystemPrompt(today, CODE), true);
   assert.equal(rt2.agent.reminders.length, 0);
   // a prompt that was built for another model is not used: the model's cache is its own, and the prompt names it
   rt2.invalidateSystemPrompt();
-  assert.equal(rt2.resumeSystemPrompt(today.replace('You are powered by the model mock.', 'You are powered by the model another.')), false);
+  assert.equal(rt2.resumeSystemPrompt(today.replace('You are powered by the model mock.', 'You are powered by the model another.'), CODE), false);
   assert.equal(rt2.systemPrompt(), today, 'a fresh one is built instead');
+  // one built by other code (the prompt was edited, then a Restart), or by code from before the fingerprint was kept
+  rt2.invalidateSystemPrompt();
+  assert.equal(rt2.resumeSystemPrompt(saved, 'older-code'), false);
+  assert.equal(rt2.resumeSystemPrompt(saved, null), false);
+  assert.equal(rt2.systemPrompt(), today, 'the new code builds it');
   // nothing saved, or garbage
-  assert.equal(rt2.resumeSystemPrompt(null), false);
-  assert.equal(rt2.resumeSystemPrompt('  '), false);
+  assert.equal(rt2.resumeSystemPrompt(null, CODE), false);
+  assert.equal(rt2.resumeSystemPrompt('  ', CODE), false);
   rt.mcp.close();
   rt2.mcp.close();
 });
@@ -816,17 +823,17 @@ test('--append-system-prompt: a saved prompt is only reused when it was built wi
   const saved = first.systemPrompt();
   assert.ok(saved.endsWith('\n\nEXTRA RULES'));
   const same = await runtimeIn(cwd, {}, { appendSystemPrompt: 'EXTRA RULES' });
-  assert.equal(same.resumeSystemPrompt(saved), true);
+  assert.equal(same.resumeSystemPrompt(saved, CODE), true);
   assert.equal(same.systemPrompt(), saved);
   const other = await runtimeIn(cwd, {}, { appendSystemPrompt: 'OTHER RULES' });
-  assert.equal(other.resumeSystemPrompt(saved), false, 'the flag of this run is not dropped in favour of the old one');
+  assert.equal(other.resumeSystemPrompt(saved, CODE), false, 'the flag of this run is not dropped in favour of the old one');
   assert.ok(other.systemPrompt().endsWith('\n\nOTHER RULES'));
   assert.doesNotMatch(other.systemPrompt(), /EXTRA RULES/);
   const plain = await runtimeIn(cwd);
   const plainSaved = plain.systemPrompt();
-  assert.equal((await runtimeIn(cwd)).resumeSystemPrompt(plainSaved), true, 'no flag, nothing to compare');
+  assert.equal((await runtimeIn(cwd)).resumeSystemPrompt(plainSaved, CODE), true, 'no flag, nothing to compare');
   const added = await runtimeIn(cwd, {}, { appendSystemPrompt: 'NEW RULES' });
-  assert.equal(added.resumeSystemPrompt(plainSaved), false, 'a flag added on resume is honoured');
+  assert.equal(added.resumeSystemPrompt(plainSaved, CODE), false, 'a flag added on resume is honoured');
   for (const rt of [first, same, other, plain, added]) rt.mcp.close();
 });
 

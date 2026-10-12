@@ -8,7 +8,7 @@ import { CheckpointStore } from './checkpoints.js';
 import { loadAgents, loadSkills } from './agents.js';
 import { buildTools, toolsForSubagent } from './tools/index.js';
 import { findShell, pruneStaleShellFiles } from './utils/shell.js';
-import { mainSystemPrompt, subagentSystemPrompt } from './prompts.js';
+import { mainSystemPrompt, subagentSystemPrompt, PROMPT_CODE_VERSION } from './prompts.js';
 import { Agent } from './agent.js';
 import { isAbort } from './api.js';
 import { McpManager } from './mcp.js';
@@ -70,10 +70,13 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   Object.defineProperty(runtime, 'systemPromptStale', { get: () => promptStale });
   // A resumed conversation continues behind the system prompt it started with (as in Claude Code): its history
   // was cached behind that one, and nothing is gained from building the prompt again. Not when the prompt was
-  // built for another model (it names the model, and each model's cache is its own anyway). The date in it is
-  // brought up to date by a note to the model, which comes after everything that is cached.
-  runtime.resumeSystemPrompt = (saved) => {
+  // built for another model (it names the model, and each model's cache is its own anyway), and not when the code
+  // that builds it has changed since (`code`, the PROMPT_CODE_VERSION saved with it; null for a session from before
+  // it was saved): the new code's prompt is wanted then, e.g. after a Restart for an edit to the prompt. The date in
+  // it is brought up to date by a note to the model, which comes after everything that is cached.
+  runtime.resumeSystemPrompt = (saved, code) => {
     if (flags.systemPrompt || typeof saved !== 'string' || !saved.trim()) return false;
+    if (code !== PROMPT_CODE_VERSION) return false;
     // --append-system-prompt is the last thing in the prompt: one built with other text is not what this run asked for
     const extra = flags.appendSystemPrompt || '';
     if (extra && !saved.endsWith(`\n\n${extra}`)) return false;

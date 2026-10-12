@@ -1,7 +1,18 @@
 // System prompts for the main agent, sub-agents and compaction.
 
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { environmentBlock, memoryFiles } from './context.js';
 import { APP_NAME, INSTALL_DIR } from './config.js';
+
+// A fingerprint of the code that builds the main system prompt (this file and context.js). The session file keeps
+// it with the prompt, so that a conversation resumed after that code changed (an update, or a Restart after the
+// agent edited its own prompt) runs behind a prompt the new code builds, not the saved one (runtime.resumeSystemPrompt).
+export const PROMPT_CODE_VERSION = (() => {
+  const hash = crypto.createHash('sha256');
+  for (const f of ['./prompts.js', './context.js']) hash.update(fs.readFileSync(new URL(f, import.meta.url)));
+  return hash.digest('hex').slice(0, 16);
+})();
 
 export function autoMemorySection({ dir, index }) {
   return `# Auto memory

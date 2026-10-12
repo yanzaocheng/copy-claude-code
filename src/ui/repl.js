@@ -1795,7 +1795,7 @@ export class App {
     this.agent.lastContextTokens = estimateTokens(loaded.messages);
     // Continue behind the system prompt the conversation had (and its cache), not a freshly built one.
     this.store.systemPrompt = loaded.systemPrompt;
-    this.runtime.resumeSystemPrompt(loaded.systemPrompt);
+    this.runtime.resumeSystemPrompt(loaded.systemPrompt, loaded.promptCode);
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
     this.remote?.resync();
     if (quiet) return;

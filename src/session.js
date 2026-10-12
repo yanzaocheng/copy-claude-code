@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { CONFIG_DIR } from './config.js';
+import { PROMPT_CODE_VERSION } from './prompts.js';
 
 export function projectDir(cwd) {
   const name = path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
@@ -88,11 +89,12 @@ export class SessionStore {
   }
   // The system prompt this conversation runs behind, kept so that a resumed one continues behind the same prompt
   // and so with the prompt cache it already has (see runtime.resumeSystemPrompt). Written when it first appears
-  // and whenever it changes (after a compaction); the newest one wins when the session is loaded.
+  // and whenever it changes (after a compaction); the newest one wins when the session is loaded. With it goes the
+  // fingerprint of the code that built it: after that code changes, a resumed conversation gets a new prompt.
   setSystemPrompt(text) {
     if (!text || text === this.systemPrompt) return;
     this.systemPrompt = text;
-    this.append({ type: 'meta', systemPrompt: text, at: Date.now() });
+    this.append({ type: 'meta', systemPrompt: text, promptCode: PROMPT_CODE_VERSION, at: Date.now() });
   }
 
   static load(file) {
@@ -123,6 +125,7 @@ export class SessionStore {
       topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,
       name: typeof meta.name === 'string' && meta.name.trim() ? meta.name : null,
       systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,
+      promptCode: typeof meta.promptCode === 'string' ? meta.promptCode : null,
       cost: Number(meta.cost) > 0 ? Number(meta.cost) : 0,
       cacheUntil: Number.isFinite(meta.cacheUntil) && meta.cacheUntil >= 0 ? meta.cacheUntil : null,
     };
