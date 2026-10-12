@@ -68,7 +68,6 @@ Usage:
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool can read images (PNG, JPG, GIF, WEBP) and Jupyter notebooks (.ipynb)
 - This tool can only read files, not directories. To list a directory, use ls via the Bash tool.
-- You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel.
 - If you read a file that exists but has empty contents you will receive a warning in place of file contents.`,
   input_schema: {
     type: 'object',
@@ -206,10 +205,8 @@ export const WriteTool = {
 
 Usage:
 - This tool will overwrite the existing file if there is one at the provided path.
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
-- Prefer editing an existing file when that is the natural place for a change, but create new files whenever the task needs them (code, tests, scripts, configs, data).
-- Do not create documentation files (*.md, READMEs) unless the user asks for them or the task clearly calls for one.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.`,
+- An existing file must have been read with the Read tool first (a Grep result does not count); otherwise this tool fails.
+- Missing parent directories are created.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -306,10 +303,8 @@ export const EditTool = {
   description: `Performs exact string replacements in files.
 
 Usage:
-- You must use your \`Read\` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- You must use your \`Read\` tool at least once in the conversation before editing (a Grep result does not count). This tool will error if you attempt an edit without reading the file.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- Prefer editing existing files when that is the natural place for a change; create new files whenever the task needs them.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
 - The edit will FAIL if \`old_string\` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use \`replace_all\` to change every instance of \`old_string\`.
 - Use \`replace_all\` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
 - To create a new file, pass an empty old_string with the full content as new_string (the file must not exist).`,

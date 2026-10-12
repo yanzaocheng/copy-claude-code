@@ -36,12 +36,17 @@ You have a persistent, file-based memory for this project at \`${dir}\`. It surv
 ${index || '(empty: no memories saved yet)'}`;
 }
 
+// The CLAUDE.md (and AGENTS.md) files that apply in `cwd`, each with where it comes from.
+function instructionFiles(cwd) {
+  return memoryFiles(cwd)
+    .map((m) => `Contents of ${m.file} (${m.scope === 'user' ? "user's private global instructions for all projects" : m.scope === 'local' ? "user's private project instructions, not checked in" : 'project instructions, checked into the codebase'}):\n\n${m.text}`)
+    .join('\n\n');
+}
+
 export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, selfRestart = false, installedCopy = false, snapshot = null }) {
-  const memory = memoryFiles(cwd);
-  const memoryText = memory.length
-    ? `\n\n# Memory\nProject and user instructions are shown below: the facts of this project (its environment, mechanisms, commands) and how the user wants to work in it. Where they differ from the defaults above, they win.\n\n${memory
-      .map((m) => `Contents of ${m.file} (${m.scope === 'user' ? "user's private global instructions for all projects" : m.scope === 'local' ? "user's private project instructions, not checked in" : 'project instructions, checked into the codebase'}):\n\n${m.text}`)
-      .join('\n\n')}`
+  const files = instructionFiles(cwd);
+  const memoryText = files
+    ? `\n\n# Memory\nProject and user instructions are shown below: the facts of this project (its environment, mechanisms, commands) and how the user wants to work in it. Where they differ from the defaults above, they win.\n\n${files}`
     : '';
 
   return `You are ${APP_NAME}, an interactive command line agent modelled on Claude Code. You help the user with software engineering tasks (solving bugs, adding functionality, refactoring, explaining code, running builds and tests) and with anything else they ask that you can do with your knowledge and the tools on this machine. Use the instructions below and the tools available to you to assist the user.
@@ -92,16 +97,24 @@ When referencing specific functions or pieces of code include the pattern \`file
 ${environmentBlock(cwd, { model, shellName, snapshot })}${memoryText}${autoMemory ? `\n\n${autoMemorySection(autoMemory)}` : ''}${extra ? `\n\n${extra}` : ''}`;
 }
 
-export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt, snapshot = null }) {
+// `readOnly`: an agent whose own prompt forbids changing anything (Explore, Plan) gets neither the boundaries nor
+// the project's instructions, which only matter to an agent that changes things and cost tokens on every call.
+export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt, snapshot = null, readOnly = false }) {
+  const files = readOnly ? '' : instructionFiles(cwd);
   return `${agentPrompt}
 
 Notes:
 - You are a sub-agent launched by the main agent. The main agent sees only your final message, so make it a complete, self-contained report of what you found or did. The user does not see your intermediate output.
-- Agent threads have their cwd reset between bash calls; use absolute file paths.
 - In your final response, share relevant file paths (always absolute) and code snippets. Include code snippets only when the exact text is load-bearing.
 - Do not use emojis.
-
-${environmentBlock(cwd, { model, shellName, snapshot })}`;
+${readOnly ? '' : `
+# Boundaries
+- Do not do anything that cannot be undone unless your task asks for it (force-pushing, publishing a package, deleting data outside the project, sending messages or spending money through external services): say in your report what should be done and why, and leave it to the main agent.
+- Never expose, log or commit secrets, and never write code that does.
+- Do not commit, push or publish unless your task asks for it: the main agent decides that.
+- Edits made with Write, Edit and NotebookEdit can be undone with /rewind; changes made through Bash cannot.
+`}
+${environmentBlock(cwd, { model, shellName, snapshot })}${files ? `\n\n# Project instructions\nThe instructions that apply in this project: its environment, commands and conventions. Follow them for how you work here; committing, pushing and publishing stay the main agent's to decide, whatever they say.\n\n${files}` : ''}`;
 }
 
 // The terminal tab's title follows the topic of the conversation: after each message the user sends, the

@@ -121,7 +121,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       depth,
       spawnSubagent: runtime.spawnSubagent,
       tools: toolsForSubagent(runtime.tools, def, { allowTask: depth < config.maxSubagentDepth }),
-      systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt, snapshot: snapshotFor(ctx.cwd) }),
+      systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt, snapshot: snapshotFor(ctx.cwd), readOnly: Boolean(def.readOnly) }),
       io: subIo,
       model,
       isSubagent: true,

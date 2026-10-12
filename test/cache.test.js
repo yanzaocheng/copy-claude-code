@@ -832,6 +832,22 @@ test('the own-code section: fix yourself in a source checkout, only report in an
   assert.doesNotMatch(neither, /# Your own/);
 });
 
+test('sub-agents get the boundaries and the project\'s instructions, except read-only ones', async () => {
+  const cwd = tmp();
+  fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'Run tests with the dot reporter.');
+  const base = { cwd, model: { id: 'mock' }, shellName: 'bash', agentPrompt: 'You work.', snapshot: { date: '2026-01-01', git: null } };
+  const writer = subagentSystemPrompt(base);
+  assert.match(writer, /# Boundaries/);
+  assert.match(writer, /Do not commit, push or publish unless your task asks for it/);
+  assert.match(writer, /# Project instructions\n[^\n]*committing, pushing and publishing stay the main agent's[\s\S]*Run tests with the dot reporter\./);
+  assert.doesNotMatch(writer, /cwd reset/, 'the working directory persists between Bash calls here');
+  const reader = subagentSystemPrompt({ ...base, readOnly: true });
+  assert.doesNotMatch(reader, /# Boundaries|# Project instructions|dot reporter/);
+  const { loadAgents } = await import('../src/agents.js');
+  const agents = loadAgents(cwd);
+  assert.deepEqual(['general-purpose', 'Explore', 'Plan'].map((n) => Boolean(agents.get(n).readOnly)), [false, true, true]);
+});
+
 test('--append-system-prompt: a saved prompt is only reused when it was built with the same text', async () => {
   const cwd = tmp();
   const first = await runtimeIn(cwd, {}, { appendSystemPrompt: 'EXTRA RULES' });

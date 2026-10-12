@@ -4,43 +4,15 @@
 export const TodoWriteTool = {
   name: 'TodoWrite',
   readOnly: true,
-  description: `Use this tool to create and manage a structured task list for your current coding session. This helps you track progress on complex tasks and shows the user where you are.
+  description: `Create and update a task list for the current request. It helps you keep track of a task with several steps and shows the user where you are.
 
-## When to Use This Tool
-Use this tool proactively in these scenarios:
-1. Complex multi-step tasks - When a task requires 3 or more distinct steps or actions
-2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
-3. User explicitly requests todo list - When the user directly asks you to use the todo list
-4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
-5. After receiving new instructions - Immediately capture user requirements as todos
-6. When you start working on a task - Mark it as in_progress BEFORE beginning work. Ideally you should only have one todo as in_progress at a time
-7. After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
+When to use it: a task with several distinct steps, several tasks the user listed, or when the user asks for a list. Skip it for a single straightforward task, a few trivial steps, or a conversational request. Each update is a request that re-reads the conversation, so use the list where it helps, not as a formality.
 
-## When NOT to Use This Tool
-Skip using this tool when:
-1. There is only a single, straightforward task
-2. The task is trivial and tracking it provides no organizational benefit
-3. The task can be completed in less than 3 trivial steps
-4. The task is purely conversational or informational
-
-## Task States and Management
-1. **Task States**:
-   - pending: Task not yet started
-   - in_progress: Currently working on (limit to ONE task at a time)
-   - completed: Task finished successfully
-   **IMPORTANT**: Task descriptions must have two forms:
-   - content: The imperative form describing what needs to be done (e.g., "Run tests")
-   - activeForm: The present continuous form shown during execution (e.g., "Running tests")
-2. **Task Management**:
-   - Keep the status current as you work: mark a task completed once it is done, in the same response as the next tool calls you make anyway rather than in a response of its own
-   - Exactly ONE task must be in_progress at any time (not less, not more)
-   - Remove tasks that are no longer relevant from the list entirely
-3. **Task Completion Requirements**:
-   - ONLY mark a task as completed when you have FULLY accomplished it
-   - If you encounter errors, blockers, or cannot finish, keep the task as in_progress
-   - Never mark a task as completed if tests are failing, the implementation is partial, or you hit unresolved errors
-
-Use the list where it helps you or the user follow a task with several steps, not as a formality: each update is a request that re-reads the conversation.`,
+How:
+- Each item has \`content\`, the imperative form ("Run tests"), and \`activeForm\`, the present continuous form shown while it is in progress ("Running tests").
+- Statuses are pending, in_progress and completed; keep exactly one item in_progress while you work.
+- Keep it current: mark an item completed once it is done, in the same response as the next tool calls you make anyway rather than in a response of its own. Add follow-up items you discover and remove ones that no longer apply.
+- Mark an item completed only when it is fully done: not while tests fail, the work is partial or an error is unresolved.`,
   input_schema: {
     type: 'object',
     properties: {
@@ -65,7 +37,7 @@ Use the list where it helps you or the user follow a task with several steps, no
     const todos = Array.isArray(input.todos) ? input.todos.filter((t) => t && t.content) : [];
     ctx.agent.todos = todos.every((t) => t.status === 'completed') ? [] : todos;
     return {
-      content: 'Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable',
+      content: 'The todo list is updated.',
       display: { todos },
     };
   },

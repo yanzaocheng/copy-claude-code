@@ -69,12 +69,8 @@ export function makeBashTool(config) {
 
 This tool is for terminal operations like git, npm, docker, running builds and tests. For file work use the dedicated tools instead of shell commands: Read, not cat/head/tail; Edit, not sed/awk; Write, not echo or heredoc redirection; Glob and Grep, not find and grep. A script is fine for a mechanical change across many files, once you know git can bring them back (Bash changes are not checkpointed).
 
-Before executing the command:
-1. If the command will create new directories or files, first verify the parent directory exists (e.g. with ls).
-2. Always quote file paths that contain spaces with double quotes.
-
 Usage notes:
-- The command argument is required.
+- Quote file paths that contain spaces with double quotes.
 - You can specify an optional timeout in milliseconds (up to ${config.bashMaxTimeout}ms / ${config.bashMaxTimeout / 60000} minutes). Default is ${config.bashDefaultTimeout}ms.
 - Write a clear, concise description of what the command does in 5-10 words.
 - If the output exceeds ${config.bashMaxOutput} characters, the middle is cut from what is returned to you, and the full output is saved to a file whose path is included so you can read it with Read or Grep.
