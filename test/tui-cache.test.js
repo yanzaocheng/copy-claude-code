@@ -158,6 +158,11 @@ test('the user\'s messages are on a band of colour; ctrl+f in fullscreen finds i
   assert.equal(line.getCell(90).getBgColor(), line.getCell(2).getBgColor(), 'which goes across the window');
 
   tui.app.screen.setFull(true);
+  const full = (await tui.snapshot()).split('\n');
+  const at = full.findIndex((l) => l.startsWith('> second question'));
+  const banded = tui.term.buffer.active.getLine(tui.term.buffer.active.baseY + at);
+  assert.notEqual(banded.getCell(2).getBgColor(), -1);
+  assert.equal(banded.getCell(90).getBgColor(), banded.getCell(2).getBgColor(), 'in fullscreen too, across the window');
   tui.send('\x06'); // ctrl+f
   await tui.waitFor('Find in the conversation', { timeout: 5000, all: false });
   tui.send('ALL DONE');

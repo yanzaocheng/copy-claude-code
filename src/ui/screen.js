@@ -47,6 +47,12 @@ const MULTI_CLICK_MS = 450;
 const FIND_MATCH = '\x1b[30;43m';
 const FIND_CURRENT = '\x1b[30;48;5;208m';
 const FIND_MAX = 10_000;
+// A row that fills the rest of its width with its background (the user's messages, see renderUserMessage) ends in an
+// erase to the end of the line made while that background is on. Nothing may erase after it: an erase does not move
+// the cursor, so a second one, made after the colours are reset, would wipe the band out again from the same column.
+const FILL = '\x1b[K';
+const LEAD = /^(?:\x1b\[[0-9;]*m)+/; // the colours a row starts in
+const endRow = (row) => row + (row.includes(FILL) ? '\x1b[0m' : '\x1b[0m\x1b[K');
 
 // The part of `plain` (no escape codes) between columns `from` (included) and `to` (not).
 function sliceCols(plain, from, to) {
@@ -229,7 +235,14 @@ export class Screen {
 
   wrappedAt(i, cols) {
     if (this.wrapCols !== cols) { this.wrapped = []; this.wrapCols = cols; this.selection = null; } // its rows are other rows now
-    return (this.wrapped[i] ??= wrapLine(this.history[i], Math.max(1, cols - 1)));
+    if (this.wrapped[i]) return this.wrapped[i];
+    let rows = wrapLine(this.history[i], Math.max(1, cols - 1));
+    // a band now wider than the window: each of its rows starts in its colours and fills the rest of the row
+    if (rows.length > 1 && this.history[i].includes(FILL)) {
+      const lead = LEAD.exec(this.history[i])?.[0] || '';
+      rows = rows.map((r, k) => (k ? lead : '') + r.replaceAll(FILL, '') + lead + FILL);
+    }
+    return (this.wrapped[i] = rows);
   }
 
   // Rows of the whole conversation at this width (for the scrolling to stop at its top).
@@ -277,15 +290,17 @@ export class Screen {
   }
 
   // A row of the conversation as drawn: the selection in reverse video, the matches of a search highlighted (the
-  // current one apart). Such a row loses its own colours.
+  // current one apart). Such a row loses its own colours, except the band of a row that fills its width.
   paintRow(e) {
     const sel = this.selectedCols(e);
     const hits = this.finding?.byRow.get(`${e.line}:${e.sub}`);
     if (!sel && !hits) return e.text;
+    const fill = e.text.includes(FILL);
+    const base = fill ? LEAD.exec(e.text)?.[0] || '' : '';
     const style = (col) => {
       if (sel && col >= sel[0] && col < sel[1]) return '\x1b[7m';
       const hit = hits?.find((h) => col >= h.from && col < h.to);
-      return !hit ? '' : hit.match === this.finding.matches[this.finding.index] ? FIND_CURRENT : FIND_MATCH;
+      return !hit ? base : hit.match === this.finding.matches[this.finding.index] ? FIND_CURRENT : FIND_MATCH;
     };
     let out = '';
     let open = '';
@@ -296,6 +311,7 @@ export class Screen {
       out += g;
       col += graphemeWidth(g);
     }
+    if (fill) return out + '\x1b[0m' + base + FILL;
     return out + (open ? '\x1b[0m' : '');
   }
 
@@ -575,7 +591,7 @@ export class Screen {
     let buf = SYNC_START + ESC.hideCursor + this.titleUpdate();
     if (full) { buf += '\x1b[2J'; this.frame = []; }
     frame.forEach((row, i) => {
-      if (this.frame[i] !== row) buf += `\x1b[${i + 1};1H` + row + '\x1b[0m\x1b[K';
+      if (this.frame[i] !== row) buf += `\x1b[${i + 1};1H` + endRow(row);
     });
     if (frame.length < this.frame.length) buf += `\x1b[${frame.length + 1};1H` + ESC.clearDown;
     this.frame = frame;
@@ -745,7 +761,7 @@ export class Screen {
     }
     const all = [...tail, ...layout.rows];
     let buf = SYNC_START + ESC.hideCursor + this.titleUpdate() + '\x1b[H';
-    buf += all.map((row) => row + '\x1b[0m\x1b[K').join('\r\n');
+    buf += all.map(endRow).join('\r\n');
     buf += ESC.clearDown;
     buf += this.settleCursor(layout);
     buf += SYNC_END;

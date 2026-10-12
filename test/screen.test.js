@@ -407,3 +407,33 @@ test('fullscreen: ctrl+f finding: matches newest first from the view, highlighte
   assert.equal(t.screen.finding.matches[s.index].line, t.screen.history.indexOf('row 30 has the Needle'));
   assert.equal(t.screen.setFind('nothing like it').total, 0);
 });
+
+test('fullscreen: a band row (the user\'s message) fills its whole width, also wrapped at a narrower width and under a search highlight', async () => {
+  const t = setup({ cols: 60, rows: 14 });
+  t.screen.setFull(true);
+  const band = (s) => `\x1b[48;5;236m${s}\x1b[K\x1b[49m`;
+  t.screen.log('before', band('> ' + 'word '.repeat(9) + 'end'), 'after');
+  await t.settle();
+  const buf = t.term.buffer.active;
+  const bg = (row, col) => buf.getLine(buf.baseY + row).getCell(col).getBgColor();
+  let rows = await t.rows();
+  let at = rows.findIndex((r) => r.startsWith('> word'));
+  assert.equal(bg(at, 2), 236);
+  assert.equal(bg(at, 58), 236, 'to the end of the row: the erase after the reset does not wipe it out');
+  assert.equal(bg(at + 1, 58), bg(0, 0), 'the next row is not on the band');
+
+  await t.resize(30, 14); // the line is wider than the window now: both of its rows are on the band
+  rows = await t.rows();
+  at = rows.findIndex((r) => r.startsWith('> word'));
+  assert.ok(rows[at + 1].includes('end'));
+  for (const r of [at, at + 1]) assert.equal(bg(r, 28), 236, `row ${r} filled`);
+
+  t.screen.openFind();
+  t.screen.setFind('end');
+  await t.flush();
+  rows = await t.rows();
+  at = rows.findIndex((r) => r.includes('end') && !r.startsWith('>'));
+  const col = rows[at].indexOf('end');
+  assert.equal(bg(at, col), 208, 'the match highlighted');
+  assert.equal(bg(at, 28), 236, 'the rest of the row still on the band');
+});
