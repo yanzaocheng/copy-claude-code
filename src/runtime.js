@@ -2,7 +2,7 @@
 
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { loadConfig, applyRememberedChoices } from './config.js';
+import { loadConfig, applyRememberedChoices, SOURCE_CHECKOUT } from './config.js';
 import { ModeManager } from './modes.js';
 import { CheckpointStore } from './checkpoints.js';
 import { loadAgents, loadSkills } from './agents.js';
@@ -41,7 +41,10 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   runtime.skills = loadSkills(cwd);
   // The self-check builds the Restart tool too, so that a mistake in it is found before a restart relies on it.
   const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
-  runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools(), restart: restartable, peers: Boolean(io?.peers) || process.env.CLAUDE_PRO_SELF_CHECK === '1' });
+  // The agent fixes its own code (and restarts for it) only in a source checkout: an installed copy is replaced by
+  // the next update, so there it reports its defects instead.
+  const selfEdit = restartable && SOURCE_CHECKOUT;
+  runtime.tools = buildTools(config, { agents, skills: runtime.skills, mcpTools: mcp.tools(), restart: selfEdit, peers: Boolean(io?.peers) || process.env.CLAUDE_PRO_SELF_CHECK === '1' });
 
   // The system prompt is built once and kept for the conversation: a prompt that changes in the middle of it
   // cannot be read from the prompt cache. So a change to what it is built from (memory, configuration) waits
@@ -58,7 +61,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
-      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: restartable, snapshot: snapshotFor(cwd) });
+      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;

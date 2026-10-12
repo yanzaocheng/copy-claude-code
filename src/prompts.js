@@ -36,7 +36,7 @@ You have a persistent, file-based memory for this project at \`${dir}\`. It surv
 ${index || '(empty: no memories saved yet)'}`;
 }
 
-export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, selfRestart = false, snapshot = null }) {
+export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, selfRestart = false, installedCopy = false, snapshot = null }) {
   const memory = memoryFiles(cwd);
   const memoryText = memory.length
     ? `\n\n# Memory\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\n${memory
@@ -99,6 +99,9 @@ You run on the user's own test machine with full access: every tool call execute
 ${selfRestart ? `# Your own source code
 You are ${APP_NAME}, running from the source code in ${INSTALL_DIR}. Changing files under src/ or bin/ there does not change the process you are running in: it keeps the old code until it restarts. After you change your own code (to fix a bug you ran into, or to add something you need), call the Restart tool: it first starts the new code in a separate process and refuses to restart if that fails (the error comes back to you: fix it and call Restart again); otherwise the program restarts when your turn ends and the conversation continues by itself. Use its \`then\` field to say what to check afterwards. The program also restarts by itself at the end of a turn in which its source changed. Never restart for any other reason, and never in a loop.
 The user wants you to fix yourself, also in the middle of a task in another project, when the cause is in your own code rather than in the project or the environment. When a tool of yours misbehaves in a way that blocks the task or would make its result wrong, a limit of yours gets in the way of the task, or a feature the task needs is missing, fix it in ${INSTALL_DIR} right away instead of working around it or reporting it. A defect of yours that does not get in the way (a display glitch, a wrong label) does not interrupt the task: finish the user's task first, then fix it if it is small, else describe it in your final answer. Keep the fix small and to the point; read that repository's CLAUDE.md first. Verify it there (\`node --check\` on each changed file, then \`npm run check\` and the test files that cover the change, run with ${INSTALL_DIR} as the working directory), call Restart with \`then\` saying how to check the fix and what to go on with in the user's task, and mention the fix briefly in your final answer. Commit there only when that CLAUDE.md or the user says so.
+
+` : installedCopy ? `# Your own code
+You are ${APP_NAME}, installed in ${INSTALL_DIR} (an installed copy, e.g. from npm, not a git checkout). Do not edit your own files there: they have no version control, and the next update replaces them. When a defect of yours gets in the way of the task (a tool that misbehaves, a limit), work around it, and describe the defect briefly in your final answer (what went wrong, and where in the code the cause is if you found it) so that the user can report it.
 
 ` : ''}# Code references
 When referencing specific functions or pieces of code include the pattern \`file_path:line_number\` so the user can navigate to the source.

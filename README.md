@@ -80,7 +80,7 @@ claude-pro config set CLAUDE_PRO_PROVIDER claude-code
 什么都没配置时（没有 `CLAUDE_PRO_PROVIDER`，也没有 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`）默认用**网关**，第一次启动直接弹出登录选择（网关排第一）；配置了 API 端点、密钥或模型的老用户仍然默认 `api`。交互界面里 `/login` 选择模型请求发往哪里（记在 `~/.claude-pro/settings.json` 的 `CLAUDE_PRO_PROVIDER`，每个后端各自记住 `/model`、`/effort`）：
 
 - **Claude 订阅**（`claude-code`）：本机 Claude Code 的登录，见上一节。
-- **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下没有固定模型：主 agent 每次调用 `Task` 按任务难易自己选 `haiku`（查找、读文件）、`sonnet`（搜索、步骤清楚的子任务）或 `opus`（难调的 bug、设计、审查等结论要依赖的分析），`Task` 的说明里列着三者的实际模型和价格；没选时用主模型（GPT 主模型下子 agent 用主模型）。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 32K。每个请求带上会话 ID（`X-Claude-Code-Session-Id`，和 Claude Code 一样；子 agent 用主对话的，`/clear` 换新的，`--resume` 和自动重启沿用原来的），网关据此让同一个对话 1 小时内继续用同一个上游账号，提示词缓存才不会因为换账号而失效。`/logout` 删除本机的网关 Key。
+- **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下没有固定模型：主 agent 每次调用 `Task` 按任务难易自己选 `haiku`（查找、读文件）、`sonnet`（搜索、步骤清楚的子任务）或 `opus`（难调的 bug、设计、审查等结论要依赖的分析），`Task` 的说明里列着三者的实际模型和价格；没选时用主模型（GPT 主模型下子 agent 用主模型）。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 48K（Opus 预扣 $0.96，请求结束按实际输出扣费；`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 可改）。每个请求带上会话 ID（`X-Claude-Code-Session-Id`，和 Claude Code 一样；子 agent 用主对话的，`/clear` 换新的，`--resume` 和自动重启沿用原来的），网关据此让同一个对话 1 小时内继续用同一个上游账号，提示词缓存才不会因为换账号而失效。`/logout` 删除本机的网关 Key。
 - **Codex 订阅**（`codex`）：本机 `codex login`（ChatGPT 套餐）写下的 `~/.codex/auth.json`（`CODEX_HOME` 可改）。请求直接发往 Codex 后端，Anthropic 格式在本机和 OpenAI Responses 格式互相转换（工具调用、推理、缓存用量都对应上）；访问令牌快到期时用同一文件里的刷新令牌续期并写回，Codex CLI 也能接着用。模型默认取 `~/.codex/config.toml` 的 `model`，否则 `gpt-6.1-sol`；不设 effort 时用模型自己的默认值（`models_cache.json` 里写的）。
 
 ## 配置
@@ -169,7 +169,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 交互式会话运行在一个很薄的**监督进程**（`src/supervisor.js`，只用 Node 内置模块）之下，所以程序可以自己重启、加载自己刚改过的代码，不需要你退出再启动：
 
-- **模型自己重启**：改完 `src/`、`bin/` 里的代码后，模型调用 `Restart` 工具。它先在一个临时进程里把新代码完整启动一遍（所有模块能加载、界面能画出来、工具定义和系统提示词合法）——**启动不起来就不重启**，把错误还给模型去修，修好再调用；通过后在**本回合结束时**重启，对话、待办列表、`/model`、`/effort`、计划模式、排队的消息、输入框里没发出去的草稿、`/rewind` 检查点都带过去，新进程里模型收到一条"已重启"的提示后接着做（可用 `then` 指定重启后先验证什么）。
+- **模型自己重启**：改完 `src/`、`bin/` 里的代码后，模型调用 `Restart` 工具。它先在一个临时进程里把新代码完整启动一遍（所有模块能加载、界面能画出来、工具定义和系统提示词合法）——**启动不起来就不重启**，把错误还给模型去修，修好再调用；通过后在**本回合结束时**重启，对话、待办列表、`/model`、`/effort`、计划模式、排队的消息、输入框里没发出去的草稿、`/rewind` 检查点都带过去，新进程里模型收到一条"已重启"的提示后接着做（可用 `then` 指定重启后先验证什么）。只在**源码仓库**（有 `.git` 的克隆，包括 `npm link` 到它）里这样做：从 npm 装的副本没有版本控制、下次更新会被覆盖，那里不给模型 `Restart` 工具，系统提示词改成"不要改自己的文件，绕过问题并在最后说明缺陷，方便用户反馈"。
 - **改了源码自动重启**：一个回合结束（或空闲）时，如果 `src/`、`bin/` 下的文件变过，就自动做同样的检查并重启。检查不通过只提示错误、不重启。按 Esc 打断的那一回合不会触发。`CLAUDE_PRO_AUTO_RESTART=0` 关闭。
 - **手动**：`/restart`（别名 `/reload`），`/restart force` 跳过检查并无视后台任务。
 - 后台 agent / 后台 shell 会被重启杀掉，所以有它们在跑时拒绝重启（可 `force`）。5 分钟内重启超过 5 次视为死循环，拒绝。
@@ -219,7 +219,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 | 项目 | 以前 | 现在 |
 |---|---|---|
-| 单次输出 `max_tokens` | 32000 | 128000；如果 API 允许的更少，会从报错里读出真实上限并自动降下来 |
+| 单次输出 `max_tokens` | 32000 | 128000（网关 48000，网关按它预扣余额）；如果 API 允许的更少，会从报错里读出真实上限并自动降下来 |
 | Bash 默认 / 最长超时 | 2 分钟 / 10 分钟 | 10 分钟 / 1 小时 |
 | Bash 输出返回给模型的上限 | 30000 字符 | 60000 字符，超出部分的全文保存到文件 |
 | 单个工具结果上限（超出落盘） | 50000 字符 | 100000 字符 |

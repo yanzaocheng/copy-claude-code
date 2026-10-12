@@ -31,7 +31,7 @@ const { SUMMARY_SYSTEM, subagentSystemPrompt } = await import('../src/prompts.js
 const { environmentBlock, takeEnvSnapshot } = await import('../src/context.js');
 const { SessionStore } = await import('../src/session.js');
 const { createRuntime } = await import('../src/runtime.js');
-const { PROMPT_CODE_VERSION: CODE } = await import('../src/prompts.js');
+const { PROMPT_CODE_VERSION: CODE, mainSystemPrompt } = await import('../src/prompts.js');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cache-'));
 let port = 20_000; // every test talks to an "endpoint" of its own: what an endpoint refuses is remembered per endpoint
@@ -815,6 +815,20 @@ test('a resumed conversation continues behind its own system prompt; a note brin
   assert.equal(rt2.resumeSystemPrompt('  ', CODE), false);
   rt.mcp.close();
   rt2.mcp.close();
+});
+
+test('the own-code section: fix yourself in a source checkout, only report in an installed copy', () => {
+  const cwd = tmp();
+  const base = { cwd, model: { id: 'mock' }, shellName: 'bash', snapshot: { date: '2026-01-01', git: null } };
+  const checkout = mainSystemPrompt({ ...base, selfRestart: true });
+  assert.match(checkout, /# Your own source code/);
+  assert.match(checkout, /call the Restart tool/);
+  const installed = mainSystemPrompt({ ...base, installedCopy: true });
+  assert.match(installed, /# Your own code\n.*an installed copy, e\.g\. from npm/);
+  assert.match(installed, /Do not edit your own files there/);
+  assert.doesNotMatch(installed, /Restart/);
+  const neither = mainSystemPrompt(base); // a checkout without the supervisor (-p): nothing to say
+  assert.doesNotMatch(neither, /# Your own/);
 });
 
 test('--append-system-prompt: a saved prompt is only reused when it was built with the same text', async () => {

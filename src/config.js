@@ -18,6 +18,9 @@ import { normalizeTtl } from './cache.js';
 import { codexModels, codexConfigDefaults } from './codex/client.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// A source checkout (a git clone, also when npm links to one), as opposed to a copy installed from npm: the agent
+// edits its own code only in a checkout, since the next update replaces an installed copy.
+export const SOURCE_CHECKOUT = fs.existsSync(path.join(INSTALL_DIR, '.git'));
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
 export const APP_NAME = 'claude-pro';
 export const PROVIDERS = ['api', 'claude-code', 'gateway', 'codex'];
@@ -60,7 +63,7 @@ export const KNOWN_KEYS = {
   CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'Context size (tokens) used for auto-compaction calculations',
   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: 'Percentage (1-100) of the window at which auto-compaction triggers',
   DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
-  CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000; lowered automatically if the API allows less)',
+  CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000, 48000 with the gateway; lowered automatically if the API allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
   CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login, as in Claude Code, and with the gateway, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
@@ -331,9 +334,10 @@ export class Config {
 
   // Generous by default so large files can be written in one go; if the API turns out to allow
   // less, streamMessage learns the real limit from the error and clamps (see api.js).
-  // The gateway holds back balance for max_tokens of output before each request, so a smaller default there (the
-  // 32K Claude Code uses) keeps a modest balance usable.
-  get maxOutputTokens() { return int(this.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, this.usesGateway ? 32_000 : 128_000); }
+  // The gateway holds back balance for max_tokens of output before each request, so a smaller default there keeps a
+  // modest balance usable. 48K: in 812 Opus requests through it (2026-10-12) p99 was 14K, three went over 24K (the
+  // longest that finished: 27K) and one was cut off at the old 32K; the hold is $0.96 on Opus instead of $0.64.
+  get maxOutputTokens() { return int(this.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, this.usesGateway ? 48_000 : 128_000); }
   get thinkingBudget() {
     return this.env.MAX_THINKING_TOKENS === undefined ? null : int(this.env.MAX_THINKING_TOKENS, null);
   }
