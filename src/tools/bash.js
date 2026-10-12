@@ -67,7 +67,7 @@ export function makeBashTool(config) {
     name: 'Bash',
     description: `Executes a given ${isCmd ? 'cmd.exe' : 'bash'} command with an optional timeout. The working directory persists between commands; shell state (variables, functions) does not.
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, running builds and tests. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+This tool is for terminal operations like git, npm, docker, running builds and tests. For reading, writing, editing, searching and finding files use the specialized tools instead; a script is fine for a mechanical change across many files (Bash changes are not checkpointed, so make sure git can bring the files back).
 
 Before executing the command:
 1. If the command will create new directories or files, first verify the parent directory exists (e.g. with ls).
@@ -85,7 +85,7 @@ Usage notes:
 - Try to maintain your current working directory by using absolute paths and avoiding \`cd\`.${os.platform() === 'win32' && !isCmd ? '\n- This is Git Bash on Windows: use Unix syntax (forward slashes, /dev/null, $VAR). Windows paths like C:/Users/... also work.' : ''}
 
 # Committing changes with git
-Only create commits when requested by the user. When asked to commit: run git status, git diff and git log in parallel to understand the change and the repo's message style; stage only relevant files (never secrets such as .env); write a concise message focused on the "why"; pass the message via a HEREDOC. Do not force push, skip hooks (--no-verify), amend commits, change git config or push unless the user asked for that.`,
+Only create commits when the user asks or the project's instructions (CLAUDE.md) say when to commit. When committing: run git status, git diff and git log in parallel to understand the change and the repo's message style; stage only relevant files (never secrets such as .env); write a concise message focused on the "why"; pass the message via a HEREDOC. Do not force push, skip hooks (--no-verify), amend commits, change git config or push unless the user asked for that.`,
     input_schema: {
       type: 'object',
       properties: {

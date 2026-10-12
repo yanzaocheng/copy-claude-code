@@ -4,7 +4,7 @@
 export const TodoWriteTool = {
   name: 'TodoWrite',
   readOnly: true,
-  description: `Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+  description: `Use this tool to create and manage a structured task list for your current coding session. This helps you track progress on complex tasks and shows the user where you are.
 
 ## When to Use This Tool
 Use this tool proactively in these scenarios:
@@ -32,8 +32,7 @@ Skip using this tool when:
    - content: The imperative form describing what needs to be done (e.g., "Run tests")
    - activeForm: The present continuous form shown during execution (e.g., "Running tests")
 2. **Task Management**:
-   - Update task status in real-time as you work
-   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
+   - Keep the status current as you work: mark a task completed once it is done, in the same response as the next tool calls you make anyway rather than in a response of its own
    - Exactly ONE task must be in_progress at any time (not less, not more)
    - Remove tasks that are no longer relevant from the list entirely
 3. **Task Completion Requirements**:
@@ -41,7 +40,7 @@ Skip using this tool when:
    - If you encounter errors, blockers, or cannot finish, keep the task as in_progress
    - Never mark a task as completed if tests are failing, the implementation is partial, or you hit unresolved errors
 
-When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.`,
+Use the list where it helps you or the user follow a task with several steps, not as a formality: each update is a request that re-reads the conversation.`,
   input_schema: {
     type: 'object',
     properties: {
