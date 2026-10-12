@@ -77,6 +77,8 @@ export class SessionStore {
   // The name the user gave the conversation with /rename (null: none again); it wins over the topic.
   setName(name) { this.append({ type: 'meta', name, at: Date.now() }); }
   reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
+  // What the conversation's requests have cost so far (USD, see pricing.js), written after each one; the newest wins.
+  setCost(usd) { this.append({ type: 'meta', cost: usd, at: Date.now() }); }
   // The system prompt this conversation runs behind, kept so that a resumed one continues behind the same prompt
   // and so with the prompt cache it already has (see runtime.resumeSystemPrompt). Written when it first appears
   // and whenever it changes (after a compaction); the newest one wins when the session is loaded.
@@ -114,6 +116,7 @@ export class SessionStore {
       topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,
       name: typeof meta.name === 'string' && meta.name.trim() ? meta.name : null,
       systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,
+      cost: Number(meta.cost) > 0 ? Number(meta.cost) : 0,
     };
   }
 

@@ -10,6 +10,7 @@ import { readGatewayLogin, fetchGatewayModels, cachedGatewayModel, gatewayEffort
 import { createCodexFetch, codexModels, codexEffort, nearestEffort } from './codex/client.js';
 import { SIGNATURE_PREFIX } from './codex/translate-request.js';
 import { fitImagesIn } from './utils/images.js';
+import { costOf } from './pricing.js';
 
 let cached = null;
 
@@ -342,6 +343,14 @@ export function isAbort(err) {
   return err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError || /^(?:request was )?aborted\.?$/i.test(err?.message || '');
 }
 
+// USD for a request at the list prices (see pricing.js), by the model that answered, else the one asked for;
+// null when neither has a price. A cost goes to config.onCost.
+function charge(config, requested, served, usage) {
+  const cost = costOf(served, usage) ?? costOf(requested, usage);
+  if (cost > 0) config.onCost?.(cost);
+  return cost;
+}
+
 // Stream a message. `onEvent` receives:
 //   {type:'block_start', index, block}
 //   {type:'text', index, text}          text delta
@@ -354,7 +363,8 @@ export function isAbort(err) {
 //   {type:'rate_limit_resume', waitedMs}   the repeated request was accepted: the pause is over
 //   {type:'reset'}                      partial output from a failed attempt must be discarded
 // `waitForRateLimit: false` reports a rate limit as an error instead of waiting for it (side queries
-// where nobody wants to sit through a pause). Returns {message, usage, stopReason}.
+// where nobody wants to sit through a pause). Returns {message, usage, stopReason, model, cost, cache}.
+// What each request costs (an interrupted one too) goes to config.onCost, the conversation's running total.
 export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true } = {}) {
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
   // A token that has expired (or is about to) is renewed first, as the official client does.
@@ -382,6 +392,10 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   for (;;) {
     let emitted = false;
     const startedAt = Date.now(); // the cache TTL counts from the start of the request, not from the end of the reply
+    const blocks = [];
+    const jsonBufs = [];
+    let usage = {};
+    let model = params.model;
     try {
       const stream = await client.messages.create(params, options);
       if (paused) {
@@ -389,11 +403,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         paused = null;
         onEvent({ type: 'rate_limit_resume', waitedMs: overloaded ? retryState.overloadedWaitMs : retryState.waitedMs, ...(overloaded ? { overloaded } : {}) });
       }
-      const blocks = [];
-      const jsonBufs = [];
-      let usage = {};
       let stopReason = null;
-      let model = params.model;
       let stopped = false;
       for await (const ev of stream) {
         switch (ev.type) {
@@ -457,9 +467,15 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         const key = cacheKey(config, params.model, login);
         cacheRefused.set(key, new Set([...(cacheRefused.get(key) || []), ...refused]));
       }
-      return { message: { role: 'assistant', content }, usage, stopReason, model, cache: { ...cachePlanOf(params), fingerprint: fingerprint(params), at: startedAt } };
+      const cost = charge(config, params.model, model, usage);
+      return { message: { role: 'assistant', content }, usage, stopReason, model, cost, cache: { ...cachePlanOf(params), fingerprint: fingerprint(params), at: startedAt } };
     } catch (raw) {
-      if (signal?.aborted || isAbort(raw)) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
+      if (signal?.aborted || isAbort(raw)) {
+        // An interrupted reply is billed for what it had read and written: the output so far is estimated.
+        const written = blocks.reduce((n, b) => n + (b?.text?.length || 0) + (b?.thinking?.length || 0), 0) + jsonBufs.join('').length;
+        charge(config, params.model, model, { ...usage, output_tokens: Math.max(usage.output_tokens || 0, Math.ceil(written / 4)) });
+        throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
+      }
       const err = describeError(raw, config);
       // The token was refused. A running native Claude Code session may have renewed the shared token
       // while this request was in flight: read it again. If it is the same one, it may have been revoked

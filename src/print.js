@@ -53,8 +53,16 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   };
   const runtime = await createRuntime({ cwd, flags, io });
   let store = new SessionStore(cwd);
+  let cost = 0; // what this run's requests cost (total_cost_usd)
+  let conversationCost = 0; // and the conversation's, kept with the session
+  runtime.config.onCost = (usd) => {
+    cost += usd;
+    conversationCost += usd;
+    store.setCost(conversationCost);
+  };
   if (flags.resumeFile) {
     const loaded = SessionStore.load(flags.resumeFile);
+    conversationCost = loaded.cost;
     runtime.agent.messages = loaded.messages;
     runtime.agent.restoreFileState(loaded.messages, loaded.times);
     runtime.agent.lastActivityAt = loaded.lastAt;
@@ -97,6 +105,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
       session_id: store.id,
       duration_ms: Date.now() - started,
       num_turns: a.usage.requests,
+      total_cost_usd: Number(cost.toFixed(6)),
       usage: { input_tokens: used.input, output_tokens: used.output, cache_read_input_tokens: used.cacheRead, cache_creation_input_tokens: used.cacheWrite },
     });
   } else {

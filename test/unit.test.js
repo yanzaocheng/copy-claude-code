@@ -17,6 +17,7 @@ import { makeBashTool } from '../src/tools/bash.js';
 import { GlobTool, GrepTool } from '../src/tools/search.js';
 import { McpManager } from '../src/mcp.js';
 import { resolvePath } from '../src/utils/paths.js';
+import { costOf, priceOf } from '../src/pricing.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-test-'));
@@ -312,4 +313,22 @@ test('Effort tool: raises the effort for the current request, the next user mess
   cfg.effortOverride = 'high';
   assert.match((await tool.call({ level: 'high', reason: 'x' })).content, /already high/);
   assert.ok(!toolsForSubagent(buildTools(cfg, { agents: new Map() }), { tools: null }, {}).some((t) => t.name === 'Effort'));
+});
+
+test('costOf prices a request as the gateway bills it', () => {
+  // a compaction on the gateway: $0.171991 (4 in, 7,169 out, 125,477 cache read, 700 written for 5 minutes)
+  const compaction = { input_tokens: 4, output_tokens: 7169, cache_read_input_tokens: 125477, cache_creation_input_tokens: 700 };
+  assert.equal(costOf('claude-opus-5-5', compaction).toFixed(6), '0.171991');
+  // 1-hour writes at their own price: 434 of them at $8/M
+  const turn = { input_tokens: 2, output_tokens: 221, cache_read_input_tokens: 124109, cache_creation_input_tokens: 434, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 434 } };
+  assert.equal(costOf('claude-opus-5-5', turn).toFixed(6), '0.032722');
+  // long context: Haiku 5.5 above 100K prompt tokens
+  assert.equal(costOf('claude-haiku-5-5', { input_tokens: 1000 }), 0.0001);
+  assert.equal(costOf('claude-haiku-5-5', { input_tokens: 200_000 }), 0.1);
+  // names as they come: dated, [1m], a provider prefix, a dot in a GPT version; an older Claude model is its family's
+  assert.equal(priceOf('anthropic/claude-sonnet-5-5-20261001[1m]').id, 'claude-sonnet-5-5');
+  assert.equal(priceOf('gpt-6.1-sol').id, 'gpt-6-1-sol');
+  assert.equal(priceOf('claude-opus-4-6').id, 'claude-opus-5-5');
+  assert.equal(costOf('mock', { input_tokens: 1000 }), null);
+  assert.equal(costOf('deepseek-chat', { input_tokens: 1000 }), null);
 });

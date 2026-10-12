@@ -463,6 +463,7 @@ export function buildCommands(app) {
       const b = a.subUsage;
       const cacheLines = a.cache.describe();
       out([
+        `Total cost:    ${formatUsd(app.cost)} ${c.dim('for this conversation, at list prices (sub-agents, compaction and side requests included)')}`,
         `Total input:   ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} tokens ${c.dim(`(${formatTokens(u.cacheRead)} cache read, ${formatTokens(u.cacheWrite)} cache write${u.cacheWrite1h ? `, ${formatTokens(u.cacheWrite1h)} of it for 1 hour` : ''})`)}`,
         `Total output:  ${formatTokens(u.output)} tokens`,
         `API requests:  ${u.requests}${u.compactions ? c.dim(` + ${u.compactions} to compact the conversation`) : ''}`,

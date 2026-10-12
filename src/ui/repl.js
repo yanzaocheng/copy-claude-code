@@ -18,7 +18,7 @@ import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
-import { readGatewayLogin } from '../gateway.js';
+import { readGatewayLogin, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -31,7 +31,7 @@ import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, read
 import { fitImagesIn } from '../utils/images.js';
 import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
 import { copyUnique } from '../transfer.js';
-import { checkForUpdate, installUpdate, installedVersion, isNewer, CHECK_EVERY_MS } from '../updater.js';
+import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
 import { qrLines } from '../qr.js';
@@ -196,6 +196,7 @@ export class App {
     this.remotePeersTimer = null;
     this.transfers = new Map(); // files on their way to or from other sessions, for the footer
     this.transferSeq = 0;
+    this.cost = 0; // what this conversation's requests have cost so far (USD at list prices): the footer and /cost
     this.fileIndex = new FileIndex(cwd, () => this.runtime?.config);
     this.store = new SessionStore(cwd);
     // What the terminal prints goes to the remote page too, except what it is told about as events.
@@ -245,6 +246,12 @@ export class App {
     this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this });
     // The conversation's id, sent to the gateway with each request (see streamMessage); it follows /clear and /resume.
     Object.defineProperty(this.runtime.config, 'sessionId', { get: () => this.store.id, configurable: true });
+    // Every request's cost (the conversation's, its sub-agents', side queries'), kept with the session.
+    this.runtime.config.onCost = (usd) => {
+      this.cost += usd;
+      this.store.setCost(this.cost);
+      this.screen.schedule();
+    };
     this.commands = buildCommands(this);
     if (pinOff(this.config.env.CLAUDE_PRO_PIN_INPUT)) { this.screen.pin = false; this.screen.pinned = null; }
     // What the session showed before a restart: scrolled back to in fullscreen, repainted after a resize otherwise.
@@ -992,9 +999,10 @@ export class App {
     if (!canRestart() || /^(0|false|no|off)$/i.test(this.config.env.CLAUDE_PRO_AUTO_RESTART || '')) return;
     this.sourceWatch = watchSource(INSTALL_DIR, (file) => {
       this.sourceChanged = file || true;
-      // another window (or npm) installed a new version: say so, and load it once this session is idle
+      // another window (or npm) installed a new version: say so, and load it once this session is idle. In a
+      // source checkout a newer version in package.json is a release being made, not an install.
       const disk = installedVersion();
-      if (disk !== VERSION && isNewer(disk, VERSION) && this.updateRestart !== disk) {
+      if (installedByNpm() && disk !== VERSION && isNewer(disk, VERSION) && this.updateRestart !== disk) {
         this.updateRestart = disk;
         this.pendingUpdate = null;
         this.notice(`${APP_NAME} ${disk} was installed (by another window or npm); this one restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
@@ -1674,6 +1682,7 @@ export class App {
       this.remote?.register().catch(() => {});
     }
     this.firstPrompt = loaded.title;
+    this.cost = loaded.cost;
     this.agent.messages = loaded.messages;
     this.agent.restoreFileState(loaded.messages, loaded.times);
     this.agent.lastActivityAt = loaded.lastAt; // a long pause before this turn clears old tool results, as it would have
@@ -1711,6 +1720,7 @@ export class App {
     this.topic = null;
     this.customTitle = null;
     this.firstPrompt = null;
+    this.cost = 0;
     this.remote?.resync();
   }
 
@@ -2174,8 +2184,11 @@ export class App {
     // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
     const level = effort || defaultEffort(cfg.mainModel.id, cfg);
     const info = c.dim(level ? `${model} · effort ${level}` : model);
+    // What the conversation has cost so far goes before the model, and is the first to go when room is short.
+    const spent = this.cost > 0 ? c.dim(formatUsd(this.cost)) : '';
+    const join = (...parts) => parts.filter(Boolean).join(c.dim(' · '));
     const room = w - stringWidth(left) - 1;
-    const right = [notice && info ? `${notice}${c.dim(' · ')}${info}` : '', notice, info].find((r) => r && stringWidth(r) < room) || '';
+    const right = [join(notice, spent, info), join(notice, info), notice, info].find((r) => r && stringWidth(r) < room) || '';
     const gap = room - stringWidth(right);
     return right ? left + ' '.repeat(gap) + right : left;
   }

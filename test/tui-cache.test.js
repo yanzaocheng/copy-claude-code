@@ -10,9 +10,10 @@ import path from 'node:path';
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cachetui-config-'));
 let requests = 0;
 let withCache = true; // report cache use in the usage, as Anthropic does
+let replyModel = 'mock'; // the model the replies say answered: one with a price is billed (see pricing.js)
 
 const sse = (usage) => [
-  { type: 'message_start', message: { model: 'mock', usage: { input_tokens: 5, output_tokens: 0, ...usage } } },
+  { type: 'message_start', message: { model: replyModel, usage: { input_tokens: 5, output_tokens: 0, ...usage } } },
   { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'All done.' } },
   { type: 'content_block_stop', index: 0 },
@@ -69,6 +70,37 @@ test('/cost says how much of the input came from the prompt cache, and /status s
   tui.send('/status\r');
   const status = await tui.waitFor('Prompt cache ', { timeout: 20_000 });
   assert.match(status, /Prompt cache +on · TTL 5m for the conversation, 5m for sub-agents and compaction/);
+});
+
+test('the footer and /cost show what the conversation has cost: kept with the session, back to nothing after /clear', async (t) => {
+  requests = 0;
+  withCache = true;
+  replyModel = 'claude-opus-5-5';
+  t.after(() => { replyModel = 'mock'; });
+  const tui = await startTui({ cwd: project() });
+  t.after(() => tui.close());
+  tui.send('first question\r');
+  await tui.waitFor('All done.', { timeout: 20_000 });
+  await tui.waitIdle({ timeout: 20_000 });
+  tui.send('second question\r');
+  await tui.waitIdle({ timeout: 20_000 });
+  // Opus 5.5: 5 in, 3 out, 4,000 written for 5 minutes; then 5 in, 3 out, 4,000 read, 200 written
+  const expected = (5 * 4 + 3 * 20 + 4000 * 5 + 5 * 4 + 3 * 20 + 4000 * 0.2 + 200 * 5) / 1e6;
+  assert.ok(Math.abs(tui.app.cost - expected) < 1e-9, `cost ${tui.app.cost}, expected ${expected}`);
+  await tui.waitFor(/\$0\.02 · mock\s*$/m, { timeout: 5000, all: false });
+  const first = { file: tui.app.store.file, id: tui.app.store.id };
+  assert.ok(Math.abs(SessionStore.load(first.file).cost - expected) < 1e-9, 'kept in the session file');
+
+  tui.send('/cost\r');
+  assert.match(await tui.waitFor('Total cost:', { timeout: 20_000 }), /Total cost: +\$0\.02 for this conversation/);
+
+  tui.send('/clear\r');
+  await tui.waitFor('Welcome to', { timeout: 20_000 });
+  assert.equal(tui.app.cost, 0);
+  assert.doesNotMatch(await tui.snapshot({ all: false }), /\$0\.02 · mock/);
+  tui.app.agent.resetConversation();
+  tui.app.loadSession(first.file, first.id);
+  assert.ok(Math.abs(tui.app.cost - expected) < 1e-9, 'a resumed conversation goes on from its total');
 });
 
 test('/effort and /model ask first while the cache is warm; a "no" changes nothing, a "yes" does', async (t) => {

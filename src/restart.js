@@ -2,6 +2,7 @@
 // process to the next, the check that the new code starts before it is trusted, and the watch on the
 // source files.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -83,18 +84,34 @@ export function runSelfCheck({ root = INSTALL_DIR, signal, timeoutMs = 60_000 } 
 
 // Watch the program's own source (src/ and bin/) and call `onChange(file)` once the files have stopped
 // changing for a moment. Returns {close()}. A platform that cannot watch just never calls back.
+// Only a change of content counts: Windows also reports a file whose last access time was updated, which
+// reading it does (at most once an hour: another window starting, npm packing it, a search).
 export function watchSource(root, onChange) {
   const watchers = [];
   let timer = null;
-  const hit = (_event, name) => {
-    if (name && !/\.(m?js|json)$/i.test(String(name))) return;
+  const SOURCE = /\.(m?js|json)$/i;
+  const digest = (file) => { try { return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('base64'); } catch { return null; } };
+  const known = new Map(); // file -> digest of its content when last seen (null: not there)
+  for (const dir of ['src', 'bin']) {
+    let names = [];
+    try { names = fs.readdirSync(path.join(root, dir), { recursive: true }); } catch { /* not there */ }
+    for (const name of names) if (SOURCE.test(name)) known.set(path.join(root, dir, name), digest(path.join(root, dir, name)));
+  }
+  const hit = (dir) => (_event, name) => {
+    if (name && !SOURCE.test(String(name))) return;
+    if (name) {
+      const file = path.join(root, dir, String(name));
+      const now = digest(file);
+      if (now === (known.get(file) ?? null)) return;
+      known.set(file, now);
+    }
     clearTimeout(timer);
     timer = setTimeout(() => { try { onChange(String(name || '')); } catch { /* the callback's problem */ } }, 400);
     timer.unref?.();
   };
   for (const dir of ['src', 'bin']) {
     try {
-      const watcher = fs.watch(path.join(root, dir), { recursive: true, persistent: false }, hit);
+      const watcher = fs.watch(path.join(root, dir), { recursive: true, persistent: false }, hit(dir));
       watcher.on('error', () => { /* a directory that vanished, a watch limit: not worth a crash */ });
       watchers.push(watcher);
     } catch { /* not supported here */ }
