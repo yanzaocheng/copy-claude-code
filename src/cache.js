@@ -80,12 +80,28 @@ export class CacheStats {
     this.ttl = '5m';
     this.model = null; // the model that answered the last request
     this.effort = null;
+    this.clockUntil = null; // the footer's prompt cache clock (see clock): null shows none
   }
 
   // The history was cut or replaced (compaction, /rewind, /resume): the next request will not find the old
   // one in the cache, and that is expected, not a miss.
   noteRewrite() {
     this.expected = null;
+  }
+
+  // A compaction replaced the conversation: none of it is in the cache until the next response.
+  noteCompacted() {
+    this.noteRewrite();
+    if (this.clockUntil != null) this.clockUntil = 0;
+  }
+
+  // The prompt cache clock of the footer, as in Claude Code's VS Code extension: the minutes left before what
+  // the last request left in the cache runs out (each response that used the cache starts it again), or cold
+  // once it has run out and right after a compaction, until the next response. null before any response
+  // reported cache use. A resumed conversation starts from the clockUntil its session file kept.
+  clock(now = Date.now()) {
+    if (this.clockUntil == null) return null;
+    return now < this.clockUntil ? { minutes: Math.ceil((this.clockUntil - now) / 60_000) } : { cold: true };
   }
 
   // One finished request. `at` is when it started: the TTL counts from there, not from the end of the reply.
@@ -107,6 +123,7 @@ export class CacheStats {
     this.expected = caching ? read + write : null;
     this.expiresAt = at + TTL_MS[ttl];
     this.ttl = ttl;
+    if (caching && (read || write)) this.clockUntil = this.expiresAt;
     if (fp) {
       this.prev = fp;
       this.model = fp.model;

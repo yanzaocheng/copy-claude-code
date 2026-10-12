@@ -346,3 +346,64 @@ test('fullscreen: a drag selects (shown inverted) and gives the text to copy; a 
   press(30, t.screen.barRow + 1);
   assert.equal(t.screen.scroll, 0);
 });
+
+test('fullscreen: ctrl+f finding: matches newest first from the view, highlighted, the current one scrolled into view, kept as output goes on', async () => {
+  const t = setup({ cols: 60, rows: 14 });
+  t.screen.setFull(true);
+  for (let i = 1; i <= 40; i++) t.screen.log(i % 10 === 0 ? `row ${i} has the Needle` : `row ${i}`);
+  t.screen.log('x'.repeat(57) + 'needle'); // wrapped over two rows at 60 columns
+  t.screen.log('last');
+  await t.settle();
+  t.screen.openFind();
+  let s = t.screen.setFind('NEEDLE');
+  assert.deepEqual(s, { query: 'NEEDLE', index: 0, total: 5 }, 'any case; the newest is the first');
+  await t.flush();
+  let rows = await t.rows();
+  const wrapped = rows.findIndex((r) => r.startsWith('xxx'));
+  assert.ok(wrapped >= 0 && rows[wrapped + 1].startsWith('edle'), 'the newest match is in view, over its two rows');
+  const buf = t.term.buffer.active;
+  const cell = (row, col) => buf.getLine(buf.baseY + row).getCell(col);
+  assert.equal(cell(wrapped, 57).getBgColor(), 208, 'the current match stands out');
+  assert.equal(cell(wrapped + 1, 2).getBgColor(), 208, 'also where the line was wrapped');
+  assert.equal(cell(wrapped, 56).getBgColor(), cell(0, 0).getBgColor(), 'not before it');
+
+  // enter: the older ones, the view goes to each and the count follows
+  s = t.screen.findStep(1);
+  assert.equal(s.index, 1);
+  rows = await t.rows();
+  let at = rows.indexOf('row 40 has the Needle');
+  assert.ok(at >= 0);
+  assert.equal(cell(at, 15).getBgColor(), 208);
+  for (let k = 0; k < 3; k++) s = t.screen.findStep(1);
+  assert.equal(s.index, 4);
+  rows = await t.rows();
+  at = rows.indexOf('row 10 has the Needle');
+  assert.ok(at >= 0, 'scrolled up to the oldest');
+  assert.ok(t.screen.scroll > 0);
+  assert.equal(t.screen.findStep(1).index, 0, 'round from the oldest to the newest');
+  assert.equal(t.screen.findStep(-1).index, 4, 'and back');
+
+  // output arriving meanwhile: the current match stays the current one, a new match counts as the newest
+  t.screen.log('a new needle');
+  await t.settle();
+  s = t.screen.findStatus();
+  assert.deepEqual([s.index, s.total], [5, 6]);
+  assert.equal(t.screen.finding.matches[s.index].line, t.screen.history.indexOf('row 10 has the Needle'));
+
+  // closing: no highlight, the view stays
+  const scroll = t.screen.scroll;
+  t.screen.closeFind();
+  await t.flush();
+  rows = await t.rows();
+  at = rows.indexOf('row 10 has the Needle');
+  assert.equal(cell(at, 15).getBgColor(), cell(0, 0).getBgColor());
+  assert.equal(t.screen.scroll, scroll);
+
+  // a search started scrolled up shows the nearest match above the bottom of the view first
+  t.screen.scrollBy('bottom');
+  t.screen.scrollBy(14);
+  t.screen.openFind();
+  s = t.screen.setFind('needle');
+  assert.equal(t.screen.finding.matches[s.index].line, t.screen.history.indexOf('row 30 has the Needle'));
+  assert.equal(t.screen.setFind('nothing like it').total, 0);
+});

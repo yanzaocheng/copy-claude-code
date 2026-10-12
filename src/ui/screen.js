@@ -43,6 +43,10 @@ const FULL_KEEP = 20_000; // fullscreen: lines of the conversation kept to scrol
 const ALT_ON = '\x1b[?1049h\x1b[?1002h\x1b[?1006h';
 const ALT_OFF = '\x1b[?1002l\x1b[?1006l\x1b[?1049l';
 const MULTI_CLICK_MS = 450;
+// A search (ctrl+f): the matches, the current one, and how many are looked for at most.
+const FIND_MATCH = '\x1b[30;43m';
+const FIND_CURRENT = '\x1b[30;48;5;208m';
+const FIND_MAX = 10_000;
 
 // The part of `plain` (no escape codes) between columns `from` (included) and `to` (not).
 function sliceCols(plain, from, to) {
@@ -146,6 +150,8 @@ export class Screen {
     this.lastArea = 0; // fullscreen: rows the conversation had on screen at the last draw
     this.viewMap = []; // fullscreen: what each row of the conversation area shows, {line, sub} (null: blank)
     this.barRow = null; // fullscreen: the row of the "Jump to bottom" bar, when it is shown
+    this.finding = null; // fullscreen: a search in the conversation (ctrl+f), see openFind
+    this.dropped = 0; // fullscreen: lines dropped from the top of the history so far (the first one's number)
     this.selection = null; // fullscreen: {anchor, focus}, points {line, sub, col} of the conversation (history line, wrapped row, column)
     this.dragging = false;
     this.lastClick = { at: 0, x: 0, y: 0, count: 0 };
@@ -270,11 +276,163 @@ export class Screen {
     return to > from ? [from, to] : null;
   }
 
+  // A row of the conversation as drawn: the selection in reverse video, the matches of a search highlighted (the
+  // current one apart). Such a row loses its own colours.
   paintRow(e) {
-    const cols = this.selectedCols(e);
-    if (!cols) return e.text;
-    const plain = stripAnsi(e.text);
-    return sliceCols(plain, 0, cols[0]) + '\x1b[7m' + sliceCols(plain, cols[0], cols[1]) + '\x1b[27m' + sliceCols(plain, cols[1], Infinity);
+    const sel = this.selectedCols(e);
+    const hits = this.finding?.byRow.get(`${e.line}:${e.sub}`);
+    if (!sel && !hits) return e.text;
+    const style = (col) => {
+      if (sel && col >= sel[0] && col < sel[1]) return '\x1b[7m';
+      const hit = hits?.find((h) => col >= h.from && col < h.to);
+      return !hit ? '' : hit.match === this.finding.matches[this.finding.index] ? FIND_CURRENT : FIND_MATCH;
+    };
+    let out = '';
+    let open = '';
+    let col = 0;
+    for (const g of graphemes(stripAnsi(e.text))) {
+      const s = style(col);
+      if (s !== open) { out += '\x1b[0m' + s; open = s; }
+      out += g;
+      col += graphemeWidth(g);
+    }
+    return out + (open ? '\x1b[0m' : '');
+  }
+
+  // ------------------------------------------------------------ finding text (fullscreen, ctrl+f)
+  //
+  // `finding`: {query, matches, byRow, index, anchor, key}. Matches are newest first (from the bottom of the
+  // conversation up): {abs, offset, line, sub, col, fromEnd}, `abs` the line counted from the first line ever
+  // printed (so that it survives lines dropped from the top), `offset` where it starts in the line's text, and
+  // `fromEnd` the rows from its first row to the end of the conversation. `byRow` maps "line:sub" to the column
+  // ranges to highlight, {from, to, match}. A match may go on over the rows a long line was wrapped onto.
+
+  // Start finding: the first match shown is the nearest one above the bottom of the view as it is now.
+  openFind() {
+    this.takeStatic();
+    this.finding = { query: '', matches: [], byRow: new Map(), index: -1, anchor: this.scroll, cols: 0, dropped: -1, scanned: -1 };
+  }
+
+  closeFind() {
+    if (!this.finding) return;
+    this.finding = null;
+    this.draw();
+  }
+
+  // Look for `query` as typed, in any case; shows the first match (see openFind). {index, total}: index is 0 for
+  // the newest match.
+  setFind(query) {
+    const f = this.finding;
+    if (!f) return null;
+    f.query = query;
+    f.cols = 0; // all of it again
+    f.index = -1;
+    this.refreshFind();
+    if (f.matches.length) {
+      const at = f.matches.findIndex((m) => m.fromEnd >= f.anchor);
+      f.index = at >= 0 ? at : f.matches.length - 1;
+      this.revealMatch();
+    }
+    this.draw();
+    return this.findStatus();
+  }
+
+  // The next match up (`dir` 1: older) or down (-1: newer), round from either end.
+  findStep(dir) {
+    const f = this.finding;
+    if (!f) return null;
+    this.refreshFind();
+    const n = f.matches.length;
+    if (n) {
+      f.index = ((f.index < 0 ? 0 : f.index + dir) % n + n) % n;
+      this.revealMatch();
+    }
+    this.draw();
+    return this.findStatus();
+  }
+
+  findStatus() {
+    const f = this.finding;
+    if (!f) return null;
+    this.refreshFind();
+    return { query: f.query, index: f.index, total: f.matches.length };
+  }
+
+  // The matches again when the conversation or the width changed since they were found; the current one stays.
+  // Lines added at the end (output while the search is open) are searched on their own.
+  refreshFind() {
+    const f = this.finding;
+    const cols = this.width;
+    if (!f || (f.cols === cols && f.dropped === this.dropped && f.scanned === this.history.length)) return;
+    if (!f.query) {
+      Object.assign(f, { matches: [], byRow: new Map(), index: -1, cols, dropped: this.dropped, scanned: this.history.length });
+      return;
+    }
+    if (f.cols === cols && f.dropped === this.dropped && f.scanned < this.history.length) {
+      const added = this.scanFind(f, f.scanned, this.history.length, cols);
+      for (const m of f.matches) m.fromEnd += added.rows;
+      f.matches = [...added.matches, ...f.matches];
+      if (f.index >= 0) f.index += added.matches.length;
+      f.scanned = this.history.length;
+      return;
+    }
+    const current = f.matches[f.index];
+    f.byRow = new Map();
+    f.matches = this.scanFind(f, 0, this.history.length, cols).matches;
+    Object.assign(f, { cols, dropped: this.dropped, scanned: this.history.length });
+    const same = current ? f.matches.findIndex((m) => m.abs === current.abs && m.offset === current.offset) : -1;
+    f.index = same >= 0 ? same : Math.min(f.index, f.matches.length - 1);
+  }
+
+  // The matches of f.query in history lines [from, to), newest first, entered in f.byRow; `rows`: the rows those
+  // lines take (fromEnd counts from the end of line to - 1).
+  scanFind(f, from, to, cols) {
+    const re = new RegExp(f.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
+    const matches = [];
+    let rowsAfter = 0;
+    for (let line = to - 1; line >= from; line--) {
+      const rows = this.wrappedAt(line, cols);
+      if (matches.length < FIND_MAX) {
+        const plains = rows.map((r) => stripAnsi(r));
+        const text = plains.join('');
+        const starts = [];
+        for (let k = 0, at = 0; k < plains.length; at += plains[k].length, k++) starts.push(at);
+        // offset -> {sub, col}: the row it falls on, and the column there (`end`: an end offset belongs to the row before)
+        const place = (offset, end = false) => {
+          let sub = plains.length - 1;
+          while (sub > 0 && (end ? starts[sub] >= offset : starts[sub] > offset)) sub--;
+          return { sub, col: stringWidth(plains[sub].slice(0, offset - starts[sub])) };
+        };
+        const found = [];
+        for (const m of text.matchAll(re)) {
+          if (!m[0]) continue;
+          const a = place(m.index);
+          const b = place(m.index + m[0].length, true);
+          const match = { abs: this.dropped + line, offset: m.index, line, sub: a.sub, col: a.col, fromEnd: rowsAfter + rows.length - 1 - a.sub };
+          for (let sub = a.sub; sub <= b.sub; sub++) {
+            const k = `${line}:${sub}`;
+            if (!f.byRow.has(k)) f.byRow.set(k, []);
+            f.byRow.get(k).push({ from: sub === a.sub ? a.col : 0, to: sub === b.sub ? b.col : Infinity, match });
+          }
+          found.push(match);
+        }
+        matches.push(...found.reverse());
+      }
+      rowsAfter += rows.length;
+    }
+    return { matches, rows: rowsAfter };
+  }
+
+  // Scroll so that the current match is on screen: where it is if it is already in view, else in the middle.
+  revealMatch() {
+    const m = this.finding?.matches[this.finding.index];
+    if (!m || !this.full) return;
+    const area = Math.max(1, this.lastArea || this.height - 6);
+    const lowest = this.scroll + (this.scroll > 0 ? 1 : 0); // the "Jump to bottom" bar covers the last row
+    if (m.fromEnd >= lowest && m.fromEnd < this.scroll + area) return;
+    const max = Math.max(0, this.totalRows(this.width) - area);
+    this.scroll = Math.max(0, Math.min(max, m.fromEnd - Math.floor(area / 2)));
+    if (!this.scroll) this.unseen = 0;
   }
 
   // The text selected, as it was printed: rows a long line was wrapped onto are joined again.
@@ -407,6 +565,7 @@ export class Screen {
     const layout = this.layoutLive(cols);
     const area = Math.max(0, screenRows - layout.rows.length);
     this.lastArea = area;
+    if (this.finding) this.refreshFind();
     const shown = this.view(area, cols);
     this.viewMap = shown;
     const top = shown.map((e) => (e ? this.paintRow(e) : ''));
@@ -474,6 +633,7 @@ export class Screen {
       const drop = this.history.length - keep;
       this.history.splice(0, drop);
       this.wrapped.splice(0, drop);
+      this.dropped += drop;
       if (this.selection) {
         for (const p of [this.selection.anchor, this.selection.focus]) p.line -= drop;
         if (this.selection.anchor.line < 0 || this.selection.focus.line < 0) this.selection = null;
@@ -630,6 +790,7 @@ export class Screen {
 
   clearScreen() {
     if (this.full) {
+      this.dropped += this.history.length;
       this.history = [];
       this.wrapped = [];
       this.selection = null;

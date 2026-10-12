@@ -51,6 +51,8 @@ export const c = {
   plan: hex('#48968c'),
   edits: hex('#af87ff'),
   code: hex('#b1b9f9'),
+  userBg: hex('#373737', true), // the band behind the user's messages (see renderUserMessage)
+  userText: hex('#e4e4e4'),
   diffAdd: hex('#225c2b', true),
   diffDel: hex('#7a2936', true),
   diffAddWord: hex('#38a660', true),

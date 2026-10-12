@@ -79,6 +79,13 @@ export class SessionStore {
   reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
   // What the conversation's requests have cost so far (USD, see pricing.js), written after each one; the newest wins.
   setCost(usd) { this.append({ type: 'meta', cost: usd, at: Date.now() }); }
+  // Until when the conversation's prompt cache lasts (ms since epoch; 0: cold), for the footer's clock of a
+  // resumed conversation (see CacheStats.clock). Written after each of its requests and compactions.
+  setCacheUntil(until) {
+    if (until == null || until === this.cacheUntil) return;
+    this.cacheUntil = until;
+    this.append({ type: 'meta', cacheUntil: until, at: Date.now() });
+  }
   // The system prompt this conversation runs behind, kept so that a resumed one continues behind the same prompt
   // and so with the prompt cache it already has (see runtime.resumeSystemPrompt). Written when it first appears
   // and whenever it changes (after a compaction); the newest one wins when the session is loaded.
@@ -117,6 +124,7 @@ export class SessionStore {
       name: typeof meta.name === 'string' && meta.name.trim() ? meta.name : null,
       systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,
       cost: Number(meta.cost) > 0 ? Number(meta.cost) : 0,
+      cacheUntil: Number.isFinite(meta.cacheUntil) && meta.cacheUntil >= 0 ? meta.cacheUntil : null,
     };
   }
 

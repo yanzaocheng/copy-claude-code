@@ -780,6 +780,7 @@ export class Agent {
     }
     const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary) }] };
     this.replaceMessages(part === 'before' ? [note, ...after] : [...before, note]);
+    if (part === 'before') this.cache.noteCompacted(); // from its first message on: nothing of it is cached (the start of "after" still is)
     if (part === 'after') this.todos = []; // what they were about may be summarized away; the model keeps them in the summary
     this.lastContextTokens = estimateTokens(this.messages) + estimateTokens(this.toolSchemas()) + 2000;
     this.tokensSinceUsage = 0;
@@ -809,6 +810,7 @@ export class Agent {
     }
     const todoNote = this.todos.length ? `\n\n<system-reminder>Current todo list:\n${this.todos.map((t) => `- [${t.status}] ${t.content}`).join('\n')}</system-reminder>` : '';
     this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto }) + todoNote }] }]);
+    this.cache.noteCompacted();
     this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
     this.fileState.clear();
     if (!this.isSubagent) this.checkpoints?.markConversationStale(); // the checkpoints are the main conversation's: a sub-agent's own compaction does not end them

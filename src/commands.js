@@ -624,7 +624,7 @@ export function buildCommands(app) {
       reloadConfig();
       app.screen.setFull(want === 'fullscreen');
       out(want === 'fullscreen'
-        ? `Fullscreen: the input box stays at the bottom; scroll with the wheel, PgUp/PgDn, ctrl+Home/End. To select text, hold Shift while dragging. (Saved in ${file})`
+        ? `Fullscreen: the input box stays at the bottom; scroll with the wheel, PgUp/PgDn, ctrl+Home/End; drag to select and copy; ctrl+f to find in the conversation. (Saved in ${file})`
         : `Default renderer: the conversation scrolls in the terminal. (Saved in ${file})`);
     },
   });

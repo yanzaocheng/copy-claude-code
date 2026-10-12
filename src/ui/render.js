@@ -1,6 +1,6 @@
 // Formatting of transcript items: user prompts, tool calls and results, diffs, todos.
 
-import { c, stringWidth, truncate, padEnd, wordWrap, wrapLine } from './ansi.js';
+import { c, colorEnabled, stringWidth, truncate, padEnd, wordWrap, wrapLine } from './ansi.js';
 import { displayPath } from '../utils/paths.js';
 import { renderMarkdown } from './markdown.js';
 
@@ -129,14 +129,19 @@ export function renderToolResult(entry, { verbose = false, width = 100, cwd }) {
   return resultLines(shown);
 }
 
+// What the user wrote, on a band of background colour across the window, so that it stands apart from the replies
+// (as in Claude Code). The band is the rest of each row erased in that colour (\x1b[K), which needs no padding and
+// so fits any width the window is given later.
+const userRow = (s) => (colorEnabled ? c.userBg(s + '\x1b[K') : s);
+
 export function renderUserMessage(text, width) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const out = [];
   lines.forEach((l, i) => {
     const wrapped = wordWrap(l, Math.max(10, width - 3));
-    wrapped.forEach((wl, j) => out.push((i === 0 && j === 0 ? c.gray('> ') : '  ') + c.gray(wl)));
+    wrapped.forEach((wl, j) => out.push(userRow((i === 0 && j === 0 ? c.gray('> ') : '  ') + c.userText(wl))));
   });
-  if (out.length > 30) return [...out.slice(0, 25), c.dim(`  … +${out.length - 25} lines`)];
+  if (out.length > 30) return [...out.slice(0, 25), userRow(c.gray(`  … +${out.length - 25} lines`))];
   return out;
 }
 
