@@ -9,7 +9,7 @@ import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
 import { CacheStats, TTL_MS } from './cache.js';
 import { resolvePath } from './utils/paths.js';
-import { fitImagesIn } from './utils/images.js';
+import { fitImagesIn, lightenImagesIn } from './utils/images.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -248,6 +248,12 @@ export class Agent {
     this.messages = messages;
     this.cache.noteRewrite(); // the old conversation is no longer a prefix of the next request: not a cache miss
     this.io.messagesReplaced?.(messages, this);
+  }
+
+  // Screenshots that joined the conversation as heavy PNGs (before images were re-encoded, see utils/images.js)
+  // go on as JPEGs: changed in place once, and kept so in the session file, at the price of one cache rewrite.
+  async lightenImages() {
+    if (await lightenImagesIn(this.messages)) this.replaceMessages(this.messages);
   }
 
   // The system prompt for the next request: this agent's own, built when it is first needed.
@@ -561,6 +567,7 @@ export class Agent {
   }
 
   async callModel(signal) {
+    await this.lightenImages();
     const system = this.currentSystem();
     // The system prompt is kept with the conversation, so that a resumed one can continue behind the same
     // prompt (and so with the cache it has) instead of a freshly built one.
@@ -764,6 +771,7 @@ export class Agent {
     const after = this.messages.slice(index);
     if (!(part === 'before' ? before : after).length) throw new Error('There is nothing in that part of the conversation to summarize.');
     this.io.compactStart?.(false, this);
+    await this.lightenImages(); // in place: `before` and `after` hold the same blocks
     const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: partialCompactPrompt(part, label, instructions) }] }]);
     let res;
     try {
@@ -793,6 +801,7 @@ export class Agent {
   async compact({ signal, auto = false, instructions = '' } = {}) {
     if (this.messages.length === 0) return null;
     this.io.compactStart?.(auto, this);
+    await this.lightenImages();
     const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: compactPrompt(instructions) }] }]);
     // If the last assistant turn has unanswered tool calls, the sequence is invalid; drop it.
     let res;

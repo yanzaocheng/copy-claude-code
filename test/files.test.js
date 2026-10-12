@@ -166,8 +166,9 @@ test('Read never returns more than 400k characters, and then says exactly where 
   assert.ok(out.includes('\t20x') && !out.includes('\t21x'));
 });
 
-// A PNG of the given size (a pattern, so that it does not compress to nothing).
-function makePng(w, h) {
+// A PNG of the given size (a pattern, so that it does not compress to nothing). `grain`: a gradient with fine
+// noise on every channel, as a rendered 3D scene has: heavy as PNG, light as JPEG.
+function makePng(w, h, { grain = false } = {}) {
   const chunk = (type, data) => {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length);
@@ -183,7 +184,14 @@ function makePng(w, h) {
   ihdr[9] = 2;
   const stride = 1 + w * 3;
   const raw = Buffer.alloc(stride * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) raw[y * stride + 1 + x * 3] = (x * 7 + y) & 255;
+  let seed = 12345;
+  const noise = () => ((seed = (seed * 1103515245 + 12345) >>> 0) >>> 24) & 31;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!grain) { raw[y * stride + 1 + x * 3] = (x * 7 + y) & 255; continue; }
+      for (let ch = 0; ch < 3; ch++) raw[y * stride + 1 + x * 3 + ch] = (((x + y) >> 2) + ch * 40 + noise()) & 255;
+    }
+  }
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 
@@ -215,4 +223,43 @@ test('Read scales a tall screenshot to what the API takes, and says so; a small 
   const small = await ReadTool.call({ file_path: path.join(dir, 'small.png') }, ctxFor(dir));
   assert.equal(small.content.length, 1);
   assert.equal(small.content[0].source.data, makePng(300, 200).toString('base64'));
+});
+
+test('a heavy PNG goes as JPEG: from Read, and once in a conversation that already holds one', { skip: process.platform !== 'win32' && 'images are re-encoded with System.Drawing here' }, async () => {
+  const { PNG_AS_JPEG_BYTES } = await import('../src/utils/images.js');
+  const { Agent } = await import('../src/agent.js');
+  const { Config } = await import('../src/config.js');
+  const { ModeManager } = await import('../src/modes.js');
+  const dir = tmp();
+  const heavy = makePng(700, 700, { grain: true });
+  assert.ok(heavy.length > PNG_AS_JPEG_BYTES, `the test PNG is ${heavy.length} bytes`);
+  fs.writeFileSync(path.join(dir, 'scene.png'), heavy);
+  const read = await ReadTool.call({ file_path: path.join(dir, 'scene.png') }, ctxFor(dir));
+  assert.ok(!read.isError, read.content);
+  const sent = Buffer.from(read.content[0].source.data, 'base64');
+  assert.equal(read.content[0].source.media_type, 'image/jpeg');
+  assert.deepEqual(imageSize(sent), { width: 700, height: 700 }, 'the same pixels');
+  assert.ok(sent.length < heavy.length / 2, `${sent.length} bytes as JPEG, ${heavy.length} as PNG`);
+  assert.equal(read.content.length, 1, 'not scaled: no note about it');
+  assert.match(read.display.summary, /^Read image \(700×700, \d+KB\)$/);
+
+  // a conversation from before: the heavy PNG in a tool result, a light one in a user message
+  const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
+  const replaced = [];
+  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [], systemPrompt: 's', io: { messagesReplaced: (m) => replaced.push(m) }, model: cfg.mainModel, cwd: dir });
+  const light = makePng(300, 200).toString('base64');
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: heavy.toString('base64') } };
+  agent.messages = [
+    { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: light } }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'scene.png' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r1', content: [image] }] },
+  ];
+  agent.cache.expected = 1234;
+  await agent.lightenImages();
+  assert.equal(image.source.media_type, 'image/jpeg', 'changed in the conversation itself');
+  assert.equal(agent.messages[0].content[1].source.data, light, 'a light PNG stays as it is');
+  assert.equal(replaced.length, 1, 'kept so in the session file');
+  assert.equal(agent.cache.expected, null, 'the cache rewrite that follows is expected, not a miss');
+  await agent.lightenImages();
+  assert.equal(replaced.length, 1, 'once');
 });

@@ -4,7 +4,13 @@
 // the model loses nothing it would have seen, and the conversation never carries an image that a later request
 // is refused for. There is no image library: Windows scales with System.Drawing (PowerShell), macOS with sips,
 // elsewhere ImageMagick when it is installed.
+//
+// A heavy PNG goes as JPEG (see PNG_AS_JPEG_BYTES). A screenshot of a 3D scene or a photo hardly compresses as
+// PNG (2.3MB at 723×1568, 180KB as JPEG), and every request carries the whole conversation: a session that
+// looked at eleven of them sent 31MB a request, which took the gateway past its memory limit and is close to the
+// API's 32MB. Images are billed by their pixels, not their bytes, so tokens stay the same.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +19,7 @@ import { spawn } from 'node:child_process';
 export const MAX_IMAGE_EDGE = 1568;
 const API_MAX_EDGE = 2000; // what a request with many images accepts: sent as it is when it cannot be scaled
 export const MAX_IMAGE_BYTES = 3_750_000; // ~5MB once base64 encoded
+export const PNG_AS_JPEG_BYTES = 512 * 1024; // a PNG larger than this goes as JPEG (quality 85) when that is smaller
 
 // {width, height} from the header of a PNG, JPEG, GIF or WebP; null for anything else.
 export function imageSize(buf) {
@@ -75,60 +82,80 @@ $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
 $g.DrawImage($img, 0, 0, $w, $h)
 $g.Dispose(); $img.Dispose()
 $out = $env:CLAUDE_PRO_IMG_OUT
+$jpegOnly = $env:CLAUDE_PRO_IMG_JPEG -eq '1'
 $format = 'png'
-if ($env:CLAUDE_PRO_IMG_JPEG -ne '1') { $bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png) }
-if ($env:CLAUDE_PRO_IMG_JPEG -eq '1' -or (Get-Item $out).Length -gt [int]$env:CLAUDE_PRO_IMG_BYTES) {
+if (-not $jpegOnly) { $bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png) }
+if ($jpegOnly -or (Get-Item $out).Length -gt [int]$env:CLAUDE_PRO_IMG_BYTES) {
+  # JPEG has no transparency: flatten onto white (a screenshot has none to lose)
+  $flat = New-Object System.Drawing.Bitmap $w, $h
+  $g = [System.Drawing.Graphics]::FromImage($flat)
+  $g.Clear([System.Drawing.Color]::White)
+  $g.DrawImage($bmp, 0, 0, $w, $h)
+  $g.Dispose()
   $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
   $params = New-Object System.Drawing.Imaging.EncoderParameters 1
   $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), 85L
-  $bmp.Save($out, $codec, $params)
-  $format = 'jpeg'
+  $jpg = "$out.jpg"
+  $flat.Save($jpg, $codec, $params)
+  $flat.Dispose()
+  if ($jpegOnly -or (Get-Item $jpg).Length -lt (Get-Item $out).Length) { Move-Item -Force $jpg $out; $format = 'jpeg' } else { Remove-Item $jpg }
 }
 $bmp.Dispose()
 Write-Output "IMG $format"
 `;
 
 // The image file `input` scaled to fit `max` px into a new file: {buffer, media_type}, or null when nothing here
-// can scale images.
+// can scale images. `jpeg`: as JPEG; else as PNG, or as JPEG when the PNG is over PNG_AS_JPEG_BYTES and the JPEG
+// is smaller.
 async function scaleFile(input, { max, jpeg }) {
   const out = path.join(os.tmpdir(), `claude-pro-img-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   try {
     if (process.platform === 'win32') {
       const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(PS_SCALE, 'utf16le').toString('base64')], {
-        env: { CLAUDE_PRO_IMG_IN: input, CLAUDE_PRO_IMG_OUT: out, CLAUDE_PRO_IMG_MAX: String(max), CLAUDE_PRO_IMG_JPEG: jpeg ? '1' : '', CLAUDE_PRO_IMG_BYTES: String(MAX_IMAGE_BYTES) },
+        env: { CLAUDE_PRO_IMG_IN: input, CLAUDE_PRO_IMG_OUT: out, CLAUDE_PRO_IMG_MAX: String(max), CLAUDE_PRO_IMG_JPEG: jpeg ? '1' : '', CLAUDE_PRO_IMG_BYTES: String(PNG_AS_JPEG_BYTES) },
       });
       const m = /IMG (png|jpeg)/.exec(r.out);
       if (r.code !== 0 || !m) return null;
       return { buffer: fs.readFileSync(out), media_type: `image/${m[1]}` };
     }
-    const target = `${out}.${jpeg ? 'jpg' : 'png'}`;
-    const tries = process.platform === 'darwin'
-      ? [['sips', ['-Z', String(max), '-s', 'format', jpeg ? 'jpeg' : 'png', input, '--out', target]]]
-      : [['magick', [input, '-resize', `${max}x${max}>`, target]], ['convert', [input, '-resize', `${max}x${max}>`, target]]];
-    for (const [cmd, args] of tries) {
-      const r = await run(cmd, args);
-      if (r.code === 0 && fs.existsSync(target)) {
-        try { return { buffer: fs.readFileSync(target), media_type: jpeg ? 'image/jpeg' : 'image/png' }; } finally { fs.rm(target, { force: true }, () => {}); }
+    const produce = async (format) => {
+      const target = `${out}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+      const asJpeg = format === 'jpeg' ? ['-background', 'white', '-flatten', '-quality', '85'] : [];
+      const tries = process.platform === 'darwin'
+        ? [['sips', ['-Z', String(max), '-s', 'format', format, ...(format === 'jpeg' ? ['-s', 'formatOptions', '85'] : []), input, '--out', target]]]
+        : [['magick', [input, '-resize', `${max}x${max}>`, ...asJpeg, target]], ['convert', [input, '-resize', `${max}x${max}>`, ...asJpeg, target]]];
+      for (const [cmd, args] of tries) {
+        const r = await run(cmd, args);
+        if (r.code === 0 && fs.existsSync(target)) {
+          try { return { buffer: fs.readFileSync(target), media_type: `image/${format}` }; } finally { fs.rm(target, { force: true }, () => {}); }
+        }
       }
-    }
-    return null;
+      return null;
+    };
+    if (jpeg) return await produce('jpeg');
+    const png = await produce('png');
+    if (!png || png.buffer.length <= PNG_AS_JPEG_BYTES) return png;
+    const jpg = await produce('jpeg');
+    return jpg && jpg.buffer.length < png.buffer.length ? jpg : png;
   } catch {
     return null;
   } finally {
     fs.rm(out, { force: true }, () => {});
+    fs.rm(`${out}.jpg`, { force: true }, () => {});
   }
 }
 
-// The image as the model should get it. `data` is base64. Returns {data, media_type, width, height, from} where
-// `from` is the size it had when it was scaled (null when it is sent as it is), or {error} when it is too large
-// and cannot be scaled here.
+// The image as the model should get it. `data` is base64. Returns {data, media_type, width, height, from, changed}
+// where `from` is the size it had when it was scaled (null when its size stays) and `changed` says whether `data`
+// is new (scaled, or a heavy PNG as JPEG), or {error} when it is too large and cannot be scaled here.
 export async function fitImage({ data, media_type }) {
   const buf = Buffer.from(data, 'base64');
   const size = imageSize(buf);
-  const keep = { data, media_type, width: size?.width ?? null, height: size?.height ?? null, from: null };
+  const keep = { data, media_type, width: size?.width ?? null, height: size?.height ?? null, from: null, changed: false };
   if (!size) return keep; // not a format it knows: the API will say what it thinks of it
   const edge = Math.max(size.width, size.height);
-  if (edge <= MAX_IMAGE_EDGE && buf.length <= MAX_IMAGE_BYTES) return keep;
+  const heavyPng = media_type === 'image/png' && buf.length > PNG_AS_JPEG_BYTES;
+  if (edge <= MAX_IMAGE_EDGE && buf.length <= MAX_IMAGE_BYTES && !heavyPng) return keep;
   const ext = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' }[media_type] || '.img';
   const input = path.join(os.tmpdir(), `claude-pro-img-in-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
   let scaled = null;
@@ -139,8 +166,10 @@ export async function fitImage({ data, media_type }) {
     fs.rm(input, { force: true }, () => {});
   }
   const got = scaled && imageSize(scaled.buffer);
-  if (got && Math.max(got.width, got.height) <= API_MAX_EDGE && scaled.buffer.length <= MAX_IMAGE_BYTES) {
-    return { data: scaled.buffer.toString('base64'), media_type: scaled.media_type, width: got.width, height: got.height, from: size };
+  const smaller = edge > MAX_IMAGE_EDGE; // in pixels
+  // the new one when it fits, and is needed or at least lighter (a PNG that stayed PNG may not be)
+  if (got && Math.max(got.width, got.height) <= API_MAX_EDGE && scaled.buffer.length <= MAX_IMAGE_BYTES && (smaller || buf.length > MAX_IMAGE_BYTES || scaled.buffer.length < buf.length)) {
+    return { data: scaled.buffer.toString('base64'), media_type: scaled.media_type, width: got.width, height: got.height, from: smaller ? size : null, changed: true };
   }
   if (edge <= API_MAX_EDGE && buf.length <= MAX_IMAGE_BYTES) return keep;
   return { error: `the image is ${size.width}×${size.height} px${buf.length > MAX_IMAGE_BYTES ? ` and ${(buf.length / 1e6).toFixed(1)}MB` : ''}, more than the API accepts (${API_MAX_EDGE} px a side when a conversation has many images), and it could not be scaled down here` };
@@ -164,12 +193,46 @@ export async function fitImagesIn(blocks) {
         for (const k of Object.keys(b)) delete b[k];
         Object.assign(b, { type: 'text', text: `[image left out: ${fit.error}]` }, mark ? { cache_control: mark } : {});
         changed++;
-      } else if (fit.from) {
+      } else if (fit.changed) {
         b.source = { type: 'base64', media_type: fit.media_type, data: fit.data };
         changed++;
       }
     }
   };
   await visit(blocks);
+  return changed;
+}
+
+// Heavy PNGs (see PNG_AS_JPEG_BYTES) already in a conversation (messages or content blocks) re-encoded in place:
+// those from before images were, or from a tool that left them as they were. Nothing else in it changes. Returns
+// how many changed. A few at a time, as each is a process; one that stays as it is (nothing here can re-encode
+// it, or the JPEG is not smaller) is remembered, so that it is not tried again before every request.
+const keptAsPng = new Set(); // sha1 of the base64 data
+export async function lightenImagesIn(blocks) {
+  const heavy = [];
+  const visit = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const b of list) {
+      if (!b || typeof b !== 'object') continue;
+      if (Array.isArray(b.content)) visit(b.content); // a message, or a tool_result
+      else if (b.type === 'image' && b.source?.type === 'base64' && b.source.media_type === 'image/png' && typeof b.source.data === 'string'
+        && b.source.data.length * 0.75 > PNG_AS_JPEG_BYTES) heavy.push(b);
+    }
+  };
+  visit(blocks);
+  let changed = 0;
+  const lighten = async (b) => {
+    const key = crypto.createHash('sha1').update(b.source.data).digest('base64');
+    if (keptAsPng.has(key)) return;
+    const fit = await fitImage(b.source);
+    if (fit.error || !fit.changed) {
+      if (keptAsPng.size >= 1000) keptAsPng.clear();
+      keptAsPng.add(key);
+      return;
+    }
+    b.source = { type: 'base64', media_type: fit.media_type, data: fit.data };
+    changed++;
+  };
+  for (let i = 0; i < heavy.length; i += 4) await Promise.all(heavy.slice(i, i + 4).map(lighten));
   return changed;
 }
