@@ -43,7 +43,7 @@ Usage notes:
 - Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
 - When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 - Each agent invocation is stateless. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message.
-- The agent's outputs should generally be trusted
+- A sub-agent may run on a smaller model than yours. Use its report to find your way, but before you build an answer or a change on one of its findings, check that finding yourself (read the lines it cites)
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - Set run_in_background: true to start the agent and continue working while it runs (e.g. a long investigation, or several independent jobs). You get a task id back immediately, and the agent's final report arrives automatically in a <task-notification> once it finishes; you do not need to poll. Use TaskOutput to check on or wait for it early, and TaskStop to cancel it. Do not start background agents that edit the same files at the same time.`,
     input_schema: {
