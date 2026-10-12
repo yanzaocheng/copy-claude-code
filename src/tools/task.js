@@ -61,7 +61,7 @@ When NOT to use the Task tool:
 - If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead
 
 Usage notes:
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+- When several independent tasks are worth delegating, start them in a single message with multiple tool uses so that they run concurrently. Do not split closely coupled work between agents: they do not see each other's work, and each one costs its own context and tokens
 - When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 - Each agent invocation is stateless. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message.
 - A sub-agent may run on a smaller model than yours. Use its report to find your way, but before you build an answer or a change on one of its findings, check that finding yourself (read the lines it cites)
