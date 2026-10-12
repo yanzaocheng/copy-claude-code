@@ -9,6 +9,10 @@
 3. 只跑改动所在领域的测试文件,如 `node --test --test-force-exit --test-reporter=dot test/oauth.test.js`(几秒)。dot 报告器只在失败时打印细节,输出比默认的 TAP 短得多(全量 TAP 约 1.5 万 token,读进上下文后每轮都要重读);`npm test` 已经用它。不确定是哪些文件就在 `test/` 里 grep 改动的函数名或命令名。
 4. `npm test`(全部约 280 项,约 15 秒):只在一次改动的最后跑一次,条件是改了共享代码(`api.js`、`agent.js`、`config.js`、`runtime.js`、`ui/repl.js`、`ui/screen.js`、`tools/`、`utils/shell.js`)或改了很多文件;可以放到后台跑,同时写文档。只改文档,或小改动的相关测试已经通过,就不跑。
 
+## 改完就提交(用户的要求,2026-10-12)
+
+每完成一项改动、检查通过后,马上 `git commit`(只提交本地,不必等用户说"提交"),这样别的程序(例如官方 Claude Code 的 `/rewind` 恢复代码)改动了文件,`git status` / `git diff` 一眼就能看出来。提交前先看 `git status`:只 `git add` 自己改的文件;有不是自己改的改动,不要一起提交,先查清来源并告诉用户。`git push` 和 `npm publish` 仍然等用户说"发布"。
+
 现有测试保留:它们很快,守着用户依赖的行为。改动有意改变行为时,改断言,不要为了通过而删测试。除非用户要求,或改动有风险(会丢数据、涉及凭据、会杀进程),否则不做变异检查、不开审查子 agent、不新增测试文件。
 
 ## 省时间的事实
