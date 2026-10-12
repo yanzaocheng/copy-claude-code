@@ -437,7 +437,7 @@ export function buildCommands(app) {
             : cfg.usesCodex ? (() => { const s = codexLoginSummary({ ...process.env, ...cfg.env }); return s.ok ? `Codex login${s.email ? ` of ${s.email}` : ''}${s.plan ? ` (${s.plan})` : ''} ${c.dim(s.file)}` : c.red(s.error); })()
               : cfg.authToken ? `ANTHROPIC_AUTH_TOKEN (${cfg.display('ANTHROPIC_AUTH_TOKEN')})` : cfg.apiKey ? `ANTHROPIC_API_KEY (${cfg.display('ANTHROPIC_API_KEY')})` : c.red('none')),
         row('Model', `${cfg.mainModel.label} ${c.dim(`(sent as "${cfg.mainModel.id}", ${formatTokens(cfg.mainModel.contextWindow)} context)`)}`),
-        row('Sub-agent model', cfg.subagentModel.label),
+        row('Sub-agent model', cfg.subagentModelChosen ? `chosen per task by difficulty ${c.dim(`(haiku, sonnet or opus; not chosen: ${cfg.subagentModel.label})`)}` : cfg.subagentModel.label),
         row('Small model', cfg.smallModel.label),
         row('Effort', cfg.effort || 'auto'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),

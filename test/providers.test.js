@@ -17,6 +17,7 @@ const { Config } = await import('../src/config.js');
 const { streamMessage, buildParams } = await import('../src/api.js');
 const { loginWithBrowser, readGatewayLogin, gatewayLoginFile, clearGatewayLogin, fetchGatewayModels } = await import('../src/gateway.js');
 const { createCodexFetch } = await import('../src/codex/client.js');
+const { makeTaskTool } = await import('../src/tools/task.js');
 
 const jwt = (payload) => `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.sig`;
 const claims = { 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_1', chatgpt_plan_type: 'plus' } };
@@ -31,12 +32,14 @@ test('gateway and codex providers: models, windows, sub-agent and output default
   const gw = config({ CLAUDE_PRO_PROVIDER: 'gateway' });
   assert.equal(gw.mainModel.id, 'claude-opus-5-5');
   assert.equal(gw.mainModel.contextWindow, 1_000_000);
-  assert.equal(gw.subagentModel.id, 'claude-sonnet-5-5');
+  assert.equal(gw.subagentModel.id, 'claude-opus-5-5', 'a sub-agent given no model runs on the main model');
+  assert.equal(gw.subagentModelChosen, true);
   assert.equal(gw.smallModel.id, 'claude-haiku-5-5');
   assert.equal(gw.maxOutputTokens, 32_000, 'a smaller balance hold per request');
   assert.equal(gw.gatewayUrl, 'https://gw.predix.icu');
   const gpt = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol' });
   assert.deepEqual([gpt.mainModel.id, gpt.mainModel.contextWindow, gpt.subagentModel.id], ['gpt-6.1-sol', 272_000, 'gpt-6.1-sol']);
+  assert.equal(gpt.subagentModelChosen, false, 'a GPT main model keeps its own');
   assert.deepEqual(buildParams(gpt, { model: gpt.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }).output_config, { effort: 'low' }, 'the model default is sent');
   const effortOf = (env) => { const c = config(env); return buildParams(c, { model: c.mainModel, system: 's', messages: [{ role: 'user', content: 'x' }] }).output_config?.effort; };
   assert.equal(effortOf({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol', CLAUDE_CODE_EFFORT_LEVEL: 'none' }), 'low', 'a level the GPT model does not take goes out as the nearest one');
@@ -50,6 +53,22 @@ test('gateway and codex providers: models, windows, sub-agent and output default
   assert.equal(cx.subagentModel.id, 'gpt-6.1-sol');
   assert.match(cx.endpointLabel, /chatgpt\.com/);
   assert.throws(() => config({ CLAUDE_PRO_PROVIDER: 'nope' }).provider, /api, claude-code, gateway, codex/);
+});
+
+test('gateway: the Task tool tells the main agent to choose each sub-agent\'s model by the task', () => {
+  const agents = new Map([['general-purpose', { name: 'general-purpose', description: 'd', tools: '*', prompt: 'p' }]]);
+  const gw = config({ CLAUDE_PRO_PROVIDER: 'gateway' });
+  const text = makeTaskTool(agents, gw).description();
+  assert.match(text, /Choosing the model: there is no fixed sub-agent model/);
+  assert.match(text, /- haiku \(claude-haiku-5-5, \$0\.1\/\$0\.5 per million/);
+  assert.match(text, /- sonnet \(claude-sonnet-5-5, \$2\/\$10 per million/);
+  assert.match(text, /- opus \(claude-opus-5-5, your own model, \$4\/\$20 per million/);
+  assert.match(text, /else on claude-opus-5-5\.$/);
+  gw.modelOverride = 'sonnet'; // /model: the text follows it
+  assert.match(makeTaskTool(agents, gw).description(), /- sonnet \(claude-sonnet-5-5, your own model/);
+  for (const other of [config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'gpt-6.1-sol' }), config({ CLAUDE_PRO_PROVIDER: 'codex' }), null]) {
+    assert.doesNotMatch(makeTaskTool(agents, other).description(), /Choosing the model/);
+  }
 });
 
 test('thinking made from Codex reasoning (cgw1:) goes to the Codex backend only; the session keeps it', () => {

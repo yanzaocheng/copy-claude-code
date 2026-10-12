@@ -313,11 +313,15 @@ export class Config {
     // With the subscription login sub-agents run on Sonnet: much cheaper than Opus, and good at the searching and
     // well-specified subtasks they are given. CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL (or a sub-agent's own model) changes it.
     if (this.usesClaudeCode) return this.resolveModel(this.env.CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL || 'sonnet');
-    // The gateway: Sonnet under a Claude main model, as with the subscription; a GPT main model keeps its own.
-    if (this.usesGateway) return /^claude-/i.test(this.mainModel.id) ? this.resolveModel('sonnet') : this.mainModel;
+    // The gateway: no fixed sub-agent model. Under a Claude main model the main agent picks one for each Task by how
+    // hard the task is (see subagentModelChosen and the Task tool's description); this is what an agent runs on when
+    // it was not given one: the main model. A GPT main model keeps its own.
+    if (this.usesGateway) return this.mainModel;
     if (this.usesCodex) return this.mainModel;
     return this.env.CLAUDE_CODE_SUBAGENT_MODEL ? this.resolveModel(this.env.CLAUDE_CODE_SUBAGENT_MODEL) : this.mainModel;
   }
+  // The main agent chooses each sub-agent's model (haiku, sonnet, opus) by the task, rather than one being set.
+  get subagentModelChosen() { return this.usesGateway && /^claude-/i.test(this.mainModel.id); }
   get smallModel() { return this.resolveModel('haiku'); }
 
   get effort() {

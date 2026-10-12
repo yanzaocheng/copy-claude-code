@@ -101,7 +101,7 @@ function configCommand(args, cwd) {
         const what = Object.entries(remembered).map(([k, v]) => `${k} ${v}`).join(', ');
         console.log(`chosen with /model, /effort: ${what} (kept in ${files.user}; wins over the settings above, --model/--effort win over it)`);
       }
-      console.log(`sub-agent model: ${cfg.subagentModel.label}; small model: ${cfg.smallModel.label}`);
+      console.log(`sub-agent model: ${cfg.subagentModelChosen ? `chosen per task (not chosen: ${cfg.subagentModel.label})` : cfg.subagentModel.label}; small model: ${cfg.smallModel.label}`);
       console.log(`auto-compact at ${cfg.autoCompactThreshold().toLocaleString()} tokens (window ${cfg.compactWindow().toLocaleString()})`);
     }
     return 0;

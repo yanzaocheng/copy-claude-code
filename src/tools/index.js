@@ -15,7 +15,7 @@ import { ListPeersTool, MessagePeerTool } from './peers.js';
 // `peers`: an interactive session, which can talk to the other sessions on this machine.
 export function buildTools(config, { agents, skills, mcpTools = [], restart = false, peers = false }) {
   return [
-    makeTaskTool(agents),
+    makeTaskTool(agents, config),
     ...(skills?.size ? [makeSkillTool(skills)] : []),
     TaskOutputTool,
     TaskStopTool,
