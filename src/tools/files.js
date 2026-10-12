@@ -68,6 +68,7 @@ Usage:
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool can read images (PNG, JPG, GIF, WEBP) and Jupyter notebooks (.ipynb)
 - This tool can only read files, not directories. To list a directory, use ls via the Bash tool.
+- Do not read a file again just to check an edit you made to it: Edit and Write report an error when they fail.
 - If you read a file that exists but has empty contents you will receive a warning in place of file contents.`,
   input_schema: {
     type: 'object',

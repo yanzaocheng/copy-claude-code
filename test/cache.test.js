@@ -832,6 +832,12 @@ test('the own-code section: fix yourself in a source checkout, only report in an
   assert.doesNotMatch(neither, /# Your own/);
 });
 
+test('the model is told that a long conversation is summarized only while auto-compaction is on', () => {
+  const base = { cwd: tmp(), model: { id: 'mock' }, shellName: 'bash', snapshot: { date: '2026-01-01', git: null } };
+  assert.match(mainSystemPrompt(base), /its earlier part is summarized automatically/);
+  assert.doesNotMatch(mainSystemPrompt({ ...base, autoCompact: false }), /summarized automatically/, 'DISABLE_AUTOCOMPACT=1');
+});
+
 test('sub-agents get the boundaries and the project\'s instructions, except read-only ones', async () => {
   const cwd = tmp();
   fs.writeFileSync(path.join(cwd, 'CLAUDE.md'), 'Run tests with the dot reporter.');

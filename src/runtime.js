@@ -61,7 +61,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
-      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, snapshot: snapshotFor(cwd) });
+      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;
