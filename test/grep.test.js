@@ -33,6 +33,14 @@ test('Grep scanner: globs that only exclude keep every other file (they used to 
   assert.deepEqual(files(dir, await grep(dir, { pattern: 'needle', glob: '!build/**,!*.md' })), ['src/a.js']);
 });
 
+test('Grep scanner: ripgrep\'s inline flags (?i) and (?s) work (a JS RegExp refused them as an invalid group)', async () => {
+  const dir = fixture({ 'a.js': 'Sub-Agent here\n', 'b.js': 'begin\nmiddle\nend\n', 'c.js': 'nothing\n' });
+  assert.deepEqual(files(dir, await grep(dir, { pattern: '(?i)sub-agent' })), ['a.js']);
+  assert.deepEqual(files(dir, await grep(dir, { pattern: '(?is)BEGIN.*END', multiline: true })), ['b.js']);
+  assert.deepEqual(files(dir, await grep(dir, { pattern: '(?s)begin.*end', multiline: true })), ['b.js']);
+  assert.match((await grep(dir, { pattern: '(?i' })).content, /Grep failed/, 'a pattern that is really invalid still says so');
+});
+
 test('Grep takes file_path for path and grep\'s -l / -c flags as output modes', async () => {
   const dir = fixture({ 'a.js': 'needle\nneedle\n', 'b.js': 'needle\n' });
   const norm = (input) => GrepTool.normalizeInput({ ...input });

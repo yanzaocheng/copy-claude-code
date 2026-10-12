@@ -62,9 +62,9 @@ Assume this tool is able to read all files on the machine. If the user provides 
 Usage:
 - The file_path parameter should be an absolute path
 - By default, it reads up to ${MAX_LINES} lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- Read a file whole when you need to understand it; when only a part of a long file matters, give offset and limit (find the place with Grep first if needed)
 - Any lines longer than ${MAX_LINE_CHARS} characters will be truncated
-- A file whose numbered text is longer than ${MAX_OUTPUT_CHARS} characters is refused (or cut there with offset/limit). When you need a large file whole, in one call, pass allow_large: true: then there is no line, character or line length limit, only the room left in the context, and a read that does not fit is refused. Prefer offset/limit or Grep when part of the file will do.
+- A file whose numbered text is longer than ${MAX_OUTPUT_CHARS} characters is refused (or cut there with offset/limit). When you need a large file whole, in one call, pass allow_large: true: then there is no line, character or line length limit, only the room left in the context, and a read that does not fit is refused.
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool can read images (PNG, JPG, GIF, WEBP) and Jupyter notebooks (.ipynb)
 - This tool can only read files, not directories. To list a directory, use ls via the Bash tool.

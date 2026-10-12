@@ -264,16 +264,24 @@ function runRg(bin, args, cwd, signal) {
   });
 }
 
+// ripgrep takes inline flags at the start of a pattern, `(?i)` or `(?is)`; a JS RegExp does not, so they become
+// flags. `m` is dropped: ^ and $ are line anchors here anyway, as in ripgrep.
+export function inlineFlags(pattern) {
+  const m = /^\(\?([ims]+)\)/.exec(pattern);
+  return m ? { pattern: pattern.slice(m[0].length), i: m[1].includes('i'), s: m[1].includes('s') } : { pattern, i: false, s: false };
+}
+
 // JS scanner used when ripgrep isn't available. Returns output lines in rg's format.
 async function jsGrep(input, base, mode, signal) {
   const exts = input.type ? TYPE_EXT[String(input.type).toLowerCase()] : null;
   if (input.type && !exts) throw new Error(`unrecognized file type: ${input.type} (known types: ${Object.keys(TYPE_EXT).join(', ')})`);
-  const flags = input['-i'] ? 'i' : '';
-  const dotAll = input.multiline ? 's' : '';
+  const inline = inlineFlags(input.pattern);
+  const flags = input['-i'] || inline.i ? 'i' : '';
+  const dotAll = input.multiline || inline.s ? 's' : '';
   // ripgrep treats ^ and $ as line anchors, so whole-file matching needs the m flag.
-  const anyRe = new RegExp(input.pattern, `${flags}m${dotAll}`);
-  const allRe = new RegExp(input.pattern, `${flags}gm${dotAll}`);
-  const lineRe = new RegExp(input.pattern, flags);
+  const anyRe = new RegExp(inline.pattern, `${flags}m${dotAll}`);
+  const allRe = new RegExp(inline.pattern, `${flags}gm${dotAll}`);
+  const lineRe = new RegExp(inline.pattern, flags);
   const content = mode === 'content';
   const before = content ? Math.max(0, Number(input['-B'] ?? input['-C'] ?? 0) || 0) : 0;
   const after = content ? Math.max(0, Number(input['-A'] ?? input['-C'] ?? 0) || 0) : 0;
