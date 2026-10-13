@@ -1017,12 +1017,15 @@ test('clearing old tool results: all but the last 5, only what can be got again,
   assert.equal(clearOldToolResults(out.messages, { atLeast: 1 }), null, 'what was cleared is not cleared again');
 });
 
+// Clearing after a pause on (or off) whatever the endpoint (the tests' mock endpoint has it off).
+const idleClearing = (cfg, on = true) => Object.defineProperty(cfg, 'clearAfterIdle', { value: on });
+
 test('back after more than 65 minutes, the next request goes out without the old results; the session file and the file state follow', async (t) => {
   const bodies = [];
   mockFetch(t, async (url, init) => { bodies.push(bodyOf(init)); return replyWith(); });
   const replaced = [];
   const notices = [];
-  const agent = makeAgent(makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '1' }), { io: { messagesReplaced: (m) => replaced.push(m), notice: (text) => notices.push(text) } });
+  const agent = makeAgent(idleClearing(makeConfig({})), { io: { messagesReplaced: (m) => replaced.push(m), notice: (text) => notices.push(text) } });
   agent.cwd = '/proj';
   agent.messages = longConversation();
   agent.fileState.set(resolvePath('/proj/a.js', '/proj'), { mtimeMs: 1 });
@@ -1046,10 +1049,10 @@ test('clearing after a pause: not before 65 minutes, not for a sub-agent, not af
     agent.lastActivityAt = Date.now() - minutes * 60_000;
     return agent;
   };
-  const on = makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '1' });
+  const on = idleClearing(makeConfig({}));
   assert.equal(idleAgent(on, {}, 64).clearAfterIdle(), null, 'the 1-hour cache may still be there');
   assert.equal(idleAgent(on, { isSubagent: true }).clearAfterIdle(), null);
-  assert.equal(idleAgent(makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '0' })).clearAfterIdle(), null);
+  assert.equal(idleAgent(idleClearing(makeConfig({}), false)).clearAfterIdle(), null);
   const unknown = idleAgent(on);
   unknown.lastActivityAt = 0;
   assert.equal(unknown.clearAfterIdle(), null, 'no idea when the last message came');
@@ -1062,7 +1065,7 @@ test('clearing after a pause: not before 65 minutes, not for a sub-agent, not af
   const adaptive = interrupted(on);
   assert.equal(adaptive.clearAfterIdle()?.results, 4, 'adaptive thinking: all thinking may go, the unfinished call\'s too (and that call moves the last 5 on by one)');
   assert.ok(adaptive.messages.every((m) => !Array.isArray(m.content) || m.content.every((b) => b.type !== 'thinking')));
-  assert.equal(interrupted(makeConfig({ CLAUDE_PRO_CLEAR_AFTER_IDLE: '1', MAX_THINKING_TOKENS: '8000' })).clearAfterIdle(), null, 'manual thinking: that message has to start with its thinking');
+  assert.equal(interrupted(idleClearing(makeConfig({ MAX_THINKING_TOKENS: '8000' }))).clearAfterIdle(), null, 'manual thinking: that message has to start with its thinking');
   assert.equal(idleAgent(on).clearAfterIdle()?.results, 3);
   // out of the box: on for the subscription login and Anthropic's own endpoint; off for the others
   const configWith = (env) => new Config(env, {}, { hooks: {}, mcpServers: {} }, process.cwd());
@@ -1070,9 +1073,6 @@ test('clearing after a pause: not before 65 minutes, not for a sub-agent, not af
   assert.equal(configWith({}).clearAfterIdle, true);
   assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com/' }).clearAfterIdle, true);
   assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' }).clearAfterIdle, false);
-  assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic', CLAUDE_PRO_CLEAR_AFTER_IDLE: 'true' }).clearAfterIdle, true);
-  assert.equal(configWith({ CLAUDE_PRO_PROVIDER: 'claude-code', CLAUDE_PRO_CLEAR_AFTER_IDLE: '0' }).clearAfterIdle, false);
-  assert.ok(KNOWN_KEYS.CLAUDE_PRO_CLEAR_AFTER_IDLE);
 });
 
 test('a resumed conversation knows when it last changed, so a pause before it counts', () => {

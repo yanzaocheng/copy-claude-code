@@ -420,14 +420,14 @@ test('without a reset time it keeps checking, backing off to the poll interval, 
     times.push(clock.now);
     return times.length <= 9 ? limited() : okResponse('Back.');
   });
-  const config = configWith({ CLAUDE_PRO_RATE_LIMIT_POLL_MS: String(2 * MIN) });
+  const config = configWith({});
   const events = [];
   const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
 
   assert.equal(res.message.content[0].text, 'Back.');
   assert.equal(times.length, 10);
   const gaps = times.slice(1).map((time, i) => time - times[i]);
-  const expected = [1000, 2000, 4000, 8000, 16_000, 32_000, 64_000, 120_000, 120_000];
+  const expected = [1000, 2000, 4000, 8000, 16_000, 32_000, 64_000, 128_000, 256_000];
   gaps.forEach((gap, i) => assert.ok(gap >= expected[i] && gap < expected[i] + 500, `gap ${i} was ${gap}, expected about ${expected[i]}`));
   assert.equal(events.filter((ev) => ev.type === 'retry').length, 5, 'waits under 30 seconds are ordinary retries');
   const pauses = events.filter((ev) => ev.type === 'rate_limit_wait');

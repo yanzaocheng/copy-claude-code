@@ -269,10 +269,8 @@ export class App {
     const stdin = this.stdin;
     stdin.setRawMode(true);
     // Where the cursor is, before anything is drawn: the input box is kept on the last rows of the window from
-    // there (see screen.js). CLAUDE_PRO_PIN_INPUT=0 (here or in the settings) leaves it right below the output.
-    const pinOff = (v) => /^(0|false|no|off)$/i.test(v || '');
-    if (pinOff(process.env.CLAUDE_PRO_PIN_INPUT)) this.screen.pin = false;
-    else if (stdin.isTTY && this.stdout.isTTY && !this.headless) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
+    // there (see screen.js).
+    if (stdin.isTTY && this.stdout.isTTY && !this.headless) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
     this.watchCopies();
@@ -292,7 +290,6 @@ export class App {
       this.screen.schedule();
     };
     this.commands = buildCommands(this);
-    if (pinOff(this.config.env.CLAUDE_PRO_PIN_INPUT)) { this.screen.pin = false; this.screen.pinned = null; }
     // What the session showed before a restart: scrolled back to in fullscreen, repainted after a resize otherwise.
     if (Array.isArray(this.flags.restart?.screenHistory)) this.screen.history = this.flags.restart.screenHistory.filter((l) => typeof l === 'string');
     if (this.fullscreenWanted()) this.screen.setFull(true);
@@ -1476,13 +1473,13 @@ export class App {
     return mode === 'fullscreen' && this.stdout.isTTY !== false;
   }
 
-  // Fullscreen: the wheel scrolls the conversation (CLAUDE_PRO_SCROLL_SPEED rows a notch, 3 by default); a drag,
+  // Fullscreen: the wheel scrolls the conversation (3 rows a notch); a drag,
   // a double or a triple click selects, and what is selected goes to the clipboard (see Screen.mouse).
   onMouse(m) {
     if (!this.screen.full || this.exiting) return;
     if (m.button & 64) {
       if (m.button & 128) return;
-      const speed = Math.max(1, Math.min(20, Number(this.config.env.CLAUDE_PRO_SCROLL_SPEED) || 3));
+      const speed = 3;
       this.screen.scrollBy(m.button & 1 ? -speed : speed);
       return;
     }

@@ -85,78 +85,38 @@ claude-pro config set CLAUDE_PRO_PROVIDER claude-code
 
 ## 配置
 
-与 Claude Code 相同的环境变量，优先级从低到高：
-
-1. `<安装目录>/.env`（已在 `.gitignore` 中，参考 `.env.example`）
-2. `~/.claude-pro/settings.json` 中的 `"env"` 块（全局）
-3. `<项目>/.claude-pro/settings.json`（项目共享）
-4. `<项目>/.claude-pro/settings.local.json`（项目本地，不提交）
-5. Shell 环境变量
-6. 命令行参数（`--model`、`--effort`）
+一般不用配置：`/login` 选好提供方就能用。要接 DeepSeek 之类兼容 Anthropic 接口的端点时，写和 Claude Code 一样的环境变量，例如：
 
 ```bash
 ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
 ANTHROPIC_AUTH_TOKEN=sk-...
 ANTHROPIC_MODEL=deepseek-flash[1m]          # [1m] 后缀 = 1M 上下文窗口（发送时自动去掉）
-ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-flash[1m]
-ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-flash[1m]
-ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-flash # 小模型：WebFetch 摘要等
-CLAUDE_CODE_SUBAGENT_MODEL=deepseek-flash    # Task 子 agent 使用的模型
-CLAUDE_CODE_EFFORT_LEVEL=max                 # 以 output_config.effort 发送
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432       # 自动压缩按这个窗口大小计算
+ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-flash # 小模型：WebFetch 摘要、标题等
+CLAUDE_CODE_EFFORT_LEVEL=max
 ```
 
-其他可选项：`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`（0 关闭思考）、提示词缓存的 `CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`、`ENABLE_PROMPT_CACHING_1H`、`FORCE_PROMPT_CACHING_5M`、`DISABLE_PROMPT_CACHING`（见下文“提示词缓存”）、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`DISABLE_AUTOCOMPACT`、`API_TIMEOUT_MS`、`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、`BASH_MAX_OUTPUT_LENGTH`、`ANTHROPIC_API_KEY`、`ANTHROPIC_CUSTOM_HEADERS`，以及本项目自己的 `CLAUDE_PRO_MAX_RETRIES`、`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`、`CLAUDE_PRO_RATE_LIMIT_POLL_MS`（见下文“限流”）、`CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`、`CLAUDE_PRO_CLEAR_AFTER_IDLE`（见下文“提示词缓存”）、`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`、`CLAUDE_PRO_VERIFY_COMMAND`、`CLAUDE_PRO_VERIFY_MAX_ROUNDS`、`CLAUDE_PRO_DISABLE_AUTO_MEMORY`、`CLAUDE_PRO_RIPGREP_PATH`（rg 的路径；`off` 强制使用内置 JS 搜索）、`CLAUDE_PRO_CONFIG_DIR`。完整列表见 `claude-pro config list`。
+可以写在 `<安装目录>/.env`（参考 `.env.example`）、`~/.claude-pro/settings.json` 的 `"env"` 里（全局）、`<项目>/.claude-pro/settings.json`（项目）、`<项目>/.claude-pro/settings.local.json`（项目本地，不提交）、shell 环境变量或命令行参数（`--model`、`--effort`），后面的覆盖前面的。Claude Code 的其他环境变量（`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`、`DISABLE_AUTOCOMPACT`、`BASH_DEFAULT_TIMEOUT_MS`…）照样认。用 Claude 订阅时，`.env` 里为 API 端点调的 effort、压缩窗口等不生效（`/config` 会列出来），要改就用 `/effort`、`/config set`。
 
 ```bash
-claude-pro config list                                   # 查看生效值及其来源
+claude-pro config list                                   # 生效的设置、来源，以及全部可设的项
 claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/settings.json
-claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 ```
 
-会话中也可以用 `/config`、`/model`、`/effort` 修改。
+会话中用 `/config`、`/model`、`/effort` 修改。
 
-## 提示词缓存：和 Claude Code 一致，尽量少花钱
+## 提示词缓存：自动的，尽量少花钱
 
-每次请求都会把整个对话重新发给模型，账单的大头是"重复读历史"。本项目按 [Claude Code 的做法](https://code.claude.com/docs/en/prompt-caching)使用 Anthropic 的提示词缓存：
+每次请求都要把整个对话发给模型，按 Claude Code 的做法用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
 
-- **断点**：在工具列表末尾、系统提示词、最新一条消息的末尾各放一个 `cache_control`（共 3 个，上限 4 个）。系统提示词在一个会话里只构建一次，前缀稳定才能命中。
-- **开箱即用，不需要配置**：默认值和 Claude Code 一致。订阅登录（`--provider claude-code`）和网关（`gateway`）下**主对话用 1 小时**缓存（Claude Code 在订阅额度内就是这样请求的；网关按 2 倍价计费 1 小时写入，但按网关的用量记录算，533 次 Opus 请求里停顿 5–60 分钟让整段对话重写了 9 次、多花 $14.77，全部改用 1 小时只多花 $2.80），API key / 其他端点用 5 分钟（API 默认值，不发送 `ttl` 字段）；子 agent、压缩等其他请求永远默认 5 分钟。effort 不设就用模型自己的默认值（Sonnet 5.5、Opus 5.5 是 medium），自动压缩窗口不设就是模型的整个窗口。
-- **`.env` 只属于 API 提供方**：`--provider claude-code` 时，`.env` 里的 `CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`、`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS` 不会被读取（它们是为 DeepSeek 之类的端点调的），订阅模式用上面的默认值；`/config` 会列出被忽略的键。想在订阅模式下调，用 `/config set`、`/effort`、设置文件、环境变量或 `--effort`，这些照常生效。
-- **TTL 分两个桶**（可以改），每次命中会重新计时：
-  - **主对话**（你的每一轮）：`CLAUDE_CODE_PROMPT_CACHE_TTL=5m|1h`，或设置项 `promptCacheTtl`
-  - **其他请求**（子 agent、压缩、小模型的辅助请求）：`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=5m|1h`，或设置项 `subagentPromptCacheTtl`
-  - 变量优先于设置项（无论来自哪个文件）；无效的值被忽略，按下一条规则算。`ENABLE_PROMPT_CACHING_1H=1` 让两个桶都用 1 小时（上面两个变量和设置项优先）；`FORCE_PROMPT_CACHING_5M=1` 强制两个桶都用 5 分钟，优先级最高；其他取值被忽略。
-  - 1 小时档的缓存写入按 2 倍价格计费（5 分钟档是 1.25 倍），而且每一轮新增的内容都按这个价写：用 API key 按 token 付费时，只有上下文很大、而且常常停顿超过 5 分钟才划算，所以那里默认是 5 分钟。订阅额度内 Claude Code 默认用 1 小时；想在订阅模式或网关下用 5 分钟，设 `FORCE_PROMPT_CACHING_5M=1`。
-- **关闭缓存**：`DISABLE_PROMPT_CACHING=1` 完全不发 `cache_control`；`DISABLE_PROMPT_CACHING_HAIKU` / `_SONNET` / `_OPUS` 只关 haiku/sonnet/opus 别名所指的模型，`_FABLE` 只关 Fable 模型。
-- **端点不认**：网关对 `cache_control`（或 `ttl`）返回 400 时，不会让请求失败：在被点名的位置去掉标记（报 `ttl` 则退回 5 分钟）后重发；没点名位置的报错一次去掉一处（先消息、再工具、再系统提示词），尽量多保留缓存。请求成功之后才记住这个端点拒绝了什么（之后不再发送），`/status` 会显示；报错本身只是提到 `cache_control` 而去掉标记也没用时，什么都不会记住。
-- **一次性的请求不加缓存标记**：WebFetch 摘要这类整页内容只发一次的小模型请求，缓存写入只会多收钱，所以不标记。
-- **压缩复用缓存**：压缩请求就是对话自己的请求（同样的模型、系统提示词、工具、effort），只在末尾追加一条"请写摘要"的指令，所以能读到前面各轮写好的缓存，而不是把整个历史重新处理一遍。只有这样得不到摘要（模型一直想调工具）或请求超长时，才退回更简单、不能命中缓存的请求。
-- **会话中途不改系统提示词**：保存记忆（`#`）、`/config set` 只做标记，系统提示词要到下一次 `/clear` 或压缩时才重建（与 Claude Code 对 CLAUDE.md 的处理一致）；`/status` 会提示有待生效的改动。子 agent 共用会话开始时的日期和 git 状态快照，同类型的子 agent 反复启动时前缀相同。会话跨过午夜时，系统提示词里的日期不变（保住缓存），新日期以一条提醒附在下一条消息后面，每天一次。
-- **恢复会话**：会话文件里保存了当时的系统提示词（`/clear` 之后的新会话也保存），`--resume` / `/resume` 继续用它，所以缓存还没过期时能接着命中；模型不同、或这次的 `--append-system-prompt` 文本不同时不用它，重新构建。日期过期了，会在下一条消息后面附一句提醒。
-- **离开一个多小时后清掉旧的工具结果**：距上一条消息超过 65 分钟再发消息时，缓存一定已经过期，这次请求本来就要把整段对话重写一遍。这时和 Claude Code 一样，把最近 5 个以外的旧工具结果（读文件、命令、搜索、网页的输出）换成一行占位，能清掉的不足 2 万 token 就不动；之前的 thinking 也一起去掉（改了早先的工具结果，API 就不再接受它后面的 thinking）。之后每次请求都少读这部分。命令、搜索的原始输出存进 `tool-results/`，模型需要时能读回来；文件需要时重新读，编辑前也要求先重读。子 agent 的报告、你的回答等不清。默认只对订阅登录和 api.anthropic.com 开启；DeepSeek 等其他端点的缓存可能保留几个小时，清了反而不命中，默认关。`CLAUDE_PRO_CLEAR_AFTER_IDLE=1` / `0` 强制开关。
-- **缓存还热时，切换要确认**：`/model`、`/effort` 会让下一次请求把整个对话重读一遍，缓存还没过期时会先问一下；过期了、新对话、或端点不报告缓存用量时不问。
-- **看效果**：`/cost` 显示命中率、miss 次数、缓存是否还热、最近一次 miss 的可能原因（系统提示词/工具/effort/模型变了，还是缓存过期了）；子 agent 和压缩的用量也算在内。`-p --output-format json` 的 `usage` 同样含子 agent 和压缩，并带 `cache_creation_input_tokens`。
+- 订阅登录和网关下对话用 1 小时缓存（停顿一会儿回来不用整段重写），其他端点用 5 分钟；子 agent、压缩等用 5 分钟。要改用 Claude Code 的变量 `CLAUDE_CODE_PROMPT_CACHE_TTL=5m|1h`，完全不用缓存设 `DISABLE_PROMPT_CACHING=1`。
+- 页脚的 `◷ 12m` 是缓存还能保留多久；变红表示已过期，下一条消息会把整个对话重新写入缓存。`/cost` 显示命中率和没命中的原因。
+- 缓存还热时 `/model`、`/effort` 会先确认（切换会让缓存失效）；离开一个多小时回来时，和 Claude Code 一样清掉较早的工具结果，少重写一些。
+
+（缓存标记放在哪、端点不认时怎么退、压缩如何复用缓存等细节见 ARCHITECTURE.md 6.5。）
 
 ## 限流：自动暂停，到点自动恢复
 
-订阅账号（`--provider claude-code`）有滚动窗口限额：5 小时和每周。窗口用完后 API 返回 429，并在 `anthropic-ratelimit-unified-*` 响应头里写明是哪个窗口、什么时候重置（与官方客户端读取的字段相同）。遇到这种情况本项目**不再报错停下**，而是：
-
-1. 暂停当前请求，界面上显示实时倒计时：`✻ 5-hour limit reached · resumes at 23:41 (in 2h 13m) (esc to cancel)`，并记录一行说明；
-2. 到重置时间（再加几秒余量和随机抖动，避免多个子 agent 同时冲上去）后，**原样重发同一个请求**，对话、已完成的工具结果都不受影响，不会重复发送你的提示；
-3. 请求被接受后提示 `The limit has cleared; continuing.`，任务接着做完。
-
-要点：
-
-- **等待期间可以随时 `Esc` 取消**；`-p` 模式会在 stderr 打印同样的说明，进程保持运行直到恢复。
-- **服务器没给出重置时间**（只有一句泛泛的 429）时，按 1s、2s、4s…递增、最长 `CLAUDE_PRO_RATE_LIMIT_POLL_MS`（默认 5 分钟）的间隔反复试，限流一解除就继续。
-- **等待上限** `CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，默认 6 小时（够等一个 5 小时窗口）。重置时间超出上限（比如周限额还有几天）时立即报错，并写明「它在几点重置、还有多久」，而不是只说“稍后再试”。设为 `0` 则不等待、直接报错；`CLAUDE_PRO_MAX_RETRIES=0` 会关闭一切重试（含等待）。
-- 等待用墙上时钟分段检查（每 15 秒一次），电脑睡眠/休眠后醒来会立刻发现已过了重置时间，不会多等。
-- **登录令牌**：官方登录的访问令牌有效期 8 小时，等 5 小时窗口恢复时它多半已经过期。恢复时本项目先**自己用刷新令牌续期**（见上文"令牌自动续期"），然后接着做，不需要你干预。只有续期失败时才会等：刷新令牌被拒绝（需要 `claude` → `/login`）、令牌接口暂时连不上、或关闭了自动续期。此时界面显示"Waiting for the Claude Code login to be renewed"并写明失败原因，每 5 分钟重试续期、每 15 秒检查一次凭据文件，你登录后就自动接着做；等待时长受上面的等待上限剩余部分约束，用完才报错，并写明失败原因和已经等了多久。凭据文件恰好被别的进程写到一半（JSON 不完整）也按同样方式等过去。
-- **压缩对话时**撞上限流同样会暂停，界面显示同样的倒计时（不会一直停在"Compacting conversation"上让人以为卡死了）。
-- **子 agent 和后台 agent** 同样会等待，暂停与恢复都以 `[agent 名]` 为前缀提示一次（倒计时那一行属于主 agent，因为后台 agent 暂停时主 agent 可能还在干活）。轮询（服务器没给重置时间）每隔几分钟重试一次，但只提示一次，不会刷屏。
-- `/doctor` 这类诊断请求不等，直接报告限流。
-- **API 过载（529 / `overloaded_error`）** 也不会让任务停下：先按 `CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS`（默认 1 秒）起、每次翻倍、最长 `CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS`（默认 32 秒）快速重试 `CLAUDE_PRO_MAX_RETRIES` 次；用完后转为暂停（界面显示 `API overloaded · checking again in …`，Esc 取消），每隔最长间隔再试一次，直到 API 恢复（提示 `The API is answering again; continuing.`），最多等 `CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS`（默认同 `CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，6 小时；`0` = 重试用完就报错）。
+订阅账号的 5 小时和每周限额用完时，不报错停下，而是暂停并显示倒计时（`✻ 5-hour limit reached · resumes at 23:41 (in 2h 13m)`，Esc 可取消），到重置时间原样重发同一个请求，任务接着做完；期间过期的登录令牌会自己续期。API 过载（529）同样先重试、再暂停等它恢复。最多等 6 小时（`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，`0` = 不等直接报错）；重置时间更远（比如周限额还有几天）时直接报错，并写明几点重置。
 
 ## 终端标题、页脚与窗口缩放
 
@@ -243,7 +203,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 | `Read` 一次最多 | 2000 行、每行 2000 字符、总共 12 万字符 | 10000 行、每行 20000 字符、总共 40 万字符；加 `allow_large: true`（与 Claude Code 2.1.296 相同）不限行数和长度，只要上下文在自动压缩之前还放得下（同一批并行读取共用这份余量），放不下就拒绝并写明差多少 |
 | `Glob` / `Grep` 默认返回条数 | 100 / 250 | 1000 / 1000 |
 | `WebFetch` | 只返回小模型的摘要（最多 4096 token），自动把 http 升成 https | `raw: true` 直接拿转换后的全文；摘要上限 16000 token、页面上限 40 万字符；按原样请求 URL，localhost 和内网也可以 |
-| 子 agent | 不能再派子 agent | 嵌套到 2 层（`CLAUDE_PRO_MAX_SUBAGENT_DEPTH`，0 = 不嵌套） |
+| 子 agent | 不能再派子 agent | 嵌套到 2 层 |
 | `Bash` 的标准输入 | 一律关闭 | 可以用 `stdin` 参数喂入文本（回答提示、给脚本传数据） |
 | 提示词里的限制 | “尽量少输出”“除非必要不要建文件”“不要强推/改 git 配置/amend” | 回答长度按任务需要；需要就建文件（测试、脚本、配置）；用户要求时可以做上述 git 操作 |
 
@@ -257,7 +217,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
 - `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
-- **全屏模式（默认，和 Claude Code 的 `/tui fullscreen` 一样）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 `CLAUDE_PRO_SCROLL_SPEED` 行，默认 3）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开就复制到剪贴板；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时 `Ctrl+C` 是复制（不会中断任务）。**右键**和在终端里一样：有选中时复制，没有时把剪贴板的文字粘贴进输入框（和 `Ctrl+V` 相同）。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底；`CLAUDE_PRO_PIN_INPUT=0` 让它紧跟在输出下面），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
+- **全屏模式（默认，和 Claude Code 的 `/tui fullscreen` 一样）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开就复制到剪贴板；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时 `Ctrl+C` 是复制（不会中断任务）。**右键**和在终端里一样：有选中时复制，没有时把剪贴板的文字粘贴进输入框（和 `Ctrl+V` 相同）。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
 - `ctrl+c` 或连按两次 `Esc` 清掉的草稿不会丢：在空输入框按 `↑` 找回（连同粘贴的文本和图片），中间发过别的消息也可以
 - `@文件` 补全并附加内容：走的就是 `Read` 工具，等于模型自己读了这个文件。最多带前 2000 行（被截断时会明确告诉模型，并把该文件记为"只读了一部分"，之后 `Write` 不会去覆盖没给它看过的行）；图片作为图片附加；二进制文件和超过 512KB 的文本会被跳过并提示原因；`@目录` 列出目录内容
 - `alt+v` 粘贴剪贴板里的图片（截图用 `Win+Shift+S`），输入框里显示为 `[Image #1]`；超过 1568px 的图会自动缩小，超过 512 KB 的 PNG（3D 画面、照片类截图）改用 JPEG 发送，通常只有原来的 1/10（每次请求都带着整个对话，图片太重会让请求超过 32 MB 的上限）。把图片文件拖进终端（或粘贴图片路径）也会作为图片附加
@@ -278,9 +238,9 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 **后台子 agent**：模型可以用 `Task` 的 `run_in_background: true` 把子 agent 放到后台，自己继续干别的。子 agent 完成后，结果会作为 `<task-notification>` 自动送回；如果当时主 agent 空闲，会自动开启新的一轮来处理结果。`TaskOutput` 用于提前等待结果，`TaskStop` 用于取消；`/tasks` 列出所有后台 agent，`/tasks kill agent_1` 停止其中一个。`-p` 模式会等所有后台 agent 结束后再退出。
 
-**自动验证循环**：设置一条验证命令（`--verify "npm test"`、会话中 `/verify npm test`，或 `CLAUDE_PRO_VERIFY_COMMAND`）后，只要某一轮改过文件，模型结束前就会自动运行这条命令。失败的输出会发回给模型继续修复，直到通过，最多 `CLAUDE_PRO_VERIFY_MAX_ROUNDS` 轮（默认 3）。没有改文件的轮次不会触发验证。
+**自动验证循环**：设置一条验证命令（`--verify "npm test"`、会话中 `/verify npm test`，或 `CLAUDE_PRO_VERIFY_COMMAND`）后，只要某一轮改过文件，模型结束前就会自动运行这条命令。失败的输出会发回给模型继续修复，直到通过，最多 3 轮。没有改文件的轮次不会触发验证。
 
-**大输出落盘**：工具结果超过 `CLAUDE_PRO_MAX_TOOL_RESULT_CHARS`（默认 50000 字符）时，全文会保存到 `~/.claude-pro/projects/<项目>/tool-results/`，只把预览和文件路径发给模型，模型可以再用 `Read`/`Grep` 按需查看。Bash 输出被截断时同样会保存全文。超过 7 天的旧文件在启动时自动清理。
+**大输出落盘**：工具结果超过 10 万字符时，全文会保存到 `~/.claude-pro/projects/<项目>/tool-results/`，只把预览和文件路径发给模型，模型可以再用 `Read`/`Grep` 按需查看。Bash 输出被截断时同样会保存全文。超过 7 天的旧文件在启动时自动清理。
 
 **Hooks**：`settings.json` 里的 `hooks` 与 Claude Code 同形：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`。事件内容以 JSON 从 **stdin** 传给脚本（同时放在环境变量 `CLAUDE_PRO_HOOK_INPUT`，另有 `CLAUDE_PROJECT_DIR`）；退出码 0 = 通过（stdout 作为附加上下文），2 = 拦截（stderr 反馈给模型；`Stop` 则让模型继续干活），其他 = 仅警告。当护栏用的 hook 加上 `"onFailure": "block"`：启动不了、超时或以其他退出码结束时按拦截处理，而不是放行（与 Claude Code 相同）。hook 输出里的 `<system-reminder>` 标签会被转义，冒充不了系统提示。
 

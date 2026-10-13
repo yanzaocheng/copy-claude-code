@@ -28,7 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test('large tool results are saved to a file and only a preview is sent', async () => {
   const dir = tmp();
-  const cfg = makeConfig(dir, { CLAUDE_PRO_MAX_TOOL_RESULT_CHARS: '5000' });
+  const cfg = Object.defineProperty(makeConfig(dir), 'maxToolResultChars', { value: 5000 }); // the limit is 100000
   const big = 'x'.repeat(4000) + '\n' + 'y'.repeat(4000) + '\nEND';
   const BigTool = { name: 'Big', readOnly: true, description: 'd', input_schema: { type: 'object', properties: {} }, async call() { return { content: big }; } };
   const agent = new Agent({ config: cfg, tools: [BigTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
@@ -111,7 +111,7 @@ test('verify loop: a failing check after edits is sent back until it passes', as
 
 test('verify loop gives up after the configured number of rounds', async () => {
   const dir = tmp();
-  const cfg = makeConfig(dir, { CLAUDE_PRO_VERIFY_COMMAND: 'exit 1', CLAUDE_PRO_VERIFY_MAX_ROUNDS: '2' });
+  const cfg = Object.defineProperty(makeConfig(dir, { CLAUDE_PRO_VERIFY_COMMAND: 'exit 1' }), 'verifyMaxRounds', { value: 2 }); // 3 in use
   const notices = [];
   const agent = new Agent({
     config: cfg, tools: [makeBashTool(cfg), WriteTool],

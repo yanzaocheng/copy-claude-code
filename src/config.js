@@ -44,8 +44,6 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_DOWNLOAD_DIR: 'Where files that other sessions send this one are saved (default: the Downloads folder)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
   CLAUDE_PRO_TUI: 'fullscreen (default: the input box fixed at the bottom, the conversation scrolled inside, like Claude Code\'s /tui fullscreen) or default (classic: it scrolls in the terminal); /tui switches',
-  CLAUDE_PRO_SCROLL_SPEED: 'Fullscreen: rows the mouse wheel scrolls a notch (default 3, at most 20)',
-  CLAUDE_PRO_PIN_INPUT: 'Set to 0 to show the input box right below the output instead of on the last rows of the window',
   CLAUDE_PRO_AUTO_RESTART: 'Restart by itself when a turn ends and claude-pro\'s own source files changed (default 1; 0 = only on /restart or the Restart tool)',
   CLAUDE_PRO_CLAUDE_CODE_MODEL: 'Model for Claude Code OAuth (default: sonnet; independent of API model settings)',
   CLAUDE_CONFIG_DIR: 'Official Claude Code configuration directory, for selecting the locally signed-in account',
@@ -78,7 +76,6 @@ export const KNOWN_KEYS = {
   API_TIMEOUT_MS: 'Request timeout in milliseconds',
   CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests (0 = no retries at all, which also turns off the rate limit wait)',
   CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: 'Longest total time to wait for a rate limit (e.g. the 5-hour window) to reset before continuing by itself (default 21600000 = 6 hours; 0 = report the error instead of waiting)',
-  CLAUDE_PRO_RATE_LIMIT_POLL_MS: 'When a rate limit does not say when it resets, try again at most this far apart (default 300000 = 5 minutes)',
   CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS: 'First wait before retrying a request refused as overloaded (529); doubled at each retry (default 1000)',
   CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS: 'Longest wait between retries of an overloaded (529) request (default 32000)',
   CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS: 'How long to keep retrying an overloaded (529) API once the usual retries are used up, before reporting the error (default: CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 hours; 0 = give up after the retries)',
@@ -87,11 +84,7 @@ export const KNOWN_KEYS = {
   BASH_MAX_OUTPUT_LENGTH: 'Max characters of Bash output returned to the model; the full text is saved to a file (default 60000)',
   CLAUDE_CODE_GIT_BASH_PATH: 'Windows: path to bash.exe (Git Bash)',
   CLAUDE_PRO_RIPGREP_PATH: 'Path to ripgrep (rg) for Grep and @-file suggestions; "off" forces the built-in JS scanner (default: rg from PATH, else the JS scanner)',
-  CLAUDE_PRO_MAX_TOOL_RESULT_CHARS: 'Tool results longer than this are saved to a file and only a preview is sent (default 100000)',
-  CLAUDE_PRO_CLEAR_AFTER_IDLE: 'Back after more than 65 minutes away (the prompt cache has expired): clear old tool results and thinking, keeping the last 5 results, as Claude Code does. 1 = on, 0 = off (default: on for the Claude Code login and api.anthropic.com, off for other endpoints, whose cache may last for hours)',
-  CLAUDE_PRO_MAX_SUBAGENT_DEPTH: 'How deep sub-agents may nest: agents below this depth can start their own sub-agents (default 2; 0 = no nesting)',
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
-  CLAUDE_PRO_VERIFY_MAX_ROUNDS: 'How many times a failing verify command is sent back before giving up (default 3)',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
   CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the small model for the current topic after each message (the tab title then shows the first message of the session)',
 };
@@ -373,7 +366,8 @@ export class Config {
   get apiTimeout() { return int(this.env.API_TIMEOUT_MS, 600_000); }
   get maxRetries() { return int(this.env.CLAUDE_PRO_MAX_RETRIES, 6); }
   get rateLimitMaxWait() { return Math.max(0, int(this.env.CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 * 3_600_000)); }
-  get rateLimitPoll() { return Math.max(1000, int(this.env.CLAUDE_PRO_RATE_LIMIT_POLL_MS, 300_000)); }
+  // A rate limit that does not say when it resets is tried again at most this far apart.
+  get rateLimitPoll() { return 300_000; }
   // An overloaded API (529): the backoff, and how long to keep trying once the retries are used up (see planRetry).
   get overloadedRetryBaseDelay() { return Math.max(100, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS, 1000)); }
   get overloadedRetryMaxDelay() { return Math.max(this.overloadedRetryBaseDelay, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS, 32_000)); }
@@ -398,23 +392,23 @@ export class Config {
   get bashDefaultTimeout() { return int(this.env.BASH_DEFAULT_TIMEOUT_MS, 600_000); }
   get bashMaxTimeout() { return int(this.env.BASH_MAX_TIMEOUT_MS, 3_600_000); }
   get bashMaxOutput() { return int(this.env.BASH_MAX_OUTPUT_LENGTH, 60_000); }
-  get maxToolResultChars() { return int(this.env.CLAUDE_PRO_MAX_TOOL_RESULT_CHARS, 100_000); }
+  // Tool results longer than this are saved to a file and only a preview is sent.
+  get maxToolResultChars() { return 100_000; }
   // Clearing old tool results after a long pause (see Agent.clearAfterIdle): on where the cache is Anthropic's,
   // which has expired by then. Another endpoint may keep its cache for hours, and clearing would make it miss.
   get clearAfterIdle() {
-    const v = String(this.env.CLAUDE_PRO_CLEAR_AFTER_IDLE ?? '').trim();
-    if (v) return isOn(v);
     return this.usesClaudeCode || this.usesGateway || /^https:\/\/api\.anthropic\.com\/?$/i.test(this.baseURL);
   }
   // How deep sub-agents may nest: the main agent is depth 0; an agent below this depth gets the Task tool.
-  get maxSubagentDepth() { return Math.max(0, int(this.env.CLAUDE_PRO_MAX_SUBAGENT_DEPTH, 2)); }
+  get maxSubagentDepth() { return 2; }
 
   // Verification after edits: session override (/verify, --verify) wins over the env setting.
   get verifyCommand() {
     const v = this.verifyOverride ?? this.env.CLAUDE_PRO_VERIFY_COMMAND ?? '';
     return v.trim() && v.trim() !== 'off' ? v.trim() : null;
   }
-  get verifyMaxRounds() { return Math.max(1, int(this.env.CLAUDE_PRO_VERIFY_MAX_ROUNDS, 3)); }
+  // How many times a failing verify command is sent back before giving up.
+  get verifyMaxRounds() { return 3; }
   get autoMemoryEnabled() { return !/^(1|true|yes)$/i.test(this.env.CLAUDE_PRO_DISABLE_AUTO_MEMORY || ''); }
 
   display(key) {
