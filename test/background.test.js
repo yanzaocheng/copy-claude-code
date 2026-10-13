@@ -31,14 +31,27 @@ const textReply = (text) => frames([
   { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
   { type: 'message_stop' },
 ]);
+const toolReply = (id, name, input) => frames([
+  { type: 'message_start', message: { model: 'mock', usage: { input_tokens: 1, output_tokens: 0 } } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name, input: {} } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 3 } },
+  { type: 'message_stop' },
+]);
+const LONG_COMMAND = 'node -e "let i = 0; const t = setInterval(() => { console.log(\'tick \' + (++i)); if (i === 12) clearInterval(t); }, 400)"';
 const gw = { hostStream: null, states: [], sessions: new Map(), registrations: [], streams: new Map(), pending: new Map(), cid: 0, outputs: new Map(), byes: [] };
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (d) => { b += d; }); req.on('end', () => resolve(b ? JSON.parse(b) : {})); });
 const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/v1/messages') {
-    await readBody(req);
+    const body = await readBody(req);
+    const last = JSON.stringify(body.messages.at(-1).content);
     res.writeHead(200, { 'content-type': 'text/event-stream' });
+    // a long task: a command that prints for a few seconds, then an answer
+    if (last.includes('toolu_long')) return res.end(textReply('Long task done.'));
+    if (last.includes('long task')) return res.end(toolReply('toolu_long', 'Bash', { command: LONG_COMMAND, description: 'Count slowly' }));
     return res.end(textReply('Hello from the model.'));
   }
   if (req.headers.authorization !== `Bearer ${KEY}`) return json(res, 401, { error: { message: 'bad key' } });
@@ -195,6 +208,7 @@ test('background sessions: opened for the page without a window, online, logged,
   term.on('data', (d) => { shown += d; });
   const attached = attachCommand(['worker'], { stdin: keys, stdout: term, stderr: term });
   await until('attached', () => shown.includes('\x1b[?1049h'));
+  await until('one terminal attached, reported', () => stateOf('bg-test-0001')?.attached === 1);
   keys.write('/status\r');
   await until('typed there, run here', async () => /Remote control/.test((await toHost('logs', { sessionId: 'bg-test-0001' })).text));
 
@@ -209,6 +223,52 @@ test('background sessions: opened for the page without a window, online, logged,
   assert.equal(await attached, 0);
   assert.match(shown, /Detached from &worker: it goes on in the background/);
   assert.ok(peerOf('bg-test-0001'), 'it goes on');
+  await until('none attached, reported', () => stateOf('bg-test-0001')?.attached === 0);
+
+  // brought to the front while a long task runs: the window shows it going on, and the task is not cut short
+  assert.equal((await toSession('bg-test-0001', 'send', { text: 'start the long task' })).ok, true);
+  await new Promise((r) => setTimeout(r, 1500)); // the command runs (it prints for about 5 seconds)
+  const peer2 = peerOf('bg-test-0001');
+  const socket2 = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: peer2.port, path: '/attach?cols=100&rows=30', headers: { connection: 'Upgrade', upgrade: 'claude-pro-attach', authorization: `Bearer ${peer2.token}` } });
+    req.on('upgrade', (_res, s2) => resolve(s2));
+    req.on('error', reject);
+    req.end();
+  });
+  let live = '';
+  socket2.on('data', (d) => { live += d; });
+  const plain = () => live.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  await until('the running command in the window', () => /Count slowly|tick \d+/.test(plain()));
+  const before2 = live.length;
+  await until('more of it, live', () => live.length > before2 + 50);
+  await until('the task done', () => (gw.outputs.get('bg-test-0001') || []).some((l) => /Long task done/.test(l)), 30_000);
+  assert.ok(!(gw.outputs.get('bg-test-0001') || []).some((l) => /Interrupted/.test(l)), 'not interrupted');
+  await until('its end in the window too', () => /Long task done/.test(plain()));
+  await until('attached, reported', () => stateOf('bg-test-0001')?.attached === 1);
+  // its window closed (the X): the process is gone, its connection closed without a word; the session goes on
+  const closedAt = Date.now();
+  socket2.end();
+  await until('none attached, reported at once', () => stateOf('bg-test-0001')?.attached === 0);
+  assert.ok(Date.now() - closedAt < 8000, `reported after ${Date.now() - closedAt} ms`);
+  assert.ok(peerOf('bg-test-0001') && stateOf('bg-test-0001').state === 'running', 'the session goes on');
+
+  // window: the same, in a new terminal window, through the service
+  const launched = [];
+  const realLaunch = svc.service.launch;
+  const realTerminal = svc.service.terminal;
+  svc.service.launch = async (spec) => { launched.push(spec); };
+  svc.service.terminal = { kind: 'wt', name: 'Windows Terminal', path: 'wt.exe' };
+  const win = await toHost('window', { sessionId: 'bg-test-0001' });
+  assert.deepEqual([win.ok, win.terminal], [true, 'Windows Terminal'], win.error);
+  const a = launched[0].args;
+  assert.deepEqual(a.slice(0, 4), ['-w', 'new', '--title', 'worker · claude-pro']);
+  assert.deepEqual(a.slice(4, 6), ['-d', project]);
+  assert.deepEqual(a.slice(-3), ['attach', 'bg-test-0001', '--keep-open']);
+  assert.equal((await toHost('window', { sessionId: 'nope-not-here' })).error, '这个会话不是这台电脑上的后台会话');
+  svc.service.terminal = null;
+  assert.equal((await toHost('window', { sessionId: 'bg-test-0001' })).error, '这台电脑没有可以打开窗口的桌面（可以在终端里运行 claude-pro attach worker）');
+  svc.service.launch = realLaunch;
+  svc.service.terminal = realTerminal;
 
   // a crash: opened again with --resume, the conversation and the id kept
   const conversation = peerOf('bg-test-0001').conversationId;
@@ -230,6 +290,40 @@ test('background sessions: opened for the page without a window, online, logged,
   await toSession('bg-test-0002', 'send', { text: '/exit' });
   await until('ended by /exit', () => svc.sessions.list().find((s) => s.sessionId === 'bg-test-0002')?.state === 'exited');
   assert.equal(svc.sessions.list().find((s) => s.sessionId === 'bg-test-0002').restarts, 0, 'not taken for a crash');
+
+  // delete: a conversation open in a background session of the service is ended first only when asked; one open in a
+  // terminal is not touched; one that is closed is gone with its files
+  const { projectDir } = await import('../src/session.js');
+  assert.equal((await toHost('open', { sessionId: 'bg-test-0004', cwd: project, window: false })).ok, true);
+  await until('the fourth session online', () => gw.streams.has('bg-test-0004') && peerOf('bg-test-0004'));
+  await toSession('bg-test-0004', 'send', { text: 'remember this' });
+  await until('its answer', () => (gw.outputs.get('bg-test-0004') || []).some((l) => /Hello from the model/.test(l)));
+  const conv4 = peerOf('bg-test-0004').conversationId;
+  const file4 = path.join(projectDir(project), `${conv4}.jsonl`);
+  assert.ok(fs.existsSync(file4));
+  assert.equal((await toHost('delete', { conversationId: conv4 })).error, `这段对话正开在会话 &${peerOf('bg-test-0004').name} 里：先结束它`);
+  assert.ok(fs.existsSync(file4) && peerOf('bg-test-0004'), 'nothing done');
+  const deleted = await toHost('delete', { conversationId: conv4, stop: true });
+  assert.equal(deleted.ok, true, deleted.error);
+  assert.ok(deleted.files >= 2 && deleted.bytes > 0, JSON.stringify(deleted)); // the conversation and the session's log
+  assert.equal(fs.existsSync(file4), false);
+  assert.equal(fs.existsSync(svc.sessions.logFile('bg-test-0004')), false, 'its log: it holds the conversation too');
+  assert.equal(peerOf('bg-test-0004'), undefined, 'the session ended first');
+  assert.ok(!svc.sessions.list().some((x) => x.sessionId === 'bg-test-0004'), 'not to be opened again');
+  assert.ok(!(await toHost('history', {})).items.some((i) => i.conversationId === conv4));
+  assert.equal((await toHost('delete', { conversationId: '../../outside-1' })).error, '对话 id 不对');
+  assert.equal((await toHost('delete', { conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })).error, '这台电脑上没有这段对话');
+  // open in a terminal (a registry entry of a terminal session, here this process): refused, nothing deleted
+  const termConv = '11112222-3333-4444-5555-666677778888';
+  const termFile = path.join(projectDir(project), `${termConv}.jsonl`);
+  fs.writeFileSync(termFile, `${JSON.stringify({ type: 'meta', cwd: project })}\n${JSON.stringify({ type: 'message', message: { role: 'user', content: 'x' } })}\n`);
+  const fakePeer = path.join(configDir, 'peers', 'aaaabbbbcccc.json');
+  fs.writeFileSync(fakePeer, JSON.stringify({ id: 'aaaabbbbcccc', name: 'in-a-terminal', cwd: project, pid: process.pid, port: 9, token: 't', kind: 'terminal', conversationId: termConv }));
+  assert.equal((await toHost('delete', { conversationId: termConv, stop: true })).error, '这段对话正开在终端里的会话 &in-a-terminal 里：请先在那台电脑上结束它（/exit）');
+  assert.ok(fs.existsSync(termFile));
+  fs.rmSync(fakePeer);
+  assert.equal((await toHost('delete', { conversationId: termConv })).ok, true, 'closed: deleted');
+  assert.equal(fs.existsSync(termFile), false);
 
   // a later service takes over a session that runs, and opens again one that does not (a reboot)
   assert.equal((await toHost('open', { sessionId: 'bg-test-0003', cwd: project, window: false })).ok, true);

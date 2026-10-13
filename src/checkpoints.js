@@ -15,7 +15,8 @@ export class CheckpointStore {
   // dir: where snapshot files are kept (created lazily).
   constructor(dir) {
     this.dir = dir;
-    // {id, label, time, messageIndex, conversationValid, orphaned, files: [{path, existed, snap, skipped}]}
+    // {id, label, time, messageIndex, conversation, conversationValid, orphaned, files: [{path, existed, snap, skipped}]}
+    // (conversation: the id of the conversation it belongs to, so that deleting the conversation finds it)
     this.entries = [];
     this.counter = 0;
     this.current = null;
@@ -23,12 +24,13 @@ export class CheckpointStore {
 
   // Start a checkpoint for a new user prompt. messageIndex is where its message will sit in
   // the conversation, so rewinding the conversation can cut it off there.
-  beginTurn({ label, messageIndex }) {
+  beginTurn({ label, messageIndex, conversation = null }) {
     const entry = {
       id: ++this.counter,
       label: String(label || '').replace(/\s+/g, ' ').trim().slice(0, 200),
       time: Date.now(),
       messageIndex,
+      conversation,
       conversationValid: true,
       orphaned: false,
       files: [],

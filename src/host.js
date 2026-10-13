@@ -8,7 +8,7 @@
 // Protocol (Bearer = the gateway API key; ARCHITECTURE.md 3.1.5):
 //   POST   /v1/remote/hosts {id, machine, host, platform, version, home, terminal, autostart, sessions, stats}
 //   GET    /v1/remote/hosts/:id/commands (SSE): online while it is open; {cid, type, body}: list, open, stop,
-//          restart, logs, history, update
+//          restart, window, logs, history, delete, update
 //   POST   /v1/remote/hosts/:id/results {cid, ok: true, ...} | {cid, ok: false, error}
 //   POST   /v1/remote/hosts/:id/state {sessions, stats}: on a change of the sessions, and every minute
 //   DELETE /v1/remote/hosts/:id: off the page's list (`host stop`, a logout, another account)
@@ -30,7 +30,7 @@ import { CONFIG_DIR, INSTALL_DIR, VERSION, GATEWAY_DEFAULT_URL, loadConfig } fro
 import { readGatewayLogin, normalizeGatewayUrl } from './gateway.js';
 import { machineName, cleanName, listPeers } from './peers.js';
 import { BackgroundSessions, markEnded, tailFile } from './background.js';
-import { listConversations } from './history.js';
+import { listConversations, deleteConversation, CONVERSATION_ID } from './history.js';
 import { checkForUpdate, installUpdate } from './updater.js';
 import { ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED } from './supervisor.js';
 
@@ -444,15 +444,15 @@ function writeEnvFile(sessionId, vars) {
 
 // How `term` opens a window that runs `node entry ...args` in `cwd`: {cmd, args, options, wait}. `wait`: 'exit'
 // when the command ends once the window is open (its exit code says whether it worked), 'spawn' when it is the
-// terminal itself.
-export function launchCommand(term, { cwd, node = process.execPath, entry = ENTRY, args = [], env = {}, envFile = null, sessionId = '' }) {
+// terminal itself. `title`: the tab's first title, where the terminal takes one (Windows Terminal).
+export function launchCommand(term, { cwd, node = process.execPath, entry = ENTRY, args = [], env = {}, envFile = null, sessionId = '', title = '' }) {
   const program = [node, ...(envFile ? [`--env-file=${envFile}`] : []), entry, ...args];
   const pairs = Object.entries(env).map(([k, v]) => `${k}=${v}`);
   const posix = [...(pairs.length ? ['env', ...pairs] : []), node, entry, ...args];
   const line = posix.map(shQuote).join(' ');
   switch (term.kind) {
     case 'wt': // a new window; wt reads ; as the start of another command
-      return { cmd: term.path, args: ['-w', 'new', '-d', cwd, ...program].map((a) => a.replace(/;/g, '\\;')), options: { windowsHide: false }, wait: 'exit' };
+      return { cmd: term.path, args: ['-w', 'new', ...(title ? ['--title', title] : []), '-d', cwd, ...program].map((a) => a.replace(/;/g, '\\;')), options: { windowsHide: false }, wait: 'exit' };
     case 'console': { // a console window of its own; Start-Process takes the command line as it is
       // what went wrong: only its message, in UTF-8 (PowerShell writes errors as CLIXML in the system's code page)
       const script = [
@@ -778,6 +778,8 @@ export class HostService {
       else if (cmd.type === 'logs') r = this.logs(body);
       else if (cmd.type === 'history') r = this.history(body);
       else if (cmd.type === 'update') r = await this.update();
+      else if (cmd.type === 'window') r = await this.window(body);
+      else if (cmd.type === 'delete') r = await this.deleteConversation(body);
       else throw new Error(`这台电脑上的 claude-pro ${VERSION} 不认识命令 ${cmd.type}，请升级`);
       result = { cid: cmd.cid, ok: true, ...r };
     } catch (e) {
@@ -803,6 +805,57 @@ export class HostService {
         return this.recent.list;
       },
     });
+  }
+
+  // window: a background session brought to the front in a terminal window of this computer, `claude-pro attach` in
+  // it (chosen as open's terminal window is). A turn that runs goes on and shows there as it goes; the session stays
+  // the service's. Closing the window (its X included: the attach process ends) only detaches it. Each call opens
+  // another window. Without a desktop, a tmux session to attach to (`tmux attach -t claude-pro-<id>-…`).
+  async window({ sessionId } = {}) {
+    if (typeof sessionId !== 'string' || !ID.test(sessionId)) throw new Error('会话 id 不对');
+    const rec = this.sessions?.sessions.get(sessionId);
+    if (!rec) {
+      if (this.sessions?.ended.some((e) => e.sessionId === sessionId)) throw new Error('会话没有在运行');
+      throw new Error('这个会话不是这台电脑上的后台会话');
+    }
+    if (rec.state !== 'running' || !this.sessions.alive(rec)) throw new Error('会话没有在运行');
+    const label = rec.name || sessionId;
+    const term = this.terminal;
+    if (!term) throw new Error(`这台电脑没有可以打开窗口的桌面（可以在终端里运行 claude-pro attach ${label}）`);
+    let cwd = rec.cwd;
+    try { if (!fs.statSync(cwd).isDirectory()) cwd = this.home; } catch { cwd = this.home; }
+    const env = passedEnv();
+    const key = `${sessionId}-w${Date.now().toString(36)}`; // its own env file and tmux session: one window more each time
+    const envFile = process.platform === 'win32' && term.kind === 'wt' ? writeEnvFile(key, env) : null;
+    try {
+      await this.launch(launchCommand(term, { cwd, args: ['attach', sessionId, '--keep-open'], env, envFile, sessionId: key, title: `${label} · claude-pro` }));
+    } catch (e) {
+      throw new Error(`无法用 ${term.name} 打开终端：${e.message}`);
+    }
+    this.log(`opened ${term.name} attached to the background session ${sessionId} (${label})`);
+    return { terminal: term.name };
+  }
+
+  // delete: what this computer keeps of a conversation (see history.js), for good. Open in a background session of this
+  // service, that session is ended first with `stop` (as the stop command does), else it is refused; open in a terminal,
+  // it is refused: a terminal the user works in is not closed for them. {files, bytes}
+  async deleteConversation({ conversationId, stop = false } = {}) {
+    const id = conversationId;
+    if (typeof id !== 'string' || !CONVERSATION_ID.test(id)) throw new Error('对话 id 不对');
+    const open = listPeers().filter((p) => p.conversationId === id);
+    const ours = (p) => p.kind === 'background' && this.sessions?.sessions.has(p.remoteId);
+    const terminal = open.find((p) => !ours(p) && p.kind !== 'background');
+    if (terminal) throw new Error(`这段对话正开在终端里的会话 &${terminal.name} 里：请先在那台电脑上结束它（/exit）`);
+    const other = open.find((p) => !ours(p));
+    if (other) throw new Error(`这段对话正开在会话 &${other.name} 里：先结束它`);
+    // the service's own sessions with it: those in the registry, and those starting or restarting
+    const running = [...(this.sessions?.sessions.values() || [])].filter((r) => (r.conversationId === id || open.some((p) => p.remoteId === r.sessionId)) && this.sessions.alive(r));
+    if (running.length && stop !== true) throw new Error(`这段对话正开在会话 &${running[0].name || running[0].sessionId} 里：先结束它`);
+    for (const r of running) await this.sessions.stop(r.sessionId);
+    const logs = this.sessions ? this.sessions.forgetConversation(id) : [];
+    const r = deleteConversation({ projects: path.join(configDir(), 'projects'), id, extra: logs });
+    this.log(`deleted the conversation ${id}: ${r.files} files, ${r.bytes} bytes${running.length ? ` (its session ${running.map((x) => x.sessionId).join(', ')} ended first)` : ''}`);
+    return { files: r.files, bytes: r.bytes };
   }
 
   // The conversations kept on this computer (see history.js), with the session each one is open in.
@@ -1370,10 +1423,11 @@ const USAGE = `Usage: claude-pro host [run | start | stop | status | install | u
 
 The computer service: it makes this computer one the gateway's web page (远程控制) runs sessions on. From the
 page: new sessions here, in the directory chosen there, in the background without a window (or, when asked, in
-a terminal window); ending and restarting them; opening a conversation kept here again (history); their logs and
-its own; updating claude-pro. A background session that crashes is opened again, and after a restart of the
-computer the service opens again those that ran (the conversation, not the task that was running).
-\`claude-pro attach\` shows a background session in a terminal here.
+a terminal window); bringing a background session to the front in a terminal window here (also while it works;
+closing the window sends it back); ending and restarting them; opening a conversation kept here again (history),
+or deleting it from this computer; their logs and its own; updating claude-pro. A background session that
+crashes is opened again, and after a restart of the computer the service opens again those that ran (the
+conversation, not the task that was running). \`claude-pro attach\` shows a background session in a terminal here.
 
 It uses the gateway login of /login or claude-pro connect, and only connects out to the gateway. A session
 logged in to the gateway starts it by itself, and /login and connect set it up to start at logon

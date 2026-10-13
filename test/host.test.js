@@ -481,3 +481,47 @@ test('the start at boot: a scheduled task as this user, logged on or not; withou
   const admin = spawnSync('net', ['session'], { stdio: 'ignore', windowsHide: true }).status === 0;
   if (!admin) assert.throws(() => host.installBootAutostart(), /administrator/);
 });
+
+test('deleting a conversation: its file, its saved tool results and its checkpoints; not another conversation\'s, not the project\'s', async () => {
+  const { deleteConversation } = await import('../src/history.js');
+  const { projectDir } = await import('../src/session.js');
+  const projects = path.join(configDir, 'projects');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-del-'));
+  const dir = projectDir(cwd);
+  const id = 'abcdef01-2345-6789-abcd-ef0123456789';
+  const other = 'fedcba98-7654-3210-fedc-ba9876543210';
+  fs.mkdirSync(path.join(dir, 'tool-results'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'memory'), { recursive: true });
+  const write = (f, text) => { fs.writeFileSync(path.join(dir, f), text); return path.join(dir, f); };
+  const bashFile = write('tool-results/bash-1791000000000-abc123.txt', 'long output');
+  const big = write('tool-results/toolu_big_1.txt', 'big result');
+  const keep = write('tool-results/toolu_other_1.txt', 'another conversation');
+  const memory = write('memory/MEMORY.md', '- a memory');
+  write(`${id}.jsonl`, [
+    { type: 'meta', cwd },
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_big:1', name: 'Read', input: {} }] } },
+    { type: 'message', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_big:1', content: `saved at ${bashFile}` }] } },
+  ].map((l) => JSON.stringify(l)).join('\n'));
+  write(`${other}.jsonl`, `${JSON.stringify({ type: 'meta', cwd })}\n`);
+  const run = path.join(dir, 'checkpoints', 'run-1');
+  fs.mkdirSync(run, { recursive: true });
+  fs.writeFileSync(path.join(run, '1-aaaaaaaaaaaa'), 'old a.js');
+  fs.writeFileSync(path.join(run, '2-bbbbbbbbbbbb'), 'old b.js');
+  fs.writeFileSync(path.join(run, 'index.json'), JSON.stringify([
+    { id: 1, conversation: id, files: [{ path: 'a.js', existed: true, snap: '1-aaaaaaaaaaaa' }] },
+    { id: 2, conversation: other, files: [{ path: 'b.js', existed: true, snap: '2-bbbbbbbbbbbb' }] },
+  ]));
+  const onlyMine = path.join(dir, 'checkpoints', 'run-2');
+  fs.mkdirSync(onlyMine, { recursive: true });
+  fs.writeFileSync(path.join(onlyMine, '1-cccccccccccc'), 'old c.js');
+  fs.writeFileSync(path.join(onlyMine, 'index.json'), JSON.stringify([{ id: 1, conversation: id, files: [{ path: 'c.js', snap: '1-cccccccccccc' }] }]));
+
+  const r = deleteConversation({ projects, id });
+  assert.equal(r.files, 6); // the conversation, 2 tool results, 2 snapshots, the index of the run that was only its
+  assert.ok(r.bytes > 0);
+  for (const gone of [path.join(dir, `${id}.jsonl`), bashFile, big, path.join(run, '1-aaaaaaaaaaaa'), onlyMine]) assert.equal(fs.existsSync(gone), false, gone);
+  for (const kept of [path.join(dir, `${other}.jsonl`), keep, memory, path.join(run, '2-bbbbbbbbbbbb')]) assert.ok(fs.existsSync(kept), kept);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(run, 'index.json'), 'utf8')).map((e) => e.conversation), [other]);
+  assert.throws(() => deleteConversation({ projects, id }), /这台电脑上没有这段对话/);
+  for (const bad of ['../../etc', 'a/b/c/d/e/f', '..\\..\\x12345', 'short']) assert.throws(() => deleteConversation({ projects, id: bad }), /对话 id 不对/);
+});

@@ -83,6 +83,16 @@ function connect(peer, io) {
   });
 }
 
+// A window the computer service opened for it (--keep-open, see HostService.window): what went wrong, or that the
+// session ended, stays readable until a key is pressed (a window that closes at once says nothing).
+function keepOpen(args, io) {
+  if (!args.includes('--keep-open') || !io.stdin.isTTY) return Promise.resolve();
+  io.stdout.write('Press any key to close this window.');
+  io.stdin.setRawMode(true);
+  io.stdin.resume();
+  return new Promise((resolve) => io.stdin.once('data', () => { io.stdin.setRawMode(false); io.stdin.pause(); resolve(); }));
+}
+
 // io: the terminal (process.stdin/stdout/stderr; the tests give their own).
 export async function attachCommand(args = [], io = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr }) {
   if (!io.stdin.isTTY || !io.stdout.isTTY) {
@@ -92,12 +102,14 @@ export async function attachCommand(args = [], io = { stdin: process.stdin, stdo
   const sessions = backgroundSessions();
   if (!sessions.length) {
     io.stdout.write('No background session runs on this computer. The web page opens them (新建会话, without "open a terminal window").\n');
+    await keepOpen(args, io);
     return 1;
   }
   const ref = args.find((a) => !a.startsWith('-'));
   let peer = ref ? findBackground(ref, sessions) : sessions.length === 1 ? sessions[0] : await choose(sessions, io);
   if (!peer) {
     io.stderr.write(`No background session called "${ref}". These run here: ${sessions.map((p) => `&${p.name}`).join(', ')}\n`);
+    await keepOpen(args, io);
     return 1;
   }
   const label = `&${peer.name}`;
@@ -122,11 +134,13 @@ export async function attachCommand(args = [], io = { stdin: process.stdin, stdo
     io.stdout.write(RESET);
     io.stdin.setRawMode(false);
     io.stderr.write(`Could not attach to ${label}: ${e.message}\n`);
+    await keepOpen(args, io);
     return 1;
   }
   io.stdout.write(RESET);
   io.stdin.setRawMode(false);
   io.stdin.pause();
   io.stdout.write(how === 'detached' ? `Detached from ${label}: it goes on in the background (claude-pro attach ${peer.name} comes back).\n` : `${label} has ended.\n`);
+  if (how !== 'detached') await keepOpen(args, io);
   return 0;
 }

@@ -468,7 +468,7 @@ export class App {
         id: this.flags.restart?.peerId,
         onMessage: (msg) => this.onPeerMessage(msg),
         getStatus: () => ({ busy: this.working() }),
-        info: () => ({ kind: this.headless ? 'background' : 'terminal', remoteId: this.remote?.id || this.flags.remoteId || this.flags.restart?.remote?.id || null, conversationId: this.store.id }),
+        info: () => ({ kind: this.headless ? 'background' : 'terminal', remoteId: this.remote?.id || this.flags.remoteId || this.flags.restart?.remote?.id || null, conversationId: this.store.id, attached: this.vterm ? this.vterm.clients.size : 0 }),
         onControl: (body) => this.onControl(body),
         onAttach: this.headless ? (socket, size) => this.attachClient(socket, size) : null,
       }).start();
@@ -500,13 +500,24 @@ export class App {
   }
 
   // `claude-pro attach` (see attach.js) on this background session: the screen, drawn whole for it, and its keys.
-  // From the client: one JSON object a line, {keys: base64} or {resize: [columns, rows]}.
+  // From the client: one JSON object a line, {keys: base64} or {resize: [columns, rows]}. A turn that runs goes on:
+  // the client gets the conversation as it is (scrolled back with the wheel, PgUp), the live part and what follows.
+  // The registry says how many are attached (the web page shows it, see background.js); one that goes away
+  // (detached, its window closed, its process killed) changes nothing else.
   attachClient(socket, { cols, rows } = {}) {
     const client = { write: (d) => { if (!socket.destroyed) socket.write(d); }, close: () => socket.end() };
     socket.on('error', () => { /* its close follows */ });
-    socket.on('close', () => this.vterm.detach(client));
+    // An HTTP server's sockets stay half open when the other side closes (allowHalfOpen): without this, a client that
+    // went away (its window closed, its process killed) would count as attached until a write failed, a minute later.
+    socket.on('end', () => socket.destroy());
+    socket.on('close', () => {
+      this.vterm.detach(client);
+      this.peers?.update();
+    });
     this.vterm.attach(client, { cols, rows });
+    this.peers?.update();
     client.write(`${ATTACH_MODES}${ESC.bracketedPasteOn}`);
+    this.screen.title = ''; // its window gets the title too (sent again with the next draw)
     if (this.screen.full) this.screen.repaint();
     let buf = '';
     // (no setEncoding: an HTTP server's socket refuses it; the lines are ASCII anyway, JSON with base64)

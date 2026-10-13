@@ -148,6 +148,7 @@ export class BackgroundSessions {
       stopping: false,
       restartFrom: null,
       suspended: false,
+      attached: 0, // terminals attached to it (claude-pro attach, a window the page opened)
     };
   }
 
@@ -273,6 +274,9 @@ export class BackgroundSessions {
         rec.state = 'running';
         changed = true;
       }
+      // the terminals attached to it (none while it is not in the registry: starting, restarting)
+      const attached = Number(p?.attached) || 0;
+      if (rec.attached !== attached) { rec.attached = attached; changed = true; }
       // one taken over from an earlier service has no child process here: its pid tells
       if (!rec.child && rec.state !== 'restarting' && !pidAlive(rec.pid)) this.gone(rec, null);
     }
@@ -366,6 +370,22 @@ export class BackgroundSessions {
     this.onChange();
   }
 
+  // The conversation `conversationId` deleted: the sessions that are not running and had it (failed, suspended,
+  // ended) are forgotten, so that it is not opened again. Returns their logs (they hold its text), to delete too.
+  forgetConversation(conversationId) {
+    const logs = [];
+    for (const rec of [...this.sessions.values()]) {
+      if (rec.conversationId !== conversationId || this.alive(rec)) continue;
+      this.sessions.delete(rec.sessionId);
+      logs.push(this.logFile(rec.sessionId));
+    }
+    for (const e of this.ended.filter((x) => x.conversationId === conversationId)) logs.push(this.logFile(e.sessionId));
+    this.ended = this.ended.filter((x) => x.conversationId !== conversationId);
+    this.persist();
+    this.onChange();
+    return logs.flatMap((f) => [f, `${f}.1`]);
+  }
+
   // The conversation `conversationId` already open in a session of this computer (a background one, or a terminal):
   // its entry in the registry.
   openConversation(conversationId) {
@@ -398,6 +418,7 @@ export class BackgroundSessions {
       exitCode: rec.exitCode,
       error: rec.error,
       restarts: rec.restarts,
+      attached: rec.attached || 0,
     };
   }
 

@@ -419,7 +419,7 @@ export class Agent {
     if (this.reminders.length) content = [...content, ...this.reminders.splice(0).map((text) => ({ type: 'text', text: `<system-reminder>${text}</system-reminder>` }))];
     if (!this.isSubagent && this.checkpoints) {
       const prompt = content.find((b) => b.type === 'text' && !b.text.startsWith('<system-reminder>') && !b.text.startsWith('<task-notification>'))?.text;
-      this.checkpoints.beginTurn({ label: prompt || '(background agent report)', messageIndex: this.messages.length });
+      this.checkpoints.beginTurn({ label: prompt || '(background agent report)', messageIndex: this.messages.length, conversation: this.config.sessionId || null });
     }
     this.pushMessage({ role: 'user', content });
 

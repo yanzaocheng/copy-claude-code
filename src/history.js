@@ -92,3 +92,72 @@ export function listConversations({ projects, query = '', cwd = null, limit = 50
   }
   return { items, more };
 }
+
+// A conversation's id as it may be used in a path: what SessionStore makes (a UUID), letters, digits, - and _ in
+// any case. Anything else (a dot, a slash: "../x") is refused before it gets near a path.
+export const CONVERSATION_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
+// Delete what this computer keeps of the conversation `id` (the web page's "delete"): its session file (in every
+// project it is in: /cd moves it), the tool results saved for it (the outputs too long for the conversation, named
+// after its tool calls or referred to by path in it) and its checkpoints (the file snapshots of /rewind, tagged
+// with the conversation they belong to). What belongs to the project stays: its memory, CLAUDE.md, the input
+// history, the checkpoints of other conversations. `extra`: more files to delete (a background session's log).
+// Returns {files, bytes}; throws when there is no such conversation.
+export function deleteConversation({ projects, id, extra = [] }) {
+  if (!CONVERSATION_ID.test(String(id || ''))) throw new Error('对话 id 不对');
+  let dirs = [];
+  try { dirs = fs.readdirSync(projects, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => path.join(projects, d.name)); } catch { /* none */ }
+  const sessionFiles = dirs.map((d) => path.join(d, `${id}.jsonl`)).filter((f) => fs.existsSync(f));
+  if (!sessionFiles.length) throw new Error('这台电脑上没有这段对话');
+  // the tool results it saved: <tool call id>.txt (persistLargeOutput) and bash-<time>-<random>.txt (the Bash tool)
+  const names = new Set();
+  for (const file of sessionFiles) {
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    for (const m of text.matchAll(/"(?:tool_use_id|id)":"([^"]{1,200})"/g)) names.add(`${m[1].replace(/[^\w-]/g, '_')}.txt`);
+    for (const m of text.matchAll(/bash-\d+-[a-z0-9]+\.txt/g)) names.add(m[0]);
+  }
+  const doomed = [...sessionFiles, ...extra];
+  const rewrites = []; // checkpoint indexes that keep other conversations' entries
+  for (const dir of dirs) {
+    const results = path.join(dir, 'tool-results');
+    for (const name of names) {
+      const f = path.join(results, name);
+      if (fs.existsSync(f)) doomed.push(f);
+    }
+    let runs = [];
+    try { runs = fs.readdirSync(path.join(dir, 'checkpoints')); } catch { continue; }
+    for (const run of runs) {
+      const runDir = path.join(dir, 'checkpoints', run);
+      let entries;
+      try { entries = JSON.parse(fs.readFileSync(path.join(runDir, 'index.json'), 'utf8')); } catch { continue; }
+      if (!Array.isArray(entries) || !entries.some((e) => e?.conversation === id)) continue;
+      const kept = entries.filter((e) => e?.conversation !== id);
+      for (const e of entries) {
+        if (e?.conversation !== id) continue;
+        for (const f of e.files || []) if (f?.snap && /^[\w-]+$/.test(f.snap)) doomed.push(path.join(runDir, f.snap));
+      }
+      if (kept.length) rewrites.push({ file: path.join(runDir, 'index.json'), entries: kept });
+      else doomed.push(path.join(runDir, 'index.json'), runDir);
+    }
+  }
+  let files = 0;
+  let bytes = 0;
+  const failed = [];
+  for (const f of doomed) {
+    try {
+      const st = fs.statSync(f);
+      if (st.isDirectory()) { fs.rmSync(f, { recursive: true, force: true }); continue; }
+      fs.rmSync(f);
+      files++;
+      bytes += st.size;
+    } catch (e) {
+      if (e.code !== 'ENOENT') failed.push(`${path.basename(f)}: ${e.code || e.message}`);
+    }
+  }
+  for (const r of rewrites) {
+    try { fs.writeFileSync(r.file, JSON.stringify(r.entries, null, 1)); } catch (e) { failed.push(`${r.file}: ${e.code || e.message}`); }
+  }
+  if (sessionFiles.some((f) => fs.existsSync(f))) throw new Error(`删除失败：${failed.join('；') || '会话文件还在'}`);
+  return { files, bytes, ...(failed.length ? { failed } : {}) };
+}
