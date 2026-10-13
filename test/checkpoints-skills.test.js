@@ -272,3 +272,28 @@ test('hooks: the event JSON is written to stdin as well as $CLAUDE_PRO_HOOK_INPU
   assert.equal(r.blocked, false);
   assert.deepEqual(r.context, ['PreToolUse:Bash:ls']);
 });
+
+test('the todo list: kept while the next turn goes on with it, put away once a whole turn left it as it was', async () => {
+  const { TodoWriteTool } = await import('../src/tools/interaction.js');
+  const dir = tmp();
+  const cfg = makeConfig(dir);
+  const agent = new Agent({ config: cfg, tools: [TodoWriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const list = [{ content: 'Build it', status: 'completed', activeForm: 'Building it' }, { content: 'Wait for the user', status: 'in_progress', activeForm: 'Waiting' }];
+  let writes = true;
+  let calls = 0;
+  agent.callModel = async () => {
+    calls++;
+    if (writes && calls % 2 === 1) return toolUse(`t${calls}`, 'TodoWrite', { todos: list });
+    return reply([{ type: 'text', text: 'ok' }]);
+  };
+  await agent.run('do the task'); // writes the list
+  assert.equal(agent.todos.length, 2);
+  writes = false;
+  calls = 0;
+  await agent.run('a follow-up'); // the turn right after: the list stays
+  assert.equal(agent.todos.length, 2);
+  await agent.run('<task-notification>a background agent finished</task-notification>'); // not the user's: not a turn of theirs
+  assert.equal(agent.todos.length, 2);
+  await agent.run('something else entirely'); // the whole turn before left it alone: put away
+  assert.deepEqual(agent.todos, []);
+});

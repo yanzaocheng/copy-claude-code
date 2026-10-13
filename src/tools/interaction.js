@@ -35,6 +35,7 @@ How:
   async call(input, ctx) {
     const todos = Array.isArray(input.todos) ? input.todos.filter((t) => t && t.content) : [];
     ctx.agent.todos = todos.every((t) => t.status === 'completed') ? [] : todos;
+    ctx.agent.todosTurn = ctx.agent.userTurns; // see Agent.noteUserTurn
     return {
       content: 'The todo list is updated.',
       display: { todos },

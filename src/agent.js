@@ -188,6 +188,8 @@ export class Agent {
     this.spawnSubagent = spawnSubagent;
     this.messages = [];
     this.todos = [];
+    this.userTurns = 0; // turns the user started (see noteUserTurn)
+    this.todosTurn = 0; // ... and the one in which the todo list was last written
     this.fileState = new Map();
     this.projectRoot = cwd;
     this.cwd = cwd;
@@ -384,10 +386,22 @@ export class Agent {
   }
 
   // Run one user turn to completion. Returns {text, interrupted}.
+  // A turn the user started (a message of theirs, or a task from another session; not only a report of a background
+  // agent). The todo list belongs to a request: one that the whole turn before this one left as it was is done or
+  // dropped (its last items never ticked off, or one waiting for the user left in it), so it is put away instead of
+  // showing under the next task. The model writes a new one when it needs one.
+  noteUserTurn(content) {
+    const fromUser = toBlocks(content).some((b) => b.type === 'image' || (b.type === 'text' && !/^<(task-notification|system-reminder)>/.test(b.text)));
+    if (!fromUser) return;
+    this.userTurns++;
+    if (this.todos.length && this.todosTurn < this.userTurns - 1) this.todos = [];
+  }
+
   async run(userContent, { signal } = {}) {
     if (!this.isSubagent) {
       this.beforeTurn?.();
       this.endEffortBoost();
+      this.noteUserTurn(userContent);
     }
     this.clearAfterIdle();
     let content = toBlocks(userContent);
