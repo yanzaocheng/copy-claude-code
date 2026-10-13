@@ -1,12 +1,16 @@
-// The computer service (`claude-pro host`): one background process per computer (per CONFIG_DIR) that keeps
-// this computer on the gateway's 远程控制 page, so that the page can open a new session here: it lists the
-// directories to choose from, and opens a terminal window with claude-pro in the one chosen, online at once with
-// the id the gateway gave it. Like a session it only connects out to the gateway, with the API key of /login.
+// The computer service (`claude-pro host`): one background process per computer (per CONFIG_DIR) that makes this
+// computer one the gateway's web page (远程控制) runs sessions on: it lists the directories to choose from, opens
+// sessions in the one chosen (in the background without a window, see background.js, or in a terminal window),
+// online at once with the id the gateway gave them, ends and restarts them, reopens kept conversations (history),
+// gives logs, updates claude-pro, and reports the sessions and how busy the computer is. Like a session it only
+// connects out to the gateway, with the API key of /login or claude-pro connect.
 //
 // Protocol (Bearer = the gateway API key; ARCHITECTURE.md 3.1.5):
-//   POST   /v1/remote/hosts {id, machine, host, platform, version, home, terminal} -> {id, ok}
-//   GET    /v1/remote/hosts/:id/commands (SSE): online while it is open; {cid, type: 'list'|'open', body}
+//   POST   /v1/remote/hosts {id, machine, host, platform, version, home, terminal, autostart, sessions, stats}
+//   GET    /v1/remote/hosts/:id/commands (SSE): online while it is open; {cid, type, body}: list, open, stop,
+//          restart, logs, history, update
 //   POST   /v1/remote/hosts/:id/results {cid, ok: true, ...} | {cid, ok: false, error}
+//   POST   /v1/remote/hosts/:id/state {sessions, stats}: on a change of the sessions, and every minute
 //   DELETE /v1/remote/hosts/:id: off the page's list (`host stop`, a logout, another account)
 //
 // It runs in the foreground with `claude-pro host`, in the background (detached, no window, logging to
@@ -1364,10 +1368,16 @@ function uninstallCommand() {
 
 const USAGE = `Usage: claude-pro host [run | start | stop | status | install | uninstall]
 
-The computer service: it keeps this computer on the gateway's 远程控制 page, so that the page can open a new
-claude-pro session here (in a terminal window, in the directory chosen there). It uses the gateway login of
-/login, and only connects out to the gateway. A session logged in to the gateway starts it by itself
-(CLAUDE_PRO_HOST=0: not).
+The computer service: it makes this computer one the gateway's web page (远程控制) runs sessions on. From the
+page: new sessions here, in the directory chosen there, in the background without a window (or, when asked, in
+a terminal window); ending and restarting them; opening a conversation kept here again (history); their logs and
+its own; updating claude-pro. A background session that crashes is opened again, and after a restart of the
+computer the service opens again those that ran (the conversation, not the task that was running).
+\`claude-pro attach\` shows a background session in a terminal here.
+
+It uses the gateway login of /login or claude-pro connect, and only connects out to the gateway. A session
+logged in to the gateway starts it by itself, and /login and connect set it up to start at logon
+(CLAUDE_PRO_HOST=0: neither).
 
   claude-pro host            Run it here, in the foreground (Ctrl+C stops it)
   claude-pro host start      Run it in the background (log: ~/.claude-pro/host.log)

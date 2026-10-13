@@ -132,9 +132,9 @@ sequenceDiagram
 - **双击 Esc**：输入框有文字时清空（`discard`，按上可找回）；为空时调用 `onDoubleEscape` → `App.openRewind()`（忙时 Esc 先中断，不会打开）。Node 的按键解析在 Esc 之后要等约 500ms 判断它是不是组合键的开头，连按的两个 Esc 常常合成一个带 `meta` 的 escape，两种都算连按。
 - **回退菜单**（`/rewind`，[`src/commands.js`](src/commands.js)）：按时间列出检查点（最新的在最下、默认选中，`SelectDialog` 的 `selected`），`/clear` 前的对话（`app.previousSession`，在 `/clear` 里记下，`loadSession` 清掉）在最上面。动作：恢复代码和对话 / 对话 / 代码（`rewind()`）、Summarize from here / up to here（`Agent.summarizePart(index, {part: 'after'|'before'})`：整段对话加上 `partialCompactPrompt` 作为一次摘要请求，走 `requestSummary` 以复用缓存；被总结的部分换成一条 `partialSummaryMessage`，其余逐字保留；然后 `CheckpointStore.summarized` 让被总结的回合不能再回退对话、把之后的回合的 `messageIndex` 前移）、Never mind（回到列表）。回填输入框的是 `promptAt(agent, entry)`：检查点所在的那条用户消息的完整文字（标签只存前 200 字）。
 
-### 3.1.5 电脑服务（claude-pro host）：从网页新建会话
+### 3.1.5 电脑服务（claude-pro host）：网页的执行者
 
-网关"远程控制"页按电脑分组列出会话，并能在某台电脑的某个目录里新建会话：那台电脑上弹出一个终端窗口运行 claude-pro，会话一启动就用网关给的 id 上线，网页直接接上。为此每台电脑（每个 `CONFIG_DIR`）常驻一个后台进程，[`src/host.js`](src/host.js)。它和会话一样只发出站请求，鉴权用 gateway.json 的 API key。
+网关"远程控制"页是操作界面：按电脑（`computerId`）分组列出会话，在某台电脑的某个目录里新建会话（默认是没有窗口的后台会话，勾选后才开终端窗口），结束、重启会话，恢复历史对话，看日志和电脑状态，更新 claude-pro。每台电脑（每个 `CONFIG_DIR`）常驻一个后台进程执行这些，[`src/host.js`](src/host.js)；会话一启动就用网关给的 id 上线，网页直接接上。它和会话一样只发出站请求，鉴权用 gateway.json 的 API key（`/login` 或 `claude-pro connect` 存下）。下面先是最初的协议（列目录、开终端窗口），后台会话和其他命令见"后台会话"和"接入与自动启动"两小节。
 
 - **协议**（Bearer = 网关 API key；host 的 id 规则同会话 id）：
   - `POST /v1/remote/hosts {id, machine, host, platform, version, home, terminal}` → `{id, ok}`。`id` 第一次生成后存在 `host.json` 里一直沿用；`machine` 是 `machineName(config.env)`，和会话注册时完全一样（网页按它分组）；`terminal` 是给人看的终端名（`Windows Terminal`、`Windows console`、`Terminal.app`、`gnome-terminal`、`tmux`…，打不开终端时为空）。注册返回 404 说明网关还不支持电脑（老网关），记一次日志、5 分钟后再试。
