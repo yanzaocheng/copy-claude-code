@@ -25,6 +25,8 @@ Options:
   --name <name>                    Name this session, as /rename does (other sessions reach it with &name)
   --remote-id <id>                 Go online at the gateway at once with this id (the gateway's web page opens
                                    sessions this way, through claude-pro host)
+  --headless                       A background session: no window, used from the web page (with --remote-id)
+                                   and from claude-pro attach; what it prints goes to stdout as a log
   -v, --version                    Print version
   -h, --help                       Show help
 
@@ -40,6 +42,8 @@ Commands:
   claude-pro config unset <KEY> [--project|--local]
   claude-pro host [start|stop|status|install|uninstall]   The computer service: lets the gateway's web page
                                           open sessions on this computer (claude-pro host --help)
+  claude-pro attach [name]                Use a background session of this computer here, in this terminal
+                                          (ctrl+] detaches; it goes on in the background)
 `;
 
 const REMOTE_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -76,6 +80,7 @@ function parseArgs(argv) {
       case '--verbose': flags.verbose = true; break;
       case '--no-mcp': flags.noMcp = true; break;
       case '--remote-control': case '--rc': break; // online by default now
+      case '--headless': flags.headless = true; break;
       case '--name': flags.name = next(); break;
       case '--remote-id': {
         const id = next();
@@ -162,6 +167,7 @@ export async function main(argv) {
   let cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
   if (argv[0] === 'host') return (await import('./host.js')).hostCommand(argv.slice(1));
+  if (argv[0] === 'attach') return (await import('./attach.js')).attachCommand(argv.slice(1));
   if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }
@@ -170,8 +176,9 @@ export async function main(argv) {
   let prompt = positional.join(' ');
 
   // Started by a restart of a running session: that session is picked up again, whatever the command line
-  // that started the first one said (-c, --resume, a first prompt).
-  const interactive = !(flags.print || !process.stdout.isTTY || !process.stdin.isTTY);
+  // that started the first one said (-c, --resume, a first prompt). A background session (--headless) has no
+  // terminal and is interactive all the same.
+  const interactive = flags.headless || !(flags.print || !process.stdout.isTTY || !process.stdin.isTTY);
   const restart = interactive ? takeRestartState() : null;
   if (restart) {
     flags.restart = restart;
@@ -191,14 +198,26 @@ export async function main(argv) {
   if (flags.continue || (flags.resume && flags.resumeId)) {
     const sessions = SessionStore.list(cwd);
     const found = flags.resumeId ? sessions.find((s) => s.id.startsWith(flags.resumeId)) : sessions[0];
-    if (!found) {
+    if (!found && flags.headless) {
+      // a background session opened again (after a crash, a reboot) that never had a conversation: a new one
+      process.stdout.write(`No conversation ${flags.resumeId || ''} here: starting a new one.\n`);
+      flags.continue = false;
+      flags.resume = false;
+      flags.resumeId = undefined;
+    } else if (!found) {
       process.stderr.write(flags.resumeId ? `No conversation found with id ${flags.resumeId}\n` : 'No conversation found to continue\n');
       return 1;
+    } else {
+      flags.resumeFile = found.file;
+      flags.resumeId = found.id;
     }
-    flags.resumeFile = found.file;
-    flags.resumeId = found.id;
   }
 
+  if (flags.headless) {
+    if (!fs.existsSync(cwd)) return 1;
+    const { runRepl } = await import('./ui/repl.js');
+    return await runRepl({ flags, cwd, initialPrompt: prompt });
+  }
   // mintty (Git Bash's default window) connects programs through pipes, not a console.
   if (!flags.print && !process.stdin.isTTY && process.env.TERM_PROGRAM === 'mintty') {
     process.stderr.write('Interactive mode needs a real console. In mintty/Git Bash run `winpty claude-pro` (or `winpty node bin/claude-pro.js`), or use Windows Terminal. For scripts use `claude-pro -p`.\n');

@@ -24,20 +24,24 @@ import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { CONFIG_DIR, INSTALL_DIR, VERSION, GATEWAY_DEFAULT_URL, loadConfig } from './config.js';
 import { readGatewayLogin, normalizeGatewayUrl } from './gateway.js';
-import { machineName, cleanName } from './peers.js';
+import { machineName, cleanName, listPeers } from './peers.js';
+import { BackgroundSessions, markEnded, tailFile } from './background.js';
 import { ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED } from './supervisor.js';
 
 export const ENTRY = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
-const BEAT_MS = 20_000; // host.json is written this often while it runs ...
+// (CLAUDE_PRO_HOST_TICK_MS, for the tests: the heartbeat and the check of the program's files that often)
+const TICK = Number(process.env.CLAUDE_PRO_HOST_TICK_MS) || 0;
+const BEAT_MS = TICK || 20_000; // host.json is written this often while it runs ...
 const STALE_MS = 90_000; // ... and one whose heartbeat is older than this is not running (its pid may be another program's now)
 const LOGIN_CHECK_MS = 5_000;
-const CODE_CHECK_MS = 60_000;
+const CODE_CHECK_MS = TICK || 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const STREAM_SILENCE_MS = 50_000; // the gateway pings every 15 s
 const MAX_ENTRIES = 1000;
 const MAX_RECENT = 15;
 const LOG_BYTES = 1_000_000;
+const STATE_MS = 60_000; // the state goes to the gateway at least this often (the numbers of Stats)
 // A session's own (its supervisor's, and those of one command of its Bash tool, see utils/shell.js: `claude-pro host
 // start` may be run there): not for the service, nor for the sessions it opens.
 const SESSION_ONLY = [ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED, 'CLAUDE_PRO_CWD_FILE', 'CLAUDE_PRO_PID_FILE', 'CLAUDE_PRO_COMMAND'];
@@ -87,7 +91,8 @@ export function hostRunning(state = readHostState(), now = Date.now()) {
   return Boolean(state.pid && pidAlive(state.pid) && now - (Number(state.beat) || 0) < STALE_MS);
 }
 
-// This computer's id at the gateway: made once, then kept in host.json.
+// This computer's id at the gateway: made once, then kept in host.json. The sessions register with it too
+// (computerId), so that the page puts a computer's service and its sessions together.
 function hostId() {
   const state = readHostState();
   if (ID.test(state.id || '')) return state.id;
@@ -95,6 +100,16 @@ function hostId() {
   updateHostState({ id });
   return id;
 }
+
+let knownId = null;
+export function computerId() {
+  if (knownId && knownId.dir === configDir()) return knownId.id;
+  knownId = { dir: configDir(), id: hostId() };
+  return knownId.id;
+}
+
+// A background session ended for good (/exit): the service does not open it again (see background.js).
+export function markBackgroundEnded(sessionId) { markEnded(configDir(), sessionId); }
 
 // One service per CONFIG_DIR: host.lock holds the pid of the one that runs. A lock is taken over when its process
 // is gone, or when it is old and no heartbeat says it runs (its pid may be another program's now).
@@ -147,11 +162,21 @@ function serviceEnv(env = process.env) {
 }
 
 // A service in the background: detached (it outlives the session or terminal that started it), without a window.
+// What it prints on its own (a crash) goes to its log too.
 export function startHostInBackground({ env = process.env } = {}) {
-  const child = spawn(process.execPath, [ENTRY, 'host', 'run', '--background'], { detached: true, stdio: 'ignore', windowsHide: true, cwd: os.homedir(), env: serviceEnv(env) });
-  child.on('error', () => { /* the next session tries again */ });
-  child.unref();
-  return child.pid;
+  let fd = 'ignore';
+  try {
+    fs.mkdirSync(hostFiles().dir, { recursive: true });
+    fd = fs.openSync(hostFiles().log, 'a');
+  } catch { /* nowhere: ignored */ }
+  try {
+    const child = spawn(process.execPath, [ENTRY, 'host', 'run', '--background'], { detached: true, stdio: ['ignore', fd, fd], windowsHide: true, cwd: os.homedir(), env: serviceEnv(env) });
+    child.on('error', () => { /* the next session tries again */ });
+    child.unref();
+    return child.pid;
+  } finally {
+    if (typeof fd === 'number') try { fs.closeSync(fd); } catch { /* closed */ }
+  }
 }
 
 // For a session that starts (see App.ensureHost): a service, unless one runs, `claude-pro host stop` stopped it, or
@@ -476,11 +501,15 @@ export function runLaunch(spec, { timeoutMs = 20_000 } = {}) {
 
 export class HostService {
   // `readLogin`, `loadConfig`, `launch`, `terminal`, `home`: what the tests give it instead of this computer's.
-  constructor({ id, log = () => {}, fetchImpl = globalThis.fetch, background = false, terminal, launch = runLaunch, home = os.homedir(), readLogin, loadConfig: load } = {}) {
+  // `sessions`: the background sessions it runs (see background.js), null when it runs none (the tests).
+  constructor({ id, log = () => {}, fetchImpl = globalThis.fetch, background = false, terminal, launch = runLaunch, home = os.homedir(), readLogin, loadConfig: load, sessions = null } = {}) {
     this.id = id;
     this.log = log;
     this.fetch = fetchImpl;
     this.background = background;
+    this.sessions = sessions;
+    this.stats = new Stats(home);
+    this.stateTimer = null;
     this.terminal = terminal === undefined ? terminalFor() : terminal;
     this.launch = launch;
     this.home = home;
@@ -537,9 +566,29 @@ export class HostService {
     return { id: this.id, machine: machineName(this.cfg().env), host: os.hostname(), platform: process.platform, version: VERSION, home: this.home, terminal: this.terminal?.name || '' };
   }
 
+  // What the page shows of this computer now: its background sessions and how busy it is.
+  state() {
+    return { sessions: this.sessions?.list() || [], stats: this.stats.now() };
+  }
+
+  // The state to the gateway: soon after a change of the sessions (several changes in a row go as one), and every
+  // minute for the numbers.
+  reportState({ soon = true } = {}) {
+    if (soon) {
+      if (this.stateTimer) return;
+      this.stateTimer = setTimeout(() => { this.stateTimer = null; this.reportState({ soon: false }); }, 300);
+      this.stateTimer.unref?.();
+      return;
+    }
+    if (!this.registered || !this.login || this.stopped) return;
+    this.request('POST', `/v1/remote/hosts/${encodeURIComponent(this.id)}/state`, this.state()).catch((e) => {
+      if (e.status === 404) { this.registered = false; this.streamAbort?.abort(); } // forgotten: registered again
+    });
+  }
+
   async register() {
     try {
-      await this.request('POST', '/v1/remote/hosts', this.info());
+      await this.request('POST', '/v1/remote/hosts', { ...this.info(), autostart: autostartKind(), ...this.state() });
     } catch (e) {
       if (e.status === 404) e.noHosts = true; // a gateway without computers (yet): not the one that forgot this one
       throw e;
@@ -564,6 +613,9 @@ export class HostService {
     } else if (this.login) {
       this.log(`logged in to the gateway ${this.base()}`);
     }
+    // the background sessions are the account's: gone with the login, back with a login
+    if (!this.login) this.sessions?.suspendAll();
+    else this.sessions?.resumeAll();
     this.streamAbort?.abort();
     this.wakeUp();
   }
@@ -617,8 +669,11 @@ export class HostService {
       setInterval(() => this.beat(), BEAT_MS),
       setInterval(() => this.checkLogin(), LOGIN_CHECK_MS),
       setInterval(() => this.checkCode(), CODE_CHECK_MS),
+      setInterval(() => this.reportState({ soon: false }), STATE_MS),
+      setInterval(() => this.stats.sample(), 5000),
     );
-    try { await this.loop(); } finally { for (const t of this.timers) clearInterval(t); }
+    for (const t of this.timers) t.unref?.();
+    try { await this.loop(); } finally { for (const t of this.timers) clearInterval(t); clearTimeout(this.stateTimer); }
   }
 
   async loop() {
@@ -642,7 +697,9 @@ export class HostService {
           this.refusedKey = this.login?.apiKey;
           this.refusedAt = Date.now();
           this.registered = false;
-          this.note(`the gateway refused this computer's key (${e.message}): waiting for /login`);
+          // removed on the web page, or its key revoked: its background sessions end (kept to be opened again)
+          this.note(`这台电脑已从网页上移除 (the gateway refused this computer's key: ${e.message}); waiting for /login or claude-pro connect`);
+          this.sessions?.suspendAll();
         }
         else if (!this.stopped && e.name !== 'AbortError') this.note(`cannot reach the gateway ${this.base()}: ${e.message}`);
       }
@@ -703,6 +760,9 @@ export class HostService {
       let r;
       if (cmd.type === 'list') r = await this.list(body);
       else if (cmd.type === 'open') r = await this.open(body);
+      else if (cmd.type === 'stop') r = await this.needSessions().stop(String(body.sessionId || ''));
+      else if (cmd.type === 'restart') r = await this.needSessions().restart(String(body.sessionId || ''));
+      else if (cmd.type === 'logs') r = this.logs(body);
       else throw new Error(`这台电脑上的 claude-pro ${VERSION} 不认识命令 ${cmd.type}，请升级`);
       result = { cid: cmd.cid, ok: true, ...r };
     } catch (e) {
@@ -730,9 +790,35 @@ export class HostService {
     });
   }
 
-  // A new terminal window with an interactive claude-pro in `cwd`, online at once as `sessionId` (and named `name`).
-  async open({ sessionId, cwd, create, name } = {}) {
+  needSessions() {
+    if (!this.sessions) throw new Error('这台电脑的 claude-pro 服务不运行后台会话');
+    return this.sessions;
+  }
+
+  // The end of a log: a background session's, or the service's own. {text}
+  logs({ sessionId, lines } = {}) {
+    const n = Math.max(1, Math.min(2000, Number(lines) || 200));
+    if (sessionId) {
+      if (!ID.test(String(sessionId))) throw new Error('会话 id 不对');
+      const file = this.needSessions().logFile(sessionId);
+      if (!fs.existsSync(file) && !fs.existsSync(`${file}.1`)) throw new Error('这个会话没有日志');
+      return { text: tailFile(file, n) };
+    }
+    return { text: tailFile(hostFiles().log, n) };
+  }
+
+  // A new session in `cwd`, online at once as `sessionId` (and named `name`): in the background (no window, see
+  // background.js), or with `window` in a terminal window. `resume`: a conversation of this computer, opened again
+  // (where it is already open, that session is the answer: {existing: its id at the gateway}). `model`: to start with.
+  async open({ sessionId, cwd, create, name, window = true, resume = null, model = null } = {}) {
     if (typeof sessionId !== 'string' || !ID.test(sessionId)) throw new Error('会话 id 不对');
+    if (resume != null && (typeof resume !== 'string' || !/^[0-9a-f-]{8,}$/i.test(resume))) throw new Error('对话 id 不对');
+    if (model != null && (typeof model !== 'string' || !/^[\w.:/[\]-]{1,100}$/.test(model))) throw new Error('模型名不对');
+    if (resume) {
+      const open = listPeers().find((p) => p.conversationId === resume);
+      if (open?.remoteId) return { existing: open.remoteId };
+      if (open) throw new Error(`这段对话已经在这台电脑的会话 &${open.name} 里打开了（它没有连上网关）`);
+    }
     const dir = typeof cwd === 'string' ? normalizeDir(cwd, { home: this.home }) : null;
     if (!dir || !String(cwd).trim()) throw new Error(`请选择一个绝对路径的目录：${cwd ?? ''}`);
     let st = null;
@@ -745,10 +831,15 @@ export class HostService {
     } else if (!st.isDirectory()) {
       throw new Error(`不是目录：${dir}`);
     }
+    const label = typeof name === 'string' && name.trim() ? cleanName(name) : '';
+    if (window === false) {
+      const r = this.needSessions().open({ sessionId, cwd: dir, name: label, resume, model });
+      this.log(`opened a background session in ${dir} for ${sessionId}${label ? ` (${label})` : ''}${resume ? `, resuming ${resume}` : ''}`);
+      return { pid: r.pid };
+    }
     const term = this.terminal;
     if (!term) throw new Error('这台电脑上找不到能打开的终端（Windows Terminal、Terminal.app、x-terminal-emulator、gnome-terminal、konsole、xterm 或 tmux）');
-    const label = typeof name === 'string' && name.trim() ? cleanName(name) : '';
-    const args = ['--remote-id', sessionId, ...(label ? ['--name', label] : [])];
+    const args = ['--remote-id', sessionId, ...(label ? ['--name', label] : []), ...(resume ? ['--resume', resume] : []), ...(model ? ['--model', model] : [])];
     const env = passedEnv();
     const envFile = process.platform === 'win32' && term.kind === 'wt' ? writeEnvFile(sessionId, env) : null;
     try {
@@ -806,7 +897,73 @@ export function codeFingerprint(root = INSTALL_DIR) {
   return hash.digest('base64');
 }
 
+// How busy this computer is, for the page: {cpu (percent, the last minute, all cores), memUsed, memTotal, diskFree,
+// diskTotal (bytes; the disk of the home directory), uptime (seconds)}. The CPU is sampled every 5 seconds.
+export class Stats {
+  constructor(home = os.homedir()) {
+    this.home = home;
+    this.samples = [];
+    this.sample();
+  }
+
+  sample() {
+    let idle = 0;
+    let total = 0;
+    for (const c of os.cpus()) {
+      idle += c.times.idle;
+      total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
+    }
+    this.samples.push({ at: Date.now(), idle, total });
+    while (this.samples.length > 2 && Date.now() - this.samples[1].at >= 60_000) this.samples.shift();
+  }
+
+  now() {
+    const first = this.samples[0];
+    const last = this.samples[this.samples.length - 1];
+    const busy = last && first && last.total > first.total ? 1 - (last.idle - first.idle) / (last.total - first.total) : 0;
+    let diskFree = null;
+    let diskTotal = null;
+    try {
+      const s = fs.statfsSync(this.home);
+      diskFree = s.bavail * s.bsize;
+      diskTotal = s.blocks * s.bsize;
+    } catch { /* unknown */ }
+    return {
+      cpu: Math.round(Math.max(0, Math.min(1, busy)) * 1000) / 10,
+      memUsed: os.totalmem() - os.freemem(),
+      memTotal: os.totalmem(),
+      diskFree,
+      diskTotal,
+      uptime: Math.round(os.uptime()),
+    };
+  }
+}
+
+// `claude-pro host check`: the code of this version loads (the service's, and a session's). A service that runs
+// asks this before it hands over to a new version (see runHost).
+export async function checkCommand() {
+  await import('./background.js');
+  await import('./ui/repl.js');
+  await import('./main.js');
+  process.stdout.write(`claude-pro ${VERSION} loads\n`);
+  return 0;
+}
+
+// Whether the code now on disk starts: `host check` in a process of its own. null, or what went wrong.
+function newVersionFails() {
+  const r = spawnSync(process.execPath, [ENTRY, 'host', 'check'], { cwd: os.homedir(), env: serviceEnv(), windowsHide: true, encoding: 'utf8', timeout: 60_000 });
+  if (r.status === 0) return null;
+  const said = `${r.stderr || ''}${r.stdout || ''}`.trim().split(/\r?\n/).filter(Boolean).slice(-6).join(' | ');
+  return said || r.error?.message || `exit code ${r.status}`;
+}
+
 // `claude-pro host run [--background]`: the service, until it is stopped. Returns the exit code.
+//
+// When the program's files change (an update, an edit of the source), a background service hands over to the new
+// version, carefully: this machine must not lose the web page's control. The new code is checked first (`host
+// check`); when it does not load, this one goes on (and says why in the log) until the files change again. When it
+// does, the new service is started and this one leaves once it runs; when it does not come up, this one takes over
+// again. The background sessions run on through it all (each is a process of its own, taken over by the next one).
 export async function runHost({ background = false } = {}) {
   for (const k of SESSION_ONLY) delete process.env[k];
   const log = background ? fileLogger() : consoleLogger();
@@ -814,22 +971,46 @@ export async function runHost({ background = false } = {}) {
     log(`claude-pro host runs already (pid ${readHostState().pid || '?'}): this one stops`);
     return background ? 0 : 1;
   }
-  const service = new HostService({ id: hostId(), log, background });
-  const stop = () => service.stop();
+  const sessions = new BackgroundSessions({ dir: configDir(), entry: ENTRY, env: serviceEnv(), log });
+  let service = null;
+  const stop = () => service?.stop();
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, stop);
-  log(`claude-pro host ${VERSION} started (pid ${process.pid}${background ? ', in the background' : ''}; terminal: ${service.terminal?.name || 'none found'})`);
-  try {
-    await service.run();
-  } finally {
+  sessions.start();
+  for (;;) {
+    service = new HostService({ id: hostId(), log, background, sessions });
+    sessions.onChange = () => service.reportState();
+    log(`claude-pro host ${VERSION} started (pid ${process.pid}${background ? ', in the background' : ''}; terminal: ${service.terminal?.name || 'none found'})`);
+    try {
+      await service.run();
+    } catch (e) {
+      log(`the service stopped on an error: ${e.stack || e.message}`);
+    }
+    if (!service.reloading) break;
+    const failure = newVersionFails();
+    if (failure) {
+      log(`the new version does not start, this one goes on: ${failure}`);
+      continue;
+    }
+    log('the program changed: starting its new version');
+    sessions.close();
     releaseLock();
     if (readHostState().pid === process.pid) updateHostState({ pid: undefined, beat: undefined, online: false });
+    const pid = startHostInBackground();
+    let handedOver = false;
+    for (let t = 0; t < 30_000 && !handedOver; t += 500) {
+      await sleep(500);
+      const s = readHostState();
+      handedOver = Boolean(pid && s.pid === pid && hostRunning(s));
+    }
+    if (handedOver) { log(`the new version runs (pid ${pid}): this one leaves`); return 0; }
+    if (!takeLock()) { log('the new version has the lock but did not report yet: this one leaves'); return 0; }
+    log(`the new version did not come up (pid ${pid}), this one goes on; see the lines above`);
+    sessions.start();
   }
-  if (service.reloading) {
-    log('the program changed: starting its new version');
-    startHostInBackground();
-  } else {
-    log('stopped');
-  }
+  sessions.close();
+  releaseLock();
+  if (readHostState().pid === process.pid) updateHostState({ pid: undefined, beat: undefined, online: false });
+  log('stopped');
   return 0;
 }
 
@@ -912,6 +1093,14 @@ export function autostartFiles({ platform = process.platform, env = process.env,
   const config = env.XDG_CONFIG_HOME || path.join(home, '.config');
   return [path.join(config, 'autostart', `claude-pro-host${s}.desktop`), path.join(config, 'systemd', 'user', `claude-pro-host${s}.service`)];
 }
+
+// How the service starts by itself: 'boot' (before anyone logs in, host install --at-boot), 'logon', or ''.
+export function autostartKind() {
+  if (bootAutostartInstalled()) return 'boot';
+  return installedAutostart() ? 'logon' : '';
+}
+
+function bootAutostartInstalled() { return false; }
 
 function installedAutostart() {
   return autostartFiles().find((f) => fs.existsSync(f)) || null;
@@ -1021,6 +1210,7 @@ export async function hostCommand(args = []) {
   const [sub = 'run', ...rest] = args;
   switch (sub) {
     case 'run': process.exit(await runHost({ background: rest.includes('--background') })); break;
+    case 'check': return checkCommand();
     case 'start': return startCommand();
     case 'stop': return stopCommand();
     case 'status': return statusCommand();

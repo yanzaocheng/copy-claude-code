@@ -1,0 +1,131 @@
+// `claude-pro attach [name]`: a background session of this computer (claude-pro --headless, see vterm.js), used
+// here in this terminal with its whole interface, as tmux attach does. It goes through the session's own server on
+// 127.0.0.1 (peers.js), not the gateway: GET /attach upgraded to a connection of its own, the screen coming down as
+// it is drawn, the keys and the size of this terminal going up as JSON lines ({keys: base64}, {resize: [cols,
+// rows]}). ctrl+] detaches; the session goes on. Several terminals can be attached at once (the last one to attach
+// or resize sets the size), and the web page at the same time.
+//
+// A restart of the session (an update, /restart, /cd) ends the connection: this waits for the session to come back
+// under the same registry id and attaches again.
+
+import http from 'node:http';
+import readline from 'node:readline';
+import { listPeers } from './peers.js';
+
+const DETACH = '\x1d'; // ctrl+]
+const RESET = '\x1b[?1002l\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?1049l\x1b[?25h';
+const BACK_WITHIN_MS = 20_000; // a restart brings the session back within this
+
+const backgroundSessions = () => listPeers().filter((p) => p.kind === 'background');
+
+// The session `ref` names: its name, its id at the gateway, or the start of its registry id.
+export function findBackground(ref, sessions = backgroundSessions()) {
+  const q = String(ref || '').replace(/^[@&＆]/, '').toLowerCase();
+  if (!q) return null;
+  return sessions.find((p) => p.name.toLowerCase() === q)
+    || sessions.find((p) => String(p.remoteId || '').toLowerCase() === q)
+    || sessions.find((p) => p.id.startsWith(q) || String(p.remoteId || '').toLowerCase().startsWith(q))
+    || null;
+}
+
+function choose(sessions) {
+  process.stdout.write('Background sessions on this computer:\n');
+  sessions.forEach((p, i) => process.stdout.write(`  ${i + 1}. &${p.name}  ${p.cwd}${p.remoteId ? `  (${p.remoteId})` : ''}\n`));
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(`Which one? [1-${sessions.length}, Enter for 1] `, (answer) => {
+      rl.close();
+      const n = answer.trim() ? Number(answer.trim()) : 1;
+      resolve(Number.isInteger(n) && n >= 1 && n <= sessions.length ? sessions[n - 1] : findBackground(answer.trim(), sessions));
+    });
+  });
+}
+
+// One connection: resolves with how it ended, 'detached' or 'closed'.
+function connect(peer) {
+  return new Promise((resolve, reject) => {
+    const { columns = 100, rows = 30 } = process.stdout;
+    const req = http.request({
+      host: '127.0.0.1', port: peer.port, path: `/attach?cols=${columns}&rows=${rows}`,
+      headers: { connection: 'Upgrade', upgrade: 'claude-pro-attach', authorization: `Bearer ${peer.token}` },
+    });
+    req.on('response', (res) => reject(new Error(res.statusCode === 404 ? 'this session cannot be attached to (a terminal session, or an older claude-pro)' : `HTTP ${res.statusCode}`)));
+    req.on('error', reject);
+    req.on('upgrade', (_res, socket, head) => {
+      let ended = null;
+      const finish = (how) => {
+        if (ended) return;
+        ended = how;
+        process.stdin.off('data', onKeys);
+        process.stdout.off('resize', onResize);
+        socket.destroy();
+        resolve(how);
+      };
+      const send = (msg) => { if (!socket.destroyed) socket.write(`${JSON.stringify(msg)}\n`); };
+      const onKeys = (data) => {
+        const i = data.indexOf(DETACH);
+        if (i >= 0) {
+          if (i > 0) send({ keys: data.subarray(0, i).toString('base64') });
+          finish('detached');
+          return;
+        }
+        send({ keys: data.toString('base64') });
+      };
+      const onResize = () => send({ resize: [process.stdout.columns, process.stdout.rows] });
+      if (head?.length) process.stdout.write(head);
+      socket.on('data', (d) => process.stdout.write(d));
+      socket.on('close', () => finish('closed'));
+      socket.on('error', () => finish('closed'));
+      process.stdin.on('data', onKeys);
+      process.stdout.on('resize', onResize);
+    });
+    req.end();
+  });
+}
+
+export async function attachCommand(args = []) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write('claude-pro attach needs a terminal.\n');
+    return 2;
+  }
+  const sessions = backgroundSessions();
+  if (!sessions.length) {
+    process.stdout.write('No background session runs on this computer. The web page opens them (新建会话, without "open a terminal window").\n');
+    return 1;
+  }
+  const ref = args.find((a) => !a.startsWith('-'));
+  let peer = ref ? findBackground(ref, sessions) : sessions.length === 1 ? sessions[0] : await choose(sessions);
+  if (!peer) {
+    process.stderr.write(`No background session called "${ref}". These run here: ${sessions.map((p) => `&${p.name}`).join(', ')}\n`);
+    return 1;
+  }
+  const label = `&${peer.name}`;
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  let how;
+  try {
+    for (;;) {
+      how = await connect(peer);
+      if (how === 'detached') break;
+      // closed: the session restarting (it comes back under the same registry id), or ended
+      const id = peer.id;
+      let back = null;
+      for (let t = 0; t < BACK_WITHIN_MS && !back; t += 300) {
+        await new Promise((r) => setTimeout(r, 300));
+        back = backgroundSessions().find((p) => p.id === id && p.pid !== peer.pid) || null;
+      }
+      if (!back) { how = 'ended'; break; }
+      peer = back;
+    }
+  } catch (e) {
+    process.stdout.write(RESET);
+    process.stdin.setRawMode(false);
+    process.stderr.write(`Could not attach to ${label}: ${e.message}\n`);
+    return 1;
+  }
+  process.stdout.write(RESET);
+  process.stdin.setRawMode(false);
+  process.stdin.pause();
+  process.stdout.write(how === 'detached' ? `Detached from ${label}: it goes on in the background (claude-pro attach ${peer.name} comes back).\n` : `${label} has ended.\n`);
+  return 0;
+}

@@ -17,6 +17,54 @@ function box(lines, width, color) {
   return out;
 }
 
+// A question answered with typed text: Enter submits, Esc cancels (shift/alt+Enter starts a new line when
+// `multiline`). On the remote page it is a text box ({input: {placeholder, value, multiline}}, see App.remoteDialog).
+export class TextDialog {
+  constructor({ title, body = [], question, placeholder = '', value = '', multiline = false, color = c.blue, onResolve, cancelValue = null }) {
+    this.title = title;
+    this.body = body;
+    this.question = question;
+    this.color = color;
+    this.onResolve = onResolve;
+    this.cancelValue = cancelValue;
+    this.input = { placeholder, multiline };
+    this.editor = new Editor();
+    if (value) this.editor.set(value, value.length);
+  }
+
+  get value() { return this.editor.text; }
+
+  resolve(value) {
+    const cb = this.onResolve;
+    this.onResolve = null;
+    cb?.(value);
+  }
+
+  handleKey(str, key = {}) {
+    if (key.name === 'escape') { this.resolve(this.cancelValue); return true; }
+    if (key.name === 'return' && !key.meta && !key.shift) { this.resolve(this.editor.text); return true; }
+    if (key.name === 'return' && !this.input.multiline) return true;
+    this.editor.handleKey(str, key);
+    return true; // modal: everything else is the editor's
+  }
+
+  render(width) {
+    const lines = [];
+    if (this.title) lines.push(c.bold(this.color(this.title)), '');
+    lines.push(...this.body);
+    if (this.body.length) lines.push('');
+    if (this.question) lines.push(this.question, '');
+    const inner = Math.max(20, width - 1) - 4;
+    const r = this.editor.render(width - 4, { placeholder: this.input.placeholder || 'Type the answer' });
+    const top = lines.length + 1; // +1 for the box's top border
+    lines.push(...r.lines.map((l) => truncate(l, inner)));
+    const cursor = r.cursor ? { row: top + r.cursor.row, col: 2 + r.cursor.col } : null;
+    const out = box(lines, width, this.color);
+    out.push(c.dim(`  Enter to submit${this.input.multiline ? ' · shift+Enter for a new line' : ''} · Esc to cancel`));
+    return { lines: out, cursor };
+  }
+}
+
 export class SelectDialog {
   // options: [{label, value, description?}]
   // selected: the option highlighted at first.

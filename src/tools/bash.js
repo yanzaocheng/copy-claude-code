@@ -57,7 +57,7 @@ export function shutdownBackgroundShells() {
 }
 
 export function listBackgroundShells() {
-  return [...background.entries()].map(([id, bg]) => ({ id, command: bg.command, status: bg.status, exitCode: bg.exitCode }));
+  return [...background.entries()].map(([id, bg]) => ({ id, command: bg.command, description: bg.description || '', status: bg.status, exitCode: bg.exitCode, startedAt: bg.startedAt }));
 }
 
 export function makeBashTool(config) {
@@ -104,7 +104,7 @@ When you commit (the system prompt says when): run git status, git diff and git 
       if (input.run_in_background) {
         const child = spawnShell(shell, command, { cwd, env: childEnv(), stdin: stdinText });
         const id = `bash_${++bgCounter}`;
-        const bg = { child, command, output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
+        const bg = { child, command, description: String(input.description || ''), output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
         background.set(id, bg);
         // Decode as a stream: a multi-byte character (CJK text) can be split between two chunks.
         child.stdout.setEncoding('utf8');

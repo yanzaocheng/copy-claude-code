@@ -585,3 +585,53 @@ test('a command that ends the session (a /cd or /exit from the page): its answer
   await remote.close();
   assert.deepEqual(order, ['POST results', 'stream closed', 'POST events']);
 });
+
+test('the status says what the page needs (asking, cost, context, background work, the conversation), and a question to type the answer to is answered from the page', async (t) => {
+  gw.sessions.clear();
+  const { TextDialog } = await import('../src/ui/dialogs.js');
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')) });
+  t.after(() => tui.close());
+  await until('online', () => gw.stream && tui.app.remote?.online);
+  const reg = [...gw.sessions.values()].at(-1);
+  assert.deepEqual([reg.kind, reg.conversationId], ['terminal', tui.app.store.id]);
+  assert.match(reg.computerId, /^[\w-]{8,64}$/);
+
+  const status = tui.app.remoteStatus();
+  assert.deepEqual([status.asking, status.kind, status.conversationId, status.cost], [false, 'terminal', tui.app.store.id, 0]);
+  assert.equal(status.context.window, tui.app.config.mainModel.contextWindow);
+  assert.ok(status.context.used > 0, 'an estimate before any request');
+  assert.deepEqual(status.background, []);
+
+  const answer = tui.app.showDialog(new TextDialog({ title: 'Name it', question: 'What should it be called?', placeholder: 'a name', value: 'draft' }));
+  await until('the question on the page', () => gw.page.status?.dialog?.input);
+  assert.equal(gw.page.status.asking, true);
+  assert.deepEqual(gw.page.status.dialog.input, { placeholder: 'a name', value: 'draft', multiline: false });
+  const id = gw.page.status.dialog.id;
+  assert.match((await command('dialog', { id, index: 0 })).error, /Type an answer first/);
+  assert.equal((await command('dialog', { id, text: 'final name' })).ok, true);
+  assert.equal(await answer, 'final name');
+  await until('no longer asking', () => gw.page.status?.asking === false);
+});
+
+test('an unwatched session sends a change of busy or asking at once, the rest at most every few seconds', async () => {
+  const { RemoteControl } = await import('../src/remote.js');
+  let status = { busy: false, asking: false, title: 'a', model: 'm', cwd: '/x', name: 'n', tokens: 0 };
+  const remote = new RemoteControl({ gateway: { url: 'http://gw.invalid', apiKey: 'k' }, id: 'urgent-test-1', fetchImpl: async () => new Response('{}'), handlers: { status: () => status, seed: () => [] } });
+  remote.registered = true;
+  remote.viewers = 0;
+  remote.needSnapshot = false;
+  remote.pump = () => {};
+  remote.flush();
+  const sent = () => remote.outbox.filter((m) => m.t === 'status').length;
+  const first = sent();
+  status = { ...status, title: 'b' };
+  remote.flush();
+  assert.equal(sent(), first, 'a title change waits');
+  status = { ...status, busy: true };
+  remote.flush();
+  assert.equal(sent(), first + 1, 'busy goes at once');
+  status = { ...status, asking: true };
+  remote.flush();
+  assert.equal(sent(), first + 2, 'so does a question');
+  clearInterval(remote.statusTimer);
+});

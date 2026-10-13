@@ -34,7 +34,8 @@ import { copyUnique } from '../transfer.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
-import { ensureHost as startHostIfNeeded, hostEnabled, listDirectory, recentDirectories } from '../host.js';
+import { ensureHost as startHostIfNeeded, hostEnabled, listDirectory, recentDirectories, computerId, markBackgroundEnded } from '../host.js';
+import { VirtualTerminal } from './vterm.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -91,6 +92,9 @@ export function remoteImages(images) {
 
 const FOCUS_EVENTS_ON = '\x1b[?1004h';
 const FOCUS_EVENTS_OFF = '\x1b[?1004l';
+// What a terminal that attaches to a background session is put in first (see attachClient): the fullscreen
+// renderer's alternate screen and mouse reports (screen.js), cleared.
+const ATTACH_MODES = '\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[2J';
 
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '✳', '✢', '·'];
 const VERBS = ['Thinking', 'Pondering', 'Crafting', 'Brewing', 'Computing', 'Conjuring', 'Cooking', 'Musing', 'Noodling', 'Percolating', 'Ruminating', 'Synthesizing', 'Working', 'Tinkering', 'Mulling', 'Deliberating', 'Churning', 'Forging', 'Hatching', 'Simmering'];
@@ -168,9 +172,14 @@ export class App {
   // `noProcessExit`: the tests, which drive the App themselves; it never ends the process, and it has no peers, no
   // gateway connection, no update checks and the default renderer. `selfCheck` (see selfcheck.js): it never ends the
   // process either, but otherwise starts as a session does, so that code only a real start runs is checked too.
-  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false }) {
+  // `vterm` (see vterm.js): a background session (claude-pro --headless): no window, it is used from the web page
+  // and from `claude-pro attach`; what it prints goes to its log (process.stdout, a file the computer service gave it).
+  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false, vterm = null }) {
     this.flags = flags;
     this.cwd = cwd;
+    this.vterm = vterm;
+    this.headless = Boolean(vterm);
+    if (vterm) { stdin = vterm.input; stdout = vterm.output; }
     this.stdin = stdin;
     this.stdout = stdout;
     this.noProcessExit = noProcessExit || selfCheck;
@@ -225,8 +234,14 @@ export class App {
     this.store = new SessionStore(cwd);
     // What the terminal prints goes to the remote page too, except what it is told about as events.
     this.screen.onLog = (items) => {
+      const lines = () => items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/));
+      // a background session's log: what it printed, as plain text
+      if (this.headless) {
+        const stamp = new Date().toISOString().slice(11, 19);
+        try { process.stdout.write(`${lines().map((l) => `${stamp} ${stripAnsi(l)}`.trimEnd()).join('\n')}\n`); } catch { /* no log */ }
+      }
       if (!this.remote || this.remoteMuted) return;
-      this.remote.output(items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/)));
+      this.remote.output(lines());
     };
     this.editor = new Editor({
       history: loadHistory(cwd),
@@ -257,7 +272,7 @@ export class App {
     // there (see screen.js). CLAUDE_PRO_PIN_INPUT=0 (here or in the settings) leaves it right below the output.
     const pinOff = (v) => /^(0|false|no|off)$/i.test(v || '');
     if (pinOff(process.env.CLAUDE_PRO_PIN_INPUT)) this.screen.pin = false;
-    else if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
+    else if (stdin.isTTY && this.stdout.isTTY && !this.headless) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
     this.watchCopies();
@@ -314,8 +329,9 @@ export class App {
     }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
-    // Nothing configured yet: the gateway is the default, and its login comes first, as in Claude Code.
-    else if (this.config.usesGateway && !readGatewayLogin(this.config.gatewayUrl)) {
+    // Nothing configured yet: the gateway is the default, and its login comes first, as in Claude Code. (Not in a
+    // background session: nobody sits at this computer to log in in its browser.)
+    else if (this.config.usesGateway && !readGatewayLogin(this.config.gatewayUrl) && !this.headless) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
     this.fileIndex.refresh();
@@ -427,6 +443,11 @@ export class App {
     if (!restart && this.agent?.messages.length) this.screen.log(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
     this.restoreTerminal({ handOver: restart });
     this.stdin.pause();
+    if (this.headless) {
+      // ended for good (/exit, the computer service's stop): the service does not open it again
+      if (code === 0 && !restart && this.remote?.id) markBackgroundEnded(this.remote.id);
+      setTimeout(() => this.vterm.closeAll(), 20).unref?.(); // the last screen first
+    }
     this.resolveExit?.(code);
     if (!this.noProcessExit) {
       // with remote control on, the gateway is told first (at most a second and a half; see RemoteControl.close)
@@ -442,11 +463,66 @@ export class App {
   async startPeer() {
     if (this.driven || !peersEnabled()) return;
     try {
-      this.peers = await new PeerNode({ cwd: this.cwd, name: this.flags.restart?.peerName, id: this.flags.restart?.peerId, onMessage: (msg) => this.onPeerMessage(msg), getStatus: () => ({ busy: this.working() }) }).start();
+      this.peers = await new PeerNode({
+        cwd: this.cwd,
+        name: this.flags.restart?.peerName,
+        id: this.flags.restart?.peerId,
+        onMessage: (msg) => this.onPeerMessage(msg),
+        getStatus: () => ({ busy: this.working() }),
+        info: () => ({ kind: this.headless ? 'background' : 'terminal', remoteId: this.remote?.id || this.flags.remoteId || this.flags.restart?.remote?.id || null, conversationId: this.store.id }),
+        onControl: (body) => this.onControl(body),
+        onAttach: this.headless ? (socket, size) => this.attachClient(socket, size) : null,
+      }).start();
     } catch (e) {
       this.peers = null;
       this.notice(`Other sessions cannot reach this one: ${e.message}`, 'warn');
     }
+  }
+
+  // The computer service (see host.js) about a background session: {action: 'exit'} ends it as /exit does (a turn
+  // that runs, or a question that waits, is stopped first), 'restart' restarts it as /restart does, 'interrupt' is
+  // Esc.
+  onControl({ action } = {}) {
+    if (action === 'interrupt') return this.remoteInterrupt();
+    if (action === 'exit') {
+      for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
+      this.interrupt();
+      setTimeout(() => this.exit(0), 50); // once the answer is out
+      return {};
+    }
+    if (action === 'restart') {
+      for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
+      this.interrupt();
+      const res = this.requestRestart({ reason: 'restarted from the web page', force: true });
+      if (!res.ok) throw new Error(res.message);
+      return {};
+    }
+    throw new Error(`Unknown action: ${action}`);
+  }
+
+  // `claude-pro attach` (see attach.js) on this background session: the screen, drawn whole for it, and its keys.
+  // From the client: one JSON object a line, {keys: base64} or {resize: [columns, rows]}.
+  attachClient(socket, { cols, rows } = {}) {
+    const client = { write: (d) => { if (!socket.destroyed) socket.write(d); }, close: () => socket.end() };
+    socket.on('error', () => { /* its close follows */ });
+    socket.on('close', () => this.vterm.detach(client));
+    this.vterm.attach(client, { cols, rows });
+    client.write(`${ATTACH_MODES}${ESC.bracketedPasteOn}`);
+    if (this.screen.full) this.screen.repaint();
+    let buf = '';
+    // (no setEncoding: an HTTP server's socket refuses it; the lines are ASCII anyway, JSON with base64)
+    socket.on('data', (d) => {
+      buf += d.toString('latin1');
+      for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        let m;
+        try { m = JSON.parse(line); } catch { continue; }
+        if (Array.isArray(m?.resize)) this.vterm.resize(m.resize[0], m.resize[1]);
+        else if (typeof m?.keys === 'string') this.vterm.type(Buffer.from(m.keys, 'base64'));
+      }
+    });
+    socket.resume(); // the HTTP server leaves an upgraded socket paused
   }
 
   // This session's name for the others.
@@ -821,7 +897,11 @@ export class App {
       gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
       id,
       handlers: {
-        info: () => ({ name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '', cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION }),
+        info: () => ({
+          name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '',
+          cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION,
+          computerId: computerId(), kind: this.headless ? 'background' : 'terminal', conversationId: this.store.id,
+        }),
         seed: () => [
           ...transcriptItems(this.agent.messages, { tools: this.runtime.tools, ctx: this.agent.makeCtx(), cwd: this.cwd }),
           ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
@@ -850,6 +930,7 @@ export class App {
     if (this.exiting) { remote.close(); return remote; }
     this.remote = remote;
     this.remoteRefused = null;
+    this.peers?.update(); // its id at the gateway, in the registry
     this.remotePeersTimer ??= setInterval(() => { if (this.remote?.online) this.refreshRemotePeers(); }, 60_000);
     this.remotePeersTimer.unref?.();
     this.screen.schedule();
@@ -911,7 +992,34 @@ export class App {
       name: this.peerLabel(),
       tasks: this.runtime.tasks.running().length,
       restarting: Boolean(this.restartRequest),
+      asking: this.dialogs.length > 0, // a question waits for an answer (the page reminds the user of it)
+      conversationId: this.store.id,
+      cost: Number(this.cost.toFixed(6)),
+      context: { used: this.contextUsed(), window: cfg.mainModel.contextWindow },
+      background: this.backgroundWork(),
+      kind: this.headless ? 'background' : 'terminal',
     };
+  }
+
+  // The tokens the conversation takes now, as /context counts them: what the last request used and what came
+  // since, or before any request an estimate (kept until the conversation changes: the status is asked for often).
+  contextUsed() {
+    const a = this.agent;
+    if (a.lastContextTokens) return a.contextEstimate;
+    const key = `${a.messages.length}|${this.runtime.tools.length}`;
+    if (this.contextGuess?.key !== key) {
+      let used = 0;
+      try { used = estimateTokens(this.runtime.systemPrompt()) + estimateTokens(a.toolSchemas()) + estimateTokens(a.messages); } catch { /* 0 */ }
+      this.contextGuess = { key, used };
+    }
+    return this.contextGuess.used;
+  }
+
+  // What runs in the background: the agent's background agents and shells.
+  backgroundWork() {
+    const agents = this.runtime.tasks.list().map((t) => ({ id: t.id, kind: 'agent', description: t.description, status: t.status, startedAt: t.started }));
+    const shells = listBackgroundShells().map((s) => ({ id: s.id, kind: 'shell', description: s.description || s.command, status: s.status, startedAt: s.startedAt || null }));
+    return [...agents, ...shells];
   }
 
   // The dialog open in the terminal, for the page to answer (options by index: values need not be strings).
@@ -920,6 +1028,8 @@ export class App {
     if (!d) return null;
     d.remoteId ??= ++this.remoteDialogs;
     const base = { id: d.remoteId, title: d.title || '', question: d.question || '', body: d.body || [], markdown: d.markdown || null };
+    // a question answered with typed text (TextDialog): a text box on the page, answered with {id, text}
+    if (d.input) return { ...base, input: { placeholder: d.input.placeholder || '', value: d.value || '', multiline: Boolean(d.input.multiline) } };
     if (!Array.isArray(d.options)) return base;
     return { ...base, multi: Boolean(d.multi), options: d.options.map((o) => ({ label: String(o.label ?? ''), description: o.description || '', other: o.value === '__other__' })) };
   }
@@ -928,7 +1038,13 @@ export class App {
     const d = this.dialogs[0];
     if (!d || d.remoteId !== id) throw new Error('That question is no longer open.');
     if (cancel) { d.resolve(d.cancelValue); return {}; }
-    if (!Array.isArray(d.options)) throw new Error('This dialog can only be answered in the terminal.');
+    if (d.input) {
+      if (typeof text !== 'string') throw new Error('Type an answer first.');
+      d.resolve(text);
+      this.screen.schedule();
+      return {};
+    }
+    if (!Array.isArray(d.options)) throw new Error('This dialog cannot be answered from the page.');
     const valueAt = (i) => {
       const o = d.options[i];
       if (!Number.isInteger(i) || !o || o.value === '__other__') throw new Error('No such option.');
@@ -1314,6 +1430,7 @@ export class App {
   // Fullscreen (see screen.js) unless CLAUDE_PRO_TUI=default, as Claude Code's /tui: the input box fixed at the
   // bottom of the window, the conversation scrolled inside the program. Not in the tests that drive the App.
   fullscreenWanted() {
+    if (this.headless) return true; // `claude-pro attach` gets the whole screen, drawn again when it comes
     const mode = String(this.config.env.CLAUDE_PRO_TUI || (this.driven ? 'default' : 'fullscreen')).toLowerCase();
     return mode === 'fullscreen' && this.stdout.isTTY !== false;
   }
@@ -1400,11 +1517,19 @@ export class App {
     }
     if (key.ctrl && key.name === 't') { this.showTodos = !this.showTodos; this.screen.schedule(); return; }
     if (key.ctrl && key.name === 'l') { if (this.screen.full) this.screen.repaint(); else this.screen.clearScreen(); return; }
-    if (key.ctrl && key.name === 'd' && !this.editor.text) { this.exit(0); return; }
+    if (key.ctrl && key.name === 'd' && !this.editor.text) { this.keyboardExit(); return; }
     if (key.name === 'escape' && this.busy) { this.interrupt(); return; }
     this.exitArmed = 0;
     this.editor.handleKey(str, key);
     this.screen.schedule();
+  }
+
+  // ctrl+c twice, ctrl+d: the end of the session, except in a background one, where the keys come from
+  // `claude-pro attach` and leaving it is detaching (/exit ends the session there).
+  keyboardExit() {
+    if (!this.headless) { this.exit(0); return; }
+    this.exitArmed = 0;
+    this.flash('This session runs in the background: ctrl+] detaches from it, /exit ends it');
   }
 
   onCtrlC() {
@@ -1416,7 +1541,7 @@ export class App {
     }
     if (this.busy) { this.interrupt(); return; }
     if (this.editor.text) { this.editor.discard(); this.screen.schedule(); return; }
-    if (Date.now() - this.exitArmed < 1500) { this.exit(0); return; }
+    if (Date.now() - this.exitArmed < 1500) { this.keyboardExit(); return; }
     this.exitArmed = Date.now();
     this.screen.schedule();
     setTimeout(() => this.screen.schedule(), 1600);
@@ -1925,6 +2050,7 @@ export class App {
     this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
     this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
+    this.peers?.update(); // the conversation, in the registry
     this.topic = loaded.topic;
     this.customTitle = loaded.name;
     // a conversation that was given a name brings it back: the other sessions reach this one by it again
@@ -1970,6 +2096,7 @@ export class App {
 
   newSession() {
     this.store = new SessionStore(this.cwd);
+    this.peers?.update();
     this.seedOutput = [];
     this.topic = null;
     this.customTitle = null;
@@ -2465,7 +2592,10 @@ export class App {
 }
 
 export async function runRepl({ flags, cwd, initialPrompt }) {
-  const app = new App({ flags, cwd });
+  // --headless: a background session (see vterm.js), its log on stdout
+  const vterm = flags.headless ? new VirtualTerminal() : null;
+  if (vterm) process.stdout.write(`${new Date().toISOString()} claude-pro ${VERSION} background session in ${cwd} (pid ${process.pid})\n`);
+  const app = new App({ flags, cwd, vterm });
   process.on('uncaughtException', (e) => {
     app.restoreTerminal();
     process.stderr.write(`\nUnexpected error: ${e?.stack || e}\n`);

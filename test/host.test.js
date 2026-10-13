@@ -106,7 +106,10 @@ test('the service: registers, lists directories, opens terminals, registers agai
   const running = service.run();
   t.after(() => service.stop());
   await until('the command stream', () => gw.stream && service.online);
-  assert.deepEqual(gw.registrations[0], { key: 'key-one', body: { id: 'host-test-0001', machine: '家里', host: os.hostname(), platform: process.platform, version: VERSION, home, terminal: 'Windows Terminal' } });
+  const { stats, ...registered } = gw.registrations[0].body;
+  assert.deepEqual({ key: gw.registrations[0].key, body: registered }, { key: 'key-one', body: { id: 'host-test-0001', machine: '家里', host: os.hostname(), platform: process.platform, version: VERSION, home, terminal: 'Windows Terminal', autostart: '', sessions: [] } });
+  assert.deepEqual(Object.keys(stats).sort(), ['cpu', 'diskFree', 'diskTotal', 'memTotal', 'memUsed', 'uptime']);
+  assert.ok(stats.memTotal > stats.memUsed && stats.diskTotal > 0 && stats.uptime > 0);
   assert.equal(readHostState().online, true, 'host.json says it is online');
   assert.equal(readHostState().pid, process.pid);
 
@@ -319,4 +322,37 @@ test('claude-pro host: one at a time, status, stop; a stopped one is not started
   const saved = process.env.CLAUDE_PRO_CONFIG_DIR;
   process.env.CLAUDE_PRO_CONFIG_DIR = dir;
   try { assert.equal(ensureHost(), null); } finally { process.env.CLAUDE_PRO_CONFIG_DIR = saved; }
+});
+
+test('a background service hands over to a new version of the program only when it loads, and goes on when it does not', { timeout: 120_000 }, async (t) => {
+  // a copy of the program, so that its files can be changed (and broken) under a service that runs from it
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-copy-'));
+  for (const d of ['bin', 'src']) fs.cpSync(path.join(ROOT, d), path.join(copy, d), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(copy, 'package.json'));
+  fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(copy, 'node_modules'), 'junction');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-handover-'));
+  const env = { ...process.env, CLAUDE_PRO_CONFIG_DIR: dir, CLAUDE_PRO_GATEWAY_URL: 'http://127.0.0.1:9', CLAUDE_PRO_HOST_TICK_MS: '700' };
+  delete env.NODE_TEST_CONTEXT;
+  const state = () => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'host.json'), 'utf8')); } catch { return {}; } };
+  const log = () => { try { return fs.readFileSync(path.join(dir, 'host.log'), 'utf8'); } catch { return ''; } };
+  const cli = (...args) => spawnSync(process.execPath, [path.join(copy, 'bin', 'claude-pro.js'), 'host', ...args], { env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(cli('start').status, 0);
+  t.after(() => { cli('stop'); });
+  await until('running', () => host.pidAlive(state().pid) && /started \(pid/.test(log()), 20_000);
+  const first = state().pid;
+
+  // broken: it stays
+  const file = path.join(copy, 'src', 'background.js');
+  const good = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, `${good}\nthis is not javascript (\n`);
+  await until('the failed check in the log', () => /the new version does not start, this one goes on/.test(log()), 30_000);
+  await new Promise((r) => setTimeout(r, 2000));
+  assert.equal(state().pid, first, 'the same service');
+  assert.ok(host.pidAlive(first));
+  assert.ok(Date.now() - state().beat < 5000, 'and it goes on');
+
+  // fixed: the new one takes over, the old one leaves
+  fs.writeFileSync(file, good);
+  await until('handed over', () => state().pid && state().pid !== first && host.pidAlive(state().pid) && /the new version runs/.test(log()), 40_000);
+  await until('the old one gone', () => !host.pidAlive(first), 10_000);
 });

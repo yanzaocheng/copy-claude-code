@@ -489,11 +489,16 @@ export class RemoteControl {
 
   // What decides whether the status is sent again: all of it while a page watches; while none does, only what
   // the gateway's session list shows (the token count of a busy session would otherwise go out every few seconds).
+  // `asking` (a question waits) is in it too: the gateway tells the user about it even with no page open.
   statusKey(status) {
     if (this.viewing) return JSON.stringify({ ...status, elapsed: 0 });
-    const { busy, title, model, cwd, name } = status;
-    return JSON.stringify({ busy, title, model, cwd, name });
+    const { busy, asking, title, model, cwd, name } = status;
+    return JSON.stringify({ busy, asking, title, model, cwd, name });
   }
+
+  // What is sent at once, without the wait between statuses of an unwatched session: a task that started or ended,
+  // a question that came or was answered.
+  urgentKey(status) { return `${Boolean(status.busy)}|${Boolean(status.asking)}`; }
 
   // What has changed goes into the next upload: a snapshot when one is due, else the events; and the status.
   flush() {
@@ -505,6 +510,7 @@ export class RemoteControl {
       this.events = [];
       this.sinceSnapshot = 0;
       this.lastStatus = this.statusKey(status);
+      this.lastUrgent = this.urgentKey(status);
       this.lastStatusAt = Date.now();
       this.outbox.push({ t: 'snapshot', seq: this.seq, items: snapshotItems(this.state.items), status });
     } else if (this.events.length) {
@@ -513,8 +519,10 @@ export class RemoteControl {
       this.events = [];
     }
     const key = this.statusKey(status);
-    if (key !== this.lastStatus && Date.now() - this.lastStatusAt >= (this.viewing ? 0 : IDLE_STATUS_MS)) {
+    const urgent = this.urgentKey(status);
+    if (key !== this.lastStatus && (urgent !== this.lastUrgent || Date.now() - this.lastStatusAt >= (this.viewing ? 0 : IDLE_STATUS_MS))) {
       this.lastStatus = key;
+      this.lastUrgent = urgent;
       this.lastStatusAt = Date.now();
       this.outbox.push({ t: 'status', status });
     }
