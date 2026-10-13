@@ -5,6 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 
 // Background sessions for real: the computer service (HostService + BackgroundSessions) against a fake gateway
 // starts claude-pro --headless processes (each a supervisor and its session), which go online at the gateway as
@@ -16,7 +17,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'bin', 'claude-pro.js');
 
 const { HostService, computerId } = await import('../src/host.js');
-const { BackgroundSessions, killTree, pidAlive } = await import('../src/background.js');
+const { BackgroundSessions, killTree, pidAlive, liveSessionProcesses } = await import('../src/background.js');
 const { listPeers } = await import('../src/peers.js');
 
 // ---------------------------------------------------------------- the fake gateway (and model)
@@ -334,11 +335,32 @@ test('background sessions: opened for the page without a window, online, logged,
   svc = startService();
   assert.equal(svc.sessions.sessions.get('bg-test-0003').pid, pid3, 'taken over');
   assert.equal(svc.sessions.sessions.get('bg-test-0003').state, 'running');
+  // service after service (new versions), the session's own process restarted in between: still one copy
+  const one = () => { const p = liveSessionProcesses().get('bg-test-0003'); return [p?.supervisors.length ?? 0, p?.sessions.length ?? 0]; };
+  for (let round = 0; round < 3; round++) {
+    await until('this service online', () => gw.hostStream && svc.service.online && !gw.hostStream.writableEnded);
+    const child = peerOf('bg-test-0003').pid;
+    assert.equal((await toHost('restart', { sessionId: 'bg-test-0003' })).ok, true);
+    await until(`restarted, round ${round}`, () => peerOf('bg-test-0003') && peerOf('bg-test-0003').pid !== child && stateOf('bg-test-0003')?.state === 'running');
+    await svc.stop();
+    gw.hostStream = null; // the stopped service's
+    svc = startService();
+    assert.equal(svc.sessions.sessions.get('bg-test-0003').pid, pid3, `taken over again, round ${round}`);
+    assert.deepEqual(one(), [1, 1], `one supervisor and one session, round ${round}`);
+  }
+  assert.ok(!logs.some((l) => /opening the background session bg-test-0003 again/.test(l)), 'never opened twice');
+  // a copy that should not be there (as a service before this fix made): the next service ends it, keeps the one it knew
+  const copy = spawn(process.execPath, [BIN, '--headless', '--remote-id', 'bg-test-0003'], { cwd: project, env: sessionEnv, detached: true, windowsHide: true, stdio: 'ignore' });
+  copy.unref();
+  await until('the copy runs', () => liveSessionProcesses().get('bg-test-0003')?.supervisors.length === 2);
+  await svc.stop();
+  svc = startService();
+  assert.equal(svc.sessions.sessions.get('bg-test-0003').pid, pid3, 'the one it knew is kept');
+  await until('the copy ended', () => !pidAlive(copy.pid) && one()[0] === 1 && one()[1] === 1, 30_000);
+  assert.ok(logs.some((l) => new RegExp(`ran twice: ended the copy with pid ${copy.pid}`).test(l)));
   await svc.stop();
   killTree(pid3);
   await until('gone', () => !pidAlive(pid3) && !peerOf('bg-test-0003'));
-  const saved = JSON.parse(fs.readFileSync(path.join(configDir, 'host-sessions.json'), 'utf8'));
-  fs.writeFileSync(path.join(configDir, 'host-sessions.json'), JSON.stringify(saved.map((s) => ({ ...s, boot: 0 }))));
   const regs3 = gw.registrations.filter((r) => r.id === 'bg-test-0003').length;
   svc = startService();
   await until('opened again after the "reboot"', () => gw.registrations.filter((r) => r.id === 'bg-test-0003').length > regs3 && peerOf('bg-test-0003'), 60_000);

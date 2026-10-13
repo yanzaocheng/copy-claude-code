@@ -8,8 +8,11 @@
 // - otherwise it crashed: opened again with --resume (the same conversation, the same id at the gateway), at most
 //   MAX_CRASHES times in CRASH_WINDOW_MS, then failed (with the end of its log as the error);
 // - CONFIG_DIR/host-sessions.json keeps the sessions to open again when the service starts (after a reboot, or a
-//   new version of the service): one still running (the same boot, its supervisor alive) is taken over, the others
-//   are opened again with --resume. A task that was running is not continued: the conversation is.
+//   new version of the service): one still running is taken over, the others are opened again with --resume. A task
+//   that was running is not continued: the conversation is.
+// - Whether a session runs is told by the processes themselves (liveSessionProcesses: those started with --headless
+//   --remote-id <id>), not by a pid kept from before: a session is never opened while a process of it runs, and
+//   copies that should not be there (two supervisors of one id) are ended, the one the service knew kept.
 //
 // Each session's output (its log: what it printed, as plain text, and the errors of its processes) goes to
 // CONFIG_DIR/logs/sessions/<id>.log, cut down to LOG_BYTES (copied to .log.1 first) once a minute.
@@ -19,7 +22,6 @@
 // (POST /control: exit, restart).
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { listPeers, controlPeer } from './peers.js';
@@ -39,8 +41,50 @@ export function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
-// When this computer started (ms, to the minute): a pid saved before a reboot means nothing after it.
-export const bootTime = () => Math.round((Date.now() - os.uptime() * 1000) / 60_000) * 60_000;
+// The processes of background sessions running now, by their id at the gateway: Map id -> {supervisors, sessions}
+// ([{pid, ppid}] each): the processes started with --headless --remote-id <id> (bin/claude-pro.js runs the
+// supervisor, which runs the session with the same arguments). A supervisor is one whose parent is not one of them;
+// a session without its supervisor (killed) is in `sessions` alone. Read from the system's list of processes.
+export function liveSessionProcesses() {
+  let rows = [];
+  try {
+    if (process.platform === 'win32') {
+      const script = [
+        '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
+        // a tab between the fields: "`t" in a string of double quotes
+        "Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%--headless%'\" | ForEach-Object { \"{0}`t{1}`t{2}\" -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
+      ].join('\n');
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 30_000 });
+      rows = String(r.stdout || '').split(/\r?\n/).filter(Boolean).map((l) => { const [pid, ppid, ...rest] = l.split('\t'); return { pid: Number(pid), ppid: Number(ppid), args: rest.join('\t') }; });
+    } else if (process.platform === 'linux') {
+      for (const d of fs.readdirSync('/proc')) {
+        if (!/^\d+$/.test(d)) continue;
+        try {
+          const args = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8').split('\0').join(' ');
+          if (!args.includes('--headless')) continue;
+          const stat = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+          rows.push({ pid: Number(d), ppid: Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]), args });
+        } catch { /* gone meanwhile */ }
+      }
+    } else {
+      const r = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 30_000 });
+      rows = String(r.stdout || '').split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), args: m[3] }));
+    }
+  } catch { /* nothing known: nothing taken for running */ }
+  const byId = new Map();
+  for (const row of rows) {
+    const id = /--remote-id\s+"?([A-Za-z0-9_-]{8,64})/.exec(row.args)?.[1];
+    if (!id || !/--headless/.test(row.args) || row.pid === process.pid) continue;
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push({ pid: row.pid, ppid: row.ppid });
+  }
+  const out = new Map();
+  for (const [id, list] of byId) {
+    const pids = new Set(list.map((p) => p.pid));
+    out.set(id, { supervisors: list.filter((p) => !pids.has(p.ppid)), sessions: list.filter((p) => pids.has(p.ppid)) });
+  }
+  return out;
+}
 
 // Where a background session says it ended for good (see App.exit): the service reads and removes it.
 export const endedMarker = (dir, id) => path.join(dir, 'background-ended', id);
@@ -95,6 +139,7 @@ export class BackgroundSessions {
   // The sessions saved by the service before: taken over when they still run, opened again when not.
   start() {
     let saved = [];
+    let live = null; // the processes of the sessions running now, read once
     try { saved = JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { /* none */ }
     for (const s of Array.isArray(saved) ? saved : []) {
       if (!s || !ID.test(String(s.sessionId || '')) || typeof s.cwd !== 'string') continue;
@@ -102,11 +147,9 @@ export class BackgroundSessions {
       this.sessions.set(rec.sessionId, rec);
       if (s.state === 'failed') { rec.state = 'failed'; rec.error = s.error || null; continue; }
       if (s.suspended) { rec.suspended = true; rec.state = 'exited'; continue; }
-      if (s.boot === bootTime() && pidAlive(s.pid)) {
-        rec.pid = s.pid;
-        rec.state = 'running';
+      live ??= liveSessionProcesses();
+      if (this.adopt(rec, live.get(rec.sessionId), s.pid)) {
         rec.startedAt = s.startedAt || null;
-        this.log(`took over the background session ${rec.sessionId} (pid ${rec.pid}) in ${rec.cwd}`);
       } else {
         this.log(`opening the background session ${rec.sessionId} again in ${rec.cwd}`);
         this.launch(rec, { resume: true });
@@ -144,7 +187,6 @@ export class BackgroundSessions {
       error: null,
       restarts: 0,
       crashes: [],
-      boot: null,
       stopping: false,
       restartFrom: null,
       suspended: false,
@@ -164,7 +206,35 @@ export class BackgroundSessions {
     return { pid: rec.pid };
   }
 
+  // Take over the session `rec` when processes of it run (`found`: an entry of liveSessionProcesses): its supervisor,
+  // the one with pid `prefer` when there are several (the others, copies that should not be there, are ended);
+  // without one, the session process itself (its supervisor was killed: it ends one day, and is then opened again).
+  // Returns whether there was one to take over.
+  adopt(rec, found, prefer = null) {
+    const heads = found?.supervisors?.length ? found.supervisors : found?.sessions || [];
+    if (!heads.length) return false;
+    const keep = heads.find((p) => p.pid === prefer) || heads.find((p) => p.pid === rec.pid) || heads[heads.length - 1];
+    for (const p of heads) {
+      if (p === keep) continue;
+      this.log(`the background session ${rec.sessionId} ran twice: ended the copy with pid ${p.pid}, kept ${keep.pid}`);
+      killTree(p.pid);
+    }
+    rec.pid = keep.pid;
+    rec.child = null;
+    rec.state = 'running';
+    rec.suspended = false;
+    this.log(`took over the background session ${rec.sessionId} (pid ${rec.pid}) in ${rec.cwd}`);
+    return true;
+  }
+
+  // Start the session's processes; with `resume` (opened again: after a crash, a restart of the service, a login)
+  // only when none of them runs (see adopt): opening it again then would make two copies of one session.
   launch(rec, { resume = false, first = false } = {}) {
+    if (resume && this.adopt(rec, liveSessionProcesses().get(rec.sessionId))) {
+      this.persist();
+      this.onChange();
+      return;
+    }
     const args = [this.entry, '--headless', '--remote-id', rec.sessionId];
     if (resume && rec.conversationId) args.push('--resume', rec.conversationId);
     if (first && rec.name) args.push('--name', rec.name);
@@ -185,7 +255,6 @@ export class BackgroundSessions {
       rec.endedAt = null;
       rec.exitCode = null;
       rec.error = null;
-      rec.boot = bootTime();
       rec.stopping = false;
       rec.suspended = false;
       child.on('error', (e) => {
@@ -430,7 +499,7 @@ export class BackgroundSessions {
   persist() {
     const list = [...this.sessions.values()].map((r) => ({
       sessionId: r.sessionId, cwd: r.cwd, name: r.name, conversationId: r.conversationId, model: r.model,
-      pid: r.pid, boot: r.boot, startedAt: r.startedAt, state: r.state === 'failed' ? 'failed' : undefined, error: r.state === 'failed' ? r.error : undefined,
+      pid: r.pid, startedAt: r.startedAt, state: r.state === 'failed' ? 'failed' : undefined, error: r.state === 'failed' ? r.error : undefined,
       suspended: r.suspended || undefined,
     }));
     try {
