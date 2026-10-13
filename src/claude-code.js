@@ -14,10 +14,10 @@ let installedVersion;
 function readJson(file, label) {
   let text;
   try { text = fs.readFileSync(file, 'utf8'); }
-  catch { throw new Error(`Could not read existing Claude Code ${label}: ${file}. Select the existing login with CLAUDE_PRO_CLAUDE_CONFIG_FILE / CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE.`); }
+  catch { throw new Error(`Could not read the Claude subscription ${label}: ${file}. Select the existing login with CLAUDE_PRO_CLAUDE_CONFIG_FILE / CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE.`); }
   // JSON.parse errors can contain an excerpt of the token. Never echo them.
   try { return JSON.parse(text.replace(/^\uFEFF/, '')); }
-  catch { throw new Error(`Invalid JSON in Claude Code ${label}: ${file}.`); }
+  catch { throw new Error(`Invalid JSON in the Claude subscription ${label}: ${file}.`); }
 }
 
 function clientVersion(config, metadata) {
@@ -37,10 +37,10 @@ export function readClaudeCodeLogin(config) {
   const credentials = readJson(config.claudeCodeCredentialsFile, 'credentials');
   const oauth = credentials?.claudeAiOauth;
   if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken.trim()) {
-    throw new Error(`No existing Claude Code subscription access token in ${config.claudeCodeCredentialsFile}. The .claude.json file contains account metadata; the token is in .claude/.credentials.json.`);
+    throw new Error(`No Claude subscription access token in ${config.claudeCodeCredentialsFile}. The .claude.json file contains account metadata; the token is in .claude/.credentials.json.`);
   }
   if (oauth.expiresAt && Number(oauth.expiresAt) <= Date.now()) {
-    throw new Error('The existing Claude Code access token has expired and cannot be renewed from here (the credentials file has no refresh token, or CLAUDE_PRO_DISABLE_TOKEN_REFRESH is set). Run `claude` and use /login to sign in again; this project will read the updated file automatically.');
+    throw new Error('The Claude subscription access token has expired and cannot be renewed from here (the credentials file has no refresh token, or CLAUDE_PRO_DISABLE_TOKEN_REFRESH is set). Run `claude` and use /login to sign in again; this project will read the updated file automatically.');
   }
   if (!sessionIds.has(config)) sessionIds.set(config, crypto.randomUUID());
   return {

@@ -209,7 +209,7 @@ async function renew(config, { force }) {
   if (!oauth?.refreshToken) return { refreshed: false, reason: 'no refresh token' };
   if (!force && !needsRefresh(oauth)) return { refreshed: false, reason: 'still valid' };
   if (Number(oauth.refreshTokenExpiresAt) > 0 && Number(oauth.refreshTokenExpiresAt) <= timing.now()) {
-    throw new Error(`The Claude Code login has expired and cannot be renewed: its refresh token ran out. ${SIGN_IN_AGAIN}`);
+    throw new Error(`The Claude subscription login has expired and cannot be renewed: its refresh token ran out. ${SIGN_IN_AGAIN}`);
   }
   const startedWith = oauth.accessToken;
   // somebody else renewed it while we were looking: take theirs
@@ -221,7 +221,7 @@ async function renew(config, { force }) {
     const now = readStoredLogin(file)?.oauth;
     // renewing early failed but the token still works: carry on with it (unless renewing was asked for)
     if (!force && now && !isExpired(now)) return { refreshed: false, reason: why, stillValid: true };
-    throw new Error(force ? `The Claude Code login could not be renewed: ${why}` : `The Claude Code access token has expired and could not be renewed: ${why}`);
+    throw new Error(force ? `The Claude subscription login could not be renewed: ${why}` : `The Claude subscription access token has expired and could not be renewed: ${why}`);
   };
 
   let release;
@@ -251,7 +251,7 @@ async function renew(config, { force }) {
     // new one: look before giving up.
     if (res.status === 400 || res.status === 401 || res.status === 403) {
       if (renewedElsewhere()) return { refreshed: false, reason: 'renewed by another process' };
-      throw new Error(`The Claude Code login can no longer be renewed (${describeFailure(res.data) || `HTTP ${res.status}`}). ${SIGN_IN_AGAIN}`);
+      throw new Error(`The Claude subscription login can no longer be renewed (${describeFailure(res.data) || `HTTP ${res.status}`}). ${SIGN_IN_AGAIN}`);
     }
     return failed(`the token server answered HTTP ${res.status}${describeFailure(res.data) ? ` (${describeFailure(res.data)})` : ''}`);
   } finally {

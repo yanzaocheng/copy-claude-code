@@ -240,7 +240,7 @@ export function describePause(ev, now = Date.now()) {
   if (ev.waitingForLogin) {
     const until = ev.giveUpAt ? ` Giving up at ${formatClock(ev.giveUpAt, now)}.` : '';
     if (ev.renewError) return `The limit has reset, but the login could not be renewed: ${ev.renewError} Trying again every 5 minutes, and this continues by itself as soon as the login is valid.${until}`;
-    return `The limit has reset, but the Claude Code login has expired and cannot be renewed from here. Waiting for it to be renewed: run claude once, and this continues by itself.${until}`;
+    return `The limit has reset, but the Claude subscription login has expired and cannot be renewed from here. Waiting for it to be renewed: run claude once, and this continues by itself.${until}`;
   }
   const label = capitalize(ev.label || 'rate limit');
   const left = humanDuration(Math.max(0, ev.resumeAt - now));
@@ -249,7 +249,7 @@ export function describePause(ev, now = Date.now()) {
     ? `${label} reached and the server gave no reset time. Checking again at ${formatClock(ev.resumeAt, now)} (in ${left}), and every few minutes after that, then continuing automatically.`
     : `${label} reached. Pausing until ${formatClock(ev.resumeAt, now)} (in ${left}), then continuing automatically.`;
   const warning = ev.loginExpiresAt && ev.loginExpiresAt < ev.resumeAt
-    ? ` The Claude Code login expires at ${formatClock(ev.loginExpiresAt, now)}, before that, and it cannot be renewed from here. If no Claude Code session is running to renew it, run claude once after the reset: this continues by itself once the login is valid again.`
+    ? ` The Claude subscription login expires at ${formatClock(ev.loginExpiresAt, now)}, before that, and it cannot be renewed from here. If no claude command is running to renew it, run claude once after the reset: this continues by itself once the login is valid again.`
     : '';
   return text + warning;
 }

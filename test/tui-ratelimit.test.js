@@ -235,9 +235,9 @@ test('interactive: while the login is being waited for the countdown line says s
   tui.app.rateLimitEvent(waiting());
   tui.app.rateLimitEvent(waiting());
   tui.app.rateLimitEvent(waiting());
-  const screen = await tui.waitFor(/Waiting for the Claude Code login to be renewed · checking again in \d+s/, { timeout: 10_000 });
+  const screen = await tui.waitFor(/Waiting for the Claude subscription login to be renewed · checking again in \d+s/, { timeout: 10_000 });
   assert.match(screen, /esc to cancel/);
-  assert.equal((screen.match(/The limit has reset, but the Claude Code login has expired/g) || []).length, 1, 'announced once, not at every check');
+  assert.equal((screen.match(/The limit has reset, but the Claude subscription login has expired/g) || []).length, 1, 'announced once, not at every check');
   assert.match(screen.replace(/\s+/g, ' '), /run claude once, and this continues by itself\./, 'the notice says what to do (it may wrap at the terminal width)');
   // a long notice breaks between words: "claude" used to be cut into "clau" and "de" at the 100th column
   for (const word of ['claude', 'continues', 'itself', 'expired', 'Giving']) assert.match(screen, new RegExp(`\\b${word}\\b`), `"${word}" must not be split across two lines`);

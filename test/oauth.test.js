@@ -519,7 +519,7 @@ test('a 401 on a token that looks valid renews it once and repeats the request w
 test('a 401 that renewing does not cure is reported once, not retried in a loop', async (t) => {
   const w = world(t, { oauth: { expiresAt: Date.now() + 6 * HOUR }, env: TOKEN_ENV });
   const calls = apiMock(t, { token: () => [400, { error: 'invalid_grant' }], onApi: () => unauthorized() });
-  await assert.rejects(streamMessage(w.config, ask(w.config)), /Claude Code OAuth authentication failed/);
+  await assert.rejects(streamMessage(w.config, ask(w.config)), /The Claude subscription login was refused \(401\)/);
   assert.equal(calls.api.length, 1);
   assert.equal(calls.token.length, 1);
 });

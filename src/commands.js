@@ -135,7 +135,7 @@ export function buildCommands(app) {
     description: 'Show help and available commands',
     run() {
       const lines = [
-        c.bold(`${APP_NAME} v${VERSION}`) + c.dim(' — a Claude Code style coding agent'),
+        c.bold(`${APP_NAME} v${VERSION}`) + c.dim(' — a command line coding agent'),
         '',
         'Always review the agent\'s changes before committing them.',
         '',
@@ -278,7 +278,7 @@ export function buildCommands(app) {
         if (v === undefined) continue;
         lines.push(`${padEnd(k, 34)} ${c.bold(v)}  ${c.dim(cfg.sources[k] || '')}`);
       }
-      if (cfg.ignoredFromDotEnv.length) lines.push('', c.dim(`Not applied from .env with the claude-code provider (it is the API provider's setup; Claude Code's defaults are used instead): ${cfg.ignoredFromDotEnv.join(', ')}. Set them with /config set or /effort to apply them here.`));
+      if (cfg.ignoredFromDotEnv.length) lines.push('', c.dim(`Not applied from .env with the claude-code provider (it is the API provider's setup; the subscription's defaults are used instead): ${cfg.ignoredFromDotEnv.join(', ')}. Set them with /config set or /effort to apply them here.`));
       lines.push('', c.dim('Other keys: ' + Object.keys(KNOWN_KEYS).filter((k) => cfg.env[k] === undefined).join(', ')));
       lines.push('', `${c.dim('Change with')} /config set KEY VALUE [--project|--local] ${c.dim('or edit')} ${settingsFiles(app.cwd).user}`);
       log(lines, '');
@@ -395,7 +395,7 @@ export function buildCommands(app) {
           question: `Now: ${c.bold(cfg.provider)} (${cfg.endpointLabel})`,
           options: [
             { label: `Gateway ${cfg.gatewayUrl} ${c.dim(saved ? `(logged in as ${saved.account?.email || 'this machine'}; paid from the account balance)` : '(log in in the browser; paid from the account balance)')}`, value: 'gateway' },
-            { label: `Claude subscription ${c.dim('(the local Claude Code login)')}`, value: 'claude-code' },
+            { label: `Claude subscription ${c.dim('(the login of the claude command on this computer)')}`, value: 'claude-code' },
             { label: `Codex subscription ${c.dim(codex.ok ? `(the local Codex login${codex.plan ? `, ${codex.plan}` : ''})` : '(run `codex login` first)')}`, value: 'codex' },
           ],
         }));
@@ -488,7 +488,7 @@ export function buildCommands(app) {
         row('cwd', app.cwd),
         row('Provider', cfg.provider),
         row('Endpoint', cfg.endpointLabel),
-        row('Auth', cfg.usesClaudeCode ? `existing Claude Code OAuth (${cfg.claudeCodeCredentialsFile})`
+        row('Auth', cfg.usesClaudeCode ? `Claude subscription (${cfg.claudeCodeCredentialsFile})`
           : cfg.usesGateway ? (readGatewayLogin(cfg.gatewayUrl) ? `gateway key of ${readGatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)'))
             : cfg.usesCodex ? (() => { const s = codexLoginSummary({ ...process.env, ...cfg.env }); return s.ok ? `Codex login${s.email ? ` of ${s.email}` : ''}${s.plan ? ` (${s.plan})` : ''} ${c.dim(s.file)}` : c.red(s.error); })()
               : cfg.authToken ? `ANTHROPIC_AUTH_TOKEN (${cfg.display('ANTHROPIC_AUTH_TOKEN')})` : cfg.apiKey ? `ANTHROPIC_API_KEY (${cfg.display('ANTHROPIC_API_KEY')})` : c.red('none')),
@@ -917,7 +917,7 @@ export function buildCommands(app) {
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
         `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
         cfg.usesClaudeCode
-          ? `${c.yellow('!')} Existing Claude Code OAuth: ${cfg.claudeCodeCredentialsFile} (checked by the request below)`
+          ? `${c.yellow('!')} Claude subscription: ${cfg.claudeCodeCredentialsFile} (checked by the request below)`
           : cfg.usesGateway ? `${readGatewayLogin(cfg.gatewayUrl) ? c.green('✔') : c.red('✘')} Gateway login for ${cfg.gatewayUrl}${readGatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/login)'}`
             : cfg.usesCodex ? (() => { const s = codexLoginSummary({ ...process.env, ...cfg.env }); return `${s.ok ? c.green('✔') : c.red('✘')} Codex login ${s.ok ? s.file : s.error}`; })()
               : `${cfg.authToken || cfg.apiKey ? c.green('✔') : c.red('✘')} Credentials ${cfg.authToken ? 'ANTHROPIC_AUTH_TOKEN' : cfg.apiKey ? 'ANTHROPIC_API_KEY' : 'missing'}`,

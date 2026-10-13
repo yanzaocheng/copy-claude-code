@@ -1,8 +1,8 @@
 # claude-pro — 完全访问的命令行编程 Agent
 
-`claude-pro` 是一个**自己实现**的 Claude Code 风格终端 AI 编程助手：可以直接接 **Anthropic 兼容 API**（DeepSeek 的 `https://api.deepseek.com/anthropic`、Anthropic 官方 API 等），也可以读取本机 Claude Code 的现有订阅登录态，直接发送 Claude Code OAuth HTTP 请求。
+`claude-pro` 是一个**自己实现**的终端 AI 编程助手：模型请求可以走网关，可以直接接 **Anthropic 兼容 API**（DeepSeek 的 `https://api.deepseek.com/anthropic`、Anthropic 官方 API 等），也可以用你的 **Claude 订阅**（读取本机官方 `claude` 命令的登录）。
 
-和官方相比最大的区别：**没有任何权限确认**。Bash 命令、文件读写、联网、MCP 工具，模型要用就直接执行，不弹窗、不问、没有 allow/deny 规则。它面向你自己的测试机器，目的是让模型的能力不被打断地发挥出来。作为补偿，每次文件修改都会做检查点，`/rewind` 可以撤销。
+最大的特点：**没有任何权限确认**。Bash 命令、文件读写、联网、MCP 工具，模型要用就直接执行，不弹窗、不问、没有 allow/deny 规则。它面向你自己的测试机器，目的是让模型的能力不被打断地发挥出来。作为补偿，每次文件修改都会做检查点，`/rewind` 可以撤销。
 
 ```
 > 给 math.js 加一个 multiply 函数并补上测试
@@ -15,11 +15,11 @@
   ⎿  PASS
 ```
 
-> **认证**：`api` 后端使用 `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`；`claude-code` 后端读取现有 Claude Code OAuth 凭据并直接请求 Anthropic。本项目没有登录流程，不复制凭据，也不启动官方 CLI 来生成回复；访问令牌过期时，它用凭据文件里的刷新令牌**自己续期**（见下）。
+> **认证**：`api` 后端使用 `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`；Claude 订阅（`claude-code` 后端）读取本机官方 `claude` 命令保存的登录凭据，直接请求 Anthropic。本项目没有登录流程，不复制凭据，也不启动官方 CLI 来生成回复；访问令牌过期时，它用凭据文件里的刷新令牌**自己续期**（见下）。
 
 ## 安装与运行
 
-需要 Node.js 22+。Windows 上 Bash 工具使用 Git Bash（与 Claude Code 相同），会自动查找，也可以用 `CLAUDE_CODE_GIT_BASH_PATH` 指定。
+需要 Node.js 22+。Windows 上 Bash 工具使用 Git Bash，会自动查找，也可以用 `CLAUDE_CODE_GIT_BASH_PATH` 指定。
 
 从 npm 安装（推荐）：
 
@@ -28,7 +28,7 @@ npm install -g @yanzc/claude-pro
 claude-pro                 # 在任意项目目录里运行
 ```
 
-自动更新（与 Claude Code 一样）：用 npm 全局安装的版本在启动时、以及运行中**每 5 分钟**查一次 npm 上的最新版（同一台电脑上的所有会话共用这个间隔，查到的新版本号也共享；查询绕过 npm 的 CDN 缓存）。
+自动更新：用 npm 全局安装的版本在启动时、以及运行中**每 5 分钟**查一次 npm 上的最新版（同一台电脑上的所有会话共用这个间隔，查到的新版本号也共享；查询绕过 npm 的 CDN 缓存）。
 - **不打断工作**：发现新版后先记下，底部显示 `update x.y.z ready · installs when idle`；**等这个会话和这台电脑上其他开着的会话都空闲**（没有在执行任务、没有等待回答的问题、没有后台 agent/命令/文件传输）才安装，有会话在忙就每 30 秒再看一次，本会话一轮结束时也会再试。
 - **安装中有提示**：底部显示 `⇣ updating claude-pro to x.y.z…`（`npm install -g --prefer-online`），装好后提示并自动重启加载，对话保留；重启后显示 `↻ Restarted: updated to claude-pro x.y.z`。
 - **多个终端**：同一时间只有一个会话去安装（加锁），其他会话看到程序文件变了，会提示"x.y.z 已由另一个窗口安装"，各自在空闲时重启；正在工作的会话等它的任务结束才重启。
@@ -47,9 +47,9 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 
 > 在 Git Bash 自带的 mintty 窗口里交互模式需要 `winpty claude-pro`；推荐在 Windows Terminal / PowerShell / cmd 中运行。
 
-## 复用已有的 Claude Code 登录态
+## 用 Claude 订阅
 
-已有本机 Claude Code 订阅登录时，选择 `claude-code` 认证即可，不需要在本项目中登录或填写 API key：
+本机的官方 `claude` 命令已经登录了 Claude 订阅时，选择 `claude-code` 认证即可，不需要在本项目中登录或填写 API key：
 
 ```powershell
 node bin/claude-pro.js --provider claude-code
@@ -67,50 +67,49 @@ claude-pro config set CLAUDE_PRO_PROVIDER claude-code
 
 `~/.claude.json` 保存设备 ID 和 OAuth 账号信息，实际访问令牌保存在 `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken` 中。Windows 对应 `%USERPROFILE%\.claude.json` 和 `%USERPROFILE%\.claude\.credentials.json`。可用 `CLAUDE_PRO_CLAUDE_CONFIG_FILE` 和 `CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE` 指向现有文件；`CLAUDE_CONFIG_DIR` 可以指定凭据目录。凭据位置参考[官方认证文档](https://code.claude.com/docs/en/authentication#credential-management)。
 
-调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上 Claude Code 的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点及会话功能都由本项目原有逻辑处理。
+调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上订阅接口要求的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点及会话功能都由本项目原有逻辑处理。
 
-此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-5-5`（与 Claude Code 2.1.293 起一样；话题标题、WebFetch 摘要等小请求用它）；子 agent 默认用 `sonnet`（`CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL` 可改）。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
+此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-5-5`（话题标题、WebFetch 摘要等小请求用它）；子 agent 默认用 `sonnet`（`CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL` 可改）。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
 
-每次请求重新读取现有凭据；如果本机 Claude Code 更新了令牌，下次请求自动使用新值。
+每次请求重新读取现有凭据；如果官方 `claude` 命令更新了令牌，下次请求自动使用新值。
 
-**令牌自动续期**：访问令牌有效期 8 小时。发请求前如果它已过期或不到 5 分钟就过期，本项目会用同一个文件里的刷新令牌向官方令牌接口续期（协议与官方客户端一致），把新令牌写回 `.credentials.json`——刷新会**轮换刷新令牌**，所以必须写回，否则官方客户端手里的就是失效的。写回只改令牌相关字段、原子替换、保持原有缩进；和官方客户端使用同样的目录锁（`.claude/.oauth_refresh.lock` 与 `.claude.lock`），两边不会同时刷新，抢先被对方刷新过就直接用对方的结果。请求收到 401 时也会强制续期一次再重试。只有刷新令牌本身被拒绝或过期（约 30 天不用）时才需要你运行 `claude` 再 `/login`，此时报错会写明原因。不想让本项目改写凭据文件：`CLAUDE_PRO_DISABLE_TOKEN_REFRESH=1`。令牌接口地址固定，不能通过任何设置（包括项目里的 `.env`）改掉，避免刷新令牌被发到别处。HTTP 认证兼容方式依赖 Claude Code 的接口约定，官方协议变化时可能需要同步调整；可用 `CLAUDE_PRO_CLAUDE_CODE_VERSION` 指定 User-Agent 中的版本（默认读取本机 npm 安装版本）。
+**令牌自动续期**：访问令牌有效期 8 小时。发请求前如果它已过期或不到 5 分钟就过期，本项目会用同一个文件里的刷新令牌向官方令牌接口续期，把新令牌写回 `.credentials.json`——刷新会**轮换刷新令牌**，所以必须写回，否则官方 `claude` 命令手里的就是失效的。写回只改令牌相关字段、原子替换、保持原有缩进；和官方 `claude` 命令使用同样的目录锁（`.claude/.oauth_refresh.lock` 与 `.claude.lock`），两边不会同时刷新，抢先被对方刷新过就直接用对方的结果。请求收到 401 时也会强制续期一次再重试。只有刷新令牌本身被拒绝或过期（约 30 天不用）时才需要你运行 `claude` 再 `/login`，此时报错会写明原因。不想让本项目改写凭据文件：`CLAUDE_PRO_DISABLE_TOKEN_REFRESH=1`。令牌接口地址固定，不能通过任何设置（包括项目里的 `.env`）改掉，避免刷新令牌被发到别处。订阅接口的约定由 Anthropic 决定，它变化时可能需要同步调整；可用 `CLAUDE_PRO_CLAUDE_CODE_VERSION` 指定 User-Agent 中的版本（默认读取本机 npm 安装版本）。
 
 ## /login：Claude 订阅、网关、Codex 订阅三选一
 
 什么都没配置时（没有 `CLAUDE_PRO_PROVIDER`，也没有 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`）默认用**网关**，第一次启动直接弹出登录选择（网关排第一）；配置了 API 端点、密钥或模型的老用户仍然默认 `api`。交互界面里 `/login` 选择模型请求发往哪里（记在 `~/.claude-pro/settings.json` 的 `CLAUDE_PRO_PROVIDER`，每个后端各自记住 `/model`、`/effort`）：
 
-- **Claude 订阅**（`claude-code`）：本机 Claude Code 的登录，见上一节。
-- **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下没有固定模型：主 agent 每次调用 `Task` 按任务难易自己选 `haiku`（查找、读文件）、`sonnet`（搜索、步骤清楚的子任务）或 `opus`（难调的 bug、设计、审查等结论要依赖的分析），`Task` 的说明里列着三者的实际模型和价格；没选时用主模型（GPT 主模型下子 agent 用主模型）。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 48K（Opus 预扣 $0.96，请求结束按实际输出扣费；`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 可改）。每个请求带上会话 ID（`X-Claude-Code-Session-Id`，和 Claude Code 一样；子 agent 用主对话的，`/clear` 换新的，`--resume` 和自动重启沿用原来的），网关据此让同一个对话 1 小时内继续用同一个上游账号，提示词缓存才不会因为换账号而失效。`/logout` 删除本机的网关 Key。
+- **Claude 订阅**（`claude-code`）：本机官方 `claude` 命令的登录，见上一节。
+- **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下没有固定模型：主 agent 每次调用 `Task` 按任务难易自己选 `haiku`（查找、读文件）、`sonnet`（搜索、步骤清楚的子任务）或 `opus`（难调的 bug、设计、审查等结论要依赖的分析），`Task` 的说明里列着三者的实际模型和价格；没选时用主模型（GPT 主模型下子 agent 用主模型）。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 48K（Opus 预扣 $0.96，请求结束按实际输出扣费；`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 可改）。每个请求带上会话 ID（`X-Claude-Code-Session-Id` 请求头；子 agent 用主对话的，`/clear` 换新的，`--resume` 和自动重启沿用原来的），网关据此让同一个对话 1 小时内继续用同一个上游账号，提示词缓存才不会因为换账号而失效。`/logout` 删除本机的网关 Key。
 - **Codex 订阅**（`codex`）：本机 `codex login`（ChatGPT 套餐）写下的 `~/.codex/auth.json`（`CODEX_HOME` 可改）。请求直接发往 Codex 后端，Anthropic 格式在本机和 OpenAI Responses 格式互相转换（工具调用、推理、缓存用量都对应上）；访问令牌快到期时用同一文件里的刷新令牌续期并写回，Codex CLI 也能接着用。模型默认取 `~/.codex/config.toml` 的 `model`，否则 `gpt-6.1-sol`；不设 effort 时用模型自己的默认值（`models_cache.json` 里写的）。
 
 ## 配置
 
-一般不用配置：`/login` 选好提供方就能用。要接 DeepSeek 之类兼容 Anthropic 接口的端点时，写和 Claude Code 一样的环境变量，例如：
+一般不用配置：`/login` 选好提供方就能用。要接 DeepSeek 之类兼容 Anthropic 接口的端点时，写环境变量，例如：
 
 ```bash
 ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
 ANTHROPIC_AUTH_TOKEN=sk-...
 ANTHROPIC_MODEL=deepseek-flash[1m]          # [1m] 后缀 = 1M 上下文窗口（发送时自动去掉）
 ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-flash # 小模型：WebFetch 摘要、标题等
-CLAUDE_CODE_EFFORT_LEVEL=max
 ```
 
-可以写在 `<安装目录>/.env`（参考 `.env.example`）、`~/.claude-pro/settings.json` 的 `"env"` 里（全局）、`<项目>/.claude-pro/settings.json`（项目）、`<项目>/.claude-pro/settings.local.json`（项目本地，不提交）、shell 环境变量或命令行参数（`--model`、`--effort`），后面的覆盖前面的。Claude Code 的其他环境变量（`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`MAX_THINKING_TOKENS`、`DISABLE_AUTOCOMPACT`、`BASH_DEFAULT_TIMEOUT_MS`…）照样认。用 Claude 订阅时，`.env` 里为 API 端点调的 effort、压缩窗口等不生效（`/config` 会列出来），要改就用 `/effort`、`/config set`。
+可以写在 `<安装目录>/.env`（参考 `.env.example`）、`~/.claude-pro/settings.json` 的 `"env"` 里（全局）、`<项目>/.claude-pro/settings.json`（项目）、`<项目>/.claude-pro/settings.local.json`（项目本地，不提交）、shell 环境变量或命令行参数（`--model`、`--effort`），后面的覆盖前面的。全部可设的项见 `claude-pro config list`。用 Claude 订阅时，`.env` 里为 API 端点调的 effort、压缩窗口等不生效（`/config` 会列出来），要改就用 `/effort`、`/config set`。
 
 ```bash
 claude-pro config list                                   # 生效的设置、来源，以及全部可设的项
-claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/settings.json
+claude-pro config set ANTHROPIC_MODEL deepseek-pro      # 写入 ~/.claude-pro/settings.json
 ```
 
 会话中用 `/config`、`/model`、`/effort` 修改。
 
 ## 提示词缓存：自动的，尽量少花钱
 
-每次请求都要把整个对话发给模型，按 Claude Code 的做法用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
+每次请求都要把整个对话发给模型，用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
 
-- 订阅登录和网关下对话用 1 小时缓存（停顿一会儿回来不用整段重写），其他端点用 5 分钟；子 agent、压缩等用 5 分钟。要改用 Claude Code 的变量 `CLAUDE_CODE_PROMPT_CACHE_TTL=5m|1h`，完全不用缓存设 `DISABLE_PROMPT_CACHING=1`。
+- 订阅登录和网关下对话用 1 小时缓存（停顿一会儿回来不用整段重写），其他端点用 5 分钟；子 agent、压缩等用 5 分钟。改缓存时长、关闭缓存的设置见 `claude-pro config list`。
 - 页脚的 `◷ 12m` 是缓存还能保留多久；变红表示已过期，下一条消息会把整个对话重新写入缓存。`/cost` 显示命中率和没命中的原因。
-- 缓存还热时 `/model`、`/effort` 会先确认（切换会让缓存失效）；离开一个多小时回来时，和 Claude Code 一样清掉较早的工具结果，少重写一些。
+- 缓存还热时 `/model`、`/effort` 会先确认（切换会让缓存失效）；离开一个多小时回来时，清掉较早的工具结果，少重写一些。
 
 （缓存标记放在哪、端点不认时怎么退、压缩如何复用缓存等细节见 ARCHITECTURE.md 6.5。）
 
@@ -120,9 +119,9 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 
 ## 终端标题、页脚与窗口缩放
 
-- **终端标题**：标签/窗口标题显示 `✳ <会话标题> | <目录> · <模型> · <effort>`（会话标题是**当前话题**：每次发消息后，后台让小模型（haiku）判断是否换了话题，换了就生成一个简短标题，和官方客户端一样；"继续"之类的消息不会改标题。话题记在会话文件里，`/resume`、重启后仍在，`/resume` 列表也显示它。旧会话没有话题时，恢复时按最近一条提问生成。还没生成时显示第一条提问。最多 40 字，保证模型和 effort 不被窄标签截掉。`CLAUDE_PRO_DISABLE_TOPIC_TITLE=1` 关闭，省掉每条消息一次的小请求）。忙碌时前缀在 `⠂`/`⠐` 之间闪动，限流暂停时变 `⏸`，退出时恢复进入前的标题。`/model`、`/effort`、`/clear`、`/resume` 后自动更新。**VS Code**(1.140 起)只对它认得的 AI 命令行(claude/codex/copilot/gemini)把程序设置的标题显示在标签上(`terminal.integrated.tabs.allowAgentCliTitle`,默认开),其余一律显示进程名 `node`;它在 Windows 上靠 `node.exe` 命令行里的 `\claude-code\` 路径段识别 Claude Code,所以监督进程用 `bin\claude-code\..\claude-pro.js` 启动会话(目录不必存在,Node 自己化简 `..`)。不经过监督进程的启动方式(`CLAUDE_PRO_NO_SUPERVISOR=1`)或 Linux/macOS 上,要在 VS Code 设置里把 `terminal.integrated.tabs.title` 改成 `${sequence}` 才能看到标题。
+- **终端标题**：标签/窗口标题显示 `✳ <会话标题> | <目录> · <模型> · <effort>`（会话标题是**当前话题**：每次发消息后，后台让小模型（haiku）判断是否换了话题，换了就生成一个简短标题；"继续"之类的消息不会改标题。话题记在会话文件里，`/resume`、重启后仍在，`/resume` 列表也显示它。旧会话没有话题时，恢复时按最近一条提问生成。还没生成时显示第一条提问。最多 40 字，保证模型和 effort 不被窄标签截掉。`CLAUDE_PRO_DISABLE_TOPIC_TITLE=1` 关闭，省掉每条消息一次的小请求）。忙碌时前缀在 `⠂`/`⠐` 之间闪动，限流暂停时变 `⏸`，退出时恢复进入前的标题。`/model`、`/effort`、`/clear`、`/resume` 后自动更新。**VS Code**(1.140 起)只对它认得的 AI 命令行(claude/codex/copilot/gemini)把程序设置的标题显示在标签上(`terminal.integrated.tabs.allowAgentCliTitle`,默认开),其余一律显示进程名 `node`;它在 Windows 上靠 `node.exe` 命令行里的 `\claude-code\` 路径段识别它,所以监督进程用 `bin\claude-code\..\claude-pro.js` 启动会话(目录不必存在,Node 自己化简 `..`)。不经过监督进程的启动方式(`CLAUDE_PRO_NO_SUPERVISOR=1`)或 Linux/macOS 上,要在 VS Code 设置里把 `terminal.integrated.tabs.title` 改成 `${sequence}` 才能看到标题。
 - **用户的提问**：带一条深灰色背景（横跨整个窗口宽度），和回复一眼就能分开。背景条是用当前背景色清除行尾（`\x1b[K`）画出来的，不靠补空格，窗口变宽变窄都正好铺满。
-- **页脚**：输入框下方右侧常驻当前模型和 effort（如 `sonnet-5-5 · high`）；没发送 effort（auto）或该模型不支持时只显示模型；窄窗口放不下时先让位给"上下文快满"等提示，再不行就不显示。模型前面是**当前对话累计花费**（如 `$1.23 · opus-5-5 · effort high`）：按官方价（和网关扣费同一张价目表，含 5 分钟/1 小时缓存写入、长上下文价）把每个请求算进去，子 agent、压缩、话题标题、WebFetch 都算，按 Esc 中断的请求按已读入的输入和估算的已输出部分算；记在会话文件里，重启、`/resume` 后接着累计，`/clear` 从零开始。`/cost` 第一行也显示它，`-p --output-format json` 的结果带本次运行的 `total_cost_usd`。不认识价格的模型（第三方端点的自定义模型）不计；网关上游分组倍率不是 1 的账户以网关流水为准。花费前面是**提示词缓存时钟**（和官方 VS Code 扩展的 prompt cache clock 一致）：`◷ 12m` 表示对话的缓存估计还能保留 12 分钟（按 5 分钟或 1 小时 TTL 倒数，每次用到缓存的回复重新开始计时）；倒数结束后分钟数消失、图标变红，直到下一次回复——这时发下一条消息会把整个对话重新写入缓存，更慢也更贵；压缩之后到下一次回复之前也是红色，因为压缩后的对话还没进缓存。时钟记在会话文件里，重启、`/resume` 后接着显示（压缩后关掉的会话恢复时是冷的）；还没有回复报告过缓存用量时不显示。窄窗口先省掉花费，再省掉时钟。
+- **页脚**：输入框下方右侧常驻当前模型和 effort（如 `sonnet-5-5 · high`）；没发送 effort（auto）或该模型不支持时只显示模型；窄窗口放不下时先让位给"上下文快满"等提示，再不行就不显示。模型前面是**当前对话累计花费**（如 `$1.23 · opus-5-5 · effort high`）：按官方价（和网关扣费同一张价目表，含 5 分钟/1 小时缓存写入、长上下文价）把每个请求算进去，子 agent、压缩、话题标题、WebFetch 都算，按 Esc 中断的请求按已读入的输入和估算的已输出部分算；记在会话文件里，重启、`/resume` 后接着累计，`/clear` 从零开始。`/cost` 第一行也显示它，`-p --output-format json` 的结果带本次运行的 `total_cost_usd`。不认识价格的模型（第三方端点的自定义模型）不计；网关上游分组倍率不是 1 的账户以网关流水为准。花费前面是**提示词缓存时钟**：`◷ 12m` 表示对话的缓存估计还能保留 12 分钟（按 5 分钟或 1 小时 TTL 倒数，每次用到缓存的回复重新开始计时）；倒数结束后分钟数消失、图标变红，直到下一次回复——这时发下一条消息会把整个对话重新写入缓存，更慢也更贵；压缩之后到下一次回复之前也是红色，因为压缩后的对话还没进缓存。时钟记在会话文件里，重启、`/resume` 后接着显示（压缩后关掉的会话恢复时是冷的）；还没有回复报告过缓存用量时不显示。窄窗口先省掉花费，再省掉时钟。
 - **缩放窗口**：拖动期间不重绘，停下约 80ms 后从左上角整屏绝对重绘一次，输入框不会再留下残影。注意：很短的会话里这次重绘会覆盖终端上方 shell 的内容。
 
 ## 自动重启：改了自己的代码马上生效
@@ -139,7 +138,7 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 
 ## 远程控制：在浏览器或手机上看执行过程、下发指令
 
-和 Claude Code 的 `/remote-control` 一样，可以在手机或另一台电脑上看着会话干活，并给它发指令；这里**不用任何命令或设置**。官方版经 Anthropic 中转，这里经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里按电脑分组列出自己的会话，可以查看、操作，也可以在某台电脑上新建、结束、重启会话，恢复历史对话（见下面"网页管理电脑和后台会话"）。模型请求走哪个提供方都可以，远程控制只用网关的登录。
+可以在手机或另一台电脑上看着会话干活，并给它发指令，**不用任何命令或设置**。会话经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里按电脑分组列出自己的会话，可以查看、操作，也可以在某台电脑上新建、结束、重启会话，恢复历史对话（见下面"网页管理电脑和后台会话"）。模型请求走哪个提供方都可以，远程控制只用网关的登录。
 
 - **默认在线**：这台电脑登录了网关（`/login` 选网关）以后，每个交互会话启动时自动连上网关（不阻塞启动，断开后自动重连），网页上能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`/login` 登录成功后当前会话**马上上线**（不用重启），并打印它的链接；`/logout` 后马上下线；在别的窗口登录或退出，这个窗口几秒内跟上。想让模型请求走 Claude 订阅：先 `/login` 选网关登录，再 `/login` 选 Claude 订阅，网关登录保留，会话照样在线。
 - **在网页上找到会话**：网关用户端的"远程控制"（`/user#remote`）按电脑列出所有会话，点开即可。`/status` 显示这个会话的远程状态（在线、连接中、没登录、key 被拒…）。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`。
@@ -188,9 +187,8 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 
 - **没有权限系统**：没有确认弹窗，没有 allow/deny 规则，也没有 `/permissions`。旧参数 `--dangerously-skip-permissions`、`--permission-mode`、`--allowedTools`、`--disallowedTools` 仍被接受但会被忽略，`--plan` 也是；settings 里残留的 `permissions` 字段也会被忽略。
 - **没有计划模式**：想先看方案再动手，直接在消息里说（例如"先给方案，我确认前不要改代码"）。
-- **检查点与 `/rewind`（或在空输入框连按两次 `Esc`）**：每条提问都会建一个检查点，Write / Edit / NotebookEdit 修改文件前会先保存原样。和官方一样，菜单按时间列出这次会话的提问（最新的在最下面、默认选中），选一条后可以：**Restore code and conversation**（代码和对话都回到这条之前）、**Restore conversation**（只回退对话，文件不动）、**Restore code**（只恢复文件，对话不动）、**Summarize from here**（这条及之后的对话压缩成摘要，腾出上下文）、**Summarize up to here**（这条之前的压缩成摘要，之后的原样保留）、**Never mind**（回到列表）。回退对话或"Summarize from here"后，那条提问的原文（完整的，不截断）回填到输入框，可以改了再发，相当于删掉不想要的那段对话重新来。`/clear` 之后，菜单最上面多一项 `/resume <id> (previous session)`，可以回到 `/clear` 之前的对话（本进程内有效）。**Bash 命令造成的改动不会被记录**，所以模型被要求优先用文件工具改文件。
+- **检查点与 `/rewind`（或在空输入框连按两次 `Esc`）**：每条提问都会建一个检查点，Write / Edit / NotebookEdit 修改文件前会先保存原样。菜单按时间列出这次会话的提问（最新的在最下面、默认选中），选一条后可以：**Restore code and conversation**（代码和对话都回到这条之前）、**Restore conversation**（只回退对话，文件不动）、**Restore code**（只恢复文件，对话不动）、**Summarize from here**（这条及之后的对话压缩成摘要，腾出上下文）、**Summarize up to here**（这条之前的压缩成摘要，之后的原样保留）、**Never mind**（回到列表）。回退对话或"Summarize from here"后，那条提问的原文（完整的，不截断）回填到输入框，可以改了再发，相当于删掉不想要的那段对话重新来。`/clear` 之后，菜单最上面多一项 `/resume <id> (previous session)`，可以回到 `/clear` 之前的对话（本进程内有效）。**Bash 命令造成的改动不会被记录**，所以模型被要求优先用文件工具改文件。
 - **想要护栏时用 hooks**：`PreToolUse` 钩子仍然可以拦截任何工具调用，由你自己定规则（见下）。
-- 模型自己的使用规则不受影响，系统提示里的安全条款与官方 Claude Code 现在的措辞一致：允许授权的安全测试、防御、CTF、教学，拒绝恶意用途。这一条是模型的使用规范，不是能力限制，没有去掉。
 
 **已经放开的限制**（都可以用环境变量改回去）：
 
@@ -200,7 +198,7 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 | Bash 默认 / 最长超时 | 2 分钟 / 10 分钟 | 10 分钟 / 1 小时 |
 | Bash 输出返回给模型的上限 | 30000 字符 | 60000 字符，超出部分的全文保存到文件 |
 | 单个工具结果上限（超出落盘） | 50000 字符 | 100000 字符 |
-| `Read` 一次最多 | 2000 行、每行 2000 字符、总共 12 万字符 | 10000 行、每行 20000 字符、总共 40 万字符；加 `allow_large: true`（与 Claude Code 2.1.296 相同）不限行数和长度，只要上下文在自动压缩之前还放得下（同一批并行读取共用这份余量），放不下就拒绝并写明差多少 |
+| `Read` 一次最多 | 2000 行、每行 2000 字符、总共 12 万字符 | 10000 行、每行 20000 字符、总共 40 万字符；加 `allow_large: true`不限行数和长度，只要上下文在自动压缩之前还放得下（同一批并行读取共用这份余量），放不下就拒绝并写明差多少 |
 | `Glob` / `Grep` 默认返回条数 | 100 / 250 | 1000 / 1000 |
 | `WebFetch` | 只返回小模型的摘要（最多 4096 token），自动把 http 升成 https | `raw: true` 直接拿转换后的全文；摘要上限 16000 token、页面上限 40 万字符；按原样请求 URL，localhost 和内网也可以 |
 | 子 agent | 不能再派子 agent | 嵌套到 2 层 |
@@ -211,13 +209,13 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 
 ## 功能
 
-**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；找不到 rg 时可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`AskUserQuestion`，以及 MCP 工具。
+**工具**：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；找不到 rg 时可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`AskUserQuestion`，以及 MCP 工具。
 
 **交互**
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
 - `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
-- **全屏模式（默认，和 Claude Code 的 `/tui fullscreen` 一样）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开就复制到剪贴板；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时 `Ctrl+C` 是复制（不会中断任务）。**右键**和在终端里一样：有选中时复制，没有时把剪贴板的文字粘贴进输入框（和 `Ctrl+V` 相同）。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
+- **全屏模式（默认）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开就复制到剪贴板；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时 `Ctrl+C` 是复制（不会中断任务）。**右键**和在终端里一样：有选中时复制，没有时把剪贴板的文字粘贴进输入框（和 `Ctrl+V` 相同）。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
 - `ctrl+c` 或连按两次 `Esc` 清掉的草稿不会丢：在空输入框按 `↑` 找回（连同粘贴的文本和图片），中间发过别的消息也可以
 - `@文件` 补全并附加内容：走的就是 `Read` 工具，等于模型自己读了这个文件。最多带前 2000 行（被截断时会明确告诉模型，并把该文件记为"只读了一部分"，之后 `Write` 不会去覆盖没给它看过的行）；图片作为图片附加；二进制文件和超过 512KB 的文本会被跳过并提示原因；`@目录` 列出目录内容
 - `alt+v` 粘贴剪贴板里的图片（截图用 `Win+Shift+S`），输入框里显示为 `[Image #1]`；超过 1568px 的图会自动缩小，超过 512 KB 的 PNG（3D 画面、照片类截图）改用 JPEG 发送，通常只有原来的 1/10（每次请求都带着整个对话，图片太重会让请求超过 32 MB 的上限）。把图片文件拖进终端（或粘贴图片路径）也会作为图片附加
@@ -228,11 +226,11 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 
 **斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
-**记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（与 Claude Code 相同，两者都有时通常是同一份说明，不重复发送）。
+**记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 
 **自动记忆（跨会话）**：每个项目有一个由 agent 自己维护的记忆目录 `~/.claude-pro/projects/<项目>/memory/`。它会把你的偏好、纠正过的做法、项目约束等写成一条条小文件，并在 `MEMORY.md` 里建索引；每次新会话开始时索引自动载入。直接说"记住……"或"忘掉……"即可；`/memory` 查看；`CLAUDE_PRO_DISABLE_AUTO_MEMORY=1` 关闭。
 
-**Skills**：`<目录>/skills/<名字>/SKILL.md`，frontmatter 写 `name` 和 `description`，正文是指令，格式与 Claude Code 的 skills 相同。搜索 `~/.claude-pro/skills/`、`<项目>/.claude/skills/`、`<项目>/.claude-pro/skills/`（项目级覆盖用户级）。模型发现任务匹配某个 skill 的描述时会通过 `Skill` 工具自动加载它；你也可以直接用 `/<skill 名> [参数]` 调用，`/skills` 列出全部。
+**Skills**：`<目录>/skills/<名字>/SKILL.md`，frontmatter 写 `name` 和 `description`，正文是指令。搜索 `~/.claude-pro/skills/`、`<项目>/.claude/skills/`、`<项目>/.claude-pro/skills/`（项目级覆盖用户级）。模型发现任务匹配某个 skill 的描述时会通过 `Skill` 工具自动加载它；你也可以直接用 `/<skill 名> [参数]` 调用，`/skills` 列出全部。
 
 **子 agent**：内置 `general-purpose`、`Explore`、`Plan`；自定义 agent 放在 `.claude/agents/*.md` 或 `~/.claude-pro/agents/*.md`（frontmatter：`name`、`description`、`tools`、`model`、`effort`（low/medium/high/xhigh/max）、`autoCompactWindow`（这个 agent 自己的自动压缩窗口，token 数））。模型调用 `Task` 时也可以给单个子 agent 指定 `model`（sonnet/opus/haiku 或完整 id）和 `effort`，优先于 agent 定义里的，定义里的又优先于会话的。
 
@@ -242,7 +240,7 @@ claude-pro config set CLAUDE_CODE_EFFORT_LEVEL high      # 写入 ~/.claude-pro/
 
 **大输出落盘**：工具结果超过 10 万字符时，全文会保存到 `~/.claude-pro/projects/<项目>/tool-results/`，只把预览和文件路径发给模型，模型可以再用 `Read`/`Grep` 按需查看。Bash 输出被截断时同样会保存全文。超过 7 天的旧文件在启动时自动清理。
 
-**Hooks**：`settings.json` 里的 `hooks` 与 Claude Code 同形：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`。事件内容以 JSON 从 **stdin** 传给脚本（同时放在环境变量 `CLAUDE_PRO_HOOK_INPUT`，另有 `CLAUDE_PROJECT_DIR`）；退出码 0 = 通过（stdout 作为附加上下文），2 = 拦截（stderr 反馈给模型；`Stop` 则让模型继续干活），其他 = 仅警告。当护栏用的 hook 加上 `"onFailure": "block"`：启动不了、超时或以其他退出码结束时按拦截处理，而不是放行（与 Claude Code 相同）。hook 输出里的 `<system-reminder>` 标签会被转义，冒充不了系统提示。
+**Hooks**：`settings.json` 里的 `hooks`：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`。事件内容以 JSON 从 **stdin** 传给脚本（同时放在环境变量 `CLAUDE_PRO_HOOK_INPUT`，另有 `CLAUDE_PROJECT_DIR`）；退出码 0 = 通过（stdout 作为附加上下文），2 = 拦截（stderr 反馈给模型；`Stop` 则让模型继续干活），其他 = 仅警告。当护栏用的 hook 加上 `"onFailure": "block"`：启动不了、超时或以其他退出码结束时按拦截处理，而不是放行。hook 输出里的 `<system-reminder>` 标签会被转义，冒充不了系统提示。
 
 ```json
 { "hooks": {
@@ -307,7 +305,7 @@ src/main.js           参数解析、config 子命令
 src/config.js         配置加载（.env / settings.json / 环境变量）与模型解析
 src/api.js            后端路由、Anthropic SDK 封装：流式、重试、effort/thinking 参数
 src/ratelimit.js      限流：解析重置时间响应头、决定等多久、墙上时钟休眠、提示文案
-src/claude-code.js    读取现有 Claude Code OAuth 登录态，生成认证头和账号 metadata
+src/claude-code.js    读取 Claude 订阅的登录（官方 claude 命令保存的），生成认证头和账号 metadata
 src/oauth.js          访问令牌过期时用刷新令牌续期，加锁、原子写回凭据文件
 src/agent.js          Agent 循环：工具调度、并行只读工具、中断、自动压缩、验证循环
 src/checkpoints.js    检查点与 /rewind
@@ -322,12 +320,12 @@ src/remote.js         远程控制：经网关中转的客户端、对话事件�
 src/commands.js       斜杠命令
 ```
 
-## 与 Claude Code 的差异
+## 其他说明
 
-没有：权限系统（刻意去掉）、IDE 集成、`/login` 等账号功能、插件市场。检查点只覆盖文件工具的修改，不覆盖 Bash 命令造成的改动。WebSearch 通过抓取 DuckDuckGo/Bing 实现（DeepSeek 没有服务端搜索工具）。
+WebSearch 通过抓取 DuckDuckGo/Bing 实现。检查点只覆盖文件工具的修改，不覆盖 Bash 命令造成的改动。
 
 提示：选中文字自动复制是终端的功能。Windows Terminal 在设置里打开“选择时自动复制”（settings.json 里的 `"copyOnSelect": true`）即可。
 
 ## 历史
 
-这个仓库依次是：自己实现的 agent（旧名 ccc，最后一版保存在 git 标签 `ccc-last`）→ 官方 `claude` 的启动器（提交 `e041b0f`）→ 现在这个版本（自己实现的 agent，去掉权限系统，加入检查点和 Skills）。
+旧名 ccc，最后一版保存在 git 标签 `ccc-last`。

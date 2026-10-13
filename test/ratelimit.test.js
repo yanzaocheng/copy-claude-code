@@ -110,16 +110,16 @@ test('describePause says when it resumes, and warns when the login will not last
   const text = describePause(ev, now);
   assert.match(text, /^5-hour limit reached\. Pausing until 23:22 \(in 3h 12m\), then continuing automatically\.$/);
   const warned = describePause({ ...ev, loginExpiresAt: now + HOUR }, now);
-  assert.match(warned, /The Claude Code login expires at 21:10, before that/);
+  assert.match(warned, /The Claude subscription login expires at 21:10, before that/);
   assert.doesNotMatch(describePause({ ...ev, loginExpiresAt: now + 8 * HOUR }, now), /login/);
   const polling = describePause({ label: 'rate limit', resumeAt: now + 5 * MIN, polling: true }, now);
   assert.match(polling, /^Rate limit reached and the server gave no reset time\. Checking again at 20:15 \(in 5m 0s\)/);
   // the limit is over, the login is not: say what to do and until when it keeps looking
   const login = describePause({ label: 'login', waitingForLogin: true, polling: true, resumeAt: now + 15_000, giveUpAt: now + 50 * MIN }, now);
-  assert.equal(login, 'The limit has reset, but the Claude Code login has expired and cannot be renewed from here. Waiting for it to be renewed: run claude once, and this continues by itself. Giving up at 21:00.');
+  assert.equal(login, 'The limit has reset, but the Claude subscription login has expired and cannot be renewed from here. Waiting for it to be renewed: run claude once, and this continues by itself. Giving up at 21:00.');
   // a renewal that was tried and failed says why
-  const failed = describePause({ label: 'login', waitingForLogin: true, polling: true, resumeAt: now + 15_000, giveUpAt: now + 50 * MIN, renewError: 'The Claude Code login can no longer be renewed (invalid_grant). Sign in again: run `claude` and use /login.' }, now);
-  assert.equal(failed, 'The limit has reset, but the login could not be renewed: The Claude Code login can no longer be renewed (invalid_grant). Sign in again: run `claude` and use /login. Trying again every 5 minutes, and this continues by itself as soon as the login is valid. Giving up at 21:00.');
+  const failed = describePause({ label: 'login', waitingForLogin: true, polling: true, resumeAt: now + 15_000, giveUpAt: now + 50 * MIN, renewError: 'The Claude subscription login can no longer be renewed (invalid_grant). Sign in again: run `claude` and use /login.' }, now);
+  assert.equal(failed, 'The limit has reset, but the login could not be renewed: The Claude subscription login can no longer be renewed (invalid_grant). Sign in again: run `claude` and use /login. Trying again every 5 minutes, and this continues by itself as soon as the login is valid. Giving up at 21:00.');
   assert.match(warned, /run claude once after the reset: this continues by itself once the login is valid again/);
 });
 
@@ -759,7 +759,7 @@ test('when the wait for a login ends, the error says why renewing failed', async
   const started = clock.now;
   routedFetch(t, { token: () => refused(), api: () => limited(unified(started + 2 * HOUR)) });
   await assert.rejects(streamMessage(config, request(config)), (err) => {
-    assert.match(err.message, /^The Claude Code login can no longer be renewed \(invalid_grant/);
+    assert.match(err.message, /^The Claude subscription login can no longer be renewed \(invalid_grant/);
     assert.match(err.message, /Waited 9m \d+s for it after the limit reset\./);
     return true;
   });

@@ -35,18 +35,18 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_GATEWAY_URL: `codex-gateway address for the gateway provider (default https://gw.predix.icu)`,
   CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
   CLAUDE_PRO_CODEX_MODEL: 'Model with the codex provider (default: the model in ~/.codex/config.toml, else gpt-6.1-sol)',
-  CLAUDE_PRO_CLAUDE_CONFIG_FILE: 'Existing Claude Code account metadata file (default: ~/.claude.json)',
-  CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE: 'Existing Claude Code OAuth credentials file (default: ~/.claude/.credentials.json)',
-  CLAUDE_PRO_CLAUDE_CODE_VERSION: 'Claude Code version in the HTTP User-Agent (default: installed npm version)',
-  CLAUDE_PRO_DISABLE_TOKEN_REFRESH: 'Set to 1 to stop this program renewing the Claude Code login by itself (it then only reads what the official client keeps up to date)',
+  CLAUDE_PRO_CLAUDE_CONFIG_FILE: 'Claude subscription: the account metadata file of the claude command (default: ~/.claude.json)',
+  CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE: 'Claude subscription: the credentials file of the claude command (default: ~/.claude/.credentials.json)',
+  CLAUDE_PRO_CLAUDE_CODE_VERSION: 'Claude subscription: the claude command version sent in the User-Agent (default: the installed one)',
+  CLAUDE_PRO_DISABLE_TOKEN_REFRESH: 'Set to 1 to stop this program renewing the Claude subscription login by itself (it then only reads what the official client keeps up to date)',
   CLAUDE_PRO_ONLINE: 'Internal (the self-check and the tests set it): 0 keeps interactive sessions off the gateway. Otherwise a session is online there whenever this computer is logged in to the gateway: its 远程控制 page shows it, and sessions on your other computers can send it tasks (&computer/name)',
   CLAUDE_PRO_HOST: 'Set to 0 so that sessions do not start the computer service (claude-pro host) by themselves; the service lets the gateway\'s 远程控制 page open new sessions on this computer',
   CLAUDE_PRO_DOWNLOAD_DIR: 'Where files that other sessions send this one are saved (default: the Downloads folder)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
-  CLAUDE_PRO_TUI: 'fullscreen (default: the input box fixed at the bottom, the conversation scrolled inside, like Claude Code\'s /tui fullscreen) or default (classic: it scrolls in the terminal); /tui switches',
+  CLAUDE_PRO_TUI: 'fullscreen (default: the input box fixed at the bottom, the conversation scrolled inside) or default (classic: it scrolls in the terminal); /tui switches',
   CLAUDE_PRO_AUTO_RESTART: 'Restart by itself when a turn ends and claude-pro\'s own source files changed (default 1; 0 = only on /restart or the Restart tool)',
-  CLAUDE_PRO_CLAUDE_CODE_MODEL: 'Model for Claude Code OAuth (default: sonnet; independent of API model settings)',
-  CLAUDE_CONFIG_DIR: 'Official Claude Code configuration directory, for selecting the locally signed-in account',
+  CLAUDE_PRO_CLAUDE_CODE_MODEL: 'Model with the Claude subscription (default: sonnet; independent of API model settings)',
+  CLAUDE_CONFIG_DIR: 'Configuration directory of the claude command, for selecting its signed-in account (Claude subscription)',
   ANTHROPIC_BASE_URL: 'API base URL (Anthropic compatible endpoint)',
   ANTHROPIC_AUTH_TOKEN: 'Bearer token sent as Authorization header',
   ANTHROPIC_API_KEY: 'API key sent as x-api-key header (used if no auth token)',
@@ -64,7 +64,7 @@ export const KNOWN_KEYS = {
   DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000, 48000 with the gateway; lowered automatically if the API allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
-  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login, as in Claude Code, and with the gateway, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
+  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login and with the gateway, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
   ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
   FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
@@ -241,7 +241,7 @@ export class Config {
       this.env.CLAUDE_CONFIG_DIR || path.join(path.dirname(this.claudeCodeConfigFile), '.claude'), '.credentials.json'));
   }
   get endpointLabel() {
-    if (this.usesClaudeCode) return 'https://api.anthropic.com (Claude Code OAuth)';
+    if (this.usesClaudeCode) return 'https://api.anthropic.com (Claude subscription)';
     if (this.usesGateway) return `${this.gatewayUrl} (codex-gateway)`;
     if (this.usesCodex) return 'https://chatgpt.com/backend-api/codex (Codex login)';
     return this.baseURL;

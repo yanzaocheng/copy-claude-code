@@ -5,7 +5,7 @@ import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
 
-A Claude Code style coding agent for APIs or existing local Claude Code OAuth credentials.
+A command line coding agent: through the gateway, an Anthropic-compatible API, or your Claude subscription.
 Starts an interactive session by default; use -p for non-interactive output.
 
 Options:

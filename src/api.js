@@ -326,7 +326,7 @@ function describeError(err, config) {
   const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded/i.test(msg);
   if (err instanceof APIError) return err;
   if (status === 401) msg = config?.usesClaudeCode
-    ? `Claude Code OAuth authentication failed (401). Check the existing local subscription credentials in ${config.claudeCodeCredentialsFile}. ${msg}`
+    ? `The Claude subscription login was refused (401). Check the subscription credentials in ${config.claudeCodeCredentialsFile}. ${msg}`
     : config?.usesGateway ? `The gateway refused the login (401). Run /login to log in again. ${msg}`
       : config?.usesCodex ? msg
         : `Authentication failed (401). Check ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY. ${msg}`;

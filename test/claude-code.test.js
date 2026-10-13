@@ -133,7 +133,7 @@ test('an unchanged invalid token does not cause a 401 retry loop', async (t) => 
     calls++;
     return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'Invalid token' } }), { status: 401, headers: { 'content-type': 'application/json' } });
   });
-  await assert.rejects(quickQuery(cfg, { model: cfg.mainModel, system: 's', prompt: 'p' }), /Claude Code OAuth authentication failed/);
+  await assert.rejects(quickQuery(cfg, { model: cfg.mainModel, system: 's', prompt: 'p' }), /The Claude subscription login was refused \(401\)/);
   assert.equal(calls, 1);
 });
 
@@ -144,7 +144,7 @@ test('missing, malformed and expired credentials fail without exposing credentia
   fs.writeFileSync(credentialsFile, JSON.stringify({ claudeAiOauth: { accessToken: 'secret-token', expiresAt: 1 } }));
   assert.throws(() => readClaudeCodeLogin(cfg), (err) => /expired/.test(err.message) && !err.message.includes('secret-token'));
   fs.writeFileSync(credentialsFile, '{}');
-  assert.throws(() => readClaudeCodeLogin(cfg), /No existing Claude Code subscription access token/);
+  assert.throws(() => readClaudeCodeLogin(cfg), /No Claude subscription access token/);
 });
 
 test('subscription requests retain native tool calls, tool results and the existing Agent loop', async (t) => {

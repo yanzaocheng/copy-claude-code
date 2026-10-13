@@ -50,7 +50,7 @@ export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory
     ? `\n\n# Memory\nProject and user instructions are shown below: the facts of this project (its environment, mechanisms, commands) and how the user wants to work in it. Where they differ from the defaults above, they win.\n\n${files}`
     : '';
 
-  return `You are ${APP_NAME}, an interactive command line agent modelled on Claude Code. You help the user with software engineering tasks (solving bugs, adding functionality, refactoring, explaining code, running builds and tests) and with anything else they ask that you can do with your knowledge and the tools on this machine. Use the instructions below and the tools available to you to assist the user.
+  return `You are ${APP_NAME}, an interactive command line agent. You help the user with software engineering tasks (solving bugs, adding functionality, refactoring, explaining code, running builds and tests) and with anything else they ask that you can do with your knowledge and the tools on this machine. Use the instructions below and the tools available to you to assist the user.
 
 # Communication
 - Your output is shown in a terminal, rendered as GitHub-flavored markdown in a monospace font: keep it scannable.

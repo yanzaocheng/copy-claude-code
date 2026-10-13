@@ -983,7 +983,7 @@ export class App {
     if (w) {
       const label = w.label.charAt(0).toUpperCase() + w.label.slice(1);
       rateWait = {
-        text: w.waitingForLogin ? 'Waiting for the Claude Code login to be renewed' : `${w.overloaded ? label : `${label} reached`}${w.polling ? ' · checking again' : ` · resumes at ${formatClock(w.resumeAt)}`}`,
+        text: w.waitingForLogin ? 'Waiting for the Claude subscription login to be renewed' : `${w.overloaded ? label : `${label} reached`}${w.polling ? ' · checking again' : ` · resumes at ${formatClock(w.resumeAt)}`}`,
         resumeIn: w.resumeAt - Date.now(),
       };
     }
@@ -1425,7 +1425,7 @@ export class App {
     const model = cfg.mainModel;
     const lines = [
       c.claude('╭' + '─'.repeat(w - 2) + '╮'),
-      row(`${c.claude('✻')} Welcome to ${c.bold(APP_NAME)}! ${c.dim(`v${VERSION} · a Claude Code style agent`)}`),
+      row(`${c.claude('✻')} Welcome to ${c.bold(APP_NAME)}! ${c.dim(`v${VERSION} · a command line coding agent`)}`),
       row(''),
       row(c.dim('  /help for help, /status for your current setup')),
       row(''),
@@ -2453,7 +2453,7 @@ export class App {
       const w = this.rateWait;
       const left = humanDuration(w.resumeAt - Date.now()); // the same wording as the notice above it
       const esc = c.dim(`(${this.controller?.signal.aborted ? 'cancelling…' : 'esc to cancel'})`);
-      if (w.waitingForLogin) return c.yellow(`${frame} Waiting for the Claude Code login to be renewed · checking again in ${left}`) + ' ' + esc;
+      if (w.waitingForLogin) return c.yellow(`${frame} Waiting for the Claude subscription login to be renewed · checking again in ${left}`) + ' ' + esc;
       const label = w.label.charAt(0).toUpperCase() + w.label.slice(1);
       const when = w.polling ? `checking again in ${left}` : `resumes at ${formatClock(w.resumeAt)} (in ${left})`;
       return c.yellow(`${frame} ${w.overloaded ? label : `${label} reached`} · ${when}`) + ' ' + esc;
