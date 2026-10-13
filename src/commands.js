@@ -21,7 +21,7 @@ import { displayPath } from './utils/paths.js';
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
-import { describeHost } from './host.js';
+import { describeHost, normalizeDir } from './host.js';
 import { qrLines } from './qr.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -34,6 +34,55 @@ const effortLevels = (modelId, modelInfo = null) => {
   if (remote.length) return remote;
   return isGpt(modelId) && codexEfforts(modelId).length ? codexEfforts(modelId) : EFFORTS;
 };
+
+// What /model offers (and the remote page, see App.remoteOptions): [{value, label, description}] in plain text, the
+// default first. `value` is what /model <value> takes. The gateway's list of models is asked for (4 seconds at
+// most); without an answer gpt-6.1-sol stands for its GPT models.
+export async function modelChoices(cfg) {
+  const configured = cfg.configuredModelSpec;
+  const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).id}` }];
+  if (cfg.usesCodex) {
+    // The models the local Codex install lists.
+    for (const m of codexModels({ ...process.env, ...cfg.env }).models.filter((x) => !x.hidden)) opts.push({ value: m.slug, label: m.slug, description: m.contextWindow ? `${formatTokens(m.contextWindow)} context` : '' });
+  } else {
+    opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ value: a, label: a, description: `→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}` })));
+  }
+  if (cfg.usesGateway) {
+    // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
+    const login = readGatewayLogin(cfg.gatewayUrl);
+    let served = null;
+    try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
+    const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
+    for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
+      if (aliased.has(m.id)) continue;
+      opts.push({ value: m.id, label: m.id, description: isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || '' });
+    }
+  }
+  if (cfg.provider === 'api' && cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL, label: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL, description: 'sub-agent model' });
+  return opts;
+}
+
+// What /effort offers for the current model: {levels, options: [{value, label, description}]} in plain text (the
+// levels, auto, default).
+export async function effortChoices(cfg) {
+  const id = cfg.mainModel.id;
+  let info = null;
+  if (cfg.usesGateway && isGpt(id)) {
+    const login = readGatewayLogin(cfg.gatewayUrl);
+    try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
+  }
+  const levels = effortLevels(id, info);
+  const configured = (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase() || 'auto';
+  const fallback = defaultEffort(id, cfg);
+  return {
+    levels,
+    options: [
+      ...levels.map((e) => ({ value: e, label: e, description: '' })),
+      { value: 'auto', label: 'auto', description: fallback ? `model default: ${fallback}` : 'use API default' },
+      { value: 'default', label: 'default', description: `configured: ${configured}` },
+    ],
+  };
+}
 
 export function buildCommands(app) {
   const commands = new Map();
@@ -106,6 +155,27 @@ export function buildCommands(app) {
         lines.push(`  ${c.bold(padEnd('/' + cmd.name + (cmd.argHint ? ' ' + cmd.argHint : ''), 28))} ${c.dim(cmd.description)}`);
       }
       log(lines, '');
+    },
+  });
+
+  add({
+    name: 'cd',
+    argHint: '<directory>',
+    argRequired: true,
+    description: 'Change the working directory; the conversation goes on there (with that project\'s settings, CLAUDE.md and memory)',
+    run(args) {
+      const wanted = args.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+      if (!wanted) { out(`Working directory: ${app.cwd} ${c.dim('(/cd <directory> changes it)')}`); return; }
+      // absolute, ~ for the home directory, D: for a drive; else from the working directory
+      const dir = normalizeDir(wanted) ?? path.resolve(app.cwd, wanted);
+      let st = null;
+      try { st = fs.statSync(dir); } catch { /* below */ }
+      if (!st) { out(c.red(`No such directory: ${dir}`)); return; }
+      if (!st.isDirectory()) { out(c.red(`Not a directory: ${dir}`)); return; }
+      const same = (a, b) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+      if (same(dir, app.cwd)) { out(`Working directory: ${app.cwd} ${c.dim('(already)')}`); return; }
+      const res = app.changeDirectory(dir);
+      if (!res.ok) out(c.red(res.message));
     },
   });
 
@@ -224,27 +294,7 @@ export function buildCommands(app) {
       const cfg = app.runtime.config;
       let choice = args.trim();
       if (!choice) {
-        const configured = cfg.configuredModelSpec;
-        const opts = [{ label: `Default ${c.dim(`(${configured} → ${cfg.resolveModel(configured).id})`)}`, value: '__default__' }];
-        if (cfg.usesCodex) {
-          // The models the local Codex install lists.
-          for (const m of codexModels({ ...process.env, ...cfg.env }).models.filter((x) => !x.hidden)) opts.push({ label: `${m.slug}${m.contextWindow ? c.dim(` (${formatTokens(m.contextWindow)} context)`) : ''}`, value: m.slug });
-        } else {
-          opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ label: `${a} ${c.dim(`→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}`)}`, value: a })));
-        }
-        if (cfg.usesGateway) {
-          // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
-          const login = readGatewayLogin(cfg.gatewayUrl);
-          let served = null;
-          try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
-          const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
-          for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
-            if (aliased.has(m.id)) continue;
-            const note = /^gpt-/i.test(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name;
-            opts.push({ label: `${m.id}${note ? ` ${c.dim(`(${note})`)}` : ''}`, value: m.id });
-          }
-        }
-        if (cfg.provider === 'api' && cfg.env.CLAUDE_CODE_SUBAGENT_MODEL) opts.push({ label: `${cfg.env.CLAUDE_CODE_SUBAGENT_MODEL} ${c.dim('(sub-agent model)')}`, value: cfg.env.CLAUDE_CODE_SUBAGENT_MODEL });
+        const opts = (await modelChoices(cfg)).map((o) => ({ label: `${o.label}${o.description ? ` ${c.dim(o.description.startsWith('→') ? o.description : `(${o.description})`)}` : ''}`, value: o.value }));
         choice = await app.showDialog(new SelectDialog({ title: 'Select model', question: `Current: ${c.bold(cfg.mainModel.label)}. Any name works too: /model <name>`, options: opts }));
         if (!choice) return;
       }
@@ -270,15 +320,9 @@ export function buildCommands(app) {
     async run(args) {
       const cfg = app.runtime.config;
       const id = cfg.mainModel.id;
-      let modelInfo = null;
-      if (cfg.usesGateway && isGpt(id)) {
-        const login = readGatewayLogin(cfg.gatewayUrl);
-        try { if (login) modelInfo = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
-      }
-      const levels = effortLevels(id, modelInfo);
+      const { levels, options } = await effortChoices(cfg);
       let choice = args.trim().toLowerCase();
       if (!choice) {
-        const configured = (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase() || 'auto';
         const fallback = defaultEffort(id, cfg);
         // A level this model does not take goes out as the nearest one it does.
         const sent = effortToSend(cfg, id, cfg.effort);
@@ -287,11 +331,7 @@ export function buildCommands(app) {
         choice = await app.showDialog(new SelectDialog({
           title: `Reasoning effort · ${id}`,
           question: `Current: ${current}`,
-          options: [
-            ...levels.map((e) => ({ label: e, value: e })),
-            { label: `auto ${c.dim(fallback ? `(model default: ${fallback})` : '(use API default)')}`, value: 'auto' },
-            { label: `default ${c.dim(`(configured: ${configured})`)}`, value: 'default' },
-          ],
+          options: options.map((o) => ({ label: `${o.label}${o.description ? ` ${c.dim(`(${o.description})`)}` : ''}`, value: o.value })),
         }));
         if (!choice) return;
       }

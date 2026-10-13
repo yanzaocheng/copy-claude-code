@@ -192,7 +192,8 @@ export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(
 
 export class RemoteControl {
   // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model}, seed() -> items, status() -> object,
-  // send(text), interrupt(), answer(body) (each returns an object or throws), changed() (online or viewers changed).
+  // send(text, images), interrupt(), answer(body), options(body), suggest(body), list(body) (each returns an object
+  // or a promise of one, or throws), changed() (online or viewers changed).
   constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
@@ -218,6 +219,7 @@ export class RemoteControl {
     this.registered = false;
     this.seenPeer = new Set(); // ids of the messages from other sessions already handled (the gateway sends again what was not acknowledged)
     this.peerPending = new Set(); // messages being handled now, acknowledged when done
+    this.replying = new Set(); // answers to the page's commands on their way
   }
 
   get viewing() { return this.viewers !== 0; } // nobody watching: events are not uploaded (a snapshot follows when someone comes)
@@ -335,20 +337,32 @@ export class RemoteControl {
     if (cmd.type === 'snapshot') { this.needSnapshot = true; this.scheduleFlush(0); return; }
     if (!cmd.cid) return;
     if (cmd.type === 'peer') { this.peerMessage(cmd); return; }
-    let result;
+    // also once closed: a /cd from the page restarts the session before its answer goes out (close() waits for it)
+    const reply = (result) => {
+      const sent = this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, result).catch(() => { /* the page times out */ });
+      this.replying.add(sent);
+      sent.finally(() => this.replying.delete(sent));
+      this.scheduleFlush(30);
+    };
+    const failed = (e) => reply({ cid: cmd.cid, ok: false, error: e?.message || String(e) });
+    let r;
     try {
-      const body = cmd.body || {};
-      let r;
-      if (cmd.type === 'send') r = this.handlers.send(String(body.text ?? ''));
+      const body = cmd.body && typeof cmd.body === 'object' ? cmd.body : {};
+      // send, interrupt and dialog act; options, suggest and list only look (and are answered while it works)
+      if (cmd.type === 'send') r = this.handlers.send(String(body.text ?? ''), body.images);
       else if (cmd.type === 'interrupt') r = this.handlers.interrupt();
       else if (cmd.type === 'dialog') r = this.handlers.answer(body);
+      else if (cmd.type === 'options' && this.handlers.options) r = this.handlers.options(body);
+      else if (cmd.type === 'suggest' && this.handlers.suggest) r = this.handlers.suggest(body);
+      else if (cmd.type === 'list' && this.handlers.list) r = this.handlers.list(body);
       else throw new Error(`Unknown command: ${cmd.type}`);
-      result = { cid: cmd.cid, ok: true, ...(r || {}) };
     } catch (e) {
-      result = { cid: cmd.cid, ok: false, error: e.message };
+      failed(e);
+      return;
     }
-    this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, result).catch(() => { /* the page times out */ });
-    this.scheduleFlush(30);
+    // an answer that takes a while (a list of models from the gateway, a directory) is sent when it is there
+    if (typeof r?.then === 'function') r.then((v) => reply({ cid: cmd.cid, ok: true, ...(v || {}) }), failed);
+    else reply({ cid: cmd.cid, ok: true, ...(r || {}) });
   }
 
   // ------------------------------------------------------------ messages of the account's other sessions
@@ -538,5 +552,7 @@ export class RemoteControl {
     if (!this.registered) return;
     const messages = [...this.outbox.splice(0), { t: 'bye', restarting }];
     await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages }, { timeout: 1500 }).catch(() => {});
+    // answers on their way (the one to the command that ended the session among them)
+    if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
   }
 }

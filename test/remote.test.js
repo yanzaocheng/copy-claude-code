@@ -50,6 +50,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/v1/messages') {
     const body = await readBody(req);
+    gw.lastRequest = body;
     const last = body.messages.at(-1);
     const blocks = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : last.content;
     const result = blocks.find((b) => b.type === 'tool_result');
@@ -433,4 +434,128 @@ test('QR codes: versions 1 to 6 by length, null beyond', () => {
   assert.equal(qrMatrix(`https://gw.predix.icu/#remote/${'a'.repeat(12)}`).length, 29);
   assert.equal(qrMatrix('x'.repeat(134)).length, 41);
   assert.equal(qrMatrix('x'.repeat(135)), null);
+});
+
+// A 1×1 PNG.
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+test('the page asks what the terminal knows (its menus\' options, its input box\'s suggestions, directories), and sends images', async (t) => {
+  gw.sessions.clear();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
+  fs.mkdirSync(path.join(cwd, 'src', 'ui'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, 'src', 'main.js'), '');
+  fs.writeFileSync(path.join(cwd, 'src', 'ui', 'app.js'), '');
+  const tui = await startTui({ cwd });
+  t.after(() => tui.close());
+  await until('online', () => gw.stream && tui.app.remote?.online);
+
+  // options: what /model and /effort offer, plain text, the default first
+  const opts = await command('options');
+  assert.equal(opts.ok, true, opts.error);
+  assert.equal(opts.model, 'mock');
+  assert.deepEqual(opts.models[0], { value: 'default', label: 'Default', description: 'mock → mock' });
+  assert.ok(opts.models.some((m) => m.value === 'opus' && m.label === 'opus' && m.description.startsWith('→ ')));
+  assert.deepEqual(opts.efforts.slice(-2).map((e) => e.value), ['auto', 'default']);
+  assert.equal(opts.mode, 'full');
+  assert.ok(!JSON.stringify(opts).includes('\\u001b'), 'no colours');
+
+  // suggest: /commands, @files, &sessions, as the input box here would
+  const mo = await command('suggest', { text: '/mo', cursor: 3 });
+  assert.deepEqual([mo.ok, mo.items[0].value, mo.items[0].label, mo.items[0].submitOnEnter, mo.from, mo.to], [true, '/model', '/model [model]', true, 0, 3]);
+  assert.ok(!JSON.stringify(mo).includes('\\u001b'));
+  let files = { items: [] };
+  for (let i = 0; i < 100 && !files.items.length; i++) { // the file index is built in the background
+    files = await command('suggest', { text: 'look at @src/', cursor: 13 });
+    if (!files.items.length) await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.deepEqual(files.items.map((i) => i.value).sort(), ['@src/', '@src/main.js', '@src/ui/', '@src/ui/app.js']);
+  assert.deepEqual(files.items, tui.app.suggest('look at @src/', 13).items.map((i) => ({ value: i.value, label: i.label, description: '', submitOnEnter: false, noSpace: Boolean(i.noSpace) })), 'what the input box here suggests');
+  assert.deepEqual([files.from, files.to], [8, 13]);
+  assert.equal(files.items.find((i) => i.value === '@src/ui/').noSpace, true);
+  tui.app.flashMessage = null;
+  assert.deepEqual(await command('suggest', { text: '&', cursor: 1 }), { cid: `c${gw.cid}`, ok: true, items: [] });
+  assert.equal(tui.app.flashMessage, null, 'nothing shows in the terminal');
+  assert.deepEqual((await command('suggest', { text: 'plain words', cursor: 11 })).items, []);
+
+  // list: the computer service's listing, "" being the working directory
+  const listed = await command('list', { path: '' });
+  assert.equal(listed.path, path.resolve(cwd));
+  assert.deepEqual(listed.entries.map((e) => e.name), ['src']);
+  assert.match((await command('list', { path: path.join(cwd, 'nope') })).error, /^目录不存在：/);
+
+  // images: alone they go as their placeholders, with the image itself to the model
+  const sent = await command('send', { text: '', images: [{ media_type: 'image/png', data: PNG }] });
+  assert.equal(sent.ok, true, sent.error);
+  await tui.waitFor('All done.', { timeout: 20_000 });
+  await tui.waitIdle({ timeout: 20_000 });
+  const first = gw.lastRequest.messages.find((m) => m.role === 'user');
+  assert.ok(first.content.some((b) => b.type === 'image' && b.source.media_type === 'image/png'), 'the image went to the model');
+  assert.ok(first.content.some((b) => b.type === 'text' && b.text === '[Image #1]'));
+  const refused = async (images) => (await command('send', { text: 'look', images })).error;
+  assert.equal(await refused([{ media_type: 'image/bmp', data: PNG }]), 'The image is image/bmp: only PNG, JPEG, GIF and WebP images can be sent.');
+  assert.equal(await refused(Array.from({ length: 7 }, () => ({ media_type: 'image/png', data: PNG }))), 'At most 6 images can be sent at a time (this message has 7).');
+  assert.equal(await refused([{ media_type: 'image/png', data: PNG }, { media_type: 'image/png', data: 'not base64!' }]), 'Image 2 is not base64 data.');
+  assert.equal(await refused([{ media_type: 'image/png', data: Buffer.alloc(6 * MB, 1).toString('base64') }]), 'The image is 6.0 MB: at most 5 MB.');
+  assert.equal(await refused([{ media_type: 'image/jpeg', data: Buffer.from('not a picture at all').toString('base64') }]), 'The image is not a readable JPEG image.');
+});
+
+test('/cd: the session goes on in another directory with the same conversation and the same id at the gateway; its name follows the directory unless one was given', async (t) => {
+  gw.sessions.clear();
+  const { projectDir, SessionStore } = await import('../src/session.js');
+  const restartFile = path.join(configDir, 'restart-state.json');
+  const saved = { supervised: process.env.CLAUDE_PRO_SUPERVISED, file: process.env.CLAUDE_PRO_RESTART_FILE };
+  Object.assign(process.env, { CLAUDE_PRO_SUPERVISED: '1', CLAUDE_PRO_RESTART_FILE: restartFile });
+  t.after(() => {
+    for (const [k, v] of [['CLAUDE_PRO_SUPERVISED', saved.supervised], ['CLAUDE_PRO_RESTART_FILE', saved.file]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  });
+  const from = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cd-from-'));
+  const to = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cd-to-')), 'next project');
+  fs.mkdirSync(to);
+  fs.writeFileSync(path.join(from, 'a-file.txt'), '');
+  const tui = await startTui({ cwd: from });
+  t.after(() => tui.close());
+  await until('online', () => gw.stream && tui.app.remote?.online);
+  tui.send('first question\r');
+  await tui.waitFor('All done.', { timeout: 20_000 });
+  await tui.waitIdle({ timeout: 20_000 });
+  const id = tui.app.remote.id;
+  const oldFile = tui.app.store.file;
+  assert.ok(fs.existsSync(oldFile));
+
+  tui.send('/cd nowhere-at-all\r');
+  await tui.waitFor(`No such directory: ${path.join(from, 'nowhere-at-all')}`, { timeout: 5000 });
+  tui.send('/cd a-file.txt\r');
+  await tui.waitFor('Not a directory:', { timeout: 5000 });
+  assert.equal(fs.existsSync(restartFile), false);
+
+  // from the page, as it does: the directory moves, the session restarts there
+  assert.equal((await command('send', { text: `/cd ${to}` })).ok, true);
+  await until('the restart', () => tui.app.exiting && fs.existsSync(restartFile));
+  const state = JSON.parse(fs.readFileSync(restartFile, 'utf8'));
+  fs.rmSync(restartFile);
+  assert.deepEqual([state.cwd, state.changedDirectory, state.remote.id, state.peerName], [to, true, id, null]);
+  assert.equal(state.sessionFile, path.join(projectDir(to), `${state.sessionId}.jsonl`));
+  assert.equal(fs.existsSync(oldFile), false, 'moved, not copied');
+  assert.equal(JSON.parse(fs.readFileSync(state.sessionFile, 'utf8').split('\n')[0]).cwd, to);
+  await until('the page told it restarts', () => gw.page.byes.at(-1)?.restarting === true);
+
+  // the next process (main.js starts it in state.cwd)
+  const next = await startTui({ cwd: to, flags: { restart: state } });
+  t.after(() => next.close());
+  await next.waitFor(`Working directory: ${to}`, { timeout: 10_000 });
+  await until('registered again', () => gw.sessions.get(id)?.cwd === to.replace(/\\/g, '/') && next.app.remote?.online);
+  assert.equal(next.app.remote.id, id, 'the page stays on it');
+  assert.equal(gw.sessions.get(id).name, 'next-project', 'the name follows the directory');
+  assert.ok(next.app.agent.messages.length >= 3, 'the conversation goes on');
+  assert.ok(SessionStore.list(to).some((s) => s.id === state.sessionId), '/resume finds it there');
+  await until('the page shows the line', () => gw.page.state.items.some((it) => it.k === 'output' && it.lines.some((l) => l.includes(`Working directory: ${to}`))));
+
+  // a name given with /rename stays; back to the first directory, from the terminal
+  next.app.renameSession('keep me');
+  next.send(`/cd ${from}\r`);
+  await until('the second restart', () => next.app.exiting && fs.existsSync(restartFile));
+  const again = JSON.parse(fs.readFileSync(restartFile, 'utf8'));
+  fs.rmSync(restartFile);
+  assert.deepEqual([again.cwd, again.peerName, again.sessionFile], [from, 'keep-me', path.join(projectDir(from), `${state.sessionId}.jsonl`)]);
+  assert.equal(again.restarts.length, 0, 'a /cd does not count as a restart that may be a loop');
 });

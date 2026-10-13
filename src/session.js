@@ -52,6 +52,30 @@ export function autoMemoryDir(cwd) {
   return path.join(projectDir(cwd), 'memory');
 }
 
+// /cd: the conversation in `file` goes on in another working directory, so its file goes to that directory's project
+// (where /resume there finds it, and where a SessionStore(cwd, id) appends), with the new directory in its first
+// line. The copy is written now; commit() removes the old file, undo() the copy. {file, commit, undo}.
+export function moveSession(file, id, cwd) {
+  const target = path.join(projectDir(cwd), `${id}.jsonl`);
+  const none = { file: target, commit() {}, undo() {} };
+  if (path.resolve(target) === path.resolve(file)) return none;
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return none; throw e; } // nothing written yet
+  const nl = text.indexOf('\n');
+  let first = nl >= 0 ? text.slice(0, nl) : text;
+  try {
+    const meta = JSON.parse(first);
+    if (meta?.type === 'meta') first = JSON.stringify({ ...meta, cwd });
+  } catch { /* not a meta line: kept as it is */ }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, first + (nl >= 0 ? text.slice(nl) : '\n'));
+  return {
+    file: target,
+    commit() { try { fs.rmSync(file, { force: true }); } catch { /* two copies: /resume shows it in both places */ } },
+    undo() { try { fs.rmSync(target, { force: true }); } catch { /* left behind */ } },
+  };
+}
+
 export class SessionStore {
   constructor(cwd, id = crypto.randomUUID()) {
     this.cwd = cwd;

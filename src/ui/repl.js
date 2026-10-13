@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { c, ESC, stringWidth, truncate, padEnd, wordWrap } from './ansi.js';
+import { c, ESC, stringWidth, truncate, padEnd, wordWrap, stripAnsi } from './ansi.js';
 import { Screen, queryCursorRow, mouseFilter } from './screen.js';
 import { Editor, topBorder } from './editor.js';
 import { SelectDialog } from './dialogs.js';
@@ -15,12 +15,12 @@ import {
   DOT, toolHeader, renderToolResult, renderTodos, renderUserMessage, resultLines, formatTokens, formatDuration, toolLabel,
 } from './render.js';
 import { createRuntime } from '../runtime.js';
-import { SessionStore, firstUserText } from '../session.js';
+import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { readGatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
-import { buildCommands } from '../commands.js';
+import { buildCommands, modelChoices, effortChoices } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { ripgrepPath } from '../utils/shell.js';
@@ -28,13 +28,13 @@ import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce }
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, readClipboardText } from '../utils/clipboard.js';
-import { fitImagesIn } from '../utils/images.js';
+import { fitImagesIn, imageSize } from '../utils/images.js';
 import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
 import { copyUnique } from '../transfer.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
-import { ensureHost as startHostIfNeeded, hostEnabled } from '../host.js';
+import { ensureHost as startHostIfNeeded, hostEnabled, listDirectory, recentDirectories } from '../host.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -66,6 +66,28 @@ export function parseTopicTitle(answer, { required = false } = {}) {
 }
 
 const imageBlock = (img) => ({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
+
+// The images the remote page sends with a message ({media_type, data: base64}), checked as the API would: at most
+// REMOTE_MAX_IMAGES, each a PNG, JPEG, GIF or WebP of at most 5 MB. Throws what to tell the page.
+const REMOTE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const REMOTE_MAX_IMAGES = 6;
+const REMOTE_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export function remoteImages(images) {
+  if (images == null) return [];
+  if (!Array.isArray(images)) throw new Error('images must be a list.');
+  if (images.length > REMOTE_MAX_IMAGES) throw new Error(`At most ${REMOTE_MAX_IMAGES} images can be sent at a time (this message has ${images.length}).`);
+  return images.map((img, i) => {
+    const n = images.length > 1 ? `Image ${i + 1}` : 'The image';
+    const type = String(img?.media_type || '').toLowerCase();
+    if (!REMOTE_IMAGE_TYPES.includes(type)) throw new Error(`${n} is ${type || 'of no type'}: only PNG, JPEG, GIF and WebP images can be sent.`);
+    const data = typeof img.data === 'string' ? img.data.replace(/^data:[^,]*,/, '').replace(/\s+/g, '') : '';
+    if (!data || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error(`${n} is not base64 data.`);
+    const buf = Buffer.from(data, 'base64');
+    if (buf.length > REMOTE_MAX_IMAGE_BYTES) throw new Error(`${n} is ${(buf.length / 1024 / 1024).toFixed(1)} MB: at most 5 MB.`);
+    if (!imageSize(buf)) throw new Error(`${n} is not a readable ${type.slice(6).toUpperCase()} image.`);
+    return { media_type: type, data };
+  });
+}
 
 const FOCUS_EVENTS_ON = '\x1b[?1004h';
 const FOCUS_EVENTS_OFF = '\x1b[?1004l';
@@ -188,6 +210,7 @@ export class App {
     this.remoteDialogs = 0;
     this.remoteStarting = null;
     this.remoteRefused = null; // a gateway key the gateway refused: not tried again by itself (a new /login is)
+    this.seedOutput = []; // lines the page is shown after the conversation when it starts from it (see resumeAfterRestart)
     this.selfCheck = selfCheck;
     this.sessionName = flags?.restart?.peerName || null; // this session's name when the sessions of this computer do not know it (CLAUDE_PRO_PEERS=0)
     this.customTitle = null; // the conversation's name given with /rename: the title, instead of the topic
@@ -799,11 +822,17 @@ export class App {
       id,
       handlers: {
         info: () => ({ name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '', cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION }),
-        seed: () => transcriptItems(this.agent.messages, { tools: this.runtime.tools, ctx: this.agent.makeCtx(), cwd: this.cwd }),
+        seed: () => [
+          ...transcriptItems(this.agent.messages, { tools: this.runtime.tools, ctx: this.agent.makeCtx(), cwd: this.cwd }),
+          ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
+        ],
         status: () => this.remoteStatus(),
-        send: (text) => this.remoteSend(text),
+        send: (text, images) => this.remoteSend(text, images),
         interrupt: () => this.remoteInterrupt(),
         answer: (body) => this.answerDialog(body),
+        options: () => this.remoteOptions(),
+        suggest: (body) => this.remoteSuggest(body),
+        list: (body) => this.remoteList(body),
         peerMessage: (msg) => this.onPeerMessage(msg),
         changed: () => {
           this.screen.schedule();
@@ -918,17 +947,59 @@ export class App {
     return {};
   }
 
-  // A message from the page: as if typed in the input box.
-  remoteSend(text) {
-    const value = String(text ?? '').replace(/\r\n/g, '\n');
+  // A message from the page: as if typed in the input box, its images as if pasted there (alt+v). Images alone go
+  // as their placeholders, which is what the input box sends for them.
+  remoteSend(text, images) {
+    const pictures = remoteImages(images);
+    let value = String(text ?? '').replace(/\r\n/g, '\n');
+    if (!value.trim() && pictures.length) value = pictures.map((_, i) => `[Image #${i + 1}]`).join(' ');
     if (!value.trim()) throw new Error('The message is empty.');
     if (this.exiting) throw new Error('The session is ending.');
     if (this.busy && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
     if (this.dialogs.length && !this.busy) throw new Error('A question is open: answer it first.');
     const queued = this.busy;
-    this.onSubmit(value, value);
+    this.onSubmit(value, value, pictures);
     this.screen.schedule();
     return { queued };
+  }
+
+  // For the page's model, effort and mode menus: what /model and /effort offer, in plain text, and what is chosen
+  // now (as the status says it).
+  async remoteOptions() {
+    const cfg = this.config;
+    const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
+    const { effort } = modelInfo(cfg);
+    return { model: cfg.mainModel.id, models, effort: effort || defaultEffort(cfg.mainModel.id, cfg), efforts: efforts.options, mode: this.runtime.modes.mode };
+  }
+
+  // For the page's input box: what the input box here would suggest (/commands, @files, &sessions), in plain text,
+  // without anything happening here. Sessions on the other computers are asked for first when the list is old.
+  async remoteSuggest(body = {}) {
+    const text = String(body.text ?? '');
+    const cursor = Number.isInteger(body.cursor) ? Math.max(0, Math.min(text.length, body.cursor)) : text.length;
+    if (/(^|\s)[&＆][^\s&＆]*$/u.test(text.slice(0, cursor)) && this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
+      await Promise.race([this.refreshRemotePeers(), new Promise((r) => setTimeout(r, 3000))]);
+    }
+    const found = this.suggest(text, cursor, { quiet: true });
+    if (!found?.items?.length) return { items: [] };
+    const plain = (s) => (s == null ? '' : stripAnsi(String(s)));
+    return {
+      items: found.items.slice(0, 50).map((it) => ({ value: it.value, label: plain(it.label ?? it.value), description: plain(it.description), submitOnEnter: Boolean(it.submitOnEnter), noSpace: Boolean(it.noSpace) })),
+      from: found.from,
+      to: found.to,
+    };
+  }
+
+  // For the page's directory browser (/cd): the computer service's listing (see host.js), "" being this session's
+  // working directory.
+  remoteList(body = {}) {
+    const wanted = typeof body.path === 'string' && body.path.trim() ? body.path : this.cwd;
+    return listDirectory(wanted, {
+      recent: () => {
+        if (!this.recentDirs || Date.now() - this.recentDirs.at > 30_000) this.recentDirs = { at: Date.now(), list: recentDirectories() };
+        return this.recentDirs.list;
+      },
+    });
   }
 
   remoteInterrupt() {
@@ -958,16 +1029,17 @@ export class App {
   // Restart as soon as nothing is running: at once when idle, otherwise when the current turn ends (the
   // turn that asked for it still has to be answered and saved). `continueTurn`: the model gets a note in
   // the new process and goes on by itself. Returns {ok, message}.
-  requestRestart({ reason = '', then = '', continueTurn = false, force = false } = {}) {
+  // `cwd`: the session goes on in that directory (/cd).
+  requestRestart({ reason = '', then = '', continueTurn = false, force = false, cwd = null } = {}) {
     if (!canRestart()) return { ok: false, message: 'This session cannot restart itself.' };
     const now = Date.now();
     const recent = this.restarts.filter((t) => now - t < RESTART_WINDOW_MS);
-    if (recent.length >= MAX_RESTARTS) {
+    if (recent.length >= MAX_RESTARTS && !cwd) {
       return { ok: false, message: `The program was restarted ${recent.length} times in the last ${Math.round(RESTART_WINDOW_MS / 60_000)} minutes. That looks like a loop: stop restarting and tell the user what is going on.` };
     }
     const blockers = this.restartBlockers();
-    if (blockers.length && !force) return { ok: false, message: `A restart would kill: ${blockers.join('; ')}.` };
-    this.restartRequest = { reason, then, continueTurn };
+    if (blockers.length && !force) return { ok: false, message: `${cwd ? 'Changing the directory restarts the session, which would stop' : 'A restart would kill'}: ${blockers.join('; ')}.` };
+    this.restartRequest = { reason, then, continueTurn, cwd };
     this.screen.schedule();
     if (!this.busy) this.restartNow();
     return { ok: true };
@@ -979,12 +1051,20 @@ export class App {
     this.restartRequest = null;
     const cfg = this.config;
     const now = Date.now();
+    // /cd: the conversation's file goes along to the new directory's project (see moveSession); the old one is
+    // removed once the next process is sure to find the new one
+    let moved = null;
+    if (request.cwd) {
+      try { moved = moveSession(this.store.file, this.store.id, request.cwd); } catch (e) { this.notice(`Could not change the directory: ${e.message}`, 'warn'); return; }
+    }
     const state = {
       at: now,
       reason: request.reason || '',
       continueWith: request.continueTurn ? restartNote(request) : '',
+      cwd: request.cwd || this.cwd,
+      changedDirectory: Boolean(request.cwd),
       sessionId: this.store.id,
-      sessionFile: this.store.file,
+      sessionFile: moved?.file || this.store.file,
       modelOverride: cfg.modelOverride,
       effortOverride: cfg.effortOverride,
       effortBoost: cfg.effortBoost,
@@ -995,18 +1075,32 @@ export class App {
       draftCursor: this.editor.cursor,
       queue: this.queue.map((q) => ({ text: q.text, images: q.images || [] })),
       checkpoints: this.runtime.checkpoints.snapshot(),
-      restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), now],
-      peerName: this.peers?.name || this.sessionName,
+      // a /cd is the user's: it does not count towards the restarts that look like a loop
+      restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), ...(request.cwd ? [] : [now])],
+      // a name given with /rename or --name stays; the one taken from the directory follows it
+      peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
     };
     try {
       writeRestartState(state);
     } catch (e) {
+      moved?.undo();
       this.notice(`Could not restart: ${e.message}`, 'warn');
       return;
     }
+    moved?.commit();
     this.exit(RESTART_EXIT_CODE, { restart: true });
+  }
+
+  // /cd: the session goes on in `dir` (an existing directory). It restarts there, so that everything that belongs to
+  // a project is that directory's: its settings and CLAUDE.md, its memory, the system prompt's directory and git
+  // state, the @ file index, the input history and where the conversation is kept. The conversation, the remote
+  // page's id and a name given with /rename stay. Returns {ok, message}.
+  changeDirectory(dir) {
+    if (this.busy) return { ok: false, message: 'Wait for the current task to finish (or press Esc) before changing the directory.' };
+    if (!canRestart()) return { ok: false, message: 'This session cannot change its directory: that restarts it, and it was not started by the claude-pro launcher. Start claude-pro in that directory instead.' };
+    return this.requestRestart({ reason: `working directory ${dir}`, cwd: dir });
   }
 
   // In the process a restart started: take up the session where the one before it left it.
@@ -1030,6 +1124,13 @@ export class App {
     // Fullscreen starts on an empty screen: without what the process before showed (an older version, or one
     // that ran classic), the conversation is drawn again from the session.
     if (this.screen.full && resumable && !Array.isArray(state.screenHistory)) this.printTranscript(this.agent.messages.slice(-80));
+    if (state.changedDirectory) {
+      // /cd: the line it answers with, here and on the remote page (which starts again from the conversation)
+      const line = `Working directory: ${this.cwd}`;
+      this.screen.log(line, '');
+      this.seedOutput = [line];
+      return;
+    }
     this.screen.log(c.dim(`↻ Restarted${state.reason ? `: ${state.reason}` : ''}${state.continueWith ? ' · continuing' : ''}`), '');
   }
 
@@ -1327,7 +1428,8 @@ export class App {
     this.screen.schedule();
   }
 
-  suggest(text, cursor) {
+  // `quiet`: for the page (remoteSuggest), nothing shows here.
+  suggest(text, cursor, { quiet = false } = {}) {
     if (text.startsWith('/') && !/\s/.test(text) && cursor === text.length) {
       const q = text.slice(1).toLowerCase();
       const all = [...this.commands.values()].filter((cmd) => !cmd.hidden);
@@ -1358,12 +1460,12 @@ export class App {
     // `&name`: the other sessions, on this computer and (through the gateway) on the account's others. At the start
     // it sends them the message; elsewhere it names them (/sendfile, or for the model).
     const amp = /(^|\s)[&＆]([^\s&＆]*)$/u.exec(before);
-    if (amp) return this.peerSuggestions(amp[2], cursor, amp.index === 0 && !amp[1]);
+    if (amp) return this.peerSuggestions(amp[2], cursor, amp.index === 0 && !amp[1], { quiet });
     return null;
   }
 
-  peerSuggestions(q, cursor, atStart = true) {
-    if (this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
+  peerSuggestions(q, cursor, atStart = true, { quiet = false } = {}) {
+    if (!quiet && this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
       this.refreshRemotePeers().then(() => {
         if (!/[&＆][^\s&＆]*$/u.test(this.editor.text.slice(0, this.editor.cursor))) return;
         this.editor.refreshSuggestions();
@@ -1378,7 +1480,7 @@ export class App {
         .map((p) => ({ value: '&' + p.label, label: `&${p.label}`, description: `${p.machine} · ${p.cwd}${p.busy ? ' · busy' : ''}` })),
     ];
     if (!items.length) {
-      if (!q && atStart) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/login to the gateway reaches your other computers)');
+      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/login to the gateway reaches your other computers)');
       return null;
     }
     return { items, from: cursor - q.length - 1, to: cursor };
@@ -1821,6 +1923,7 @@ export class App {
   loadSession(file, id, { quiet = false } = {}) {
     const loaded = SessionStore.load(file);
     this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
+    this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
     this.topic = loaded.topic;
     this.customTitle = loaded.name;
@@ -1867,6 +1970,7 @@ export class App {
 
   newSession() {
     this.store = new SessionStore(this.cwd);
+    this.seedOutput = [];
     this.topic = null;
     this.customTitle = null;
     this.firstPrompt = null;

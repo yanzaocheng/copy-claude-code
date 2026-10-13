@@ -184,7 +184,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - **默认在线**：这台电脑登录了网关（`/login` 选网关）以后，每个交互会话启动时自动连上网关（不阻塞启动，断开后自动重连），网页上能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`/login` 登录成功后当前会话**马上上线**（不用重启），并打印它的链接；`/logout` 后马上下线；在别的窗口登录或退出，这个窗口几秒内跟上。想让模型请求走 Claude 订阅：先 `/login` 选网关登录，再 `/login` 选 Claude 订阅，网关登录保留，会话照样在线。
 - **链接和二维码**：`/status` 显示这个会话的远程状态（在线、连接中、没登录、key 被拒…）、它在网关上的链接（`https://gw.predix.icu/user#remote/<id>`）和二维码，手机扫码即可打开（没登录时先登录，登录后直接进入这个会话）。所有会话的列表在 `/user#remote`。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`。
 - **网页上能看到**：完整对话（用户消息、流式输出的回答、可展开的思考、工具调用和结果，包括 diff 和正在运行的命令的最新几行输出）、斜杠命令和提示的输出、当前状态（正在想/运行多久/多少 token、限流暂停的倒计时）、待办列表、排队中的消息。
-- **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、批准/拒绝计划、以及 `/model`、`/rewind` 之类命令弹出的选择框。终端和网页可以交替使用，两边同步。
+- **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、批准/拒绝计划、以及 `/model`、`/rewind` 之类命令弹出的选择框。网页顶部可以直接改会话的名字、工作目录（`/cd`，带目录浏览）、模型、effort 和 plan 模式（都是替你发对应的斜杠命令，终端里显示同样的结果；任务进行中不能改）。网页输入框里输入 `/`、`@`、`&` 有和终端一样的补全，也能粘贴或拖入图片（每次最多 6 张、每张不超过 5 MB，PNG/JPEG/GIF/WebP）。终端和网页可以交替使用，两边同步。
 - **安全**：只有同一个网关账户登录后才能看到和操作这个会话；**能登录这个网关账户的人，就能通过它在这台电脑上以完全权限执行命令**。会话内容经网关中转并暂存在网关上。
 - **省流量**：没人打开网页时只上报状态（列表里的标题、忙/闲），不上传对话；有人打开时先发一份完整快照，再实时推送。
 - **重启不断线**：自动重启（改了源码、自动更新）沿用同一个会话 id，网页显示"重启中"后接着看；网关重启丢了状态时，claude-pro 自动重新注册并补发完整对话。
@@ -260,7 +260,9 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 上下文用量接近阈值时自动压缩（`CLAUDE_CODE_AUTO_COMPACT_WINDOW`），也可手动 `/compact`
 - 会话自动保存到 `~/.claude-pro/projects/`，`claude-pro -c` 继续上次，`claude-pro -r` 选择历史会话
 
-**斜杠命令**：`/help` `/tui` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
+
+**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（与 Claude Code 相同，两者都有时通常是同一份说明，不重复发送）。
 

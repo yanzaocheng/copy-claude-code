@@ -159,7 +159,7 @@ function readStdin({ optional }) {
 }
 
 export async function main(argv) {
-  const cwd = process.cwd();
+  let cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
   if (argv[0] === 'host') return (await import('./host.js')).hostCommand(argv.slice(1));
   if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
@@ -179,6 +179,13 @@ export async function main(argv) {
     flags.resume = false;
     flags.resumeId = undefined;
     prompt = '';
+    // the session's working directory, which /cd may have changed (the supervisor starts every process where the
+    // first one started)
+    if (typeof restart.cwd === 'string' && restart.cwd !== cwd) {
+      try {
+        if (fs.statSync(restart.cwd).isDirectory()) { process.chdir(restart.cwd); cwd = process.cwd(); }
+      } catch { /* gone meanwhile: where the first one started */ }
+    }
   }
 
   if (flags.continue || (flags.resume && flags.resumeId)) {
