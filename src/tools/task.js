@@ -96,7 +96,7 @@ Usage notes:
       if (input.run_in_background) {
         if (!ctx.tasks) return { isError: true, content: 'Background agents are not available here; run the task in the foreground.' };
         // The task outlives this turn, so it gets its own signal and no live progress display.
-        const base = { cwd: ctx.cwd, projectRoot: ctx.projectRoot, config: ctx.config, modes: ctx.modes, checkpoints: ctx.checkpoints, io: ctx.io, depth: ctx.agent?.depth ?? 0 };
+        const base = { cwd: ctx.cwd, projectRoot: ctx.projectRoot, config: ctx.config, checkpoints: ctx.checkpoints, io: ctx.io, depth: ctx.agent?.depth ?? 0 };
         const task = ctx.tasks.start({
           description: input.description || def.name,
           subagentType: def.name,

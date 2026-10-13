@@ -8,7 +8,6 @@ import { getClient, buildParams, streamMessage, quickQuery, effortSupported } fr
 import { readClaudeCodeLogin, CLAUDE_CODE_SYSTEM } from '../src/claude-code.js';
 import { Agent } from '../src/agent.js';
 import { endpoint } from '../src/oauth.js';
-import { ModeManager } from '../src/modes.js';
 import { GlobTool } from '../src/tools/search.js';
 
 endpoint.url = 'http://127.0.0.1:9/never-reached'; // no test may reach the real token endpoint
@@ -163,7 +162,7 @@ test('subscription requests retain native tool calls, tool results and the exist
     assert.equal(last.content[0].content, 'No files found');
     return sse([{ type: 'text', text: 'done' }]);
   });
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: cfg.cwd });
+  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: cfg.cwd });
   const result = await agent.run('List files');
   assert.equal(result.text, 'done');
   assert.equal(turns, 2);

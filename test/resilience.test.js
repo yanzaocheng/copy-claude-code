@@ -7,7 +7,6 @@ import { Config } from '../src/config.js';
 import { streamMessage, isAbort } from '../src/api.js';
 import { parseRetryAfter, retryDelay, timing } from '../src/ratelimit.js';
 import { Agent } from '../src/agent.js';
-import { ModeManager } from '../src/modes.js';
 import { GlobTool } from '../src/tools/search.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-resilience-'));
@@ -161,7 +160,7 @@ test('aborting while waiting to retry stops at once', async (t) => {
 test('Agent.assistantText keeps what a failed run had already written', async () => {
   const dir = tmp();
   const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;
@@ -180,7 +179,7 @@ test('Agent.assistantText keeps what a failed run had already written', async ()
 
 test('Agent.assistantText is empty when nothing was written', () => {
   const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: process.cwd() });
+  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: process.cwd() });
   agent.messages.push({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
   assert.equal(agent.assistantText(), '');
 });

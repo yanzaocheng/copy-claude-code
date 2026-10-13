@@ -456,7 +456,7 @@ test('the page asks what the terminal knows (its menus\' options, its input box\
   assert.deepEqual(opts.models[0], { value: 'default', label: 'Default', description: 'mock → mock' });
   assert.ok(opts.models.some((m) => m.value === 'opus' && m.label === 'opus' && m.description.startsWith('→ ')));
   assert.deepEqual(opts.efforts.slice(-2).map((e) => e.value), ['auto', 'default']);
-  assert.equal(opts.mode, 'full');
+  assert.equal('mode' in opts, false, 'no plan mode to choose any more');
   assert.ok(!JSON.stringify(opts).includes('\\u001b'), 'no colours');
 
   // suggest: /commands, @files, &sessions, as the input box here would

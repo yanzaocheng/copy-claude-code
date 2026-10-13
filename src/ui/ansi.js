@@ -48,7 +48,6 @@ export const c = {
   white: hex('#ffffff'),
   claude: hex('#d77757'), // the orange brand accent
   permission: hex('#b1b9f9'),
-  plan: hex('#48968c'),
   edits: hex('#af87ff'),
   code: hex('#b1b9f9'),
   userBg: hex('#373737', true), // the band behind the user's messages (see renderUserMessage)

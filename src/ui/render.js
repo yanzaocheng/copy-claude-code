@@ -99,10 +99,6 @@ export function renderToolResult(entry, { verbose = false, width = 100, cwd }) {
     return resultLines([...partial.map((l) => c.dim(truncate(l, w))), c.red('Interrupted by user')]);
   }
   if (d.todos) return renderTodos(d.todos);
-  if (d.plan !== undefined) {
-    const md = renderMarkdown(d.plan, { width: w });
-    return resultLines([d.approved ? c.green('User approved the plan') : c.yellow('User asked to keep planning'), ...(verbose ? md : [])]);
-  }
   if (d.preview && !r.isError) {
     const lines = [d.summary ? `${d.summary}` : ''];
     if (d.preview.kind === 'create' && !verbose) return resultLines([d.summary || `Created ${displayPath(d.preview.path, cwd)}`]);

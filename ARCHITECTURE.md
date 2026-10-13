@@ -106,7 +106,7 @@ sequenceDiagram
 - **从页面下发**：`remoteSend` 等同在输入框敲回车（`onSubmit`：忙时排队、`/命令`、`!`、`#`、`@会话` 都照常）；忙时的 `/命令`、有对话框打开时的普通消息直接拒绝（错误作为结果回给页面）。对话框通过 `remoteDialog()` 暴露（`SelectDialog` 的标题、问题、选项，按下标回答，因为选项值不一定是字符串；计划审批附带完整计划 `dialog.markdown`），`answerDialog` 校验 `id` 仍是当前对话框再 `resolve`。`remoteInterrupt` 等同 Ctrl+C 的第一下（取消对话框并中断）。
   - **send 带图片**：`body = {text, images?: [{media_type, data}]}`。`remoteImages()` 校验：最多 6 张；`image/png|jpeg|gif|webp`；base64（允许 `data:…,` 前缀和空白）；解码后不超过 5 MB；`imageSize()` 能读出尺寸（类型和内容对得上）。错误原文（英文，和其他结果一致）：`At most 6 images can be sent at a time (this message has N).`、`The image is image/bmp: only PNG, JPEG, GIF and WebP images can be sent.`、`Image 2 is not base64 data.`、`The image is 6.0 MB: at most 5 MB.`、`The image is not a readable JPEG image.`（一张时说 The image，多张时说 Image N）。之后和 alt+v 粘贴的图片一样走 `onSubmit(value, raw, images)`（忙时进队列，`startTurn` 里 `fitImagesIn` 缩到 1568 px、重 PNG 转 JPEG）。只有图片没有文字时，文字是 `[Image #1] [Image #2]…`，和终端输入框里只粘贴图片后回车发出的一样。
   - **只读查询**（忙时也回答，不在终端产生任何显示）：`options` → `remoteOptions()`：`{model: 当前模型 id, models, effort: 和 status.effort 一样, efforts, mode: 'full'|'plan'}`，`models`/`efforts` 来自 `modelChoices(cfg)`/`effortChoices(cfg)`（[`src/commands.js`](src/commands.js)，`/model`、`/effort` 的选择框也用它们），纯文本 `{value, label, description}`，`value` 是 `/model <value>`、`/effort <value>` 接受的值，第一个是 `default`；网关模型列表取不到时照 /model 降级（只列 gpt-6.1-sol）。`suggest {text, cursor}` → `remoteSuggest()`：调 `suggest(text, cursor, {quiet: true})`（和输入框同一份：`/命令`、`@文件`、`&会话`；`quiet` 时 `&` 没有结果也不 `flash`、不刷新输入框），去掉 ANSI，最多 50 项 `{value, label, description, submitOnEnter, noSpace}` 加 `from`/`to`，没有时 `{items: []}`；`&` 补全时网关会话列表超过 10 秒没更新就先刷新（最多等 3 秒）。`list {path}` → `remoteList()`：电脑服务的 `listDirectory()`（[`src/host.js`](src/host.js)，结果字段完全一样），只是 `path` 为空时列会话的工作目录。
-  - 页面上改名字、目录、模型、effort、模式都是发斜杠命令（`/rename <名字>`、`/cd <目录>`、`/model <值>`、`/effort <值>`、`/plan`），和终端里输入一样：带参数时不弹选择框（`/model`、`/effort` 在缓存热时仍会弹 confirmCacheLoss，页面能回答）。
+  - 页面上改名字、目录、模型、effort 都是发斜杠命令（`/rename <名字>`、`/cd <目录>`、`/model <值>`、`/effort <值>`），和终端里输入一样：带参数时不弹选择框（`/model`、`/effort` 在缓存热时仍会弹 confirmCacheLoss，页面能回答）。
 - **`/cd <目录>`**（`App.changeDirectory`）：绝对路径、`~`、`D:`，或相对当前目录的路径（`normalizeDir`，否则 `path.resolve(cwd, …)`）；不存在、不是目录、和当前目录相同时只打印一行，不重启；忙时拒绝；不在监督进程下（`canRestart()` 为假）时报错。否则走重启：`requestRestart({cwd})` → `restartNow` 先用 `moveSession()`（[`src/session.js`](src/session.js)）把会话文件写到新目录的项目目录（`projects/<新目录>/<同一个 id>.jsonl`，第一行 meta 的 `cwd` 换成新目录，`/resume` 在新目录能找到，`SessionStore(cwd, id)` 也接着往这里写），重启状态里带 `cwd` 和 `changedDirectory: true`，写成功后才删旧文件（写失败就删新文件、不重启）。新进程的 `main.js` 在取到重启状态后 `process.chdir(state.cwd)`（监督进程总是在第一次启动的目录里拉起子进程，所以之后每次重启的状态里都带 `cwd`），于是项目设置、CLAUDE.md、auto memory、系统提示词里的目录和 git 状态、`@` 文件索引、输入历史全部按新目录加载。保持不变的：对话、远程控制 id（`handoff()`）、模型/effort/模式、待办、排队的消息、草稿；`/rename` 或 `--name` 起的名字（`customTitle` 不为空）通过 `peerName` 带过去，按目录取的默认名字不带（新进程按新目录名取，网关注册时 `name`、`cwd` 都是新的）。`/cd` 不计入"5 分钟 5 次"的重启循环保护。新进程在 `resumeAfterRestart` 里打印 `Working directory: <目录>`（代替"↻ Restarted"），并把这一行放进 `seedOutput`，远程控制的初始条目（`seed()`）在对话后面带上它，所以页面重新拿到快照后也看得到；`/clear`、`/resume` 清空它。
 - **退出与重启**：`close({restarting})` 把剩下的消息和 `{t:'bye',restarting}` 一起发出，进程等它最多 1.5 秒再退出。重启后的新进程用同一个 id 注册（`persistent`：网关暂时连不上也不放弃，后台重试），网关上的页面看到同一个会话回来并收到新快照。
 - **二维码**：[`src/qr.js`](src/qr.js)（字节模式、纠错 L、版本 1–6、按罚分选掩码，已与 `qrcode` 包逐模块比对一致），有颜色时用黑白前景/背景色画，与终端主题无关。`/status` 在会话在线时把页面链接画成二维码。
@@ -199,7 +199,6 @@ sequenceDiagram
 | 字段 | 作用 |
 |---|---|
 | `config` | 有效配置、模型解析、上下文窗口和限制 |
-| `modes` | `full` 或 `plan` 模式检查 |
 | `checkpoints` | 文件编辑前快照和 `/rewind` |
 | `agents` / `skills` | Agent 定义和 Skill 定义 |
 | `mcp` | MCP server 连接与动态工具 |
@@ -420,7 +419,7 @@ flowchart TD
     F -- 否 --> G{需要继续/verify?}
     G -- 继续 --> E
     G -- 否 --> H[Stop hooks + 返回文本]
-    F -- 是 --> I[校验工具输入与 plan 模式]
+    F -- 是 --> I[校验工具输入]
     I --> J[PreToolUse hooks]
     J --> K{只读工具是否连续?}
     K -- 是 --> L[并行执行]
@@ -452,7 +451,7 @@ flowchart TD
 | Shell | `Bash`、`BashOutput`、`KillShell`；支持 cwd、超时、后台进程和输出落盘 |
 | Web | `WebFetch`、`WebSearch`；包含 HTML 转 Markdown、缓存和摘要查询 |
 | Agent | `Task`、`TaskOutput`、`TaskStop`；支持前台和后台子 Agent |
-| 交互 | `TodoWrite`、`AskUserQuestion`、`ExitPlanMode` |
+| 交互 | `TodoWrite`、`AskUserQuestion` |
 | 扩展 | `Skill`、MCP 动态工具 |
 
 ### MCP
@@ -494,9 +493,9 @@ flowchart TD
 
 检查点只覆盖文件工具在修改前记录的文件。通过 `/rewind` 可选择恢复代码、恢复对话或两者同时恢复；Bash 的任意副作用需要用户自行处理或通过 hooks/验证命令控制。
 
-## 10. UI、计划模式与权限边界
+## 10. UI 与权限边界
 
-项目有意采用“工具直接执行”的权限模型：没有官方 Claude Code 的 allow/deny 询问框，也没有权限审批队列。旧的权限相关 flags 会被兼容解析但忽略；唯一内置的执行门控是 `--plan`/`/plan` 的只读计划模式。
+项目有意采用“工具直接执行”的权限模型：没有官方 Claude Code 的 allow/deny 询问框，也没有权限审批队列。旧的权限相关 flags（以及 `--plan`）会被兼容解析但忽略。没有计划模式（0.7 之后去掉了）：要先出方案，用户在消息里说即可；唯一的执行门控是 PreToolUse hook。
 
 这意味着：
 

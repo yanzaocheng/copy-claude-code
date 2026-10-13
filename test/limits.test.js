@@ -99,7 +99,7 @@ test('sub-agents get the Task tool only while below the nesting limit', () => {
   const def = agents.get('general-purpose');
   assert.ok(!names(toolsForSubagent(all, def)).includes('Task'), 'at the limit there is no Task tool');
   assert.ok(names(toolsForSubagent(all, def, { allowTask: true })).includes('Task'));
-  for (const n of ['TaskOutput', 'TaskStop', 'TodoWrite', 'ExitPlanMode', 'AskUserQuestion']) {
+  for (const n of ['TaskOutput', 'TaskStop', 'TodoWrite', 'AskUserQuestion']) {
     assert.ok(!names(toolsForSubagent(all, def, { allowTask: true })).includes(n), `${n} stays main-agent only`);
   }
   const explore = { name: 'Explore', description: 'd', tools: ['Glob', 'Grep', 'Read'], prompt: 'p' };

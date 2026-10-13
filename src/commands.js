@@ -479,7 +479,6 @@ export function buildCommands(app) {
     description: 'Show version, model, API endpoint and session info',
     run() {
       const cfg = app.runtime.config;
-      const modes = app.runtime.modes;
       const mem = memoryFiles(app.cwd);
       const mcp = app.runtime.mcp.status();
       const row = (k, v) => `${c.dim(padEnd(k, 18))} ${v}`;
@@ -501,7 +500,7 @@ export function buildCommands(app) {
         row('Max output', formatTokens(cfg.maxOutputTokens)),
         row('Prompt cache', cfg.promptCachingDisabled(cfg.mainModel.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.mainModel.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.mainModel.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', cfg.autoCompactEnabled ? `at ${formatTokens(cfg.autoCompactThreshold())} tokens (window ${formatTokens(cfg.compactWindow())})` : 'disabled'),
-        row('Mode', modes.mode === 'plan' ? 'plan (read-only; shift+tab to leave)' : 'full access (no permission prompts)'),
+        row('Access', 'full (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
         row('Shell', `${app.runtime.shell.name} ${c.dim(app.runtime.shell.path)}`),
         row('ripgrep', hasRipgrep(cfg) ? 'yes' : 'no (using JS fallback)'),
@@ -720,17 +719,6 @@ export function buildCommands(app) {
       const got = app.renameSession(name);
       const note = got !== cleanName(name) ? c.dim(' (another session on this computer has that name)') : '';
       out(`This session is now ${c.bold('&' + got)}${note}${app.remote ? c.dim(` · from your other computers: &${machineName(app.config.env)}/${got}`) : ''}`);
-    },
-  });
-
-  add({
-    name: 'plan',
-    description: 'Toggle read-only plan mode (same as shift+tab)',
-    run() {
-      const mode = app.runtime.modes.toggle();
-      out(mode === 'plan'
-        ? [`${c.plan('Plan mode on')}: the agent can only read and research, then proposes a plan with ExitPlanMode.`, c.dim('Run /plan or press shift+tab to leave it.')]
-        : `Plan mode off: ${c.bold('full access')}, tools run immediately.`);
     },
   });
 

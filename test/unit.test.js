@@ -6,7 +6,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { parseDotEnv, Config } from '../src/config.js';
-import { splitCommand, isReadOnlyCommand, ModeManager } from '../src/modes.js';
 import { applyEdit, ReadTool, EditTool, WriteTool } from '../src/tools/files.js';
 import { diffLines, makeHunks, countChanges } from '../src/utils/diff.js';
 import { stringWidth, wrapLine, stripAnsi } from '../src/ui/ansi.js';
@@ -54,56 +53,6 @@ test('model resolution: [1m] suffix, aliases, sub-agent model, compaction window
   assert.equal(cfg.autoCompactThreshold(), 393216);
   // The window is capped by the model's real context size.
   assert.equal(makeConfig({ ANTHROPIC_MODEL: 'x', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '999999' }).compactWindow(), 200_000);
-});
-
-test('splitCommand respects quotes', () => {
-  assert.deepEqual(splitCommand('git status && echo "a && b" | wc -l; ls'), ['git status', 'echo "a && b"', 'wc -l', 'ls']);
-  assert.deepEqual(splitCommand('npm test 2>&1'), ['npm test 2>&1']);
-});
-
-test('read-only command detection', () => {
-  assert.ok(isReadOnlyCommand('git status'));
-  assert.ok(isReadOnlyCommand('ls -la | head -5'));
-  assert.ok(isReadOnlyCommand('git log --oneline -n 5 2>/dev/null'));
-  assert.ok(!isReadOnlyCommand('rm -rf /'));
-  assert.ok(!isReadOnlyCommand('echo hi > file.txt'));
-  assert.ok(!isReadOnlyCommand('cat $(which evil)'));
-  assert.ok(!isReadOnlyCommand('find . -delete'));
-  assert.ok(!isReadOnlyCommand('git push'));
-  assert.ok(!isReadOnlyCommand('ls && npm install'));
-});
-
-test('full access: every tool runs without asking; plan mode is the only gate', () => {
-  const modes = new ModeManager();
-  assert.equal(modes.mode, 'full');
-  const bash = { name: 'Bash' };
-  const everything = [
-    [bash, { command: 'npm publish' }], [bash, { command: 'rm -rf build' }], [bash, { command: 'echo hi > x.txt' }],
-    [EditTool, { file_path: path.join(os.tmpdir(), 'anywhere.js') }], [WriteTool, {}], [{ name: 'mcp__x__y' }, {}],
-  ];
-  for (const [tool, input] of everything) assert.equal(modes.check(tool, input).behavior, 'allow', `${tool.name} ${JSON.stringify(input)}`);
-
-  modes.setMode('plan');
-  assert.equal(modes.check(EditTool, {}).behavior, 'deny');
-  assert.equal(modes.check(WriteTool, {}).behavior, 'deny');
-  assert.equal(modes.check({ name: 'mcp__x__y' }, {}).behavior, 'deny');
-  assert.equal(modes.check(bash, { command: 'npm install' }).behavior, 'deny');
-  assert.equal(modes.check(bash, { command: 'git diff | head -5' }).behavior, 'allow', 'read-only research commands still run');
-  assert.equal(modes.check(ReadTool, {}).behavior, 'allow');
-  assert.match(modes.check(EditTool, {}).message, /Plan mode is active/);
-});
-
-test('modes: toggle, listeners, and unknown modes are ignored', () => {
-  const modes = new ModeManager('nonsense');
-  assert.equal(modes.mode, 'full');
-  const seen = [];
-  modes.listeners.add((m) => seen.push(m));
-  assert.equal(modes.toggle(), 'plan');
-  assert.equal(modes.toggle(), 'full');
-  modes.setMode('acceptEdits'); // an old mode name from the permission system
-  assert.equal(modes.mode, 'full');
-  assert.deepEqual(seen, ['plan', 'full']);
-  assert.equal(new ModeManager('plan').mode, 'plan');
 });
 
 test('applyEdit: uniqueness, replace_all, not found, curly quotes', () => {
@@ -278,7 +227,7 @@ test('MCP stdio client lists and calls tools', async () => {
 test('agent loop runs tools and feeds results back (mock model)', async () => {
   const dir = tmp();
   const cfg = makeConfig({ ANTHROPIC_MODEL: 'mock' }, dir);
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;

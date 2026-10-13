@@ -306,7 +306,6 @@ export class App {
       try { this.onKey(str, key || {}); } catch (e) { this.logError(e); }
     });
     stdin.resume();
-    this.runtime.modes.listeners.add(() => this.screen.schedule());
     // Started by a restart of this session: the output of the process before it is still on screen, so no
     // welcome box and no transcript, just a line saying so.
     const restart = this.flags.restart || null;
@@ -990,7 +989,6 @@ export class App {
       todos: (this.agent.todos || []).map((t) => ({ content: t.content, status: t.status })),
       queue: this.queue.map((q) => q.display ?? q.text),
       dialog: this.remoteDialog(),
-      mode: this.runtime.modes.mode,
       model,
       effort: effort || defaultEffort(cfg.mainModel.id, cfg),
       title: this.sessionLabel() || path.basename(this.cwd),
@@ -1091,7 +1089,7 @@ export class App {
     const cfg = this.config;
     const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
     const { effort } = modelInfo(cfg);
-    return { model: cfg.mainModel.id, models, effort: effort || defaultEffort(cfg.mainModel.id, cfg), efforts: efforts.options, mode: this.runtime.modes.mode };
+    return { model: cfg.mainModel.id, models, effort: effort || defaultEffort(cfg.mainModel.id, cfg), efforts: efforts.options };
   }
 
   // For the page's input box: what the input box here would suggest (/commands, @files, &sessions), in plain text,
@@ -1218,7 +1216,6 @@ export class App {
       modelOverride: cfg.modelOverride,
       effortOverride: cfg.effortOverride,
       effortBoost: cfg.effortBoost,
-      mode: this.runtime.modes.mode,
       todos: this.agent.todos,
       draft: this.editor.text,
       screenHistory: this.screen.history.slice(-3000),
@@ -1263,7 +1260,6 @@ export class App {
     if ('effortOverride' in state) cfg.effortOverride = state.effortOverride || null;
     // The Effort tool's level holds for the request the restart continues, not for the user's next one.
     if (state.effortBoost) { cfg.effortBoost = state.effortBoost; cfg.effortBoostKeepNext = Boolean(state.continueWith); }
-    if (state.mode === 'plan') this.runtime.modes.setMode('plan');
     this.restarts = (Array.isArray(state.restarts) ? state.restarts : []).filter((t) => Number.isFinite(t));
     if (resumable) {
       this.loadSession(state.sessionFile, state.sessionId, { quiet: true });
@@ -1541,7 +1537,6 @@ export class App {
     }
     if (key.ctrl && key.name === 'f') { this.openFind(); return; }
     if (this.finder) { this.findKey(str, key); this.screen.schedule(); return; }
-    if (key.name === 'tab' && key.shift) { this.runtime.modes.toggle(); this.screen.schedule(); return; }
     // alt+v like Claude Code on Windows (ctrl+v is the terminal's own text paste there).
     if ((key.meta || key.ctrl) && key.name === 'v') { this.pasteImage(); return; }
     if (key.ctrl && key.name === 'o') {
@@ -1700,12 +1695,12 @@ export class App {
   shortcutsHelp() {
     const rows = [
       ['! for bash mode', 'double tap esc to clear input'],
-      ['/ for commands', 'shift + tab to cycle permission modes'],
-      ['@ for file paths, & for other sessions', 'ctrl + o to toggle verbose output'],
+      ['/ for commands', 'ctrl + o to toggle verbose output'],
+      ['@ for file paths, & for other sessions', 'ctrl + f to find in the conversation'],
       ['PgUp/PgDn, wheel to scroll', 'ctrl + home/end to the top/bottom'],
       ['# to memorize', 'ctrl + t to toggle todos'],
       ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
-      ['alt + v to paste an image', 'ctrl + f to find in the conversation'],
+      ['alt + v to paste an image', ''],
     ];
     return rows.map(([a, b]) => c.dim('  ' + padEnd(a, 30) + b));
   }
@@ -2157,27 +2152,6 @@ export class App {
     });
   }
 
-  async approvePlan(plan) {
-    this.flushStreaming();
-    const md = renderMarkdown(plan, { width: this.width - 8 });
-    const max = Math.max(8, this.screen.height - 14);
-    const body = md.length > max ? [...md.slice(0, max), c.dim(`… +${md.length - max} lines (the full plan is printed above)`)] : md;
-    if (md.length > max) this.logLocal(c.plan(`${DOT} Plan:`), ...md.map((l) => '  ' + l), '');
-    const dialog = new SelectDialog({
-      title: 'Ready to code?',
-      body: ["Here is the plan:", '', ...body],
-      question: 'Would you like to proceed?',
-      color: c.plan,
-      cancelValue: 'reject',
-      options: [
-        { label: 'Yes, start coding', value: 'full' },
-        { label: 'No, keep planning', value: 'reject' },
-      ],
-    });
-    dialog.markdown = plan; // the remote page shows the whole plan
-    return await this.showDialog(dialog);
-  }
-
   async askQuestion(q) {
     const answer = await this.showDialog(new SelectDialog({
       title: q.header || 'Question',
@@ -2384,7 +2358,6 @@ export class App {
       }
     };
     return {
-      approvePlan: async () => 'reject',
       askQuestion: async () => null,
       notice: (text, kind) => app.notice(`[${def.name}] ${text}`, kind),
       toolStart(tu, tool, input, agent) {
@@ -2582,13 +2555,11 @@ export class App {
   }
 
   footer(w) {
-    const mode = this.runtime.modes.mode;
     let left;
     const flash = this.flashMessage && Date.now() < this.flashMessage.until ? this.flashMessage : null;
     if (this.exitArmed && Date.now() - this.exitArmed < 1500) left = c.dim('  Press Ctrl-C again to exit');
     else if (flash) left = (flash.kind === 'warn' ? c.yellow : c.dim)('  ' + truncate(flash.text, w - 4));
     else if (this.restartRequest) left = c.dim('  ↻ restarting when this turn ends');
-    else if (mode === 'plan') left = '  ' + c.plan('⏸ plan mode on (read-only)') + c.dim(' (shift+tab to leave)');
     else if (this.editor.mode === 'bash') left = c.magenta('  ! for bash mode');
     else if (this.editor.mode === 'memory') left = c.blue('  # to memorize');
     else left = c.dim('  ? for shortcuts');

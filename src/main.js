@@ -15,7 +15,6 @@ Options:
   --provider <backend>            api (default) | claude-code (direct HTTP with existing local login)
   --model <model>                  Model for this session (name or alias: opus, sonnet, haiku)
   --effort <level>                 Reasoning effort: none|minimal|low|medium|high|xhigh|max
-  --plan                           Start in read-only plan mode (research first, then ExitPlanMode)
   --output-format <format>         text | json | stream-json (with --print)
   --verify <command>               After the agent edits files, run this (e.g. "npm test") and send failures back to fix
   --append-system-prompt <text>    Append text to the system prompt
@@ -33,7 +32,7 @@ Options:
 There are no permission prompts: every tool runs immediately (full access). File edits are
 checkpointed per prompt, and /rewind in a session undoes them. The old flags
 --dangerously-skip-permissions, --permission-mode, --allowedTools and --disallowedTools
-are accepted and ignored (--permission-mode plan is the same as --plan), and so is
+are accepted and ignored, and so are --plan (there is no plan mode: ask for a plan in the message) and
 --remote-control (--rc): a session is online at the gateway whenever this computer is logged in to it.
 
 Commands:
@@ -71,8 +70,8 @@ function parseArgs(argv) {
       case '--model': flags.model = next(); break;
       case '--provider': flags.provider = next(); break;
       case '--effort': flags.effort = next(); break;
-      case '--plan': flags.plan = true; break;
-      case '--permission-mode': if (next() === 'plan') flags.plan = true; break;
+      case '--plan': break; // no plan mode any more: asking for a plan in the message does it
+      case '--permission-mode': next(); break;
       case '--dangerously-skip-permissions': break; // nothing to skip: there are no prompts
       case '--allowedTools': case '--allowed-tools': case '--disallowedTools': case '--disallowed-tools': skipRules(); break;
       case '--output-format': flags.outputFormat = next(); break;

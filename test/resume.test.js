@@ -7,7 +7,6 @@ import { rebuildFileState } from '../src/filestate.js';
 import { SessionStore } from '../src/session.js';
 import { Agent } from '../src/agent.js';
 import { Config } from '../src/config.js';
-import { ModeManager } from '../src/modes.js';
 import { ReadTool, EditTool, WriteTool } from '../src/tools/files.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-resume-'));
@@ -109,7 +108,7 @@ test('a resumed conversation can edit files it remembers reading, but not ones c
     use('r2', 'Read', { file_path: b }), ok('r2', '     1\talpha\n     2\tbeta'),
   ];
   const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [ReadTool, EditTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [ReadTool, EditTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   agent.fileState.set(path.join(dir, 'left-over.txt'), { mtimeMs: 1 }); // from the conversation being replaced
   agent.messages = messages;
   agent.restoreFileState(messages, messages.map(() => readAt));
@@ -157,7 +156,7 @@ test('a restored partial read stays partial, so Write still refuses to overwrite
   assert.equal(state.get(written).partial, false, 'after a Write the model knows the whole file');
 
   const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   agent.restoreFileState(messages, messages.map((_, i) => T + i * 1000));
   const refused = await WriteTool.call({ file_path: head, content: 'x\n' }, agent.makeCtx());
   assert.equal(refused.isError, true);

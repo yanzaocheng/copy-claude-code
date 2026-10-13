@@ -10,7 +10,6 @@ import path from 'node:path';
 process.env.CLAUDE_PRO_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-config-'));
 
 const { Config } = await import('../src/config.js');
-const { ModeManager } = await import('../src/modes.js');
 const { Agent, persistLargeOutput } = await import('../src/agent.js');
 const { makeBashTool } = await import('../src/tools/bash.js');
 const { WriteTool } = await import('../src/tools/files.js');
@@ -32,7 +31,7 @@ test('large tool results are saved to a file and only a preview is sent', async 
   const cfg = makeConfig(dir, { CLAUDE_PRO_MAX_TOOL_RESULT_CHARS: '5000' });
   const big = 'x'.repeat(4000) + '\n' + 'y'.repeat(4000) + '\nEND';
   const BigTool = { name: 'Big', readOnly: true, description: 'd', input_schema: { type: 'object', properties: {} }, async call() { return { content: big }; } };
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [BigTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [BigTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;
@@ -82,7 +81,7 @@ test('verify loop: a failing check after edits is sent back until it passes', as
   const dir = tmp();
   const cfg = makeConfig(dir, { CLAUDE_PRO_VERIFY_COMMAND: 'test -f ok.txt || { echo "ok.txt is missing"; exit 1; }' });
   const agent = new Agent({
-    config: cfg, modes: new ModeManager(), tools: [makeBashTool(cfg), WriteTool],
+    config: cfg, tools: [makeBashTool(cfg), WriteTool],
     systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir,
   });
   let calls = 0;
@@ -115,7 +114,7 @@ test('verify loop gives up after the configured number of rounds', async () => {
   const cfg = makeConfig(dir, { CLAUDE_PRO_VERIFY_COMMAND: 'exit 1', CLAUDE_PRO_VERIFY_MAX_ROUNDS: '2' });
   const notices = [];
   const agent = new Agent({
-    config: cfg, modes: new ModeManager(), tools: [makeBashTool(cfg), WriteTool],
+    config: cfg, tools: [makeBashTool(cfg), WriteTool],
     systemPrompt: 's', io: { notice: (t) => notices.push(t) }, model: cfg.mainModel, cwd: dir,
   });
   let calls = 0, n = 0;
@@ -154,7 +153,7 @@ test('agent: Task run_in_background returns at once and the report arrives as a 
   let release;
   const gate = new Promise((r) => { release = r; });
   const agent = new Agent({
-    config: cfg, modes: new ModeManager(), tools: [makeTaskTool(agents), TaskOutputTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir, tasks,
+    config: cfg, tools: [makeTaskTool(agents), TaskOutputTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir, tasks,
     spawnSubagent: async ({ prompt }) => { await gate; return { text: `report for: ${prompt}`, toolUses: 2, tokens: 100 }; },
   });
   tasks.onDone((t) => agent.notifications.push({ taskId: t.id, text: taskNotification(t) }));
@@ -188,7 +187,7 @@ test('TaskOutput waits for the result and consumes the pending notification', as
   const dir = tmp();
   const cfg = makeConfig(dir);
   const tasks = new BackgroundTasks();
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir, tasks });
+  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir, tasks });
   tasks.onDone((t) => agent.notifications.push({ taskId: t.id, text: taskNotification(t) }));
   const t = tasks.start({ description: 'x', subagentType: 'Plan', run: async () => { await sleep(30); return { text: 'the plan' }; } });
   const r = await TaskOutputTool.call({ task_id: t.id }, agent.makeCtx());

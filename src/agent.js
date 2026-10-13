@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
-import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, PLAN_MODE_REMINDER, SUMMARY_SYSTEM } from './prompts.js';
+import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, SUMMARY_SYSTEM } from './prompts.js';
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
 import { CacheStats, TTL_MS } from './cache.js';
@@ -169,7 +169,7 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, modes, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn, effort, compactWindow = 0 }) {
+  constructor({ config, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn, effort, compactWindow = 0 }) {
     this.config = config;
     this.effort = effort || undefined; // a sub-agent's own effort level; undefined: the session's (config.effort)
     this.compactWindow = compactWindow; // a sub-agent's own auto-compact window (tokens); 0: the session's
@@ -178,7 +178,6 @@ export class Agent {
     this.tasks = tasks; // background tasks (sub-agents started with run_in_background)
     this.notifications = []; // {taskId, text} waiting to be shown to the model
     this.editsThisRun = 0; // successful file edits since the last verification
-    this.modes = modes; // session mode: full access, or read-only plan mode
     this.checkpoints = checkpoints; // snapshots of files before they are edited, per user prompt
     this.tools = tools;
     this.systemPrompt = systemPrompt; // string or () => string
@@ -392,7 +391,6 @@ export class Agent {
     }
     this.clearAfterIdle();
     let content = toBlocks(userContent);
-    if (this.modes.mode === 'plan' && !this.isSubagent) content = [...content, { type: 'text', text: PLAN_MODE_REMINDER }];
     if (this.hooks?.has('UserPromptSubmit') && !this.isSubagent) {
       const prompt = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
       const h = await this.hooks.run('UserPromptSubmit', { prompt }, { cwd: this.cwd, signal });
@@ -599,7 +597,6 @@ export class Agent {
       config: this.config,
       signal,
       fileState: this.fileState,
-      modes: this.modes,
       checkpoints: this.checkpoints,
       agent: this,
       io: this.io,
@@ -618,7 +615,7 @@ export class Agent {
     const batches = [];
     for (const tu of toolUses) {
       const tool = map.get(tu.name);
-      const safe = !!tool?.readOnly && tool.name !== 'ExitPlanMode' && tool.name !== 'AskUserQuestion';
+      const safe = !!tool?.readOnly && tool.name !== 'AskUserQuestion';
       const last = batches[batches.length - 1];
       if (safe && last?.parallel) last.items.push(tu);
       else batches.push({ parallel: safe, items: [tu] });
@@ -669,13 +666,7 @@ export class Agent {
       return fail(invalid);
     }
 
-    // Nothing is ever asked: tools run right away. The only gate is plan mode (read-only research).
-    const decision = this.modes.check(tool, input);
-    if (decision.behavior === 'deny') {
-      this.io.toolRejected?.(tu, tool, decision.message, this);
-      return fail(decision.message);
-    }
-
+    // Nothing is ever asked: tools run right away (a PreToolUse hook can still block one).
     if (this.hooks?.has('PreToolUse')) {
       const h = await this.hooks.run('PreToolUse', { tool_name: tool.name, tool_input: input }, { cwd: this.cwd, signal });
       for (const w of h.warnings) this.io.notice?.(w, 'warn');

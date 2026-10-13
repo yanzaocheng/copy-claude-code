@@ -27,7 +27,6 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   };
   const mainRateLimit = rateLimitReporter();
   const io = {
-    approvePlan: async () => 'reject', // non-interactive: a plan is only presented, never executed
     askQuestion: async () => null,
     notice: (text) => err(c.yellow(text)),
     toolStart: (tu, tool, input, agent) => {

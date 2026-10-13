@@ -6,7 +6,6 @@ import path from 'node:path';
 import { Config } from '../src/config.js';
 import { streamMessage, quickQuery } from '../src/api.js';
 import { Agent } from '../src/agent.js';
-import { ModeManager } from '../src/modes.js';
 import { GlobTool } from '../src/tools/search.js';
 import { endpoint } from '../src/oauth.js';
 import {
@@ -546,7 +545,7 @@ test('an agent turn survives a pause: the conversation is intact and the prompt 
   });
   const config = configWith();
   const events = [];
-  const agent = new Agent({ config, modes: new ModeManager(), tools: [GlobTool], systemPrompt: 's', io: { streamEvent: (ev) => events.push(ev) }, model: config.mainModel, cwd: process.cwd() });
+  const agent = new Agent({ config, tools: [GlobTool], systemPrompt: 's', io: { streamEvent: (ev) => events.push(ev) }, model: config.mainModel, cwd: process.cwd() });
   const result = await agent.run('hello');
   assert.equal(result.text, 'All good.');
   assert.deepEqual(agent.messages.map((m) => m.role), ['user', 'assistant']);
@@ -579,7 +578,7 @@ test('Esc during an automatic compaction pause ends the turn as an interrupt, no
   // a window this small makes the long prompt below compact first
   const config = configWith({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '20000', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '10' });
   const events = [];
-  const agent = new Agent({ config, modes: new ModeManager(), tools: [GlobTool], systemPrompt: 's', io: { compactProgress: (ev) => events.push(ev) }, model: config.mainModel, cwd: process.cwd() });
+  const agent = new Agent({ config, tools: [GlobTool], systemPrompt: 's', io: { compactProgress: (ev) => events.push(ev) }, model: config.mainModel, cwd: process.cwd() });
   agent.messages = [{ role: 'user', content: [{ type: 'text', text: 'earlier' }] }, { role: 'assistant', content: [{ type: 'text', text: 'an answer' }] }];
   const ctrl = new AbortController();
   const run = agent.run(`A long prompt. ${'filler '.repeat(3000)}`, { signal: ctrl.signal });

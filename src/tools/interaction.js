@@ -1,5 +1,4 @@
-// Tools that interact with the session rather than the machine: TodoWrite,
-// ExitPlanMode and AskUserQuestion.
+// Tools that interact with the session rather than the machine: TodoWrite and AskUserQuestion.
 
 export const TodoWriteTool = {
   name: 'TodoWrite',
@@ -39,34 +38,6 @@ How:
     return {
       content: 'The todo list is updated.',
       display: { todos },
-    };
-  },
-};
-
-export const ExitPlanModeTool = {
-  name: 'ExitPlanMode',
-  readOnly: true,
-  description: `Use this tool when you are in plan mode and have finished planning the implementation steps of a task that requires writing code, and are ready to code. This will prompt the user to approve your plan.
-Only use this tool when the task requires planning the implementation steps of a task that requires writing code. For research tasks where you're gathering information, searching files, reading files or in general trying to understand the codebase - do NOT use this tool.`,
-  input_schema: {
-    type: 'object',
-    properties: {
-      plan: { type: 'string', description: 'The plan you came up with, that you want to run by the user for approval. Supports markdown. The plan should be pretty concise.' },
-    },
-    required: ['plan'],
-  },
-  summarize() { return ''; },
-  async call(input, ctx) {
-    if (ctx.modes.mode !== 'plan') return { isError: true, content: 'You are not in plan mode. Proceed with the task.' };
-    const choice = await ctx.io.approvePlan(input.plan);
-    if (choice === 'full') {
-      ctx.modes.setMode('full');
-      return { content: 'User has approved your plan. You can now start coding. Start with updating your todo list if applicable.', display: { plan: input.plan, approved: true } };
-    }
-    return {
-      content: 'The user wants to keep planning. Do not start implementation. Wait for the user to explain what should change in the plan.',
-      display: { plan: input.plan, approved: false },
-      stopTurn: true,
     };
   },
 };

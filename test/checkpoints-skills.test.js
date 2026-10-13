@@ -1,4 +1,4 @@
-// Tests for checkpoints and /rewind, plan mode through the agent, skills, hooks over stdin.
+// Tests for checkpoints and /rewind, full access through the agent, skills, hooks over stdin.
 // CONFIG_DIR is fixed when config.js is first imported, so point it at a temp dir first.
 
 import { test } from 'node:test';
@@ -10,7 +10,6 @@ import path from 'node:path';
 process.env.CLAUDE_PRO_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-config-'));
 
 const { Config, CONFIG_DIR, loadConfig } = await import('../src/config.js');
-const { ModeManager } = await import('../src/modes.js');
 const { Agent } = await import('../src/agent.js');
 const { CheckpointStore, rewind, promptAt } = await import('../src/checkpoints.js');
 const { ReadTool, WriteTool } = await import('../src/tools/files.js');
@@ -147,7 +146,7 @@ test('agent: Write/Edit calls are checkpointed per prompt and /rewind undoes the
   fs.writeFileSync(f, 'old');
   const cfg = makeConfig(dir);
   const store = new CheckpointStore(path.join(dir, '.snaps'));
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), checkpoints: store, tools: [ReadTool, WriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, checkpoints: store, tools: [ReadTool, WriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;
@@ -172,7 +171,7 @@ test('rewind menu: summarize up to here or from here keeps the rest word for wor
   const dir = tmp();
   const cfg = makeConfig(dir);
   const store = new CheckpointStore(path.join(dir, '.snaps'));
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), checkpoints: store, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, checkpoints: store, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   const long = `third prompt ${'x'.repeat(300)}`;
   let n = 0;
   agent.callModel = async () => reply([{ type: 'text', text: `answer ${++n}` }]);
@@ -208,29 +207,22 @@ test('rewind menu: summarize up to here or from here keeps the rest word for wor
   assert.equal(agent.messages.length, 1, 'only the summary of the first exchange is left');
 });
 
-test('plan mode blocks edits through the agent; full access allows them', async () => {
+test('full access: an edit through the agent runs at once, nothing is asked and nothing is added to the prompt', async () => {
   const dir = tmp();
   const cfg = makeConfig(dir);
-  const modes = new ModeManager('plan');
-  const agent = new Agent({ config: cfg, modes, tools: [WriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [WriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   const target = path.join(dir, 'out.txt');
   let calls = 0;
   agent.callModel = async () => {
     calls++;
-    if (calls === 1 || calls === 3) return toolUse(`w${calls}`, 'Write', { file_path: target, content: 'x' });
+    if (calls === 1) return toolUse('w1', 'Write', { file_path: target, content: 'x' });
     const block = agent.messages[agent.messages.length - 1].content[0];
-    if (calls === 2) { assert.equal(block.is_error, true); assert.match(block.content, /Plan mode is active/); }
+    assert.equal(block.is_error, undefined, block.content);
     return reply([{ type: 'text', text: 'ok' }]);
   };
   await agent.run('write it');
-  assert.equal(fs.existsSync(target), false);
-  assert.match(agent.messages[1].content[0].type, /tool_use/);
-  assert.match(JSON.stringify(agent.messages[0].content), /Plan mode is active/, 'the plan-mode reminder is added to the prompt');
-
-  modes.setMode('full');
-  calls = 2; // the next model call is the third one, which writes
-  await agent.run('now write it for real');
-  assert.equal(fs.existsSync(target), true);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'x');
+  assert.deepEqual(agent.messages[0].content, [{ type: 'text', text: 'write it' }], 'the prompt as it was typed');
 });
 
 test('skills: loaded from skills/<name>/SKILL.md, project overrides user, usable through the Skill tool', async () => {

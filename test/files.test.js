@@ -229,7 +229,6 @@ test('a heavy PNG goes as JPEG: from Read, and once in a conversation that alrea
   const { PNG_AS_JPEG_BYTES } = await import('../src/utils/images.js');
   const { Agent } = await import('../src/agent.js');
   const { Config } = await import('../src/config.js');
-  const { ModeManager } = await import('../src/modes.js');
   const dir = tmp();
   const heavy = makePng(700, 700, { grain: true });
   assert.ok(heavy.length > PNG_AS_JPEG_BYTES, `the test PNG is ${heavy.length} bytes`);
@@ -246,7 +245,7 @@ test('a heavy PNG goes as JPEG: from Read, and once in a conversation that alrea
   // a conversation from before: the heavy PNG in a tool result, a light one in a user message
   const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
   const replaced = [];
-  const agent = new Agent({ config: cfg, modes: new ModeManager(), tools: [], systemPrompt: 's', io: { messagesReplaced: (m) => replaced.push(m) }, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: { messagesReplaced: (m) => replaced.push(m) }, model: cfg.mainModel, cwd: dir });
   const light = makePng(300, 200).toString('base64');
   const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: heavy.toString('base64') } };
   agent.messages = [

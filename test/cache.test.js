@@ -26,7 +26,6 @@ const { CLAUDE_CODE_SYSTEM } = await import('../src/claude-code.js');
 const { CacheStats, cacheControl, cachePlanOf, fingerprint, normalizeTtl } = await import('../src/cache.js');
 const { Agent, CLEARED, clearOldToolResults } = await import('../src/agent.js');
 const { resolvePath } = await import('../src/utils/paths.js');
-const { ModeManager } = await import('../src/modes.js');
 const { SUMMARY_SYSTEM, subagentSystemPrompt } = await import('../src/prompts.js');
 const { environmentBlock, takeEnvSnapshot } = await import('../src/context.js');
 const { SessionStore } = await import('../src/session.js');
@@ -477,7 +476,7 @@ test('fingerprint ignores the cache markers and the messages, and sees everythin
 // ---------------------------------------------------------------------------------------------- the agent
 
 function makeAgent(cfg, { systemPrompt = 'MAIN SYSTEM', io = {}, ...rest } = {}) {
-  return new Agent({ config: cfg, modes: new ModeManager(), tools, systemPrompt, io, model: cfg.mainModel, cwd: process.cwd(), ...rest });
+  return new Agent({ config: cfg, tools, systemPrompt, io, model: cfg.mainModel, cwd: process.cwd(), ...rest });
 }
 
 test('the summary request is the conversation\'s own request with the instruction at the end', async (t) => {

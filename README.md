@@ -67,7 +67,7 @@ claude-pro config set CLAUDE_PRO_PROVIDER claude-code
 
 `~/.claude.json` 保存设备 ID 和 OAuth 账号信息，实际访问令牌保存在 `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken` 中。Windows 对应 `%USERPROFILE%\.claude.json` 和 `%USERPROFILE%\.claude\.credentials.json`。可用 `CLAUDE_PRO_CLAUDE_CONFIG_FILE` 和 `CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE` 指向现有文件；`CLAUDE_CONFIG_DIR` 可以指定凭据目录。凭据位置参考[官方认证文档](https://code.claude.com/docs/en/authentication#credential-management)。
 
-调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上 Claude Code 的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点、计划模式及会话功能都由本项目原有逻辑处理。
+调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上 Claude Code 的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点及会话功能都由本项目原有逻辑处理。
 
 此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-5-5`（与 Claude Code 2.1.293 起一样；话题标题、WebFetch 摘要等小请求用它）；子 agent 默认用 `sonnet`（`CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL` 可改）。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
 
@@ -169,7 +169,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 交互式会话运行在一个很薄的**监督进程**（`src/supervisor.js`，只用 Node 内置模块）之下，所以程序可以自己重启、加载自己刚改过的代码，不需要你退出再启动：
 
-- **模型自己重启**：改完 `src/`、`bin/` 里的代码后，模型调用 `Restart` 工具。它先在一个临时进程里把新代码完整启动一遍（所有模块能加载、界面能画出来、工具定义和系统提示词合法）——**启动不起来就不重启**，把错误还给模型去修，修好再调用；通过后在**本回合结束时**重启，对话、待办列表、`/model`、`/effort`、计划模式、排队的消息、输入框里没发出去的草稿、`/rewind` 检查点都带过去，新进程里模型收到一条"已重启"的提示后接着做（可用 `then` 指定重启后先验证什么）。只在**源码仓库**（有 `.git` 的克隆，包括 `npm link` 到它）里这样做：从 npm 装的副本没有版本控制、下次更新会被覆盖，那里不给模型 `Restart` 工具，系统提示词改成"不要改自己的文件，绕过问题并在最后说明缺陷，方便用户反馈"。
+- **模型自己重启**：改完 `src/`、`bin/` 里的代码后，模型调用 `Restart` 工具。它先在一个临时进程里把新代码完整启动一遍（所有模块能加载、界面能画出来、工具定义和系统提示词合法）——**启动不起来就不重启**，把错误还给模型去修，修好再调用；通过后在**本回合结束时**重启，对话、待办列表、`/model`、`/effort`、排队的消息、输入框里没发出去的草稿、`/rewind` 检查点都带过去，新进程里模型收到一条"已重启"的提示后接着做（可用 `then` 指定重启后先验证什么）。只在**源码仓库**（有 `.git` 的克隆，包括 `npm link` 到它）里这样做：从 npm 装的副本没有版本控制、下次更新会被覆盖，那里不给模型 `Restart` 工具，系统提示词改成"不要改自己的文件，绕过问题并在最后说明缺陷，方便用户反馈"。
 - **改了源码自动重启**：一个回合结束（或空闲）时，如果 `src/`、`bin/` 下的文件变过，就自动做同样的检查并重启。检查不通过只提示错误、不重启。按 Esc 打断的那一回合不会触发。`CLAUDE_PRO_AUTO_RESTART=0` 关闭。
 - **手动**：`/restart`（别名 `/reload`），`/restart force` 跳过检查并无视后台任务。
 - 后台 agent / 后台 shell 会被重启杀掉，所以有它们在跑时拒绝重启（可 `force`）。5 分钟内重启超过 5 次视为死循环，拒绝。
@@ -184,7 +184,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - **默认在线**：这台电脑登录了网关（`/login` 选网关）以后，每个交互会话启动时自动连上网关（不阻塞启动，断开后自动重连），网页上能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`/login` 登录成功后当前会话**马上上线**（不用重启），并打印它的链接；`/logout` 后马上下线；在别的窗口登录或退出，这个窗口几秒内跟上。想让模型请求走 Claude 订阅：先 `/login` 选网关登录，再 `/login` 选 Claude 订阅，网关登录保留，会话照样在线。
 - **链接和二维码**：`/status` 显示这个会话的远程状态（在线、连接中、没登录、key 被拒…）、它在网关上的链接（`https://gw.predix.icu/user#remote/<id>`）和二维码，手机扫码即可打开（没登录时先登录，登录后直接进入这个会话）。所有会话的列表在 `/user#remote`。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`。
 - **网页上能看到**：完整对话（用户消息、流式输出的回答、可展开的思考、工具调用和结果，包括 diff 和正在运行的命令的最新几行输出）、斜杠命令和提示的输出、当前状态（正在想/运行多久/多少 token、限流暂停的倒计时）、待办列表、排队中的消息。
-- **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、批准/拒绝计划、以及 `/model`、`/rewind` 之类命令弹出的选择框。网页顶部可以直接改会话的名字、工作目录（`/cd`，带目录浏览）、模型、effort 和 plan 模式（都是替你发对应的斜杠命令，终端里显示同样的结果；任务进行中不能改）。网页输入框里输入 `/`、`@`、`&` 有和终端一样的补全，也能粘贴或拖入图片（每次最多 6 张、每张不超过 5 MB，PNG/JPEG/GIF/WebP）。终端和网页可以交替使用，两边同步。
+- **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、以及 `/model`、`/rewind` 之类命令弹出的选择框。网页顶部可以直接改会话的名字、工作目录（`/cd`，带目录浏览）、模型和 effort（都是替你发对应的斜杠命令，终端里显示同样的结果；任务进行中不能改）。网页输入框里输入 `/`、`@`、`&` 有和终端一样的补全，也能粘贴或拖入图片（每次最多 6 张、每张不超过 5 MB，PNG/JPEG/GIF/WebP）。终端和网页可以交替使用，两边同步。
 - **安全**：只有同一个网关账户登录后才能看到和操作这个会话；**能登录这个网关账户的人，就能通过它在这台电脑上以完全权限执行命令**。会话内容经网关中转并暂存在网关上。
 - **省流量**：没人打开网页时只上报状态（列表里的标题、忙/闲），不上传对话；有人打开时先发一份完整快照，再实时推送。
 - **重启不断线**：自动重启（改了源码、自动更新）沿用同一个会话 id，网页显示"重启中"后接着看；网关重启丢了状态时，claude-pro 自动重新注册并补发完整对话。
@@ -225,8 +225,8 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 ## 完全访问与安全网
 
-- **没有权限系统**：没有确认弹窗，没有 allow/deny 规则，也没有 `/permissions`。旧参数 `--dangerously-skip-permissions`、`--permission-mode`、`--allowedTools`、`--disallowedTools` 仍被接受但会被忽略（`--permission-mode plan` 等同于 `--plan`）；settings 里残留的 `permissions` 字段也会被忽略。
-- **计划模式（唯一的开关）**：`shift+tab`、`/plan` 或 `--plan` 进入。此时只能读和调研，改文件、跑会改东西的命令都会被挡住；模型调研完用 `ExitPlanMode` 提交计划，你批准后回到完全访问。
+- **没有权限系统**：没有确认弹窗，没有 allow/deny 规则，也没有 `/permissions`。旧参数 `--dangerously-skip-permissions`、`--permission-mode`、`--allowedTools`、`--disallowedTools` 仍被接受但会被忽略，`--plan` 也是；settings 里残留的 `permissions` 字段也会被忽略。
+- **没有计划模式**：想先看方案再动手，直接在消息里说（例如"先给方案，我确认前不要改代码"）。
 - **检查点与 `/rewind`（或在空输入框连按两次 `Esc`）**：每条提问都会建一个检查点，Write / Edit / NotebookEdit 修改文件前会先保存原样。和官方一样，菜单按时间列出这次会话的提问（最新的在最下面、默认选中），选一条后可以：**Restore code and conversation**（代码和对话都回到这条之前）、**Restore conversation**（只回退对话，文件不动）、**Restore code**（只恢复文件，对话不动）、**Summarize from here**（这条及之后的对话压缩成摘要，腾出上下文）、**Summarize up to here**（这条之前的压缩成摘要，之后的原样保留）、**Never mind**（回到列表）。回退对话或"Summarize from here"后，那条提问的原文（完整的，不截断）回填到输入框，可以改了再发，相当于删掉不想要的那段对话重新来。`/clear` 之后，菜单最上面多一项 `/resume <id> (previous session)`，可以回到 `/clear` 之前的对话（本进程内有效）。**Bash 命令造成的改动不会被记录**，所以模型被要求优先用文件工具改文件。
 - **想要护栏时用 hooks**：`PreToolUse` 钩子仍然可以拦截任何工具调用，由你自己定规则（见下）。
 - 模型自己的使用规则不受影响，系统提示里的安全条款与官方 Claude Code 现在的措辞一致：允许授权的安全测试、防御、CTF、教学，拒绝恶意用途。这一条是模型的使用规范，不是能力限制，没有去掉。
@@ -246,11 +246,11 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 | `Bash` 的标准输入 | 一律关闭 | 可以用 `stdin` 参数喂入文本（回答提示、给脚本传数据） |
 | 提示词里的限制 | “尽量少输出”“除非必要不要建文件”“不要强推/改 git 配置/amend” | 回答长度按任务需要；需要就建文件（测试、脚本、配置）；用户要求时可以做上述 git 操作 |
 
-**刻意保留的**：`Edit`/`Write` 必须先 `Read`（防止覆盖没看过的改动，这是正确性保护，不是能力限制；`Write` 覆盖已有文件要求读过完整内容，只读了一部分时用 `Edit`；`--resume` 恢复会话时会按记录重建读取状态，读过之后被改动的文件需要重读）、计划模式（需要时才开）、"没被要求就不提交"、做不可撤销且没被要求的外部操作（强推、发布包、给外部服务发消息或花钱）之前先说一声。
+**刻意保留的**：`Edit`/`Write` 必须先 `Read`（防止覆盖没看过的改动，这是正确性保护，不是能力限制；`Write` 覆盖已有文件要求读过完整内容，只读了一部分时用 `Edit`；`--resume` 恢复会话时会按记录重建读取状态，读过之后被改动的文件需要重读）、"没被要求就不提交"、做不可撤销且没被要求的外部操作（强推、发布包、给外部服务发消息或花钱）之前先说一声。
 
 ## 功能
 
-**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；找不到 rg 时可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`ExitPlanMode`、`AskUserQuestion`，以及 MCP 工具。
+**工具**（与 Claude Code 同名同语义）：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`Edit`（必须先读后改、检测外部修改、保留 CRLF/BOM）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；找不到 rg 时可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`AskUserQuestion`，以及 MCP 工具。
 
 **交互**
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
@@ -265,7 +265,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/plan` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（与 Claude Code 相同，两者都有时通常是同一份说明，不重复发送）。
 
@@ -306,7 +306,7 @@ claude-pro -p "解释一下 src/agent.js"                  # 只输出最终回�
 cat error.log | claude-pro -p "这个报错是什么原因"
 claude-pro -p --output-format json "..."              # JSON 结果（含 token 用量）
 claude-pro -p --verify "npm test" "修复失败的测试"     # 改完自动跑测试，失败继续修
-claude-pro -p --plan "给出重构方案"                    # 只调研、只出方案，不动文件
+claude-pro -p "只调研，给出重构方案，不要改文件"     # 只出方案：在消息里说就行
 ```
 
 ## 快捷键
@@ -317,7 +317,6 @@ claude-pro -p --plan "给出重构方案"                    # 只调研、只�
 | `\` + `Enter` / `ctrl+j` / `alt+enter` | 换行 |
 | `Esc` | 中断当前任务；连按两次：有文字时清空输入，输入框为空时打开回退菜单（同 `/rewind`） |
 | `ctrl+c` | 中断 / 清空输入 / 连按两次退出 |
-| `shift+tab` | 开关计划模式（只读） |
 | `ctrl+o` | 切换详细输出（思考过程、完整工具输出） |
 | `ctrl+t` | 显示/隐藏 todo 列表 |
 | `ctrl+l` | 清屏重绘 |
@@ -350,7 +349,6 @@ src/ratelimit.js      限流：解析重置时间响应头、决定等多久、�
 src/claude-code.js    读取现有 Claude Code OAuth 登录态，生成认证头和账号 metadata
 src/oauth.js          访问令牌过期时用刷新令牌续期，加锁、原子写回凭据文件
 src/agent.js          Agent 循环：工具调度、并行只读工具、中断、自动压缩、验证循环
-src/modes.js          会话模式：完全访问 / 计划模式（没有权限规则）
 src/checkpoints.js    检查点与 /rewind
 src/filestate.js      恢复会话时从记录重建"已读文件"状态（文件自读取后没变过才信任）
 src/hooks.js          Hooks 运行器

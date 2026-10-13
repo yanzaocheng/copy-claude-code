@@ -3,7 +3,6 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { loadConfig, applyRememberedChoices, SOURCE_CHECKOUT } from './config.js';
-import { ModeManager } from './modes.js';
 import { CheckpointStore } from './checkpoints.js';
 import { loadAgents, loadSkills } from './agents.js';
 import { buildTools, toolsForSubagent } from './tools/index.js';
@@ -25,8 +24,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   pruneToolResults(cwd);
   pruneCheckpoints(cwd);
   pruneStaleShellFiles();
-  // Full access: nothing is ever asked. The only mode switch is the read-only plan mode (--plan).
-  const modes = new ModeManager(flags.plan ? 'plan' : 'full');
+  // Full access: nothing is ever asked.
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));
 
   const agents = loadAgents(cwd);
@@ -37,7 +35,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   const hooks = new HookRunner(config);
   const tasks = new BackgroundTasks();
   const memoryDir = autoMemoryDir(cwd);
-  const runtime = { config, modes, checkpoints, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir };
+  const runtime = { config, checkpoints, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir };
   runtime.skills = loadSkills(cwd);
   // The self-check builds the Restart tool too, so that a mistake in it is found before a restart relies on it.
   const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
@@ -116,7 +114,6 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     const depth = (ctx.depth ?? ctx.agent?.depth ?? 0) + 1;
     const sub = new Agent({
       config,
-      modes,
       checkpoints,
       depth,
       spawnSubagent: runtime.spawnSubagent,
@@ -148,7 +145,6 @@ export async function createRuntime({ cwd, flags = {}, io }) {
 
   runtime.agent = new Agent({
     config,
-    modes,
     checkpoints,
     tools: runtime.tools,
     systemPrompt: runtime.systemPrompt,
