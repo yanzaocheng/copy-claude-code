@@ -1119,7 +1119,7 @@ function statusCommand() {
   const auto = installedAutostart();
   const boot = bootAutostartInstalled();
   const lines = [
-    `claude-pro host (lets the gateway's web page open sessions on this computer): ${running ? `running, pid ${state.pid}, since ${state.startedAt || '?'}` : state.disabled ? 'stopped (claude-pro host start)' : 'not running (claude-pro host start)'}`,
+    `claude-pro host (the web page runs and manages sessions on this computer through it): ${running ? `running, pid ${state.pid}, since ${state.startedAt || '?'}` : state.disabled ? 'stopped (claude-pro host start)' : 'not running (claude-pro host start)'}`,
   ];
   if (running) lines.push(`  gateway: ${state.gateway ? `${state.gateway}${state.account ? ` as ${state.account}` : ''} · ${state.online ? 'online' : 'not connected now'}` : 'not logged in (it waits for /login)'}`);
   if (state.id) lines.push(`  id: ${state.id}${state.machine ? ` · computer: ${state.machine}` : ''}${state.terminal ? ` · opens: ${state.terminal}` : ''}${state.version ? ` · version ${state.version}` : ''}`);
