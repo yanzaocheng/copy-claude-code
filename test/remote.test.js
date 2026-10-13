@@ -635,3 +635,30 @@ test('an unwatched session sends a change of busy or asking at once, the rest at
   assert.equal(sent(), first + 2, 'so does a question');
   clearInterval(remote.statusTimer);
 });
+
+test('output: the whole result of a tool call, also one that was saved to a file', async (t) => {
+  gw.sessions.clear();
+  const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-')) });
+  t.after(() => tui.close());
+  await until('online', () => gw.stream && tui.app.remote?.online);
+  tui.send('run something\r');
+  await tui.waitFor('All done.', { timeout: 20_000 });
+  await tui.waitIdle({ timeout: 20_000 });
+  const out = await command('output', { id: 'toolu_bash' });
+  assert.equal(out.ok, true, out.error);
+  assert.match(out.text, /remote-ok/);
+  assert.equal(out.truncated, false);
+  assert.match((await command('output', { id: 'toolu_nope' })).error, /no such tool call/);
+
+  // a result that points to the file it was saved to: the file is what comes back
+  const { toolResultsDir } = await import('../src/session.js');
+  const saved = path.join(toolResultsDir(tui.app.cwd), 'big.txt');
+  fs.mkdirSync(path.dirname(saved), { recursive: true });
+  fs.writeFileSync(saved, 'x'.repeat(1024 * 1024 + 10));
+  tui.app.agent.messages.push(
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_big', name: 'Bash', input: { command: 'big' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_big', content: `<persisted-output>\nOutput too large (1024.0KB). Full output saved to: ${saved}\n...` }] },
+  );
+  const big = await command('output', { id: 'toolu_big' });
+  assert.deepEqual([big.text.length, big.truncated], [1024 * 1024, true]);
+});

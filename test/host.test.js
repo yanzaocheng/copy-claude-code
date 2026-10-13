@@ -290,6 +290,7 @@ test('claude-pro host: one at a time, status, stop; a stopped one is not started
   first.stdout.on('data', (d) => { out += d; });
   await until('the first one', () => state().pid === first.pid && /not logged in to the gateway/.test(out), 20_000);
   assert.match(state().id, /^[\w-]{8,64}$/);
+  assert.match(fs.readFileSync(path.join(dir, 'host.log'), 'utf8'), /not logged in to the gateway/, 'in the foreground too, its log is in host.log (the web page reads it)');
 
   const second = cli('run');
   assert.equal(second.status, 1);
@@ -355,4 +356,59 @@ test('a background service hands over to a new version of the program only when 
   fs.writeFileSync(file, good);
   await until('handed over', () => state().pid && state().pid !== first && host.pidAlive(state().pid) && /the new version runs/.test(log()), 40_000);
   await until('the old one gone', () => !host.pidAlive(first), 10_000);
+});
+
+test('history: the conversations of this computer, newest first, searched, a page at a time, with the session each is open in', async () => {
+  const { listConversations, conversationSummary } = await import('../src/history.js');
+  const { projectDir } = await import('../src/session.js');
+  const projects = path.join(configDir, 'projects');
+  const a = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-hist-a-'));
+  const b = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-hist-b-'));
+  const write = (cwd, id, lines, minutesAgo) => {
+    const file = path.join(projectDir(cwd), `${id}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, [{ type: 'meta', cwd, created: 'x' }, ...lines].map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const t = new Date(Date.now() - minutesAgo * 60_000);
+    fs.utimesSync(file, t, t);
+    return file;
+  };
+  const user = (text) => ({ type: 'message', message: { role: 'user', content: [{ type: 'text', text }] }, at: 1 });
+  const reply = (text) => ({ type: 'message', message: { role: 'assistant', content: [{ type: 'text', text }] }, at: 1 });
+  const ids = ['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444'];
+  write(a, ids[0], [user('fix the login page'), reply('done')], 30);
+  write(a, ids[1], [user('first thing'), reply('ok'), { type: 'meta', topic: 'Deploy script' }, { type: 'reset', messages: [{ role: 'user', content: 'summary' }] }, user('more'), reply('ok')], 20);
+  write(b, ids[2], [user('named one'), { type: 'meta', name: 'release-notes' }], 10);
+  write(b, ids[3], [], 5); // no messages: not a conversation
+
+  const all = listConversations({ projects, open: new Map([[ids[2], 'remote-session-1']]) });
+  assert.deepEqual(all.items.map((i) => [i.conversationId, i.title, i.messages]), [
+    [ids[2], 'release-notes', 1],
+    [ids[1], 'Deploy script', 3],
+    [ids[0], 'fix the login page', 2],
+  ]);
+  assert.equal(all.items[0].sessionId, 'remote-session-1');
+  assert.equal(all.items[0].cwd, b);
+  assert.equal(all.more, false);
+  assert.match(all.items[0].updatedAt, /^\d{4}-\d\d-\d\dT/);
+
+  assert.deepEqual(listConversations({ projects, query: 'LOGIN' }).items.map((i) => i.conversationId), [ids[0]]);
+  assert.deepEqual(listConversations({ projects, query: 'first thing' }).items.map((i) => i.conversationId), [ids[1]], 'the first prompt counts too');
+  assert.deepEqual(listConversations({ projects, cwd: a }).items.map((i) => i.conversationId), [ids[1], ids[0]]);
+  const page = listConversations({ projects, limit: 2 });
+  assert.deepEqual([page.items.length, page.more], [2, true]);
+  const next = listConversations({ projects, limit: 2, before: page.items.at(-1).updatedAt });
+  assert.deepEqual([next.items.map((i) => i.conversationId), next.more], [[ids[0]], false]);
+
+  // read again only when it changed
+  const file = path.join(projectDir(a), `${ids[0]}.jsonl`);
+  assert.equal(conversationSummary(file).messages, 2);
+  fs.appendFileSync(file, `${JSON.stringify(user('again'))}\n`);
+  assert.equal(conversationSummary(file).messages, 3);
+
+  // through the service
+  const service = new HostService({ id: 'host-hist-0001', terminal: null, readLogin: () => null, loadConfig: () => ({ env: {}, gatewayUrl: base }) });
+  assert.equal(service.history({ limit: 1 }).items.length, 1);
+  assert.throws(() => service.history({ before: 'yesterday-ish' }), /before 不是时间/);
+  assert.throws(() => service.history({ cwd: 'relative' }), /不是绝对路径/);
+  assert.match((await service.update()).message, /源码目录|已是最新|已安装|正在安装/);
 });

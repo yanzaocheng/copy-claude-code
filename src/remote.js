@@ -355,6 +355,7 @@ export class RemoteControl {
       else if (cmd.type === 'options' && this.handlers.options) r = this.handlers.options(body);
       else if (cmd.type === 'suggest' && this.handlers.suggest) r = this.handlers.suggest(body);
       else if (cmd.type === 'list' && this.handlers.list) r = this.handlers.list(body);
+      else if (cmd.type === 'output' && this.handlers.output) r = this.handlers.output(body);
       else throw new Error(`Unknown command: ${cmd.type}`);
     } catch (e) {
       failed(e);

@@ -913,6 +913,7 @@ export class App {
         options: () => this.remoteOptions(),
         suggest: (body) => this.remoteSuggest(body),
         list: (body) => this.remoteList(body),
+        output: (body) => this.remoteOutput(body),
         peerMessage: (msg) => this.onPeerMessage(msg),
         changed: () => {
           this.screen.schedule();
@@ -1116,6 +1117,34 @@ export class App {
         return this.recentDirs.list;
       },
     });
+  }
+
+  // For the page's "the whole output": the full result of the tool call `id` ({text, truncated}, at most a MB): the
+  // file it was saved to when it was too long for the conversation, or cleared from it later; what it printed so
+  // far while it runs.
+  remoteOutput({ id } = {}) {
+    if (typeof id !== 'string' || !id) throw new Error('Which tool call?');
+    const MAX = 1024 * 1024;
+    const cut = (text, running = false) => ({ text: text.length > MAX ? text.slice(0, MAX) : text, truncated: text.length > MAX, ...(running ? { running } : {}) });
+    let result = null;
+    for (const m of this.agent.messages) {
+      if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+      for (const b of m.content) if (b.type === 'tool_result' && b.tool_use_id === id) result = b;
+    }
+    if (!result) {
+      const live = this.active.find((e) => e.tu?.id === id);
+      if (live) return cut(String(live.progress || ''), true);
+      throw new Error('There is no such tool call in this conversation.');
+    }
+    let text = typeof result.content === 'string' ? result.content
+      : (Array.isArray(result.content) ? result.content : []).map((b) => (b.type === 'text' ? b.text : b.type === 'image' ? '[image]' : '')).join('\n');
+    // saved whole in the projects' tool-results (see persistLargeOutput and the Bash tool): read from there
+    const saved = /(?:saved to:?|saved at)\s+(\S+?\.txt)\b/.exec(text)?.[1];
+    const results = path.join(CONFIG_DIR, 'projects');
+    if (saved && path.resolve(saved).startsWith(results + path.sep) && path.resolve(saved).includes(`${path.sep}tool-results${path.sep}`)) {
+      try { text = fs.readFileSync(saved, 'utf8'); } catch { /* the reference is what there is */ }
+    }
+    return cut(text);
   }
 
   remoteInterrupt() {

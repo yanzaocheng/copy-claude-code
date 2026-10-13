@@ -138,8 +138,12 @@ test('background sessions: opened for the page without a window, online, logged,
   let svc = startService();
   t.after(async () => {
     await svc.stop();
-    for (const p of listPeers()) if (p.kind === 'background') killTree(p.pid);
-    for (const id of ['bg-test-0001', 'bg-test-0002', 'bg-test-0003']) { const pid = svc.sessions.sessions.get(id)?.pid; if (pid) killTree(pid); }
+    // the supervisors (and their sessions), then any session left; again once whatever was starting has started
+    for (let round = 0; round < 2; round++) {
+      for (const rec of svc.sessions.sessions.values()) if (rec.pid) killTree(rec.pid);
+      for (const p of listPeers()) if (p.kind === 'background') killTree(p.pid);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
   });
   await until('the service online', () => gw.hostStream && svc.service.online);
 

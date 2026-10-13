@@ -112,6 +112,7 @@ export class BackgroundSessions {
         this.launch(rec, { resume: true });
       }
     }
+    this.closed = false;
     this.timer = setInterval(() => this.tick(), 2000);
     this.timer.unref?.();
     this.rotateTimer = setInterval(() => this.rotateLogs(), 60_000);
@@ -119,7 +120,9 @@ export class BackgroundSessions {
     this.persist();
   }
 
+  // The service stops watching (its sessions run on, for the next one to take over).
   close() {
+    this.closed = true;
     clearInterval(this.timer);
     clearInterval(this.rotateTimer);
   }
@@ -226,7 +229,7 @@ export class BackgroundSessions {
     rec.exitCode = code;
     this.log(`the background session ${rec.sessionId} stopped (${code ?? 'no exit code'}): opening it again (${rec.crashes.length}/${MAX_CRASHES} in ${CRASH_WINDOW_MS / 60_000} minutes)`);
     this.onChange();
-    setTimeout(() => { if (this.sessions.get(rec.sessionId) === rec && rec.state === 'restarting' && !this.alive(rec)) this.launch(rec, { resume: true }); }, 1000).unref?.();
+    setTimeout(() => { if (!this.closed && this.sessions.get(rec.sessionId) === rec && rec.state === 'restarting' && !this.alive(rec)) this.launch(rec, { resume: true }); }, 1000).unref?.();
   }
 
   fail(rec, error, code = null) {

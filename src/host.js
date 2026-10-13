@@ -26,6 +26,8 @@ import { CONFIG_DIR, INSTALL_DIR, VERSION, GATEWAY_DEFAULT_URL, loadConfig } fro
 import { readGatewayLogin, normalizeGatewayUrl } from './gateway.js';
 import { machineName, cleanName, listPeers } from './peers.js';
 import { BackgroundSessions, markEnded, tailFile } from './background.js';
+import { listConversations } from './history.js';
+import { checkForUpdate, installUpdate } from './updater.js';
 import { ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED } from './supervisor.js';
 
 export const ENTRY = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
@@ -763,6 +765,8 @@ export class HostService {
       else if (cmd.type === 'stop') r = await this.needSessions().stop(String(body.sessionId || ''));
       else if (cmd.type === 'restart') r = await this.needSessions().restart(String(body.sessionId || ''));
       else if (cmd.type === 'logs') r = this.logs(body);
+      else if (cmd.type === 'history') r = this.history(body);
+      else if (cmd.type === 'update') r = await this.update();
       else throw new Error(`这台电脑上的 claude-pro ${VERSION} 不认识命令 ${cmd.type}，请升级`);
       result = { cid: cmd.cid, ok: true, ...r };
     } catch (e) {
@@ -788,6 +792,36 @@ export class HostService {
         return this.recent.list;
       },
     });
+  }
+
+  // The conversations kept on this computer (see history.js), with the session each one is open in.
+  history({ query, cwd, limit, before } = {}) {
+    if (before != null && Number.isNaN(Date.parse(before))) throw new Error('before 不是时间');
+    if (cwd != null && (typeof cwd !== 'string' || !normalizeDir(cwd, { home: this.home }))) throw new Error(`不是绝对路径：${cwd}`);
+    const open = new Map(listPeers().filter((p) => p.conversationId && p.remoteId).map((p) => [p.conversationId, p.remoteId]));
+    return listConversations({
+      projects: path.join(configDir(), 'projects'),
+      query: typeof query === 'string' ? query : '',
+      cwd: cwd ? normalizeDir(cwd, { home: this.home }) : null,
+      limit,
+      before,
+      open,
+    });
+  }
+
+  // update: a newer claude-pro from npm now (as /update). An install takes a while: it goes on after the answer,
+  // and its result goes to the log. The service and the sessions pick the new version up by themselves.
+  async update() {
+    const found = await checkForUpdate({ force: true });
+    if (found.status === 'dev') return { version: VERSION, message: `这台电脑运行的是源码目录里的 claude-pro ${VERSION}（${INSTALL_DIR}），不从 npm 更新` };
+    if (found.status === 'current') return { version: VERSION, message: `已是最新 ${VERSION}` };
+    if (found.status === 'installed') return { version: found.version, message: `已安装 ${found.version}，空闲后重启` };
+    if (found.status !== 'available') throw new Error(`检查更新失败（${found.status}）`);
+    this.updating ??= installUpdate(found.version).then((r) => {
+      if (r.status === 'updated' || r.status === 'installed') this.log(`installed claude-pro ${r.version}`);
+      else this.log(`could not install claude-pro ${found.version}: ${r.status}${r.error ? ` (${r.error})` : ''}`);
+    }, (e) => this.log(`could not install claude-pro ${found.version}: ${e.message}`)).finally(() => { this.updating = null; });
+    return { version: found.version, message: `正在安装 ${found.version}，装好后空闲时自动重启` };
   }
 
   needSessions() {
@@ -966,9 +1000,12 @@ function newVersionFails() {
 // again. The background sessions run on through it all (each is a process of its own, taken over by the next one).
 export async function runHost({ background = false } = {}) {
   for (const k of SESSION_ONLY) delete process.env[k];
-  const log = background ? fileLogger() : consoleLogger();
+  // its log: host.log (where the web page reads it, see logs), and in the foreground the terminal too
+  const toFile = fileLogger();
+  const toTerminal = background ? null : consoleLogger();
+  const log = (msg) => { toFile(msg); toTerminal?.(msg); };
   if (!takeLock()) {
-    log(`claude-pro host runs already (pid ${readHostState().pid || '?'}): this one stops`);
+    (toTerminal || toFile)(`claude-pro host runs already (pid ${readHostState().pid || '?'}): this one stops`);
     return background ? 0 : 1;
   }
   const sessions = new BackgroundSessions({ dir: configDir(), entry: ENTRY, env: serviceEnv(), log });
