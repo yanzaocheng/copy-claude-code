@@ -949,21 +949,21 @@ export class App {
     this.screen.schedule();
   }
 
-  // This session at the gateway, for /status: {text, url} (url: its page, once registered).
+  // This session at the gateway, for /status: {text}. (Its page is in the web page's list, 远程控制: no link here.)
   remoteState() {
     const r = this.remote;
     if (r) {
       const who = r.account ? ` as ${r.account}` : '';
       const pages = r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
       const text = r.online ? `${c.green('online')}${who}${pages}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
-      return { text, url: r.url };
+      return { text };
     }
-    if (this.remoteStarting) return { text: 'connecting…', url: null };
+    if (this.remoteStarting) return { text: 'connecting…' };
     const login = readGatewayLogin(this.config.gatewayUrl);
-    if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login)`), url: null };
-    if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/logout, then /login)'), url: null };
-    if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)'), url: null };
-    return { text: c.dim('offline'), url: null };
+    if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login)`) };
+    if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/logout, then /login)') };
+    if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)') };
+    return { text: c.dim('offline') };
   }
 
   // The state the page shows below the transcript; sent whenever it changes.

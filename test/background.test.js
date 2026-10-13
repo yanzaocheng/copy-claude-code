@@ -90,7 +90,7 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: { email: 'me@example.com' } }));
 
-const until = async (what, check, timeout = 30_000) => {
+const until = async (what, check, timeout = 60_000) => { // generous: the whole suite runs at once
   const start = Date.now();
   while (!(await check())) {
     if (Date.now() - start > timeout) throw new Error(`timed out waiting for ${what}`);

@@ -2,7 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { c, padEnd, truncate, colorEnabled } from './ui/ansi.js';
+import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
@@ -22,7 +22,6 @@ import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
 import { describeHost, normalizeDir } from './host.js';
-import { qrLines } from './qr.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);
@@ -375,8 +374,8 @@ export function buildCommands(app) {
     const remote = await app.syncRemote();
     app.ensureHost({ login: true });
     if (!remote) return;
-    out(remote.url
-      ? `${c.green('⇄')} This session is online at the gateway: ${c.blue(remote.url)} ${c.dim('(/status shows it, with a QR code for a phone)')}`
+    out(remote.registered
+      ? `${c.green('⇄')} This session is online at the gateway: the web page (远程控制) shows it.`
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
   };
 
@@ -512,7 +511,7 @@ export function buildCommands(app) {
     },
   });
 
-  // /status about the gateway: this session there (its page, and a QR code of it for a phone), its name for the
+  // /status about the gateway: whether this session is online there, its name for the
   // sessions on the other computers, and the computer service.
   function remoteLines(row) {
     const cfg = app.runtime.config;
@@ -520,15 +519,9 @@ export function buildCommands(app) {
     const me = app.peerLabel();
     const lines = [
       row('Remote control', remote.text),
-      ...(remote.url ? [row('', c.blue(remote.url))] : []),
       row('Name', `&${me} ${c.dim(`(on your other computers: &${machineName(cfg.env)}/${me}; /rename changes it)`)}`),
       row('Computer service', describeHost(cfg.env)),
     ];
-    const qr = remote.url && app.remote?.online ? qrLines(remote.url, { color: colorEnabled }) : null;
-    if (qr) {
-      lines.push('', c.dim('  Scan with a phone to open this session (log in to the gateway there):'), ...qr.map((l) => `    ${l}`));
-      lines.push(c.dim(`  Whoever can log in to this gateway account, or holds one of its API keys, can run anything on this computer through it.`));
-    }
     return lines;
   }
 

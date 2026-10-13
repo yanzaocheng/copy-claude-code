@@ -92,10 +92,10 @@ sequenceDiagram
 
 登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），`CLAUDE_PRO_ONLINE=0` 只给自检和测试用。和官方经 Anthropic 中转一样，会话只发出站请求、不监听端口；鉴权用 `/login` 存下的网关 API key（`readGatewayLogin`），与模型请求走哪个提供方无关。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
 
-- **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者有 `--remote-id`（网页经电脑服务打开的会话，见 3.1.5：用网关给的 id 立即上线，不看 `CLAUDE_PRO_ONLINE`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线并打印链接，同时 `ensureHost()`），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒）、会话页面链接和二维码，以及电脑服务的状态（`describeHost`）。
+- **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者有 `--remote-id`（网页经电脑服务打开的会话，见 3.1.5：用网关给的 id 立即上线，不看 `CLAUDE_PRO_ONLINE`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线并打印链接，同时 `ensureHost()`），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒），以及电脑服务的状态（`describeHost`）。
 
 - **协议**（Bearer = 网关 API key）：
-  - `POST /v1/remote/sessions {id, name, title, cwd, host, machine, peerId, model, version}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url；`--remote-id` 给定时用它），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（`/status` 显示并做成二维码）。
+  - `POST /v1/remote/sessions {id, name, title, cwd, host, machine, peerId, model, version}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url；`--remote-id` 给定时用它），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（网页列表里用；终端不再显示它）。
   - `GET /v1/remote/sessions/:id/commands`（SSE）：连着就算在线。收到 `{type:'viewers',count}`（页面数，页脚显示）、`{type:'snapshot'}`（网关要完整快照）、`{cid,type:'send'|'interrupt'|'dialog'|'options'|'suggest'|'list',body}`（页面下发的命令，见下面"从页面下发"）。50 秒没有任何数据（网关每 15 秒 ping）视为断开；断开后 1s、2s、4s… 最长 30s 重连，404 表示网关忘了这个会话，先重新注册。
   - `POST …/results {cid, ok, …|error}`：命令的结果，网关拿它回复页面的请求（返回 `{ok, delivered}`）。处理函数可以返回 promise（`options` 要等网关的模型列表），结果在它完成后再发；网关最多等 15 秒。`close()` 先让出当前调用（页面发来的 `/cd`、`/exit` 在命令处理函数里就关闭会话，它的结果要等处理函数返回才发出），再等在路上的结果发完（最多 1.5 秒），然后才断开命令流、发 bye：网关在命令流断开时会让还没结果的命令失败。
   - 网关的错误是 `{type:"error", error:{type, message}}`；注册时一个账户已有 20 个在线会话返回 429，id 被别的账户占用返回 409。
@@ -109,8 +109,7 @@ sequenceDiagram
   - 页面上改名字、目录、模型、effort 都是发斜杠命令（`/rename <名字>`、`/cd <目录>`、`/model <值>`、`/effort <值>`），和终端里输入一样：带参数时不弹选择框（`/model`、`/effort` 在缓存热时仍会弹 confirmCacheLoss，页面能回答）。
 - **`/cd <目录>`**（`App.changeDirectory`）：绝对路径、`~`、`D:`，或相对当前目录的路径（`normalizeDir`，否则 `path.resolve(cwd, …)`）；不存在、不是目录、和当前目录相同时只打印一行，不重启；忙时拒绝；不在监督进程下（`canRestart()` 为假）时报错。否则走重启：`requestRestart({cwd})` → `restartNow` 先用 `moveSession()`（[`src/session.js`](src/session.js)）把会话文件写到新目录的项目目录（`projects/<新目录>/<同一个 id>.jsonl`，第一行 meta 的 `cwd` 换成新目录，`/resume` 在新目录能找到，`SessionStore(cwd, id)` 也接着往这里写），重启状态里带 `cwd` 和 `changedDirectory: true`，写成功后才删旧文件（写失败就删新文件、不重启）。新进程的 `main.js` 在取到重启状态后 `process.chdir(state.cwd)`（监督进程总是在第一次启动的目录里拉起子进程，所以之后每次重启的状态里都带 `cwd`），于是项目设置、CLAUDE.md、auto memory、系统提示词里的目录和 git 状态、`@` 文件索引、输入历史全部按新目录加载。保持不变的：对话、远程控制 id（`handoff()`）、模型/effort/模式、待办、排队的消息、草稿；`/rename` 或 `--name` 起的名字（`customTitle` 不为空）通过 `peerName` 带过去，按目录取的默认名字不带（新进程按新目录名取，网关注册时 `name`、`cwd` 都是新的）。`/cd` 不计入"5 分钟 5 次"的重启循环保护。新进程在 `resumeAfterRestart` 里打印 `Working directory: <目录>`（代替"↻ Restarted"），并把这一行放进 `seedOutput`，远程控制的初始条目（`seed()`）在对话后面带上它，所以页面重新拿到快照后也看得到；`/clear`、`/resume` 清空它。
 - **退出与重启**：`close({restarting})` 把剩下的消息和 `{t:'bye',restarting}` 一起发出，进程等它最多 1.5 秒再退出。重启后的新进程用同一个 id 注册（`persistent`：网关暂时连不上也不放弃，后台重试），网关上的页面看到同一个会话回来并收到新快照。
-- **二维码**：[`src/qr.js`](src/qr.js)（字节模式、纠错 L、版本 1–6、按罚分选掩码，已与 `qrcode` 包逐模块比对一致），有颜色时用黑白前景/背景色画，与终端主题无关。`/status` 在会话在线时把页面链接画成二维码。
-- 测试：[`test/remote.test.js`](test/remote.test.js) 在无头终端里驱动真实 App（`CLAUDE_PRO_ONLINE=1`），假网关同时扮演中转和页面：登录了就自动上线、页面发命令跑一轮（工具调用和回答以事件到达）、在页面上回答 `AskUserQuestion`、忙时的命令和过期的对话框被拒绝、网关忘掉会话后自动重新注册并补发对话、`/clear` 重置、`/status` 显示链接/状态/二维码、`/logout` 发 bye 下线、`/login` 立即重新上线、别的窗口退出登录后 `syncRemote` 下线；`--remote-id`/`--name` 用给定的 id 和名字上线（`CLAUDE_PRO_ONLINE=0` 也上线）；被拒绝的 key 只报一次、不再重试，换了登录才上线。
+- 测试：[`test/remote.test.js`](test/remote.test.js) 在无头终端里驱动真实 App（`CLAUDE_PRO_ONLINE=1`），假网关同时扮演中转和页面：登录了就自动上线、页面发命令跑一轮（工具调用和回答以事件到达）、在页面上回答 `AskUserQuestion`、忙时的命令和过期的对话框被拒绝、网关忘掉会话后自动重新注册并补发对话、`/clear` 重置、`/status` 显示状态（没有链接和二维码）、`/logout` 发 bye 下线、`/login` 立即重新上线、别的窗口退出登录后 `syncRemote` 下线；`--remote-id`/`--name` 用给定的 id 和名字上线（`CLAUDE_PRO_ONLINE=0` 也上线）；被拒绝的 key 只报一次、不再重试，换了登录才上线。
 
 ### 3.1.3 会话之间的消息（本机和其他电脑）
 
@@ -526,7 +525,7 @@ flowchart TD
 | [`src/session.js`](src/session.js) | JSONL 会话、工具结果、自动记忆目录 |
 | [`src/checkpoints.js`](src/checkpoints.js) | 文件快照与回滚 |
 | [`src/ui/`](src/ui/) | 终端屏幕、编辑器、Markdown、对话 UI |
-| [`src/remote.js`](src/remote.js) / [`src/qr.js`](src/qr.js) | 远程控制：经网关中转的客户端、事件归约（网关页面里有同一份）、终端二维码 |
+| [`src/remote.js`](src/remote.js) | 远程控制：经网关中转的客户端、事件归约（网关页面里有同一份） |
 | [`src/host.js`](src/host.js) | 电脑服务 `claude-pro host`：网页的执行者：列目录、开会话（后台或终端窗口）、结束/重启、日志、历史、更新、状态上报；单实例、安全换版本、登录或开机自启（3.1.5） |
 | [`src/background.js`](src/background.js) / [`src/ui/vterm.js`](src/ui/vterm.js) | 后台会话：服务对 `--headless` 进程的管理（崩溃拉起、恢复、日志）；后台会话的虚拟终端 |
 | [`src/history.js`](src/history.js) / [`src/connect.js`](src/connect.js) / [`src/attach.js`](src/attach.js) | 本机保存的对话（网页的历史）；`claude-pro connect` 配对接入；`claude-pro attach` 在终端里接上后台会话 |

@@ -169,7 +169,6 @@ Object.assign(process.env, {
   CLAUDE_PRO_ONLINE: '1', // a session the tests drive goes online (when logged in) only with this
 });
 const { startTui } = await import('./tui-harness.js');
-const { qrMatrix } = await import('../src/qr.js');
 
 test.after(() => server.close());
 
@@ -227,12 +226,12 @@ test('remote control through the gateway: the page follows a turn it started, an
   tui.send('/clear\r');
   await until('the reset', () => page.snapshots > snapshots && page.state.items.length === 0);
 
-  // /status: the page's link, the state, a QR code for a phone, the name, the computer service.
+  // /status: the state, the name, the computer service (no link, no QR code: the web page lists the sessions).
   tui.send('/status\r');
   const status = await tui.waitFor('Computer service', { timeout: 5000 });
   assert.match(status, /Remote control\s+online as me@example\.com · 1 page open now/);
-  assert.ok(status.includes(`https://gw.example/#remote/${session.id}`));
-  assert.match(status, /Scan with a phone/);
+  assert.ok(!status.includes('https://gw.example/#remote/'), 'no link');
+  assert.doesNotMatch(status, /Scan with a phone/);
   assert.match(status, /Name\s+&claude-pro-remote-/);
 
   // /logout: offline at once, with a goodbye; /login: online again at once, without a restart.
@@ -244,7 +243,7 @@ test('remote control through the gateway: the page follows a turn it started, an
   fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: { email: 'me@example.com' } }));
   const before = gw.registrations;
   tui.send('/login gateway\r');
-  await tui.waitFor('This session is online at the gateway: https://gw.example/#remote/', { timeout: 10_000 });
+  await tui.waitFor('This session is online at the gateway: the web page (远程控制) shows it.', { timeout: 10_000 });
   assert.ok(gw.registrations > before && tui.app.remote?.online);
 
   // logged out in another window: this one follows (the timer does what syncRemote does)
@@ -427,13 +426,6 @@ test('remote control: a key the gateway refuses is reported once, not retried un
   assert.ok((await tui.app.syncRemote())?.registered);
   assert.equal(gw.registrations, registrations + 1);
   await until('online', () => tui.app.remote?.online);
-});
-
-test('QR codes: versions 1 to 6 by length, null beyond', () => {
-  assert.equal(qrMatrix('hi').length, 21);
-  assert.equal(qrMatrix(`https://gw.predix.icu/#remote/${'a'.repeat(12)}`).length, 29);
-  assert.equal(qrMatrix('x'.repeat(134)).length, 41);
-  assert.equal(qrMatrix('x'.repeat(135)), null);
 });
 
 // A 1×1 PNG.
