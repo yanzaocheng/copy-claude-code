@@ -42,6 +42,8 @@ Commands:
   claude-pro config unset <KEY> [--project|--local]
   claude-pro host [start|stop|status|install|uninstall]   The computer service: lets the gateway's web page
                                           open sessions on this computer (claude-pro host --help)
+  claude-pro connect <code> [--url U]    Join this computer to your gateway account with the web page's pairing
+                                          code; the computer service then starts, and starts at logon
   claude-pro attach [name]                Use a background session of this computer here, in this terminal
                                           (ctrl+] detaches; it goes on in the background)
 `;
@@ -168,6 +170,7 @@ export async function main(argv) {
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
   if (argv[0] === 'host') return (await import('./host.js')).hostCommand(argv.slice(1));
   if (argv[0] === 'attach') return (await import('./attach.js')).attachCommand(argv.slice(1));
+  if (argv[0] === 'connect') return (await import('./connect.js')).connectCommand(argv.slice(1));
   if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }

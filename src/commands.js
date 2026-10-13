@@ -373,7 +373,7 @@ export function buildCommands(app) {
   // sessions), and the computer service starts (the web page opens new sessions through it).
   const goOnline = async () => {
     const remote = await app.syncRemote();
-    app.ensureHost();
+    app.ensureHost({ login: true });
     if (!remote) return;
     out(remote.url
       ? `${c.green('⇄')} This session is online at the gateway: ${c.blue(remote.url)} ${c.dim('(/status shows it, with a QR code for a phone)')}`

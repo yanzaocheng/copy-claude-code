@@ -191,16 +191,19 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro --project
 - 一个会话对应网关上的一个远程会话。每个网关账户最多 20 个（超出时淘汰最久没活动的离线会话）；已结束的会话在列表里保留 6 小时，断开但没结束的保留 24 小时。不支持从网页上传图片。
 - 不想在线：`/logout`（这台电脑的会话和电脑服务都会下线）。
 
-### 从网页新建会话（电脑服务 `claude-pro host`）
+### 网页管理电脑和后台会话（电脑服务 `claude-pro host`）
 
-在网关"远程控制"页点**新建会话**，选一台电脑、浏览它的目录（上面列出最近用过的目录）、点创建：那台电脑上弹出一个新的终端窗口，在选的目录里运行 claude-pro，网页直接打开这个会话。一台电脑可以开很多个。
+装了 claude-pro 的电脑就是网页的"执行者"：网页是操作界面（新建、打开、结束、重启会话，恢复历史对话，看电脑状态和日志），电脑在后台执行，不弹窗口。在终端里手动开的 claude-pro 照常工作，也照常出现在网页上（同一台电脑下）。
 
-- **终端窗口**：Windows 用 Windows Terminal（没装时是普通控制台窗口）；macOS 用"终端"；Linux 桌面上用 x-terminal-emulator / gnome-terminal / konsole / xterm 里第一个有的；没有桌面的 Linux 开一个 tmux 会话（`tmux attach -t claude-pro-<id>` 可以接上，网页照常用）。
-- **靠电脑服务**：每台电脑一个后台进程（`claude-pro host`），用 `/login` 存下的网关 key 连到网关，只发出站请求。**不用手动启动**：登录了网关的会话启动时，发现它没在运行就在后台把它拉起来（不弹窗口），会话关掉后它继续运行，所以电脑上没开着 claude-pro 也能从网页新建。设 `CLAUDE_PRO_HOST=0` 就不自动拉起。
-- **开机自动启动**：`claude-pro host install`（Windows 在"启动"文件夹放一个不弹窗口的 .vbs；macOS 是 LaunchAgent；Linux 桌面是自动启动项，没有桌面时是 systemd 用户服务，要不登录也运行就 `loginctl enable-linger`）；`claude-pro host uninstall` 撤销。
-- **其他命令**：`claude-pro host status`（是否在运行、在线、日志位置）；`claude-pro host stop`（停掉，并把这台电脑从网页列表里去掉；之后会话不再自动拉起它，`claude-pro host start` 才重新启动）；`claude-pro host`（在前台运行，看日志调试用）。日志在 `~/.claude-pro/host.log`，状态在 `~/.claude-pro/host.json`。
-- **跟着登录走**：`/logout` 后服务从网页列表下线并等待；重新 `/login`（也可以是另一个账户）后自动注册上。claude-pro 升级或源码改动后，服务一两分钟内自己换成新版本。
-- **安全**：和远程控制一样，能登录这个网关账户的人，可以在这台电脑上任意目录打开会话、以完全权限执行命令。
+- **接入一台新电脑**：网页"远程控制"里点**添加电脑**，它给出一条命令，例如 `npm i -g @yanzc/claude-pro && claude-pro connect K7QF-M2XD`（`--url <网关>` 可选），在那台电脑上运行一次：用配对码换到这台电脑自己的密钥（存进 `~/.claude-pro/gateway.json`，和 `/login` 一样），设置登录后自动启动，并马上启动电脑服务，打印"已连接到 <账户>，可以在网页上使用这台电脑了"。已经 `/login` 过网关的电脑不用 connect：`/login` 成功后同样会设置自动启动并启动电脑服务；登录了网关的会话启动时也会做一次。
+- **新建会话**：选电脑、浏览目录（上面列出最近用过的目录）、可选模型，创建。默认是**后台会话**：那台电脑上没有任何窗口，会话完全在网页上使用（和终端里的 claude-pro 同一套代码，命令、工具、记忆、CLAUDE.md、自动更新都一样）；勾上"同时打开终端窗口"才弹出终端窗口（Windows Terminal，没装时是普通控制台；macOS"终端"；Linux 桌面上的终端，没有桌面时是 tmux）。一台电脑可以开很多个，每个都是独立进程，一个崩溃不影响别的。
+- **历史对话**：网页列出这台电脑上保存的对话（可搜索），点一下就在原来的目录里恢复成后台会话；已经开着的直接打开那个会话。
+- **后台会话的管理**：网页上可以结束（等于 `/exit`，忙时先中断，10 秒不退就强制结束）、重启（等于 `/restart`，对话保留）、看日志、展开某个工具调用的完整输出。会话意外退出时自动拉起（同一段对话、同一个网页链接；10 分钟内最多 3 次，之后标为失败并显示日志最后几行，可以在网页上重启）。电脑重启后，电脑服务会重新打开之前的后台会话（只恢复对话，不自动继续被中断的任务）；用结束或 `/exit` 关掉的不再打开。
+- **在本机终端接上后台会话**：`claude-pro attach [名字]`（不带名字时列出本机的后台会话供选择）：完整的终端界面，可以输入；`Ctrl+]` 断开，会话继续在后台跑。可以同时 attach 多个终端，网页也可以同时看。会话重启时 attach 自动重新接上。后台会话里 `Ctrl+C` 两次或 `Ctrl+D` 不会结束会话（只有 `/exit` 会）。
+- **自动启动**：默认在用户登录后启动（Windows 在"启动"文件夹放一个不弹窗口的 .vbs；macOS 是 LaunchAgent；Linux 桌面是自动启动项，没有桌面时是 systemd 用户服务）。`claude-pro host install --at-boot`：**开机就运行，不用登录**（Windows 是"系统启动时"运行的计划任务，以当前用户身份、不管是否登录，不保存密码，所以访问不了网络共享；需要在"以管理员身份运行"的终端里执行。Linux 是 systemd 用户服务加 `loginctl enable-linger`。macOS 没有 root 做不到，只能登录后启动）。`claude-pro host uninstall` 撤销（之后会话和 `/login` 不会再自动设置）；`CLAUDE_PRO_HOST=0` 完全关掉自动启动和自动拉起。
+- **其他命令**：`claude-pro host status`（是否在运行、在线、自动启动方式、日志位置）；`claude-pro host stop`（停掉，并把这台电脑从网页列表里去掉；之后会话不再自动拉起它，`claude-pro host start` 才重新启动；后台会话继续运行，下次启动的电脑服务会接管）；`claude-pro host`（在前台运行，看日志调试用）。服务日志在 `~/.claude-pro/host.log`（网页上也能看），后台会话的日志在 `~/.claude-pro/logs/sessions/<id>.log`，状态在 `~/.claude-pro/host.json`，后台会话列表在 `~/.claude-pro/host-sessions.json`。
+- **跟着登录走**：`/logout`、或者网页上移除了这台电脑（密钥作废）后，后台会话结束（保留在恢复列表里），服务从网页列表下线并等待；重新 `/login` 或 `claude-pro connect` 后自动恢复。claude-pro 升级或源码改动后，服务一两分钟内自己换成新版本：先确认新版本能加载，加载不了就继续用旧的，不会让网页失去这台电脑。
+- **安全**：能登录这个网关账户的人，可以在这台电脑上任意目录打开会话、以完全权限执行命令。
 
 ## 会话之间互发任务（本机和其他电脑）
 

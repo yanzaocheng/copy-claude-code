@@ -42,7 +42,7 @@ export function sessionEntry(entry, platform = process.platform) {
 // A background session (--headless, started by the computer service) has no terminal and is one all the same.
 export function shouldSupervise(argv, env = process.env, isTty = (fd) => tty.isatty(fd)) {
   if (env[ENV_SUPERVISED] || /^(1|true|yes)$/i.test(env.CLAUDE_PRO_NO_SUPERVISOR || '')) return false;
-  if (argv[0] === 'config' || argv[0] === 'host' || argv[0] === 'attach') return false;
+  if (['config', 'host', 'attach', 'connect'].includes(argv[0])) return false;
   if ((!isTty(0) || !isTty(1)) && !argv.includes('--headless')) return false;
   return !argv.some((a) => NOT_INTERACTIVE.has(a));
 }

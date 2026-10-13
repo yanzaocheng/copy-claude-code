@@ -28,10 +28,10 @@ export function findBackground(ref, sessions = backgroundSessions()) {
     || null;
 }
 
-function choose(sessions) {
-  process.stdout.write('Background sessions on this computer:\n');
-  sessions.forEach((p, i) => process.stdout.write(`  ${i + 1}. &${p.name}  ${p.cwd}${p.remoteId ? `  (${p.remoteId})` : ''}\n`));
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+function choose(sessions, io) {
+  io.stdout.write('Background sessions on this computer:\n');
+  sessions.forEach((p, i) => io.stdout.write(`  ${i + 1}. &${p.name}  ${p.cwd}${p.remoteId ? `  (${p.remoteId})` : ''}\n`));
+  const rl = readline.createInterface({ input: io.stdin, output: io.stdout });
   return new Promise((resolve) => {
     rl.question(`Which one? [1-${sessions.length}, Enter for 1] `, (answer) => {
       rl.close();
@@ -42,9 +42,9 @@ function choose(sessions) {
 }
 
 // One connection: resolves with how it ended, 'detached' or 'closed'.
-function connect(peer) {
+function connect(peer, io) {
   return new Promise((resolve, reject) => {
-    const { columns = 100, rows = 30 } = process.stdout;
+    const { columns = 100, rows = 30 } = io.stdout;
     const req = http.request({
       host: '127.0.0.1', port: peer.port, path: `/attach?cols=${columns}&rows=${rows}`,
       headers: { connection: 'Upgrade', upgrade: 'claude-pro-attach', authorization: `Bearer ${peer.token}` },
@@ -56,8 +56,8 @@ function connect(peer) {
       const finish = (how) => {
         if (ended) return;
         ended = how;
-        process.stdin.off('data', onKeys);
-        process.stdout.off('resize', onResize);
+        io.stdin.off('data', onKeys);
+        io.stdout.off('resize', onResize);
         socket.destroy();
         resolve(how);
       };
@@ -71,41 +71,42 @@ function connect(peer) {
         }
         send({ keys: data.toString('base64') });
       };
-      const onResize = () => send({ resize: [process.stdout.columns, process.stdout.rows] });
-      if (head?.length) process.stdout.write(head);
-      socket.on('data', (d) => process.stdout.write(d));
+      const onResize = () => send({ resize: [io.stdout.columns, io.stdout.rows] });
+      if (head?.length) io.stdout.write(head);
+      socket.on('data', (d) => io.stdout.write(d));
       socket.on('close', () => finish('closed'));
       socket.on('error', () => finish('closed'));
-      process.stdin.on('data', onKeys);
-      process.stdout.on('resize', onResize);
+      io.stdin.on('data', onKeys);
+      io.stdout.on('resize', onResize);
     });
     req.end();
   });
 }
 
-export async function attachCommand(args = []) {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    process.stderr.write('claude-pro attach needs a terminal.\n');
+// io: the terminal (process.stdin/stdout/stderr; the tests give their own).
+export async function attachCommand(args = [], io = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr }) {
+  if (!io.stdin.isTTY || !io.stdout.isTTY) {
+    io.stderr.write('claude-pro attach needs a terminal.\n');
     return 2;
   }
   const sessions = backgroundSessions();
   if (!sessions.length) {
-    process.stdout.write('No background session runs on this computer. The web page opens them (新建会话, without "open a terminal window").\n');
+    io.stdout.write('No background session runs on this computer. The web page opens them (新建会话, without "open a terminal window").\n');
     return 1;
   }
   const ref = args.find((a) => !a.startsWith('-'));
-  let peer = ref ? findBackground(ref, sessions) : sessions.length === 1 ? sessions[0] : await choose(sessions);
+  let peer = ref ? findBackground(ref, sessions) : sessions.length === 1 ? sessions[0] : await choose(sessions, io);
   if (!peer) {
-    process.stderr.write(`No background session called "${ref}". These run here: ${sessions.map((p) => `&${p.name}`).join(', ')}\n`);
+    io.stderr.write(`No background session called "${ref}". These run here: ${sessions.map((p) => `&${p.name}`).join(', ')}\n`);
     return 1;
   }
   const label = `&${peer.name}`;
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
+  io.stdin.setRawMode(true);
+  io.stdin.resume();
   let how;
   try {
     for (;;) {
-      how = await connect(peer);
+      how = await connect(peer, io);
       if (how === 'detached') break;
       // closed: the session restarting (it comes back under the same registry id), or ended
       const id = peer.id;
@@ -118,14 +119,14 @@ export async function attachCommand(args = []) {
       peer = back;
     }
   } catch (e) {
-    process.stdout.write(RESET);
-    process.stdin.setRawMode(false);
-    process.stderr.write(`Could not attach to ${label}: ${e.message}\n`);
+    io.stdout.write(RESET);
+    io.stdin.setRawMode(false);
+    io.stderr.write(`Could not attach to ${label}: ${e.message}\n`);
     return 1;
   }
-  process.stdout.write(RESET);
-  process.stdin.setRawMode(false);
-  process.stdin.pause();
-  process.stdout.write(how === 'detached' ? `Detached from ${label}: it goes on in the background (claude-pro attach ${peer.name} comes back).\n` : `${label} has ended.\n`);
+  io.stdout.write(RESET);
+  io.stdin.setRawMode(false);
+  io.stdin.pause();
+  io.stdout.write(how === 'detached' ? `Detached from ${label}: it goes on in the background (claude-pro attach ${peer.name} comes back).\n` : `${label} has ended.\n`);
   return 0;
 }

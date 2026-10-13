@@ -186,12 +186,29 @@ test('background sessions: opened for the page without a window, online, logged,
   await until('the command in the log', async () => /Total cost/.test((await toHost('logs', { sessionId: 'bg-test-0001' })).text));
   socket.destroy();
 
+  // `claude-pro attach worker` (its own terminal here): attached, typing, still attached across a restart, detached
+  const { attachCommand } = await import('../src/attach.js');
+  const { PassThrough } = await import('node:stream');
+  const keys = Object.assign(new PassThrough(), { isTTY: true, setRawMode() { return this; } });
+  const term = Object.assign(new PassThrough(), { isTTY: true, columns: 90, rows: 30 });
+  let shown = '';
+  term.on('data', (d) => { shown += d; });
+  const attached = attachCommand(['worker'], { stdin: keys, stdout: term, stderr: term });
+  await until('attached', () => shown.includes('\x1b[?1049h'));
+  keys.write('/status\r');
+  await until('typed there, run here', async () => /Remote control/.test((await toHost('logs', { sessionId: 'bg-test-0001' })).text));
+
   // restart: the same process tree, a new session process, the same id at the gateway
   const before = peerOf('bg-test-0001').pid;
   const regs = gw.registrations.filter((r) => r.id === 'bg-test-0001').length;
   assert.equal((await toHost('restart', { sessionId: 'bg-test-0001' })).ok, true);
   await until('restarted', () => peerOf('bg-test-0001') && peerOf('bg-test-0001').pid !== before && stateOf('bg-test-0001')?.state === 'running');
   await until('registered again', () => gw.registrations.filter((r) => r.id === 'bg-test-0001').length > regs);
+  await until('attach back on the restarted session', () => shown.split('\x1b[?1049h').length >= 3, 30_000);
+  keys.write('\x1d'); // ctrl+]
+  assert.equal(await attached, 0);
+  assert.match(shown, /Detached from &worker: it goes on in the background/);
+  assert.ok(peerOf('bg-test-0001'), 'it goes on');
 
   // a crash: opened again with --resume, the conversation and the id kept
   const conversation = peerOf('bg-test-0001').conversationId;

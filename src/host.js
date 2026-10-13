@@ -71,7 +71,7 @@ export function readHostState() {
 }
 
 // Merges `change` into host.json (an undefined value removes the key).
-function updateHostState(change) {
+export function updateHostState(change) {
   const next = { ...readHostState(), ...change };
   for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
   const file = hostFiles().state;
@@ -108,6 +108,13 @@ export function computerId() {
   if (knownId && knownId.dir === configDir()) return knownId.id;
   knownId = { dir: configDir(), id: hostId() };
   return knownId.id;
+}
+
+// The id the gateway gave this computer when it was paired (claude-pro connect), when it is not the one it had.
+export function setComputerId(id) {
+  if (!ID.test(String(id || ''))) return;
+  updateHostState({ id });
+  knownId = null;
 }
 
 // A background session ended for good (/exit): the service does not open it again (see background.js).
@@ -1106,18 +1113,26 @@ function statusCommand() {
   const state = readHostState();
   const running = hostRunning(state);
   const auto = installedAutostart();
+  const boot = bootAutostartInstalled();
   const lines = [
     `claude-pro host (lets the gateway's web page open sessions on this computer): ${running ? `running, pid ${state.pid}, since ${state.startedAt || '?'}` : state.disabled ? 'stopped (claude-pro host start)' : 'not running (claude-pro host start)'}`,
   ];
   if (running) lines.push(`  gateway: ${state.gateway ? `${state.gateway}${state.account ? ` as ${state.account}` : ''} · ${state.online ? 'online' : 'not connected now'}` : 'not logged in (it waits for /login)'}`);
   if (state.id) lines.push(`  id: ${state.id}${state.machine ? ` · computer: ${state.machine}` : ''}${state.terminal ? ` · opens: ${state.terminal}` : ''}${state.version ? ` · version ${state.version}` : ''}`);
   lines.push(`  log: ${hostFiles().log}`);
-  lines.push(`  at logon: ${auto ? `starts (${auto}; claude-pro host uninstall stops that)` : 'no (claude-pro host install)'}`);
+  lines.push(`  starts by itself: ${boot ? `at boot, before anyone logs in (${process.platform === 'win32' ? `scheduled task "${bootTaskName()}"` : 'systemd user service, lingering'})` : auto ? `at logon (${auto})` : 'no (claude-pro host install; --at-boot: before anyone logs in)'}${boot || auto ? ' · claude-pro host uninstall stops that' : ''}`);
   console.log(lines.join('\n'));
   return 0;
 }
 
-// ---------------------------------------------------------------- starting at logon
+// ---------------------------------------------------------------- starting by itself: at logon, at boot
+//
+// By default the service starts when the user logs in (Windows: a script in the Startup folder, without a window;
+// macOS: a LaunchAgent; Linux: a desktop autostart entry, else a systemd user service). `host install --at-boot`:
+// already when the computer starts, before anyone logs in (Windows: a scheduled task "at startup" that runs as the
+// user whether logged on or not, S4U: no password kept, no network shares; Linux: the systemd user service with
+// lingering; macOS: not without root, so at logon). A session logged in to the gateway, /login and `claude-pro
+// connect` set up the start at logon by themselves (ensureAutostart), unless `host uninstall` said no.
 
 const suffix = () => (process.env.CLAUDE_PRO_CONFIG_DIR ? `-${crypto.createHash('sha1').update(path.resolve(process.env.CLAUDE_PRO_CONFIG_DIR)).digest('hex').slice(0, 8)}` : '');
 
@@ -1131,27 +1146,43 @@ export function autostartFiles({ platform = process.platform, env = process.env,
   return [path.join(config, 'autostart', `claude-pro-host${s}.desktop`), path.join(config, 'systemd', 'user', `claude-pro-host${s}.service`)];
 }
 
+export const bootTaskName = () => `claude-pro host${suffix()}`;
+
 // How the service starts by itself: 'boot' (before anyone logs in, host install --at-boot), 'logon', or ''.
 export function autostartKind() {
   if (bootAutostartInstalled()) return 'boot';
   return installedAutostart() ? 'logon' : '';
 }
 
-function bootAutostartInstalled() { return false; }
+let bootKnown = { at: 0, value: false };
+function bootAutostartInstalled() {
+  if (Date.now() - bootKnown.at < 60_000) return bootKnown.value;
+  let value = false;
+  if (process.platform === 'win32') {
+    value = spawnSync('schtasks', ['/Query', '/TN', bootTaskName()], { windowsHide: true, stdio: 'ignore' }).status === 0;
+  } else if (process.platform === 'linux') {
+    const unit = autostartFiles()[1];
+    const linger = spawnSync('loginctl', ['show-user', os.userInfo().username, '-p', 'Linger'], { encoding: 'utf8' });
+    value = fs.existsSync(unit) && /Linger=yes/.test(linger.stdout || '');
+  }
+  bootKnown = { at: Date.now(), value };
+  return value;
+}
 
 function installedAutostart() {
   return autostartFiles().find((f) => fs.existsSync(f)) || null;
 }
 
 // What runs at logon: `claude-pro host start`, with the config directory when it is not the default one.
-function startCommandLine() {
+function startCommandLine(sub = ['host', 'start']) {
   const env = process.env.CLAUDE_PRO_CONFIG_DIR ? { CLAUDE_PRO_CONFIG_DIR: path.resolve(process.env.CLAUDE_PRO_CONFIG_DIR) } : {};
-  return { program: [process.execPath, ENTRY, 'host', 'start'], env };
+  return { program: [process.execPath, ENTRY, ...sub], env };
 }
 
-const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const xml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-async function installCommand() {
+// The start at logon, set up: {file, note}.
+export function installLogonAutostart() {
   const { program, env } = startCommandLine();
   const [desktop, service] = autostartFiles();
   let file;
@@ -1198,30 +1229,135 @@ async function installCommand() {
     fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=claude-pro host\nComment=Lets the gateway's web page open claude-pro sessions on this computer\nExec=${exec}\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n`);
   } else {
     file = service;
-    const q = (s) => `"${String(s).replace(/(["\\])/g, '\\$1')}"`;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `[Unit]\nDescription=claude-pro host: lets the gateway's web page open claude-pro sessions on this computer\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=${program.map(q).join(' ')}\n${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join('')}\n[Install]\nWantedBy=default.target\n`);
-    const daemon = spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
-    const enabled = spawnSync('systemctl', ['--user', 'enable', path.basename(file)], { stdio: 'ignore' });
-    note = daemon.status === 0 && enabled.status === 0
-      ? ` (systemd user service; \`loginctl enable-linger ${os.userInfo().username}\` keeps it running without a login)`
-      : ' (systemctl --user did not take it: enable it by hand)';
+    note = writeSystemdUnit(service);
   }
-  console.log(`claude-pro host starts at logon now: ${file}${note}`);
+  bootKnown.at = 0;
+  return { file, note };
+}
+
+// Linux: the systemd user service (Type=oneshot + RemainAfterExit: the service's process stays in its cgroup).
+function writeSystemdUnit(file) {
+  const { program, env } = startCommandLine();
+  const q = (s) => `"${String(s).replace(/(["\\])/g, '\\$1')}"`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `[Unit]\nDescription=claude-pro host: lets the gateway's web page open claude-pro sessions on this computer\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=${program.map(q).join(' ')}\n${Object.entries(env).map(([k, v]) => `Environment=${q(`${k}=${v}`)}\n`).join('')}\n[Install]\nWantedBy=default.target\n`);
+  const daemon = spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
+  const enabled = spawnSync('systemctl', ['--user', 'enable', path.basename(file)], { stdio: 'ignore' });
+  return daemon.status === 0 && enabled.status === 0 ? ' (systemd user service)' : ' (systemctl --user did not take it: enable it by hand)';
+}
+
+// Windows: the scheduled task that starts the service at boot, as this user, logged on or not (S4U).
+export function bootTaskXml({ user = `${process.env.USERDOMAIN || os.hostname()}\\${os.userInfo().username}`, home = os.homedir() } = {}) {
+  const { program, env } = startCommandLine(['host', 'run', '--background']);
+  let command = program[0];
+  let args = program.slice(1).map(quoteWindowsArg).join(' ');
+  if (Object.keys(env).length) { // a task cannot set variables: cmd does
+    command = process.env.ComSpec || 'cmd.exe';
+    args = `/d /c "${Object.entries(env).map(([k, v]) => `set "${k}=${v}"&& `).join('')}${program.map(quoteWindowsArg).join(' ')}"`;
+  }
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>claude-pro host: lets the gateway's web page use this computer (claude-pro host uninstall removes it)</Description></RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>S4U</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
+    <Hidden>true</Hidden>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>${xml(command)}</Command><Arguments>${xml(args)}</Arguments><WorkingDirectory>${xml(home)}</WorkingDirectory></Exec></Actions>
+</Task>
+`;
+}
+
+// The start at boot, set up: a line saying how. Throws what to do when it cannot be (no administrator rights).
+export function installBootAutostart() {
+  bootKnown.at = 0;
+  if (process.platform === 'win32') {
+    const file = path.join(os.tmpdir(), `claude-pro-boot-task-${process.pid}.xml`);
+    fs.writeFileSync(file, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(bootTaskXml(), 'utf16le')]));
+    try {
+      const r = spawnSync('schtasks', ['/Create', '/TN', bootTaskName(), '/XML', file, '/F'], { windowsHide: true, encoding: 'latin1' });
+      if (r.status !== 0) {
+        throw new Error(`Windows did not create the scheduled task (schtasks exit code ${r.status}). It takes an administrator: run \`claude-pro host install --at-boot\` again in a terminal started with "Run as administrator". (Without a password kept, the service cannot use network shares; it does not need them.)`);
+      }
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+    return `a scheduled task "${bootTaskName()}" starts it when Windows starts, as ${os.userInfo().username}, logged on or not`;
+  }
+  if (process.platform === 'linux') {
+    const note = writeSystemdUnit(autostartFiles()[1]);
+    const user = os.userInfo().username;
+    const linger = spawnSync('loginctl', ['enable-linger', user], { stdio: 'ignore' });
+    if (linger.status !== 0) throw new Error(`The systemd user service is set up${note}, but lingering is not on, so it starts only once ${user} logs in: run \`sudo loginctl enable-linger ${user}\`.`);
+    return `the systemd user service starts it at boot (lingering is on for ${user})`;
+  }
+  throw new Error('On macOS a program starts before anyone logs in only as a LaunchDaemon, which takes root: claude-pro starts at logon instead (a LaunchAgent). Turn on automatic login in System Settings to have it after a restart.');
+}
+
+function removeBootAutostart() {
+  bootKnown.at = 0;
+  if (process.platform === 'win32') {
+    if (spawnSync('schtasks', ['/Query', '/TN', bootTaskName()], { windowsHide: true, stdio: 'ignore' }).status !== 0) return null;
+    const r = spawnSync('schtasks', ['/Delete', '/TN', bootTaskName(), '/F'], { windowsHide: true, stdio: 'ignore' });
+    return r.status === 0 ? `the scheduled task "${bootTaskName()}"` : `(the scheduled task "${bootTaskName()}" could not be removed: as administrator, schtasks /Delete /TN "${bootTaskName()}" /F)`;
+  }
+  return null; // Linux: the unit goes with the files below; lingering may serve other services, it stays
+}
+
+// For a session logged in to the gateway, /login (`force`) and `claude-pro connect`: the start at logon, set up once,
+// unless the user said no (`host uninstall`) or turned the service off (CLAUDE_PRO_HOST=0).
+export function ensureAutostart({ force = false, env = process.env } = {}) {
+  if (!hostEnabled(env)) return null;
+  const state = readHostState();
+  if (state.autostartDeclined || (state.autostartAuto && !force)) return null;
+  if (installedAutostart() || bootAutostartInstalled()) { updateHostState({ autostartAuto: new Date().toISOString() }); return null; }
+  try {
+    const r = installLogonAutostart();
+    updateHostState({ autostartAuto: new Date().toISOString() });
+    return r;
+  } catch {
+    return null;
+  }
+}
+
+async function installCommand(args = []) {
+  updateHostState({ autostartDeclined: undefined, autostartAuto: new Date().toISOString() });
+  if (args.includes('--at-boot')) {
+    try {
+      console.log(`claude-pro host starts at boot now: ${installBootAutostart()}.`);
+    } catch (e) {
+      console.log(e.message);
+      if (process.platform !== 'darwin') return 1;
+    }
+  }
+  if (!args.includes('--at-boot') || process.platform === 'darwin') {
+    const { file, note } = installLogonAutostart();
+    console.log(`claude-pro host starts at logon now: ${file}${note}`);
+  }
   return startCommand();
 }
 
 function uninstallCommand() {
-  let removed = 0;
+  const removed = [];
+  const task = removeBootAutostart();
+  if (task) removed.push(task);
   for (const file of autostartFiles()) {
     if (!fs.existsSync(file)) continue;
     if (process.platform === 'darwin') spawnSync('launchctl', ['unload', '-w', file], { stdio: 'ignore' });
     if (file.endsWith('.service')) spawnSync('systemctl', ['--user', 'disable', path.basename(file)], { stdio: 'ignore' });
     fs.rmSync(file, { force: true });
-    console.log(`Removed ${file}`);
-    removed++;
+    removed.push(file);
   }
-  if (!removed) console.log('claude-pro host was not set to start at logon.');
+  bootKnown.at = 0;
+  updateHostState({ autostartDeclined: true }); // sessions and /login do not set it up again
+  console.log(removed.length ? `Removed ${removed.join(', ')}` : 'claude-pro host was not set to start by itself.');
   if (hostRunning()) console.log('It is still running now: `claude-pro host stop` stops it.');
   return 0;
 }
@@ -1237,9 +1373,13 @@ claude-pro session here (in a terminal window, in the directory chosen there). I
   claude-pro host start      Run it in the background (log: ~/.claude-pro/host.log)
   claude-pro host stop       Stop it and take this computer off the gateway's list (sessions then no longer start it)
   claude-pro host status     Whether it runs, its id, its log
-  claude-pro host install    Start it at logon too (Windows: a script in the Startup folder; macOS: a LaunchAgent;
-                             Linux: a desktop autostart entry, else a systemd user service)
-  claude-pro host uninstall  Not at logon any more
+  claude-pro host install    Start it at logon (Windows: a script in the Startup folder; macOS: a LaunchAgent;
+                             Linux: a desktop autostart entry, else a systemd user service). /login and
+                             claude-pro connect do this by themselves
+  claude-pro host install --at-boot
+                             Start it when the computer starts, before anyone logs in (Windows: a scheduled
+                             task, as administrator; Linux: lingering; macOS: not possible, at logon instead)
+  claude-pro host uninstall  Not by itself any more (sessions and /login do not set it up again)
 `;
 
 // `claude-pro host ...`: returns the exit code (`run` ends the process itself once the service has stopped).
@@ -1251,7 +1391,7 @@ export async function hostCommand(args = []) {
     case 'start': return startCommand();
     case 'stop': return stopCommand();
     case 'status': return statusCommand();
-    case 'install': return installCommand();
+    case 'install': return installCommand(rest);
     case 'uninstall': return uninstallCommand();
     case 'help': case '-h': case '--help': process.stdout.write(USAGE); return 0;
     default: process.stderr.write(`Unknown host command: ${sub}\n\n${USAGE}`); return 2;

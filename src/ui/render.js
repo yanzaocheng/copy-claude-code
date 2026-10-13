@@ -27,6 +27,16 @@ export function resultLines(lines) {
   return lines.map((l, i) => (i === 0 ? c.gray(RESULT_PREFIX) : RESULT_INDENT) + l);
 }
 
+// A message of bash mode (`!command`, see App.runBashMode) as it was shown when it ran: the command, then its output
+// (at most 40 lines, the middle left out). null for any other message.
+export function bashModeLines(text) {
+  const m = /^<bash-input>([\s\S]*?)<\/bash-input>\n?(?:<bash-stdout>([\s\S]*?)<\/bash-stdout>)?\n?(?:<bash-stderr>([\s\S]*?)<\/bash-stderr>)?/.exec(String(text ?? ''));
+  if (!m) return null;
+  let lines = [m[2], m[3]].filter((s) => s != null && s !== '').join('\n').split('\n');
+  if (lines.length > 40) lines = [...lines.slice(0, 20), c.dim(`… +${lines.length - 40} lines`), ...lines.slice(-20)];
+  return [c.magenta('! ') + m[1], ...resultLines(lines.map((l) => c.dim(l)))];
+}
+
 function numberWidth(hunks) {
   let max = 1;
   for (const h of hunks) for (const l of h.lines) max = Math.max(max, l.oldNo || 0, l.newNo || 0);

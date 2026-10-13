@@ -12,7 +12,7 @@ import { Editor, topBorder } from './editor.js';
 import { SelectDialog } from './dialogs.js';
 import { MarkdownStream, renderMarkdown } from './markdown.js';
 import {
-  DOT, toolHeader, renderToolResult, renderTodos, renderUserMessage, resultLines, formatTokens, formatDuration, toolLabel,
+  DOT, toolHeader, renderToolResult, renderTodos, renderUserMessage, resultLines, formatTokens, formatDuration, toolLabel, bashModeLines,
 } from './render.js';
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
@@ -34,7 +34,7 @@ import { copyUnique } from '../transfer.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
-import { ensureHost as startHostIfNeeded, hostEnabled, listDirectory, recentDirectories, computerId, markBackgroundEnded } from '../host.js';
+import { ensureHost as startHostIfNeeded, ensureAutostart, hostEnabled, listDirectory, recentDirectories, computerId, markBackgroundEnded } from '../host.js';
 import { VirtualTerminal } from './vterm.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
@@ -882,12 +882,17 @@ export class App {
   }
 
   // The computer service (see host.js): started in the background when none runs, so that the gateway's web page can
-  // open sessions on this computer even when no session is open. Not in the tests nor in the self-check.
-  ensureHost() {
+  // open sessions on this computer even when no session is open, and set up to start at logon (once; after /login,
+  // `login`, again unless `claude-pro host uninstall` said no). Not in the tests nor in the self-check.
+  ensureHost({ login = false } = {}) {
     const env = this.config.env;
     if (this.driven || this.selfCheck || process.env.NODE_TEST_CONTEXT || this.exiting) return;
     if (!onlineEnabled(env) || !hostEnabled(env) || !readGatewayLogin(this.config.gatewayUrl)) return;
     try { startHostIfNeeded(); } catch { /* the next session tries again */ }
+    try {
+      const auto = ensureAutostart({ force: login, env });
+      if (auto?.file && login) this.notice(`The computer service starts at logon from now on (${auto.file}; claude-pro host uninstall stops that).`);
+    } catch { /* not this time */ }
   }
 
   async connectRemote({ id }) {
@@ -2112,7 +2117,9 @@ export class App {
     for (const m of messages) {
       const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content;
       for (const b of blocks) {
-        if (m.role === 'user' && b.type === 'text' && !b.text.startsWith('<system-reminder>')) this.screen.log(renderUserMessage(b.text.slice(0, 2000), this.width));
+        const bash = m.role === 'user' && b.type === 'text' ? bashModeLines(b.text) : null;
+        if (bash) this.screen.log(bash, '');
+        else if (m.role === 'user' && b.type === 'text' && !b.text.startsWith('<system-reminder>')) this.screen.log(renderUserMessage(b.text.slice(0, 2000), this.width));
         if (m.role === 'assistant' && b.type === 'text') this.screen.log(renderMarkdown(b.text, { width: this.width - 1, firstPrefix: `${DOT} `, indent: '  ' }), '');
         if (m.role === 'assistant' && b.type === 'tool_use') {
           const tool = toolMap.get(b.name) || { name: b.name };

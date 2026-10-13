@@ -412,3 +412,72 @@ test('history: the conversations of this computer, newest first, searched, a pag
   assert.throws(() => service.history({ cwd: 'relative' }), /不是绝对路径/);
   assert.match((await service.update()).message, /源码目录|已是最新|已安装|正在安装/);
 });
+
+test('claude-pro connect: the pairing code gets this computer its key; the service is then set up to start at logon (once, unless declined)', async (t) => {
+  const { connectCommand, normalizePairingCode } = await import('../src/connect.js');
+  const { readGatewayLogin } = await import('../src/gateway.js');
+  const { settingsFiles } = await import('../src/config.js');
+  // where the start at logon goes, here: not this user's real Startup folder
+  const appdata = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-appdata-'));
+  const saved = process.env.APPDATA;
+  process.env.APPDATA = appdata;
+  t.after(() => { process.env.APPDATA = saved; });
+
+  assert.equal(normalizePairingCode(' k7qf-m2xd '), 'K7QFM2XD');
+  assert.equal(normalizePairingCode('K7QF M2XD'), 'K7QFM2XD');
+  assert.equal(normalizePairingCode('K7QF-M2X'), null);
+
+  const asked = [];
+  let answer = { status: 200, body: { apiKey: 'paired-key', computerId: host.computerId(), url: 'https://gw.example/', account: { name: 'Nick', email: 'n@example.com' } } };
+  const fetchImpl = async (url, init) => {
+    asked.push({ url, body: JSON.parse(init.body), auth: init.headers.authorization });
+    return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'content-type': 'application/json' } });
+  };
+  const lines = [];
+  const out = (s) => lines.push(s);
+  assert.equal(await connectCommand(['k7qf-m2xd', '--url', 'https://gw.example'], { fetchImpl, out, err: out, startService: false }), 0);
+  assert.equal(asked[0].url, 'https://gw.example/v1/remote/pair');
+  assert.equal(asked[0].auth, undefined, 'no authentication');
+  assert.deepEqual(Object.keys(asked[0].body).sort(), ['code', 'home', 'host', 'id', 'machine', 'platform', 'version']);
+  assert.deepEqual([asked[0].body.code, asked[0].body.id], ['K7QFM2XD', host.computerId()]);
+  assert.equal(readGatewayLogin('https://gw.example').apiKey, 'paired-key');
+  assert.equal(JSON.parse(fs.readFileSync(settingsFiles(os.homedir()).user, 'utf8')).env.CLAUDE_PRO_GATEWAY_URL, 'https://gw.example', 'another gateway than the default: kept for the sessions and the service');
+  assert.match(lines.join('\n'), /已连接到 Nick，可以在网页上使用这台电脑了/);
+  const [startup] = host.autostartFiles();
+  if (process.platform === 'win32') assert.ok(fs.existsSync(startup), 'set up to start at logon');
+  assert.equal(host.autostartKind(), process.platform === 'win32' ? 'logon' : host.autostartKind());
+
+  // what the gateway refuses is said as it says it
+  answer = { status: 400, body: { error: { message: '配对码无效或已过期' } } };
+  assert.equal(await connectCommand(['ABCD-2345'], { fetchImpl, out, err: out, startService: false }), 1);
+  assert.equal(lines.at(-1), '配对码无效或已过期');
+  answer = { status: 429, body: { error: { message: 'slow down' } } };
+  await connectCommand(['ABCD-2345'], { fetchImpl, out, err: out, startService: false });
+  assert.equal(lines.at(-1), '请求太频繁，请稍后再试（slow down）');
+  assert.equal(await connectCommand(['nope'], { fetchImpl, out, err: out }), 2);
+
+  // set up once: a session does not put it back after the user removed it by hand; `host uninstall` says no for good
+  if (process.platform === 'win32') {
+    fs.rmSync(startup);
+    assert.equal(host.ensureAutostart(), null);
+    assert.equal(fs.existsSync(startup), false);
+    assert.ok(host.ensureAutostart({ force: true }).file, '/login does');
+    const env = { ...process.env, APPDATA: appdata, CLAUDE_PRO_CONFIG_DIR: configDir };
+    delete env.NODE_TEST_CONTEXT;
+    const r = spawnSync(process.execPath, [BIN, 'host', 'uninstall'], { env, encoding: 'utf8' });
+    assert.match(r.stdout, /Removed/);
+    assert.equal(host.ensureAutostart({ force: true }), null, 'declined');
+    assert.equal(fs.existsSync(startup), false);
+  }
+});
+
+test('the start at boot: a scheduled task as this user, logged on or not; without administrator rights it says what to do', { skip: process.platform !== 'win32' && 'Windows' }, () => {
+  const xml = host.bootTaskXml({ user: 'PC\\nick', home: 'C:\\Users\\nick' });
+  assert.match(xml, /<BootTrigger><Enabled>true<\/Enabled><\/BootTrigger>/);
+  assert.match(xml, /<UserId>PC\\nick<\/UserId><LogonType>S4U<\/LogonType>/);
+  assert.match(xml, /<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/, 'not stopped after three days');
+  assert.match(xml, /host run --background/);
+  assert.match(xml, /set &quot;CLAUDE_PRO_CONFIG_DIR=/, 'its config directory, through cmd (a task cannot set variables)');
+  const admin = spawnSync('net', ['session'], { stdio: 'ignore', windowsHide: true }).status === 0;
+  if (!admin) assert.throws(() => host.installBootAutostart(), /administrator/);
+});

@@ -662,3 +662,16 @@ test('output: the whole result of a tool call, also one that was saved to a file
   const big = await command('output', { id: 'toolu_big' });
   assert.deepEqual([big.text.length, big.truncated], [1024 * 1024, true]);
 });
+
+test('a !command of bash mode reads on the page, after a resume, as it was shown when it ran', async () => {
+  const { transcriptItems } = await import('../src/remote.js');
+  const { stripAnsi } = await import('../src/ui/ansi.js');
+  const items = transcriptItems([
+    { role: 'user', content: [{ type: 'text', text: '<bash-input>echo hi</bash-input>\n<bash-stdout>hi\nthere</bash-stdout>\n<system-reminder>The user ran this command directly in bash mode.</system-reminder>' }] },
+    { role: 'user', content: 'a question' },
+  ]);
+  assert.deepEqual(items.map((i) => (i.k === 'output' ? { k: 'output', lines: i.lines.map(stripAnsi) } : i)), [
+    { k: 'output', lines: ['! echo hi', '  ⎿  hi', '     there', ''] },
+    { k: 'user', text: 'a question' },
+  ]);
+});

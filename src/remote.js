@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { stripAnsi } from './ui/ansi.js';
-import { toolHeader, renderToolResult } from './ui/render.js';
+import { toolHeader, renderToolResult, bashModeLines } from './ui/render.js';
 import { uploadFile, downloadFile } from './transfer.js';
 
 export const REMOTE_WIDTH = 100; // columns that tool headers and results are laid out for on the page
@@ -120,6 +120,8 @@ export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE
         if (b.type === 'text') {
           const raw = String(b.text || '');
           if (raw.startsWith('This session is being continued')) { items.push({ k: 'summary', text: raw }); continue; }
+          const bash = bashModeLines(raw); // `!command`: as it was shown when it ran
+          if (bash) { items.push({ k: 'output', lines: [...bash, ''] }); continue; }
           const text = raw.startsWith('<system-reminder>') ? '' : shownUserText(raw);
           if (text) items.push({ k: 'user', text });
         } else if (b.type === 'image') {
