@@ -97,7 +97,7 @@ sequenceDiagram
 - **协议**（Bearer = 网关 API key）：
   - `POST /v1/remote/sessions {id, name, title, cwd, host, machine, peerId, model, version}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url；`--remote-id` 给定时用它），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（`/status` 显示并做成二维码）。
   - `GET /v1/remote/sessions/:id/commands`（SSE）：连着就算在线。收到 `{type:'viewers',count}`（页面数，页脚显示）、`{type:'snapshot'}`（网关要完整快照）、`{cid,type:'send'|'interrupt'|'dialog'|'options'|'suggest'|'list',body}`（页面下发的命令，见下面"从页面下发"）。50 秒没有任何数据（网关每 15 秒 ping）视为断开；断开后 1s、2s、4s… 最长 30s 重连，404 表示网关忘了这个会话，先重新注册。
-  - `POST …/results {cid, ok, …|error}`：命令的结果，网关拿它回复页面的请求（返回 `{ok, delivered}`）。处理函数可以返回 promise（`options` 要等网关的模型列表），结果在它完成后再发；网关最多等 15 秒。`close()` 发完 bye 后还会等在路上的结果（最多 1.5 秒），因为页面发来的 `/cd` 会在结果发出前就让会话重启。
+  - `POST …/results {cid, ok, …|error}`：命令的结果，网关拿它回复页面的请求（返回 `{ok, delivered}`）。处理函数可以返回 promise（`options` 要等网关的模型列表），结果在它完成后再发；网关最多等 15 秒。`close()` 先让出当前调用（页面发来的 `/cd`、`/exit` 在命令处理函数里就关闭会话，它的结果要等处理函数返回才发出），再等在路上的结果发完（最多 1.5 秒），然后才断开命令流、发 bye：网关在命令流断开时会让还没结果的命令失败。
   - 网关的错误是 `{type:"error", error:{type, message}}`；注册时一个账户已有 20 个在线会话返回 429，id 被别的账户占用返回 409。
   - `POST …/events {messages:[…]}`：按顺序的 `{t:'snapshot',seq,items,status}`、`{t:'batch',events}`、`{t:'status',status}`、`{t:'bye',restarting}`。网关只存"最新快照 + 之后的事件 + 最新状态"并转发给页面，不需要理解内容。
 - **事件模型**：页面看到的是一串条目（`user`、`text`、`thinking`、`tool`、`output`、`summary`），由事件 `user/start/delta/stop/tool/progress/sub/done/output` 更新。归约函数 `applyEvent(state, ev)` 和 `hydrate(items)` 是自包含的，网关页面里有同一份拷贝（codex-gateway 的 `src/user-remote.js` 顶部，改事件语义时两边一起改）。页面渲染在网关那边，它的 CSP 不允许内联样式：ANSI 颜色等用 `data-*` 属性再由脚本设置。每个事件带递增 `seq`，快照带当时的 `seq`，页面丢弃不大于它的事件。

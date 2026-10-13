@@ -35,7 +35,7 @@ const { applyEvent, hydrate } = await import('../src/remote.js');
 
 // The fake gateway: the model API, and the remote control relay with a page that keeps the transcript.
 const KEY = 'gw-test-key';
-const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], files: new Map(), deleted: [], uploads: new Map(), puts: [], ranges: [], cutAt: null, cutGet: false };
+const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], files: new Map(), deleted: [], uploads: new Map(), puts: [], ranges: [], cutAt: null, cutGet: false, order: [] };
 const MB = 1024 * 1024;
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 const storeFile = (name, data) => {
@@ -136,11 +136,11 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
     res.write(`data: ${JSON.stringify({ type: 'viewers', count: 1 })}\n\n`);
     gw.stream = res;
-    req.on('close', () => { if (gw.stream === res) gw.stream = null; });
+    req.on('close', () => { gw.order.push('stream closed'); if (gw.stream === res) gw.stream = null; });
     return;
   }
   const body = await readBody(req);
-  if (m[2] === 'results') { gw.acks.push(body.cid); gw.pending.get(body.cid)?.(body); gw.pending.delete(body.cid); return json(res, 200, { ok: true }); }
+  if (m[2] === 'results') { gw.order.push(`result ${body.cid}`); gw.acks.push(body.cid); gw.pending.get(body.cid)?.(body); gw.pending.delete(body.cid); return json(res, 200, { ok: true }); }
   const page = gw.page;
   for (const msg of body.messages) {
     if (msg.t === 'snapshot') { page.state = hydrate(msg.items); page.seq = msg.seq; page.status = msg.status; page.snapshots++; }
@@ -529,7 +529,9 @@ test('/cd: the session goes on in another directory with the same conversation a
   assert.equal(fs.existsSync(restartFile), false);
 
   // from the page, as it does: the directory moves, the session restarts there
+  gw.order = [];
   assert.equal((await command('send', { text: `/cd ${to}` })).ok, true);
+  const cdCid = `c${gw.cid}`;
   await until('the restart', () => tui.app.exiting && fs.existsSync(restartFile));
   const state = JSON.parse(fs.readFileSync(restartFile, 'utf8'));
   fs.rmSync(restartFile);
@@ -538,6 +540,8 @@ test('/cd: the session goes on in another directory with the same conversation a
   assert.equal(fs.existsSync(oldFile), false, 'moved, not copied');
   assert.equal(JSON.parse(fs.readFileSync(state.sessionFile, 'utf8').split('\n')[0]).cwd, to);
   await until('the page told it restarts', () => gw.page.byes.at(-1)?.restarting === true);
+  await until('its command stream closed', () => gw.order.includes('stream closed'));
+  assert.ok(gw.order.indexOf(`result ${cdCid}`) < gw.order.indexOf('stream closed'), `the answer before the stream closes: ${gw.order}`);
 
   // the next process (main.js starts it in state.cwd)
   const next = await startTui({ cwd: to, flags: { restart: state } });
@@ -558,4 +562,26 @@ test('/cd: the session goes on in another directory with the same conversation a
   fs.rmSync(restartFile);
   assert.deepEqual([again.cwd, again.peerName, again.sessionFile], [from, 'keep-me', path.join(projectDir(from), `${state.sessionId}.jsonl`)]);
   assert.equal(again.restarts.length, 0, 'a /cd does not count as a restart that may be a loop');
+});
+
+test('a command that ends the session (a /cd or /exit from the page): its answer goes out before the command stream closes and the bye', async () => {
+  const { RemoteControl } = await import('../src/remote.js');
+  const order = [];
+  const fetchImpl = async (url, init) => {
+    order.push(`${init.method} ${new URL(url).pathname.split('/').pop()}`);
+    return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  let remote;
+  remote = new RemoteControl({
+    gateway: { url: 'http://gw.invalid', apiKey: 'k' },
+    id: 'ends-itself-1',
+    fetchImpl,
+    handlers: { send: () => { remote.close({ restarting: true }); return { queued: false }; }, seed: () => [] },
+  });
+  remote.registered = true;
+  remote.streamAbort = new AbortController();
+  remote.streamAbort.signal.addEventListener('abort', () => order.push('stream closed'));
+  remote.command({ cid: 'c1', type: 'send', body: { text: '/cd x' } });
+  await remote.close();
+  assert.deepEqual(order, ['POST results', 'stream closed', 'POST events']);
 });

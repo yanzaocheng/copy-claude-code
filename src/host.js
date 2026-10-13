@@ -38,7 +38,9 @@ const STREAM_SILENCE_MS = 50_000; // the gateway pings every 15 s
 const MAX_ENTRIES = 1000;
 const MAX_RECENT = 15;
 const LOG_BYTES = 1_000_000;
-const SESSION_ONLY = [ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED]; // a session's own: not for the service, nor the sessions it opens
+// A session's own (its supervisor's, and those of one command of its Bash tool, see utils/shell.js: `claude-pro host
+// start` may be run there): not for the service, nor for the sessions it opens.
+const SESSION_ONLY = [ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED, 'CLAUDE_PRO_CWD_FILE', 'CLAUDE_PRO_PID_FILE', 'CLAUDE_PRO_COMMAND'];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

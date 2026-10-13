@@ -268,6 +268,7 @@ test('paths, quoting and the environment passed on', () => {
   assert.deepEqual(passedEnv({
     CLAUDE_PRO_CONFIG_DIR: 'C:\\cfg', CLAUDE_PRO_GATEWAY_URL: 'http://gw', ANTHROPIC_MODEL: 'opus', ANTHROPIC_AUTH_TOKEN: 'secret',
     ANTHROPIC_API_KEY: 'secret', CLAUDE_PRO_SUPERVISED: '1', CLAUDE_PRO_RESTART_FILE: 'x', PATH: '/bin', CLAUDE_PRO_LAUNCH_ARGS: 'x',
+    CLAUDE_PRO_CWD_FILE: 'C:\\tmp\\cwd', CLAUDE_PRO_PID_FILE: 'C:\\tmp\\pid', CLAUDE_PRO_COMMAND: 'claude-pro host start',
   }), { CLAUDE_PRO_CONFIG_DIR: 'C:\\cfg', CLAUDE_PRO_GATEWAY_URL: 'http://gw', ANTHROPIC_MODEL: 'opus' });
 });
 

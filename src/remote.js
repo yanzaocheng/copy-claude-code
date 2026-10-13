@@ -337,7 +337,7 @@ export class RemoteControl {
     if (cmd.type === 'snapshot') { this.needSnapshot = true; this.scheduleFlush(0); return; }
     if (!cmd.cid) return;
     if (cmd.type === 'peer') { this.peerMessage(cmd); return; }
-    // also once closed: a /cd from the page restarts the session before its answer goes out (close() waits for it)
+    // close() waits for it: a /cd from the page restarts the session before its answer goes out
     const reply = (result) => {
       const sent = this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, result).catch(() => { /* the page times out */ });
       this.replying.add(sent);
@@ -541,8 +541,18 @@ export class RemoteControl {
 
   // Ends the connection; resolves once the gateway was told (or gave up waiting). `restarting`: the session comes
   // back at once with the same id, and the pages wait for it.
-  async close({ restarting = false } = {}) {
-    if (this.closed) return;
+  close({ restarting = false } = {}) {
+    this.closeDone ??= this.shutdown(restarting);
+    return this.closeDone;
+  }
+
+  async shutdown(restarting) {
+    // First the answers on their way, while the command stream is still open (the gateway fails what is still
+    // waiting once it closes). Among them the answer to the command that ends the session: a /cd or /exit from the
+    // page closes it from inside that command, and its answer is sent when the command returns, hence the wait for
+    // the current call to finish first.
+    await null;
+    if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
     this.closing = true; // what flush() collects now goes out with the last message, not on its own
     this.flush();
     this.closed = true;
@@ -552,7 +562,5 @@ export class RemoteControl {
     if (!this.registered) return;
     const messages = [...this.outbox.splice(0), { t: 'bye', restarting }];
     await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages }, { timeout: 1500 }).catch(() => {});
-    // answers on their way (the one to the command that ended the session among them)
-    if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
   }
 }
