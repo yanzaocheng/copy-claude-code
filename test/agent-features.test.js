@@ -129,6 +129,38 @@ test('verify loop gives up after the configured number of rounds', async () => {
   assert.ok(notices.some((t) => /still failing after 2/.test(t)));
 });
 
+test('a response with only thinking does not end the turn silently: the model is asked once for its reply', async () => {
+  const dir = tmp();
+  const cfg = makeConfig(dir);
+  const notices = [];
+  const agent = new Agent({ config: cfg, tools: [makeBashTool(cfg)], systemPrompt: 's', io: { notice: (t, kind) => notices.push([t, kind]) }, model: cfg.mainModel, cwd: dir });
+  const thinkingOnly = () => reply([{ type: 'thinking', thinking: '', signature: 'sig' }]);
+  let calls = 0;
+  agent.callModel = async () => {
+    calls++;
+    if (calls === 1) return toolUse('b1', 'Bash', { command: 'echo hi' });
+    if (calls === 2) return thinkingOnly();
+    assert.match(lastUser(agent).content[0].text, /<system-reminder>Your previous response ended your turn without any text/);
+    return reply([{ type: 'text', text: 'the answer' }]);
+  };
+  const r = await agent.run('go');
+  assert.equal(calls, 3);
+  assert.equal(r.text, 'the answer');
+  const roles = agent.messages.map((m) => `${m.role}:${m.content.map((b) => b.type).join(',')}`);
+  assert.deepEqual(roles.slice(-3), ['assistant:thinking', 'user:text', 'assistant:text'], 'the thinking-only message stays, so the cached prefix does');
+  assert.deepEqual(notices, [['The model ended its turn without a reply; asking it to go on…', undefined]]);
+
+  // Asked once only: a second silent response ends the turn, and the screen says so.
+  calls = 0;
+  notices.length = 0;
+  agent.callModel = async () => { calls++; return calls === 1 ? reply([]) : thinkingOnly(); };
+  const again = await agent.run('and now?');
+  assert.equal(calls, 2);
+  assert.equal(again.text, '');
+  assert.deepEqual(notices.map(([, kind]) => kind), [undefined, 'warn']);
+  assert.match(notices[1][0], /ended its turn without a reply\.$/);
+});
+
 test('background tasks: run independently, notify on completion, can be stopped', async () => {
   const tasks = new BackgroundTasks();
   const done = [];

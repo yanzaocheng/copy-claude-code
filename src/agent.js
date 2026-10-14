@@ -427,6 +427,7 @@ export class Agent {
     let verifyRounds = 0;
     let stopHookRounds = 0;
     let continuations = 0;
+    let silentEnds = 0;
     let compactedForError = false;
     let finalText = '';
     for (;;) {
@@ -456,12 +457,12 @@ export class Agent {
         throw err;
       }
       const { message, stopReason } = res;
+      const text = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
       if (!message.content.length) message.content.push({ type: 'text', text: '(no content)' });
       this.pushMessage(message);
       this.io.assistantMessage?.(message, this);
 
       const toolUses = message.content.filter((b) => b.type === 'tool_use');
-      const text = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
       if (text) finalText = text;
 
       if (!toolUses.length) {
@@ -474,6 +475,16 @@ export class Agent {
         const queued = [...toQueuedBlocks(this.io.takeQueued?.() || []), ...(this.isSubagent ? [] : this.drainNotifications())];
         if (queued.length) {
           this.pushMessage({ role: 'user', content: queued });
+          continue;
+        }
+        // A response with nothing but thinking (or nothing at all) ends the turn with no reply on the screen: the user
+        // cannot tell whether the work is done or stuck. The model is asked once, in a new user message (the
+        // continuation Anthropic recommends for empty end_turn responses; the thinking-only message stays, so the
+        // cached prefix does too, and the API takes it).
+        if (!text && stopReason !== 'refusal' && silentEnds < 1) {
+          silentEnds++;
+          this.io.notice?.('The model ended its turn without a reply; asking it to go on…');
+          this.pushMessage({ role: 'user', content: [{ type: 'text', text: '<system-reminder>Your previous response ended your turn without any text or tool call, so the user got no reply and cannot tell whether you are done. If the task is not finished, carry on with it; if it is, give the user your answer now.</system-reminder>' }] });
           continue;
         }
         const verify = this.config.verifyCommand;
@@ -499,6 +510,7 @@ export class Agent {
             continue;
           }
         }
+        if (!text) this.io.notice?.('The model ended its turn without a reply.', 'warn');
         return { text: finalText, interrupted: false };
       }
 
