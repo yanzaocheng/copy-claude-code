@@ -59,7 +59,9 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
-      promptCache = flags.systemPrompt || mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
+      promptCache = flags.systemPrompt !== undefined
+        ? flags.systemPrompt
+        : mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;
@@ -76,7 +78,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   // it was saved): the new code's prompt is wanted then, e.g. after a Restart for an edit to the prompt. The date in
   // it is brought up to date by a note to the model, which comes after everything that is cached.
   runtime.resumeSystemPrompt = (saved, code) => {
-    if (flags.systemPrompt || typeof saved !== 'string' || !saved.trim()) return false;
+    if (flags.systemPrompt !== undefined || flags.systemPromptFile !== undefined || typeof saved !== 'string' || !saved.trim()) return false;
     if (code !== PROMPT_CODE_VERSION) return false;
     // --append-system-prompt is the last thing in the prompt: one built with other text is not what this run asked for
     const extra = flags.appendSystemPrompt || '';

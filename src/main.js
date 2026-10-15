@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { VERSION, KNOWN_KEYS, loadConfig, settingsFiles, updateSettingsFile, applyRememberedChoices } from './config.js';
+import { resolvePath } from './utils/paths.js';
 import { SessionStore } from './session.js';
 import { takeRestartState } from './restart.js';
 
@@ -19,6 +20,7 @@ Options:
   --verify <command>               After the agent edits files, run this (e.g. "npm test") and send failures back to fix
   --append-system-prompt <text>    Append text to the system prompt
   --system-prompt <text>           Replace the system prompt
+  --system-prompt-file <file>      Replace the system prompt with the contents of a file
   --verbose                        Show thinking and full tool output
   --no-mcp                         Do not start MCP servers
   --name <name>                    Name this session, as /rename does (other sessions reach it with &name)
@@ -78,6 +80,7 @@ function parseArgs(argv) {
       case '--verify': flags.verify = next(); break;
       case '--append-system-prompt': flags.appendSystemPrompt = next(); break;
       case '--system-prompt': flags.systemPrompt = next(); break;
+      case '--system-prompt-file': flags.systemPromptFile = next(); break;
       case '--verbose': flags.verbose = true; break;
       case '--no-mcp': flags.noMcp = true; break;
       case '--remote-control': case '--rc': break; // online by default now
@@ -174,6 +177,20 @@ export async function main(argv) {
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }
   if (flags.help) { process.stdout.write(HELP); return 0; }
+
+  if (flags.systemPromptFile !== undefined) {
+    if (!flags.systemPromptFile || flags.systemPromptFile.startsWith('-')) {
+      process.stderr.write('--system-prompt-file requires a file path\n');
+      return 2;
+    }
+    const file = resolvePath(flags.systemPromptFile, cwd);
+    try {
+      flags.systemPrompt = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      process.stderr.write(`Cannot read system prompt file ${file}: ${e.message}\n`);
+      return 2;
+    }
+  }
 
   let prompt = positional.join(' ');
 

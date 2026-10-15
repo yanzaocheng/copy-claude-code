@@ -96,6 +96,19 @@ test('claude-pro -p runs the agent loop end to end: tool call, tool result, fina
   assert.ok(!toolResult.content.includes('node_modules'));
 });
 
+test('claude-pro -p --system-prompt-file sends the file contents as the system prompt', async (t) => {
+  const dir = project();
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-e2e-config-'));
+  const file = path.join(dir, 'system-prompt.txt');
+  fs.writeFileSync(file, 'Use this system prompt.\n请保持简洁。\n');
+  const api = await fakeApi([{ stopReason: 'end_turn', blocks: [{ type: 'text', text: 'ok' }] }]);
+  t.after(() => api.close());
+
+  const r = await runCli(['-p', '--system-prompt-file', file, 'hello'], { cwd: dir, env: baseEnv(api, configDir) });
+  assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+  assert.equal(api.requests[0].system[0].text, 'Use this system prompt.\n请保持简洁。\n');
+});
+
 // A server that answers every request with a 429 (the headers given), and counts the requests.
 async function limitedApi(t, headers) {
   const api = { requests: 0 };
