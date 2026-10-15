@@ -18,7 +18,7 @@ const { makeSkillTool } = await import('../src/tools/skill.js');
 const { HookRunner } = await import('../src/hooks.js');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cp-'));
-const makeConfig = (cwd, hooks = {}) => new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { mcpServers: {}, hooks }, cwd);
+const makeConfig = (cwd, hooks = {}) => new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { mcpServers: {}, hooks }, cwd);
 const reply = (content, stopReason = 'end_turn') => ({ message: { role: 'assistant', content }, stopReason });
 const toolUse = (id, name, input) => reply([{ type: 'tool_use', id, name, input }], 'tool_use');
 const read = (f) => fs.readFileSync(f, 'utf8');

@@ -8,8 +8,8 @@ import path from 'node:path';
 // made: what is tested is what the mention turns into, and what the agent is told it has read.
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-mention-config-'));
 Object.assign(process.env, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', ANTHROPIC_AUTH_TOKEN: 'test-token',
-  ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: 'http://127.0.0.1:9', CLAUDE_PRO_GATEWAY_API_KEY: 'test-token',
+  CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
 });
 const { startTui } = await import('./tui-harness.js');
 const { checkFreshness } = await import('../src/tools/files.js');

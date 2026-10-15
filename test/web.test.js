@@ -19,7 +19,7 @@ async function pageServer(t, handler) {
 }
 
 const raw = (tool, url) => tool.call({ url, raw: true }, {});
-const config = (env = {}) => new Config({ ANTHROPIC_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
+const config = (env = {}) => new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
 
 // Limits are shared by the whole module: every test that changes them puts them back.
 function limits(t, changes) {
@@ -167,7 +167,7 @@ test('WebFetch: when the summary request is rate limited it returns the page at 
   });
   await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
   t.after(() => { api.closeAllConnections?.(); api.close(); });
-  const cfg = config({ ANTHROPIC_BASE_URL: `http://127.0.0.1:${api.address().port}`, ANTHROPIC_AUTH_TOKEN: 'test', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_PROVIDER: 'api' });
+  const cfg = config({ CLAUDE_PRO_GATEWAY_URL: `http://127.0.0.1:${api.address().port}`, CLAUDE_PRO_GATEWAY_API_KEY: 'test', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_PROVIDER: 'gateway' });
   const tool = makeWebFetchTool(cfg);
   const started = Date.now();
   const r = await tool.call({ url: `${base}/summarise-me`, prompt: 'what does it say?' }, {});

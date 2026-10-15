@@ -243,7 +243,7 @@ test('a heavy PNG goes as JPEG: from Read, and once in a conversation that alrea
   assert.match(read.display.summary, /^Read image \(700×700, \d+KB\)$/);
 
   // a conversation from before: the heavy PNG in a tool result, a light one in a user message
-  const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
+  const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
   const replaced = [];
   const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: { messagesReplaced: (m) => replaced.push(m) }, model: cfg.mainModel, cwd: dir });
   const light = makePng(300, 200).toString('base64');

@@ -15,7 +15,6 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeTtl } from './cache.js';
-import { codexModels, codexConfigDefaults } from './codex/client.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A source checkout (a git clone, also when npm links to one), as opposed to a copy installed from npm: the agent
@@ -23,48 +22,30 @@ export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.u
 export const SOURCE_CHECKOUT = fs.existsSync(path.join(INSTALL_DIR, '.git'));
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
 export const APP_NAME = 'claude-pro';
-export const PROVIDERS = ['api', 'claude-code', 'gateway', 'codex'];
+export const PROVIDERS = ['gateway'];
 export const GATEWAY_DEFAULT_URL = 'https://gw.predix.icu';
-// The codex provider's model when neither CLAUDE_PRO_CODEX_MODEL nor the Codex config.toml names one.
-export const CODEX_DEFAULT_MODEL = 'gpt-6.1-sol';
 export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).version;
 
 // Every key we understand, with a short description (shown by /config).
 export const KNOWN_KEYS = {
-  CLAUDE_PRO_PROVIDER: 'Authentication backend: gateway (default; api when an API endpoint or key is configured), api, claude-code (local Claude subscription login), gateway (codex-gateway account, /login) or codex (local Codex/ChatGPT subscription login)',
-  CLAUDE_PRO_GATEWAY_URL: `codex-gateway address for the gateway provider (default https://gw.predix.icu)`,
+  CLAUDE_PRO_PROVIDER: 'Authentication backend: gateway only (codex-gateway account, /login)',
+  CLAUDE_PRO_GATEWAY_URL: `codex-gateway address (default https://gw.predix.icu)`,
+  CLAUDE_PRO_GATEWAY_API_KEY: 'Gateway API key (normally saved by /login in gateway.json)',
   CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
-  CLAUDE_PRO_CODEX_MODEL: 'Model with the codex provider (default: the model in ~/.codex/config.toml, else gpt-6.1-sol)',
-  CLAUDE_PRO_CLAUDE_CONFIG_FILE: 'Claude subscription: the account metadata file of the claude command (default: ~/.claude.json)',
-  CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE: 'Claude subscription: the credentials file of the claude command (default: ~/.claude/.credentials.json)',
-  CLAUDE_PRO_CLAUDE_CODE_VERSION: 'Claude subscription: the claude command version sent in the User-Agent (default: the installed one)',
-  CLAUDE_PRO_DISABLE_TOKEN_REFRESH: 'Set to 1 to stop this program renewing the Claude subscription login by itself (it then only reads what the official client keeps up to date)',
   CLAUDE_PRO_ONLINE: 'Internal (the self-check and the tests set it): 0 keeps interactive sessions off the gateway. Otherwise a session is online there whenever this computer is logged in to the gateway: its 远程控制 page shows it, and sessions on your other computers can send it tasks (&computer/name)',
   CLAUDE_PRO_HOST: 'Set to 0 so that sessions do not start the computer service (claude-pro host) by themselves; the service lets the gateway\'s 远程控制 page open new sessions on this computer',
   CLAUDE_PRO_DOWNLOAD_DIR: 'Where files that other sessions send this one are saved (default: the Downloads folder)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
   CLAUDE_PRO_TUI: 'fullscreen (default: the input box fixed at the bottom, the conversation scrolled inside) or default (classic: it scrolls in the terminal); /tui switches',
   CLAUDE_PRO_AUTO_RESTART: 'Restart by itself when a turn ends and claude-pro\'s own source files changed (default 1; 0 = only on /restart or the Restart tool)',
-  CLAUDE_PRO_CLAUDE_CODE_MODEL: 'Model with the Claude subscription (default: sonnet; independent of API model settings)',
-  CLAUDE_CONFIG_DIR: 'Configuration directory of the claude command, for selecting its signed-in account (Claude subscription)',
-  ANTHROPIC_BASE_URL: 'API base URL (Anthropic compatible endpoint)',
-  ANTHROPIC_AUTH_TOKEN: 'Bearer token sent as Authorization header',
-  ANTHROPIC_API_KEY: 'API key sent as x-api-key header (used if no auth token)',
-  ANTHROPIC_CUSTOM_HEADERS: 'Extra headers, "Name: Value" separated by newlines',
-  ANTHROPIC_MODEL: 'Main model (name or alias opus/sonnet/haiku; suffix [1m] = 1M context)',
-  ANTHROPIC_DEFAULT_OPUS_MODEL: 'Model used for the "opus" alias',
-  ANTHROPIC_DEFAULT_SONNET_MODEL: 'Model used for the "sonnet" alias',
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'Small/fast model (web page summarising, titles)',
-  ANTHROPIC_SMALL_FAST_MODEL: 'Deprecated alias of ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  CLAUDE_CODE_SUBAGENT_MODEL: 'Model used by Task sub-agents (API providers; default: the main model)',
-  CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL: 'Model used by Task sub-agents with the claude-code provider (default: sonnet)',
+
   CLAUDE_CODE_EFFORT_LEVEL: 'Reasoning effort: none|minimal|low|medium|high|xhigh|max (sent as output_config.effort)',
   CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'Context size (tokens) used for auto-compaction calculations',
   CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: 'Percentage (1-100) of the window at which auto-compaction triggers',
   DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
-  CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 128000, 48000 with the gateway; lowered automatically if the API allows less)',
+  CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 48000; lowered automatically if the gateway allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
-  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the subscription login and with the gateway, else 5m; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
+  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the gateway; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
   ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
   FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
@@ -89,7 +70,7 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the small model for the current topic after each message (the tab title then shows the first message of the session)',
 };
 
-const SECRET_KEYS = new Set(['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS']);
+const SECRET_KEYS = new Set(['CLAUDE_PRO_GATEWAY_API_KEY']);
 
 export function parseDotEnv(text) {
   const env = {};
@@ -129,15 +110,7 @@ export function settingsFiles(cwd) {
   };
 }
 
-// What the install's .env holds is, by its own template, the API provider's setup: an endpoint, its token and
-// models, and how hard and how long that model works. The subscription provider (claude-code) does not take that
-// tuning over: it starts from Claude Code's own defaults (the model's default effort, the model's whole context
-// window), which is what makes it work without any setting. The same keys in a settings file, in the shell, as a
-// flag, or chosen with /effort do apply there.
-export const API_ONLY_DOTENV_KEYS = ['CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS'];
-
-// The variable that holds the model, per provider.
-const MODEL_KEYS = { api: 'ANTHROPIC_MODEL', 'claude-code': 'CLAUDE_PRO_CLAUDE_CODE_MODEL', gateway: 'CLAUDE_PRO_GATEWAY_MODEL', codex: 'CLAUDE_PRO_CODEX_MODEL' };
+const MODEL_KEYS = { gateway: 'CLAUDE_PRO_GATEWAY_MODEL' };
 
 export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.join(INSTALL_DIR, '.env') } = {}) {
   const env = {};
@@ -167,7 +140,7 @@ export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.
     for (const [event, entries] of Object.entries(json.hooks || {})) {
       if (Array.isArray(entries)) (settings.hooks[event] ||= []).push(...entries);
     }
-    if (json.model) { env.ANTHROPIC_MODEL = json.model; sources.ANTHROPIC_MODEL = `${file} (model)`; }
+    if (json.model) { env.CLAUDE_PRO_GATEWAY_MODEL = json.model; sources.CLAUDE_PRO_GATEWAY_MODEL = `${file} (model)`; }
     settings[scope] = json;
   }
   // Project level .mcp.json, same format as Claude Code.
@@ -180,24 +153,13 @@ export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.
 
   if (flags.provider) { env.CLAUDE_PRO_PROVIDER = flags.provider; sources.CLAUDE_PRO_PROVIDER = '--provider flag'; }
   if (flags.model) {
-    const key = MODEL_KEYS[(env.CLAUDE_PRO_PROVIDER || '').trim().toLowerCase()] || 'ANTHROPIC_MODEL';
+    const key = MODEL_KEYS[(env.CLAUDE_PRO_PROVIDER || 'gateway').trim().toLowerCase()] || 'CLAUDE_PRO_GATEWAY_MODEL';
     env[key] = flags.model;
     sources[key] = '--model flag';
   }
   if (flags.effort) { env.CLAUDE_CODE_EFFORT_LEVEL = flags.effort; sources.CLAUDE_CODE_EFFORT_LEVEL = '--effort flag'; }
 
-  const ignoredFromDotEnv = [];
-  if (!['', 'api'].includes((env.CLAUDE_PRO_PROVIDER || '').trim().toLowerCase())) {
-    for (const key of API_ONLY_DOTENV_KEYS) {
-      if (sources[key] !== dotEnvFile) continue;
-      delete env[key];
-      delete sources[key];
-      ignoredFromDotEnv.push(key);
-    }
-  }
-  const config = new Config(env, sources, settings, cwd);
-  config.ignoredFromDotEnv = ignoredFromDotEnv; // shown by /config
-  return config;
+  return new Config(env, sources, settings, cwd);
 }
 
 const int = (v, d) => {
@@ -217,64 +179,19 @@ export class Config {
     this.effortBoost = null; // set by the model with the Effort tool, for the rest of the user's current request
     this.effortBoostKeepNext = false; // a restart continues the request: the next turn keeps the boost
     this.verifyOverride = null; // set by /verify or --verify during a session
-    this.ignoredFromDotEnv = []; // .env keys that are not applied because of the provider (see API_ONLY_DOTENV_KEYS)
   }
 
-  // Not set: an API endpoint, key or model that is configured (.env, settings) means the api provider, as before;
-  // otherwise the gateway, where /login gets an account in the browser.
   get provider() {
-    const configuredApi = this.env.ANTHROPIC_AUTH_TOKEN || this.env.ANTHROPIC_API_KEY || this.env.ANTHROPIC_BASE_URL || this.env.ANTHROPIC_MODEL;
-    const value = (this.env.CLAUDE_PRO_PROVIDER || (configuredApi ? 'api' : 'gateway')).trim().toLowerCase();
-    if (!PROVIDERS.includes(value)) throw new Error(`Unknown CLAUDE_PRO_PROVIDER: ${value}. Use ${PROVIDERS.join(', ')}.`);
-    return value;
+    const value = (this.env.CLAUDE_PRO_PROVIDER || 'gateway').trim().toLowerCase();
+    if (value !== 'gateway') throw new Error(`Only the gateway provider is supported. Set CLAUDE_PRO_PROVIDER=gateway (received ${value}).`);
+    return 'gateway';
   }
-  get usesClaudeCode() { return this.provider === 'claude-code'; }
-  get usesGateway() { return this.provider === 'gateway'; }
-  get usesCodex() { return this.provider === 'codex'; }
+  get usesGateway() { return true; }
   get gatewayUrl() { return (this.env.CLAUDE_PRO_GATEWAY_URL || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, ''); }
-  // Claude's own model names and context windows apply: the subscription login, or the gateway (which serves
-  // Claude through a subscription login too).
-  get claudeIds() { return this.usesClaudeCode || this.usesGateway; }
-  get claudeCodeConfigFile() { return path.resolve(this.cwd, this.env.CLAUDE_PRO_CLAUDE_CONFIG_FILE || path.join(os.homedir(), '.claude.json')); }
-  get claudeCodeCredentialsFile() {
-    return path.resolve(this.cwd, this.env.CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE || path.join(
-      this.env.CLAUDE_CONFIG_DIR || path.join(path.dirname(this.claudeCodeConfigFile), '.claude'), '.credentials.json'));
-  }
-  get endpointLabel() {
-    if (this.usesClaudeCode) return 'https://api.anthropic.com (Claude subscription)';
-    if (this.usesGateway) return `${this.gatewayUrl} (codex-gateway)`;
-    if (this.usesCodex) return 'https://chatgpt.com/backend-api/codex (Codex login)';
-    return this.baseURL;
-  }
-  get baseURL() { return this.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'; }
-  get authToken() { return this.env.ANTHROPIC_AUTH_TOKEN || null; }
-  get apiKey() { return this.env.ANTHROPIC_API_KEY || null; }
-  get customHeaders() {
-    const headers = {};
-    for (const line of (this.env.ANTHROPIC_CUSTOM_HEADERS || '').split(/\n/)) {
-      const i = line.indexOf(':');
-      if (i > 0) headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-    }
-    return headers;
-  }
+  get endpointLabel() { return `${this.gatewayUrl} (codex-gateway)`; }
 
   aliasTarget(alias) {
-    if (this.usesClaudeCode) {
-      return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
-    }
-    // The gateway prices models by their undated names.
-    if (this.usesGateway) return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
-    if (this.usesCodex) {
-      // No Claude here: the big aliases mean the Codex model, haiku the small one when the Codex install has it.
-      if (alias === 'haiku') return codexModels(this.env).models.some((m) => m.slug === 'gpt-6-luna') ? 'gpt-6-luna' : this.codexModelSpec;
-      return alias === 'opus' || alias === 'sonnet' ? this.codexModelSpec : null;
-    }
-    switch (alias) {
-      case 'opus': return this.env.ANTHROPIC_DEFAULT_OPUS_MODEL || 'claude-opus-4-5';
-      case 'sonnet': return this.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-5';
-      case 'haiku': return this.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || this.env.ANTHROPIC_SMALL_FAST_MODEL || 'claude-haiku-4-5';
-      default: return null;
-    }
+    return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
   }
 
   // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}.
@@ -287,36 +204,18 @@ export class Config {
       const inner = this.resolveModel(aliased);
       return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
-    const nativeOneM = this.claudeIds && /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
-    // OpenAI models (the codex provider, gpt-6.1-sol on the gateway): the window the Codex install reports,
-    // else the 272K of the current GPT models.
-    if (/^gpt-/i.test(name)) {
-      const known = codexModels(this.env).models.find((m) => m.slug === name)?.contextWindow;
-      return { id: name, contextWindow: known || 272_000, label: name };
-    }
+    const nativeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
+    // GPT models are served by the gateway's Codex backend and use its standard context window.
+    if (/^gpt-/i.test(name)) return { id: name, contextWindow: 272_000, label: name };
     return { id: name, contextWindow: oneM || nativeOneM ? 1_000_000 : 200_000, label: `${name}${oneM ? '[1m]' : ''}` };
   }
 
-  // The model the active provider is configured with, before any /model override.
-  get configuredModelSpec() {
-    if (this.usesGateway) return this.env.CLAUDE_PRO_GATEWAY_MODEL || 'opus';
-    if (this.usesCodex) return this.codexModelSpec;
-    return (this.usesClaudeCode ? this.env.CLAUDE_PRO_CLAUDE_CODE_MODEL : this.env.ANTHROPIC_MODEL) || 'sonnet';
-  }
-  get codexModelSpec() { return this.env.CLAUDE_PRO_CODEX_MODEL || codexConfigDefaults(this.env).model || CODEX_DEFAULT_MODEL; }
+  // The model the gateway is configured with, before any /model override.
+  get configuredModelSpec() { return this.env.CLAUDE_PRO_GATEWAY_MODEL || 'opus'; }
   get mainModelSpec() { return this.modelOverride || this.configuredModelSpec; }
   get mainModel() { return this.resolveModel(this.mainModelSpec); }
-  get subagentModel() {
-    // With the subscription login sub-agents run on Sonnet: much cheaper than Opus, and good at the searching and
-    // well-specified subtasks they are given. CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL (or a sub-agent's own model) changes it.
-    if (this.usesClaudeCode) return this.resolveModel(this.env.CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL || 'sonnet');
-    // The gateway: no fixed sub-agent model. Under a Claude main model the main agent picks one for each Task by how
-    // hard the task is (see subagentModelChosen and the Task tool's description); this is what an agent runs on when
-    // it was not given one: the main model. A GPT main model keeps its own.
-    if (this.usesGateway) return this.mainModel;
-    if (this.usesCodex) return this.mainModel;
-    return this.env.CLAUDE_CODE_SUBAGENT_MODEL ? this.resolveModel(this.env.CLAUDE_CODE_SUBAGENT_MODEL) : this.mainModel;
-  }
+  // The gateway lets the main agent choose Claude sub-agent models by task difficulty.
+  get subagentModel() { return this.mainModel; }
   // The main agent chooses each sub-agent's model (haiku, sonnet, opus) by the task, rather than one being set.
   get subagentModelChosen() { return this.usesGateway && /^claude-/i.test(this.mainModel.id); }
   get smallModel() { return this.resolveModel('haiku'); }
@@ -331,15 +230,14 @@ export class Config {
   // The gateway holds back balance for max_tokens of output before each request, so a smaller default there keeps a
   // modest balance usable. 48K: in 812 Opus requests through it (2026-10-12) p99 was 14K, three went over 24K (the
   // longest that finished: 27K) and one was cut off at the old 32K; the hold is $0.96 on Opus instead of $0.64.
-  get maxOutputTokens() { return int(this.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, this.usesGateway ? 48_000 : 128_000); }
+  get maxOutputTokens() { return int(this.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, 48_000); }
   get thinkingBudget() {
     return this.env.MAX_THINKING_TOKENS === undefined ? null : int(this.env.MAX_THINKING_TOKENS, null);
   }
   // Prompt cache TTL for a request bucket, by Claude Code's rules: "main" is the conversation itself, "other"
   // is everything else (sub-agents, compaction, side queries). In order: FORCE_PROMPT_CACHING_5M; the bucket's
-  // own variable or setting; ENABLE_PROMPT_CACHING_1H; then the default: with the subscription login the
-  // conversation's own requests use 1 hour, which is what Claude Code asks for there (within the plan's
-  // usage); with an API key or another endpoint, and for everything else, 5 minutes.
+  // own variable or setting; ENABLE_PROMPT_CACHING_1H; then the gateway default: the conversation's own
+  // requests use 1 hour and everything else uses 5 minutes.
   cacheTtl(bucket = 'main') {
     if (isOn(this.env.FORCE_PROMPT_CACHING_5M)) return '5m';
     // an invalid value is ignored, and the next rule applies (as in Claude Code)
@@ -350,7 +248,7 @@ export class Config {
     if (isOn(this.env.ENABLE_PROMPT_CACHING_1H)) return '1h';
     // The gateway too: measured on its usage records (533 Opus requests), pauses of 5 to 60 minutes rewrote the whole
     // conversation 9 times at 1.25x, $14.77; writing every turn at 2x instead costs $2.80 more.
-    return bucket === 'main' && (this.usesClaudeCode || this.usesGateway) ? '1h' : '5m';
+    return bucket === 'main' && this.usesGateway ? '1h' : '5m';
   }
   // DISABLE_PROMPT_CACHING turns it off for everything; the per-model variables only for the model that
   // their alias resolves to (a different version pinned as the model keeps its caching), wherever it runs.
@@ -394,11 +292,9 @@ export class Config {
   get bashMaxOutput() { return int(this.env.BASH_MAX_OUTPUT_LENGTH, 60_000); }
   // Tool results longer than this are saved to a file and only a preview is sent.
   get maxToolResultChars() { return 100_000; }
-  // Clearing old tool results after a long pause (see Agent.clearAfterIdle): on where the cache is Anthropic's,
-  // which has expired by then. Another endpoint may keep its cache for hours, and clearing would make it miss.
-  get clearAfterIdle() {
-    return this.usesClaudeCode || this.usesGateway || /^https:\/\/api\.anthropic\.com\/?$/i.test(this.baseURL);
-  }
+  // Clearing old tool results after a long pause (see Agent.clearAfterIdle): the gateway prompt cache has
+  // expired by then, so retaining old tool payloads would only make the next request larger.
+  get clearAfterIdle() { return true; }
   // How deep sub-agents may nest: the main agent is depth 0; an agent below this depth gets the Task tool.
   get maxSubagentDepth() { return 2; }
 

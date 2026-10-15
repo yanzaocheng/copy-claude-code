@@ -163,8 +163,8 @@ const command = (type, body = {}) => new Promise((resolve, reject) => {
 
 fs.writeFileSync(path.join(configDir, 'gateway.json'), JSON.stringify({ url: base, apiKey: KEY, account: { email: 'me@example.com' } }));
 Object.assign(process.env, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: base, CLAUDE_PRO_GATEWAY_URL: base,
-  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '1', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: base,
+  CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '1', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
   CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: 'auto', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '0',
   CLAUDE_PRO_ONLINE: '1', // a session the tests drive goes online (when logged in) only with this
 });

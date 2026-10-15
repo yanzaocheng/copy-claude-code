@@ -16,11 +16,11 @@ import { makeWebFetchTool } from '../src/tools/web.js';
 import { buildTools, toolsForSubagent } from '../src/tools/index.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-limits-'));
-const makeConfig = (env = {}) => new Config({ ANTHROPIC_MODEL: 'mock', ...env }, {}, { mcpServers: {}, hooks: {} }, process.cwd());
+const makeConfig = (env = {}) => new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock', ...env }, {}, { mcpServers: {}, hooks: {} }, process.cwd());
 
 test('defaults are generous', () => {
   const cfg = makeConfig();
-  assert.equal(cfg.maxOutputTokens, 128_000);
+  assert.equal(cfg.maxOutputTokens, 48_000);
   assert.equal(cfg.bashDefaultTimeout, 600_000);
   assert.equal(cfg.bashMaxTimeout, 3_600_000);
   assert.equal(cfg.bashMaxOutput, 60_000);
@@ -28,9 +28,9 @@ test('defaults are generous', () => {
   assert.equal(cfg.maxSubagentDepth, 2);
   assert.equal(makeConfig({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192' }).maxOutputTokens, 8192, 'still configurable');
   // A big max_tokens must not eat the context window: the compaction reserve is capped at 64k.
-  assert.equal(cfg.autoCompactThreshold(cfg.resolveModel('x[1m]')), 1_000_000 - 64_000);
+  assert.equal(cfg.autoCompactThreshold(cfg.resolveModel('x[1m]')), 1_000_000 - 48_000);
   const params = buildParams(cfg, { model: cfg.mainModel, system: 's', messages: [] });
-  assert.equal(params.max_tokens, 128_000);
+  assert.equal(params.max_tokens, 48_000);
 });
 
 test('parseMaxTokensLimit understands the usual "max_tokens too large" errors', () => {

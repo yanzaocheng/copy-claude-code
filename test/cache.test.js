@@ -22,7 +22,6 @@ try { execFileSync('git', ['--version'], { stdio: 'pipe' }); } catch { hasGit = 
 
 const { Config, loadConfig, KNOWN_KEYS } = await import('../src/config.js');
 const { buildParams, streamMessage, quickQuery, cacheRefusals } = await import('../src/api.js');
-const { CLAUDE_CODE_SYSTEM } = await import('../src/claude-code.js');
 const { CacheStats, cacheControl, cachePlanOf, fingerprint, normalizeTtl } = await import('../src/cache.js');
 const { Agent, CLEARED, clearOldToolResults } = await import('../src/agent.js');
 const { resolvePath } = await import('../src/utils/paths.js');
@@ -34,7 +33,7 @@ const { PROMPT_CODE_VERSION: CODE, mainSystemPrompt } = await import('../src/pro
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cache-'));
 let port = 20_000; // every test talks to an "endpoint" of its own: what an endpoint refuses is remembered per endpoint
-const makeConfig = (env = {}) => new Config({ ANTHROPIC_BASE_URL: `http://127.0.0.1:${port++}`, ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
+const makeConfig = (env = {}) => new Config({ CLAUDE_PRO_GATEWAY_URL: `http://127.0.0.1:${port++}`, CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
 const tool = (name) => ({ name, description: `the ${name} tool`, input_schema: { type: 'object', properties: {} } });
 const tools = [tool('Alpha'), tool('Beta'), tool('Gamma')];
 
@@ -78,27 +77,21 @@ const request = (cfg, extra = {}) => ({ model: cfg.mainModel, system: 'SYS', mes
 
 // ---------------------------------------------------------------------------------------------- TTL and switches
 
-test('cache TTL follows Claude Code: FORCE 5m, the bucket\'s own value, ENABLE 1h, then 5 minutes', () => {
+test('gateway cache TTL follows overrides and keeps the conversation at one hour by default', () => {
   const ttl = (env, bucket) => makeConfig(env).cacheTtl(bucket);
-  assert.equal(ttl({}, 'main'), '5m');
+  assert.equal(ttl({}, 'main'), '1h');
   assert.equal(ttl({}, 'other'), '5m');
-  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, 'main'), '1h');
-  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }, 'other'), '5m', 'the two buckets are separate');
+  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }, 'main'), '5m');
   assert.equal(ttl({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1H' }, 'other'), '1h');
-  assert.equal(ttl({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'main'), '5m');
-  assert.equal(ttl({ ENABLE_PROMPT_CACHING_1H: '1' }, 'main'), '1h');
   assert.equal(ttl({ ENABLE_PROMPT_CACHING_1H: '1' }, 'other'), '1h');
-  assert.equal(ttl({ ENABLE_PROMPT_CACHING_1H: '1', CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }, 'main'), '5m', 'a bucket\'s own value wins over ENABLE');
-  assert.equal(ttl({ ENABLE_PROMPT_CACHING_1H: '1', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '5m' }, 'other'), '5m');
-  assert.equal(ttl({ FORCE_PROMPT_CACHING_5M: '1', ENABLE_PROMPT_CACHING_1H: '1', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'main'), '5m', 'FORCE wins over everything');
-  assert.equal(ttl({ FORCE_PROMPT_CACHING_5M: '1', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'other'), '5m');
-  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '30m' }, 'main'), '5m', 'any other value is ignored');
-  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '30m', ENABLE_PROMPT_CACHING_1H: 'true' }, 'main'), '1h', '... and then the next rule applies');
+  assert.equal(ttl({ FORCE_PROMPT_CACHING_5M: '1', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }, 'main'), '5m', 'FORCE wins over everything');
+  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '30m' }, 'main'), '1h', 'any other value is ignored');
+  assert.equal(ttl({ CLAUDE_CODE_PROMPT_CACHE_TTL: '30m', ENABLE_PROMPT_CACHING_1H: 'true' }, 'main'), '1h');
   assert.equal(normalizeTtl(' 1H '), '1h');
   assert.equal(normalizeTtl('2h'), null);
   assert.equal(normalizeTtl(undefined), null);
   for (const key of ['CLAUDE_CODE_PROMPT_CACHE_TTL', 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', 'ENABLE_PROMPT_CACHING_1H', 'FORCE_PROMPT_CACHING_5M', 'DISABLE_PROMPT_CACHING', 'DISABLE_PROMPT_CACHING_HAIKU', 'DISABLE_PROMPT_CACHING_SONNET', 'DISABLE_PROMPT_CACHING_OPUS', 'DISABLE_PROMPT_CACHING_FABLE']) {
-    assert.ok(key in KNOWN_KEYS, `${key} is a known key (so it is read from the shell environment and shown by /config)`);
+    assert.ok(key in KNOWN_KEYS, `${key} is a known key`);
   }
 });
 
@@ -127,8 +120,8 @@ test('the TTL settings promptCacheTtl and subagentPromptCacheTtl rank below the 
     fs.writeFileSync(user, JSON.stringify({ env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' } }));
     fs.writeFileSync(project, JSON.stringify({ promptCacheTtl: 'soon' }));
     assert.equal(load().cacheTtl('main'), '1h');
-    // ... and an invalid setting falls through to the next rule: here the default of the subscription login, 1 hour
-    const sub = () => loadConfig({ cwd, dotEnvFile: noDotEnv, flags: { provider: 'claude-code' } });
+    // ... and an invalid setting falls through to the gateway default, 1 hour
+    const sub = () => loadConfig({ cwd, dotEnvFile: noDotEnv, flags: { provider: 'gateway' } });
     fs.writeFileSync(user, JSON.stringify({ promptCacheTtl: true }));
     fs.writeFileSync(project, JSON.stringify({}));
     assert.equal(sub().cacheTtl('main'), '1h');
@@ -139,59 +132,27 @@ test('the TTL settings promptCacheTtl and subagentPromptCacheTtl rank below the 
   }
 });
 
-test('out of the box: the subscription login caches the conversation for an hour, as Claude Code does; the API provider for 5 minutes', () => {
-  const sub = (env = {}) => makeConfig({ CLAUDE_PRO_PROVIDER: 'claude-code', ...env });
-  assert.equal(sub().cacheTtl('main'), '1h');
-  assert.equal(sub().cacheTtl('other'), '5m', 'sub-agents, compaction and side queries stay at 5 minutes');
-  assert.equal(makeConfig().cacheTtl('main'), '5m', 'an API key or another endpoint: 5 minutes');
-  const gw = (env = {}) => makeConfig({ CLAUDE_PRO_PROVIDER: 'gateway', ...env });
-  assert.deepEqual([gw().cacheTtl('main'), gw().cacheTtl('other'), gw({ FORCE_PROMPT_CACHING_5M: '1' }).cacheTtl('main')], ['1h', '5m', '5m'], 'the gateway as the subscription');
-  assert.equal(sub({ FORCE_PROMPT_CACHING_5M: '1' }).cacheTtl('main'), '5m', 'FORCE still wins');
-  assert.equal(sub({ CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' }).cacheTtl('main'), '5m', 'so does the conversation\'s own setting');
-  assert.equal(sub({ CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h' }).cacheTtl('other'), '1h');
-  const cfg = sub();
-  const params = buildParams(cfg, request(cfg), { accessToken: 'x', userId: '{}', version: '2.1.289' });
-  assert.deepEqual(params.system[1].cache_control, { type: 'ephemeral', ttl: '1h' });
-  assert.deepEqual(buildParams(cfg, request(cfg, { cacheBucket: 'other' }), { accessToken: 'x', userId: '{}', version: '2.1.289' }).system[1].cache_control, { type: 'ephemeral' });
+test('gateway cache markers use the one-hour conversation TTL and five-minute side-query TTL', () => {
+  const cfg = makeConfig();
+  assert.equal(cfg.cacheTtl('main'), '1h');
+  assert.equal(cfg.cacheTtl('other'), '5m');
+  const main = buildParams(cfg, request(cfg));
+  assert.deepEqual(main.system[0].cache_control, { type: 'ephemeral', ttl: '1h' });
+  const other = buildParams(cfg, request(cfg, { cacheBucket: 'other' }));
+  assert.deepEqual(other.system[0].cache_control, { type: 'ephemeral' });
 });
 
-test('out of the box: the API provider\'s tuning in .env is not carried into the subscription provider', (t) => {
-  // the shell this runs in may set some of these itself (MAX_THINKING_TOKENS is not unusual)
-  const keys = ['CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS'];
-  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-  for (const k of keys) delete process.env[k];
-  t.after(() => { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+test('gateway tuning in .env is applied directly', () => {
   const dir = tmp();
   const dotEnv = path.join(dir, '.env');
-  fs.writeFileSync(dotEnv, ['CLAUDE_CODE_EFFORT_LEVEL=max', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000', 'MAX_THINKING_TOKENS=0', 'BASH_DEFAULT_TIMEOUT_MS=1000', 'ANTHROPIC_MODEL=deepseek-flash[1m]'].join('\n'));
-  const cwd = tmp();
-  // the API provider keeps all of it
-  const api = loadConfig({ cwd, dotEnvFile: dotEnv });
-  assert.equal(api.effort, 'max');
-  assert.equal(api.compactWindow(), 786_432);
-  assert.deepEqual(api.ignoredFromDotEnv, []);
-  // the subscription provider starts from Claude Code's defaults
-  const sub = loadConfig({ cwd, dotEnvFile: dotEnv, flags: { provider: 'claude-code' } });
-  assert.equal(sub.effort, null, 'no effort is sent: the model\'s own default applies');
-  assert.equal(sub.compactWindow(), 1_000_000, 'the model\'s whole window (sonnet 5.5 has 1M)');
-  assert.equal(sub.maxOutputTokens, 128_000);
-  assert.equal(sub.thinkingBudget, null);
-  assert.deepEqual(sub.ignoredFromDotEnv, ['CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS']);
-  assert.equal(sub.bashDefaultTimeout, 1000, 'settings that are not about the model are not touched');
-  assert.equal(sub.sources.CLAUDE_CODE_EFFORT_LEVEL, undefined);
-  // the provider may itself come from .env
-  fs.appendFileSync(dotEnv, '\nCLAUDE_PRO_PROVIDER=claude-code\n');
-  assert.equal(loadConfig({ cwd, dotEnvFile: dotEnv }).effort, null);
-  // the same keys from anywhere else do apply: a settings file, a flag, the shell
-  fs.mkdirSync(path.join(cwd, '.claude-pro'));
-  fs.writeFileSync(path.join(cwd, '.claude-pro', 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_EFFORT_LEVEL: 'high', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '250000' } }));
-  const mine = loadConfig({ cwd, dotEnvFile: dotEnv });
-  assert.equal(mine.effort, 'high');
-  assert.equal(mine.compactWindow(), 250_000);
-  assert.ok(!mine.ignoredFromDotEnv.includes('CLAUDE_CODE_EFFORT_LEVEL'), 'a value that was overridden is not reported as ignored');
-  assert.equal(loadConfig({ cwd: tmp(), dotEnvFile: dotEnv, flags: { effort: 'low' } }).effort, 'low');
-  process.env.CLAUDE_CODE_EFFORT_LEVEL = 'medium';
-  assert.equal(loadConfig({ cwd: tmp(), dotEnvFile: dotEnv }).effort, 'medium');
+  fs.writeFileSync(dotEnv, ['CLAUDE_CODE_EFFORT_LEVEL=max', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000', 'MAX_THINKING_TOKENS=0', 'BASH_DEFAULT_TIMEOUT_MS=1000', 'CLAUDE_PRO_GATEWAY_MODEL=claude-sonnet-5-5'].join('\n'));
+  const cfg = loadConfig({ cwd: tmp(), dotEnvFile: dotEnv });
+  assert.equal(cfg.provider, 'gateway');
+  assert.equal(cfg.effort, 'max');
+  assert.equal(cfg.compactWindow(), 786_432);
+  assert.equal(cfg.maxOutputTokens, 32_000);
+  assert.equal(cfg.thinkingBudget, 0);
+  assert.equal(cfg.bashDefaultTimeout, 1000);
 });
 
 test('DISABLE_PROMPT_CACHING turns it off everywhere; the per-model variables only for the model their alias is', () => {
@@ -199,27 +160,25 @@ test('DISABLE_PROMPT_CACHING turns it off everywhere; the per-model variables on
   assert.equal(off({}, 'mock'), false);
   assert.equal(off({ DISABLE_PROMPT_CACHING: '1' }, 'mock'), true);
   assert.equal(off({ DISABLE_PROMPT_CACHING: '0' }, 'mock'), false);
-  const env = { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small-one', ANTHROPIC_DEFAULT_SONNET_MODEL: 'mid-one', ANTHROPIC_DEFAULT_OPUS_MODEL: 'big-one' };
-  assert.equal(off({ ...env, DISABLE_PROMPT_CACHING_HAIKU: '1' }, 'small-one'), true);
-  assert.equal(off({ ...env, DISABLE_PROMPT_CACHING_HAIKU: '1' }, 'mid-one'), false);
-  assert.equal(off({ ...env, DISABLE_PROMPT_CACHING_SONNET: '1' }, 'mid-one'), true);
-  assert.equal(off({ ...env, DISABLE_PROMPT_CACHING_OPUS: '1' }, 'big-one'), true);
-  assert.equal(off({ ...env, DISABLE_PROMPT_CACHING_OPUS: '1' }, 'big-two'), false, 'another version pinned as the model keeps caching');
+  assert.equal(off({ DISABLE_PROMPT_CACHING_HAIKU: '1' }, 'claude-haiku-5-5'), true);
+  assert.equal(off({ DISABLE_PROMPT_CACHING_HAIKU: '1' }, 'claude-sonnet-5-5'), false);
+  assert.equal(off({ DISABLE_PROMPT_CACHING_SONNET: '1' }, 'claude-sonnet-5-5'), true);
+  assert.equal(off({ DISABLE_PROMPT_CACHING_OPUS: '1' }, 'claude-opus-5-5'), true);
+  assert.equal(off({ DISABLE_PROMPT_CACHING_OPUS: '1' }, 'claude-opus-4-5'), false, 'another version pinned as the model keeps caching');
   assert.equal(off({ DISABLE_PROMPT_CACHING_FABLE: '1' }, 'claude-fable-5-1'), true);
   assert.equal(off({ DISABLE_PROMPT_CACHING_FABLE: '1' }, 'claude-opus-5-5'), false);
-  assert.equal(off({ ANTHROPIC_SMALL_FAST_MODEL: 'old-small', DISABLE_PROMPT_CACHING_HAIKU: '1' }, 'old-small'), true, 'the deprecated small model variable still names the haiku model');
 });
 
 // ---------------------------------------------------------------------------------------------- the request
 
-test('a request marks the last tool, the system prompt and the newest message; a 5-minute TTL sends no ttl field', () => {
+test('a gateway request marks the last tool, system prompt and newest message with the one-hour TTL', () => {
   const cfg = makeConfig();
   const params = buildParams(cfg, request(cfg));
-  assert.deepEqual(params.system, [{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral' } }]);
-  assert.deepEqual(params.tools.map((t) => t.cache_control), [undefined, undefined, { type: 'ephemeral' }]);
-  assert.deepEqual(params.messages[0].content, [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }]);
-  assert.deepEqual(cachePlanOf(params), { caching: true, ttl: '5m' });
-  assert.equal(JSON.stringify(params).includes('"ttl"'), false);
+  assert.deepEqual(params.system, [{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral', ttl: '1h' } }]);
+  assert.deepEqual(params.tools.map((t) => t.cache_control), [undefined, undefined, { type: 'ephemeral', ttl: '1h' }]);
+  assert.deepEqual(params.messages[0].content, [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral', ttl: '1h' } }]);
+  assert.deepEqual(cachePlanOf(params), { caching: true, ttl: '1h' });
+  assert.equal(JSON.stringify(params).includes('"ttl":"1h"'), true);
 });
 
 test('the conversation\'s requests use the "main" TTL and the others the "other" one', () => {
@@ -249,9 +208,9 @@ test('with caching disabled no marker is sent at all, and the request is otherwi
   assert.deepEqual(strip({ ...a, messages: null }), strip({ ...b, messages: null }), 'only the markers differ');
   assert.deepEqual(b.messages, [{ role: 'user', content: 'hi' }], 'the messages are sent as they are');
   // a model that is switched off alone
-  const haiku = makeConfig({ DISABLE_PROMPT_CACHING_HAIKU: '1', ANTHROPIC_MODEL: 'haiku' });
+  const haiku = makeConfig({ DISABLE_PROMPT_CACHING_HAIKU: '1', CLAUDE_PRO_GATEWAY_MODEL: 'haiku' });
   assert.equal(JSON.stringify(buildParams(haiku, request(haiku))).includes('cache_control'), false);
-  const sonnet = makeConfig({ DISABLE_PROMPT_CACHING_HAIKU: '1', ANTHROPIC_MODEL: 'sonnet' });
+  const sonnet = makeConfig({ DISABLE_PROMPT_CACHING_HAIKU: '1', CLAUDE_PRO_GATEWAY_MODEL: 'sonnet' });
   assert.equal(JSON.stringify(buildParams(sonnet, request(sonnet))).includes('cache_control'), true);
 });
 
@@ -262,13 +221,13 @@ test('a message list that ends with an assistant message, or is empty, gets no m
   assert.deepEqual(buildParams(cfg, request(cfg, { messages: [] })).messages, []);
 });
 
-test('with the subscription login the Claude Code system line goes first and is never marked', () => {
-  const cfg = makeConfig({ CLAUDE_PRO_PROVIDER: 'claude-code', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' });
-  const login = { accessToken: 'x', userId: '{}', version: '2.1.289' };
-  const params = buildParams(cfg, request(cfg), login);
-  assert.equal(params.system[0].text, CLAUDE_CODE_SYSTEM);
-  assert.equal(params.system[0].cache_control, undefined);
-  assert.deepEqual(params.system[1].cache_control, { type: 'ephemeral', ttl: '1h' });
+test('gateway requests keep the custom system prompt as the only system block', () => {
+  const cfg = makeConfig({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' });
+  const params = buildParams(cfg, request(cfg));
+  assert.equal(params.system.length, 1);
+  assert.equal(params.system[0].text, 'SYS');
+  assert.deepEqual(params.system[0].cache_control, { type: 'ephemeral', ttl: '1h' });
+  assert.equal(params.metadata, undefined);
 });
 
 // ---------------------------------------------------------------------------------------------- endpoints that refuse it
@@ -285,8 +244,8 @@ test('an endpoint that refuses cache_control on the system prompt: the request g
   assert.equal(res.message.content[0].text, 'fine');
   assert.equal(bodies.length, 2);
   assert.equal(bodies[1].system[0].cache_control, undefined, 'taken off where it was refused');
-  assert.deepEqual(bodies[1].tools.at(-1).cache_control, { type: 'ephemeral' }, 'and left where it was not');
-  assert.deepEqual(bodies[1].messages[0].content[0].cache_control, { type: 'ephemeral' });
+  assert.deepEqual(bodies[1].tools.at(-1).cache_control, { type: 'ephemeral', ttl: '1h' }, 'and left where it was not');
+  assert.deepEqual(bodies[1].messages[0].content[0].cache_control, { type: 'ephemeral', ttl: '1h' });
   assert.deepEqual(res.cache.caching, true, 'the reply says it was still cached');
   await streamMessage(cfg, request(cfg));
   assert.equal(bodies.length, 3, 'the next request is made once, without asking again');
@@ -363,7 +322,7 @@ test('an error that merely mentions cache_control does not switch caching off fo
   mockFetch(t, async () => { ttlCalls++; return rejected('ttl value is not valid for this request'); });
   const plain = makeConfig();
   await assert.rejects(() => streamMessage(plain, request(plain)), /ttl/);
-  assert.ok(ttlCalls <= 4, `gave up after ${ttlCalls} requests`);
+  assert.ok(ttlCalls <= 5, `gave up after ${ttlCalls} requests`);
   // other 400s reach the caller as they are
   mockFetch(t, async () => rejected('messages: roles must alternate'));
   const other = makeConfig();
@@ -496,7 +455,8 @@ test('the summary request is the conversation\'s own request with the instructio
   const [turn, compaction] = bodies;
   assert.equal(compaction.system[0].text, 'MAIN SYSTEM', 'the same system prompt');
   assert.deepEqual(compaction.tools.map((t) => t.name), turn.tools.map((t) => t.name));
-  assert.deepEqual(JSON.stringify(compaction.tools), JSON.stringify(turn.tools), 'the same tools, marker included');
+  assert.deepEqual(strip(compaction.tools), strip(turn.tools), 'the same tools apart from the bucket-specific marker TTL');
+  assert.deepEqual(compaction.tools.at(-1).cache_control, { type: 'ephemeral' });
   assert.deepEqual(compaction.output_config, { effort: 'high' }, 'the same effort');
   assert.deepEqual(compaction.output_config, turn.output_config);
   assert.equal(compaction.model, turn.model);
@@ -626,9 +586,9 @@ test('a compaction after the cache ran out sends the history as plain input: no 
   resumed.messages = [{ role: 'user', content: 'hello' }];
   assert.equal(resumed.cacheExpired(), false, 'not knowing counts as warm');
   resumed.lastActivityAt = Date.now() - 60_000;
-  assert.equal(resumed.cacheExpired(), false, 'a minute ago, with the 5-minute TTL');
+  assert.equal(resumed.cacheExpired(), false, 'a minute ago, with the one-hour TTL');
   resumed.lastActivityAt = Date.now() - 10 * 60_000;
-  assert.equal(resumed.cacheExpired(), true, 'ten minutes ago');
+  assert.equal(resumed.cacheExpired(), false, 'ten minutes ago is still within the gateway TTL');
   const hour = makeAgent(makeConfig({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }));
   hour.lastActivityAt = Date.now() - 10 * 60_000;
   assert.equal(hour.cacheExpired(), false, 'the conversation\'s own TTL counts');
@@ -750,7 +710,7 @@ test('the session file keeps the system prompt; the newest wins, and the same on
 });
 
 async function runtimeIn(cwd, env = {}, flags = {}) {
-  Object.assign(process.env, { CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_RIPGREP_PATH: 'off', ...env });
+  Object.assign(process.env, { CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_RIPGREP_PATH: 'off', ...env });
   const runtime = await createRuntime({ cwd, flags: { noMcp: true, ...flags }, io: {} });
   return runtime;
 }
@@ -1067,12 +1027,10 @@ test('clearing after a pause: not before 65 minutes, not for a sub-agent, not af
   assert.ok(adaptive.messages.every((m) => !Array.isArray(m.content) || m.content.every((b) => b.type !== 'thinking')));
   assert.equal(interrupted(idleClearing(makeConfig({ MAX_THINKING_TOKENS: '8000' }))).clearAfterIdle(), null, 'manual thinking: that message has to start with its thinking');
   assert.equal(idleAgent(on).clearAfterIdle()?.results, 3);
-  // out of the box: on for the subscription login and Anthropic's own endpoint; off for the others
   const configWith = (env) => new Config(env, {}, { hooks: {}, mcpServers: {} }, process.cwd());
-  assert.equal(configWith({ CLAUDE_PRO_PROVIDER: 'claude-code' }).clearAfterIdle, true);
+  assert.equal(configWith({ CLAUDE_PRO_PROVIDER: 'gateway' }).clearAfterIdle, true);
   assert.equal(configWith({}).clearAfterIdle, true);
-  assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com/' }).clearAfterIdle, true);
-  assert.equal(configWith({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' }).clearAfterIdle, false);
+  assert.equal(configWith({ CLAUDE_PRO_GATEWAY_URL: 'https://api.deepseek.com/anthropic' }).clearAfterIdle, true);
 });
 
 test('a resumed conversation knows when it last changed, so a pause before it counts', () => {

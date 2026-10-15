@@ -1,7 +1,7 @@
 // The codex-gateway provider: model requests go to a shared gateway (https://gw.predix.icu by default) with an
-// API key of the user's gateway account, which pays for them from its balance. /login gets that key the way
-// Claude Code logs in: a local callback server, the gateway's login page in the browser, and a one-time code
-// exchanged for a key of this machine's own (see handleCli in codex-gateway's server.mjs).
+// API key of the user's gateway account, which pays for them from its balance. /login starts a local callback
+// server, opens the gateway login page in the browser, and exchanges a one-time code for a key belonging to this machine
+// (see handleCli in codex-gateway's server.mjs).
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -26,6 +26,12 @@ export function readGatewayLogin(url) {
   } catch {
     return null;
   }
+}
+
+// A key supplied for a headless run is equivalent to a saved login for model and remote requests.
+// It has no account metadata, so the UI uses a neutral account label.
+export function gatewayLogin(url, apiKey = process.env.CLAUDE_PRO_GATEWAY_API_KEY) {
+  return readGatewayLogin(url) || (apiKey ? { url: normalizeGatewayUrl(url), apiKey, account: {} } : null);
 }
 
 export function saveGatewayLogin(login) {

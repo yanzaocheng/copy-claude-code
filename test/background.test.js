@@ -124,8 +124,8 @@ const toSession = (id, type, body) => send(gw.streams.get(id), type, body);
 const sessionEnv = { ...process.env };
 for (const k of ['NODE_TEST_CONTEXT', 'CLAUDE_PRO_SUPERVISED', 'CLAUDE_PRO_RESTART_FILE', 'CLAUDE_PRO_RESTARTED']) delete sessionEnv[k];
 Object.assign(sessionEnv, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_GATEWAY_URL: base, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: base,
-  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_AUTO_UPDATE: '0', CLAUDE_PRO_HOST: '0',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_GATEWAY_URL: base, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: base,
+  CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_AUTO_UPDATE: '0', CLAUDE_PRO_HOST: '0',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_DISABLE_TOPIC_TITLE: '1', CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: 'auto',
   CLAUDE_PRO_MACHINE_NAME: 'bg-test-pc',
 });

@@ -27,7 +27,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { CONFIG_DIR, INSTALL_DIR, VERSION, GATEWAY_DEFAULT_URL, loadConfig } from './config.js';
-import { readGatewayLogin, normalizeGatewayUrl } from './gateway.js';
+import { gatewayLogin, normalizeGatewayUrl } from './gateway.js';
 import { machineName, cleanName, listPeers } from './peers.js';
 import { BackgroundSessions, markEnded, tailFile } from './background.js';
 import { listConversations, deleteConversation, CONVERSATION_ID } from './history.js';
@@ -411,7 +411,7 @@ const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 // The settings of this service's environment that a session it opens needs too (the config directory, the
 // gateway's address, the computer's name ...): Windows Terminal starts the program with its own environment, and
 // tmux and a desktop's terminal with theirs. Not the secrets: those stay where they were set.
-const PASS_ENV = /^(CLAUDE_PRO_|ANTHROPIC_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR$)/;
+const PASS_ENV = /^(CLAUDE_PRO_|CLAUDE_CODE_)/;
 const SECRET = /TOKEN|KEY|SECRET|PASSWORD|HEADERS/i;
 export function passedEnv(env = process.env) {
   const out = {};
@@ -527,7 +527,10 @@ export class HostService {
     this.launch = launch;
     this.home = home;
     this.loadConfig = load || (() => loadConfig({ cwd: home }));
-    this.readLogin = readLogin || (() => readGatewayLogin(this.cfg().gatewayUrl));
+    this.readLogin = readLogin || (() => {
+      const cfg = this.cfg();
+      return gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+    });
     this.config = null;
     this.configAt = 0;
     this.login = null; // {url, apiKey, account} of gateway.json
@@ -1119,7 +1122,7 @@ export async function runHost({ background = false } = {}) {
 
 async function gatewayRequest(method, route) {
   const cfg = loadConfig({ cwd: os.homedir() });
-  const login = readGatewayLogin(cfg.gatewayUrl);
+  const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
   if (!login) return false;
   const res = await fetch(`${normalizeGatewayUrl(login.url || cfg.gatewayUrl)}${route}`, { method, headers: { authorization: `Bearer ${login.apiKey}` }, signal: AbortSignal.timeout(8000) });
   return res.ok || res.status === 404;
@@ -1138,7 +1141,7 @@ async function startCommand() {
     const now = readHostState();
     if (hostRunning(now)) {
       const cfg = loadConfig({ cwd: os.homedir() });
-      const login = readGatewayLogin(cfg.gatewayUrl);
+      const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
       console.log(`claude-pro host started in the background (pid ${now.pid}). Log: ${hostFiles().log}`);
       if (!login) console.log(`This computer is not logged in to the gateway ${cfg.gatewayUrl}: it waits until /login in a session.`);
       return 0;

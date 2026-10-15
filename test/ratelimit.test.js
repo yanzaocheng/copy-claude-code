@@ -7,12 +7,9 @@ import { Config } from '../src/config.js';
 import { streamMessage, quickQuery } from '../src/api.js';
 import { Agent } from '../src/agent.js';
 import { GlobTool } from '../src/tools/search.js';
-import { endpoint } from '../src/oauth.js';
 import {
   parseRateLimit, planRetry, humanDuration, formatClock, describePause, shouldAnnounce, sleepUntil, timing, resumeText,
 } from '../src/ratelimit.js';
-
-endpoint.url = 'http://127.0.0.1:9/never-reached'; // no test may reach the real token endpoint
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -104,23 +101,13 @@ test('humanDuration and formatClock', () => {
   assert.equal(formatClock(new Date(2026, 9, 9, 21, 5).getTime(), now), 'Oct 9 21:05');
 });
 
-test('describePause says when it resumes, and warns when the login will not last that long', () => {
+test('describePause says when a gateway limit will resume', () => {
   const now = new Date(2026, 9, 4, 20, 10).getTime();
   const ev = { label: '5-hour limit', resumeAt: now + 3 * HOUR + 12 * MIN, polling: false };
   const text = describePause(ev, now);
   assert.match(text, /^5-hour limit reached\. Pausing until 23:22 \(in 3h 12m\), then continuing automatically\.$/);
-  const warned = describePause({ ...ev, loginExpiresAt: now + HOUR }, now);
-  assert.match(warned, /The Claude subscription login expires at 21:10, before that/);
-  assert.doesNotMatch(describePause({ ...ev, loginExpiresAt: now + 8 * HOUR }, now), /login/);
   const polling = describePause({ label: 'rate limit', resumeAt: now + 5 * MIN, polling: true }, now);
   assert.match(polling, /^Rate limit reached and the server gave no reset time\. Checking again at 20:15 \(in 5m 0s\)/);
-  // the limit is over, the login is not: say what to do and until when it keeps looking
-  const login = describePause({ label: 'login', waitingForLogin: true, polling: true, resumeAt: now + 15_000, giveUpAt: now + 50 * MIN }, now);
-  assert.equal(login, 'The limit has reset, but the Claude subscription login has expired and cannot be renewed from here. Waiting for it to be renewed: run claude once, and this continues by itself. Giving up at 21:00.');
-  // a renewal that was tried and failed says why
-  const failed = describePause({ label: 'login', waitingForLogin: true, polling: true, resumeAt: now + 15_000, giveUpAt: now + 50 * MIN, renewError: 'The Claude subscription login can no longer be renewed (invalid_grant). Sign in again: run `claude` and use /login.' }, now);
-  assert.equal(failed, 'The limit has reset, but the login could not be renewed: The Claude subscription login can no longer be renewed (invalid_grant). Sign in again: run `claude` and use /login. Trying again every 5 minutes, and this continues by itself as soon as the login is valid. Giving up at 21:00.');
-  assert.match(warned, /run claude once after the reset: this continues by itself once the login is valid again/);
 });
 
 test('shouldAnnounce: the first wait is announced, waits that only continue it are not', () => {
@@ -136,10 +123,6 @@ test('shouldAnnounce: the first wait is announced, waits that only continue it a
   // ... but one that moved by more than two minutes (the server announced another window) is news
   assert.equal(shouldAnnounce({ resumeAt: at }, { resumeAt: at + 3 * MIN, polling: false }), true);
   assert.equal(shouldAnnounce({ resumeAt: at }, { resumeAt: at - 3 * MIN, polling: false }), true);
-  // waiting for the login to be renewed is another kind of wait: told once when it begins, not at every check
-  assert.equal(shouldAnnounce({ resumeAt: at }, { resumeAt: at + 15_000, polling: true, waitingForLogin: true }), true);
-  assert.equal(shouldAnnounce({ resumeAt: at, waitingForLogin: true }, { resumeAt: at + 15_000, polling: true, waitingForLogin: true }), false);
-  assert.equal(shouldAnnounce({ resumeAt: at, waitingForLogin: true }, { resumeAt: at + 4 * HOUR, polling: false }), true, 'back to waiting for a limit');
 });
 
 // ---------------------------------------------------------------- the decision
@@ -325,7 +308,7 @@ test('sleepUntil can be cancelled, before and during the sleep', async () => {
 // ---------------------------------------------------------------- through streamMessage
 
 const configWith = (env = {}) => new Config({
-  ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', ...env,
+  CLAUDE_PRO_GATEWAY_URL: 'http://127.0.0.1:9', CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', ...env,
 }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
 const request = (config) => ({ model: config.mainModel, system: 's', messages: [{ role: 'user', content: 'hi' }] });
 
@@ -588,224 +571,4 @@ test('Esc during an automatic compaction pause ends the turn as an interrupt, no
   assert.equal(result.interrupted, true);
   assert.equal(JSON.stringify(agent.messages.at(-1)).includes('[Request interrupted by user]'), true, 'the model is told the turn was interrupted');
   assert.equal(agent.messages.length, 4, 'the conversation is untouched: earlier pair, the prompt, the interrupt marker');
-});
-
-// ---------------------------------------------------------------- the subscription login
-
-function oauthFixture(t, env = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-ratelimit-'));
-  const configFile = path.join(dir, '.claude.json');
-  const credentialsFile = path.join(dir, '.credentials.json');
-  const expiresAt = Date.now() + 8 * HOUR;
-  fs.writeFileSync(configFile, JSON.stringify({ userID: 'test-device', oauthAccount: { accountUuid: 'test-account' } }));
-  const writeToken = (token, expires) => fs.writeFileSync(credentialsFile, JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt: expires, scopes: ['user:inference'] } }));
-  writeToken('test-oauth-token', expiresAt);
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const config = new Config({
-    CLAUDE_PRO_PROVIDER: 'claude-code', CLAUDE_PRO_CLAUDE_CONFIG_FILE: configFile, CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE: credentialsFile,
-    CLAUDE_PRO_CLAUDE_CODE_VERSION: '2.1.289', CLAUDE_PRO_MAX_RETRIES: '3', ...env,
-  }, {}, { hooks: {}, mcpServers: {} }, dir);
-  return { config, expiresAt, writeToken };
-}
-
-test('after the pause the login is read again, so a token refreshed in the meantime is used', async (t) => {
-  const { config, expiresAt, writeToken } = oauthFixture(t);
-  let rotated = false;
-  const clock = fakeClock(t, { onSleep: () => { if (!rotated) { rotated = true; writeToken('refreshed-token', Date.now() + 8 * HOUR); } } });
-  const seen = [];
-  mockFetch(t, async (url, options) => {
-    seen.push(new Headers(options.headers).get('authorization'));
-    return seen.length === 1 ? limited(unified(clock.now + 2 * HOUR)) : okResponse('back');
-  });
-  const events = [];
-  const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
-  assert.equal(res.message.content[0].text, 'back');
-  assert.deepEqual(seen, ['Bearer test-oauth-token', 'Bearer refreshed-token']);
-  assert.equal(events.find((ev) => ev.type === 'rate_limit_wait').loginExpiresAt, expiresAt, 'the event carries the login expiry so it can be shown');
-});
-
-test('a login that expired during the pause and never comes back is reported clearly instead of failing with a 401', async (t) => {
-  const { config, writeToken } = oauthFixture(t);
-  let expired = false;
-  const clock = fakeClock(t, { onSleep: () => { if (!expired) { expired = true; writeToken('test-oauth-token', Date.now() - 1000); } } });
-  let calls = 0;
-  mockFetch(t, async () => { calls++; return limited(unified(clock.now + 2 * HOUR)); });
-  await assert.rejects(() => streamMessage(config, request(config)), /access token has expired/);
-  assert.equal(calls, 1, 'no request is sent with an expired token');
-});
-
-test('a login that expired during the pause is waited for, and the request goes on once it is renewed', async (t) => {
-  const { config, writeToken } = oauthFixture(t);
-  let step = 0;
-  const clock = fakeClock(t, {
-    onSleep: () => {
-      // what the local Claude Code does meanwhile, by the (virtual) time since the request was first sent
-      const at = clock.now - started;
-      if (step === 0 && at >= HOUR) { step = 1; writeToken('test-oauth-token', Date.now() - 1000); } // the token runs out during the pause
-      else if (step === 1 && at >= 2 * HOUR + 5 * MIN) { step = 2; fs.writeFileSync(config.claudeCodeCredentialsFile, '{"claudeAiOauth": {"accessTo'); } // it is being rewritten right now
-      else if (step === 2 && at >= 2 * HOUR + 6 * MIN) { step = 3; writeToken('renewed-token', Date.now() + 8 * HOUR); } // and then it is there
-    },
-  });
-  const started = clock.now;
-  const seen = [];
-  mockFetch(t, async (url, options) => {
-    seen.push(new Headers(options.headers).get('authorization'));
-    return seen.length === 1 ? limited(unified(started + 2 * HOUR)) : okResponse('back');
-  });
-  const events = [];
-  const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
-
-  assert.equal(res.message.content[0].text, 'back');
-  assert.deepEqual(seen, ['Bearer test-oauth-token', 'Bearer renewed-token'], 'the renewed token is the one that is used');
-  // the pause as the interface sees it: the wait for the limit, the waits for the login, one "continuing"
-  const pause = events.map((ev) => (ev.type === 'rate_limit_wait' ? (ev.waitingForLogin ? 'login' : 'limit') : ev.type)).filter((kind) => kind === 'limit' || kind === 'login' || kind === 'rate_limit_resume');
-  assert.equal(pause[0], 'limit');
-  assert.equal(pause.at(-1), 'rate_limit_resume');
-  assert.deepEqual([...new Set(pause.slice(1, -1))], ['login'], 'nothing but waits for the login in between');
-  assert.equal(pause.filter((kind) => kind === 'rate_limit_resume').length, 1, 'one "continuing" for the whole pause');
-  const logins = events.filter((ev) => ev.waitingForLogin);
-  assert.ok(logins.length >= 18 && logins.length <= 30, `about 6 minutes of 15 second checks, got ${logins.length}`);
-  assert.equal(logins[0].polling, true);
-  assert.match(logins[0].error.message, /access token has expired/);
-  assert.ok(logins.some((ev) => /Invalid JSON/.test(ev.error.message)), 'a file that is being rewritten is waited out like an expired token');
-  assert.ok(logins[0].giveUpAt > logins[0].resumeAt, 'the event says when it would give up');
-  assert.equal(logins[0].resumeAt - logins[0].giveUpAt < 0, true);
-});
-
-test('waiting for the login is limited by what is left of the waiting budget, and the error says how long it was waited', async (t) => {
-  // budget: the 2 hour pause plus 10 minutes
-  const { config, writeToken } = oauthFixture(t, { CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: String(2 * HOUR + 10 * MIN) });
-  let expired = false;
-  const clock = fakeClock(t, { onSleep: () => { if (!expired) { expired = true; writeToken('test-oauth-token', Date.now() - 1000); } } });
-  const started = clock.now;
-  let calls = 0;
-  mockFetch(t, async () => { calls++; return limited(unified(started + 2 * HOUR)); });
-  await assert.rejects(() => streamMessage(config, request(config)), (err) => {
-    assert.match(err.message, /access token has expired/);
-    assert.match(err.message, /Waited 9m \d+s for it after the limit reset\./);
-    return true;
-  });
-  assert.equal(calls, 1);
-  assert.ok(clock.now - started <= 2 * HOUR + 10 * MIN + 20_000, `it waited ${(clock.now - started) / MIN} minutes in all, beyond its budget`);
-});
-
-// What the login looks like when this program can renew it itself: a refresh token is stored with it.
-function renewableFixture(t, env = {}) {
-  const fx = oauthFixture(t, env);
-  endpoint.url = 'http://token.test/v1/oauth/token';
-  t.after(() => { endpoint.url = 'http://127.0.0.1:9/never-reached'; });
-  const write = (access, expires, refresh = 'refresh-1') => fs.writeFileSync(fx.config.claudeCodeCredentialsFile, JSON.stringify({ claudeAiOauth: { accessToken: access, refreshToken: refresh, expiresAt: expires, scopes: ['user:inference'] } }, null, 2) + '\n');
-  write('test-oauth-token', Date.now() + 8 * HOUR);
-  return { ...fx, write };
-}
-
-// Routes the token endpoint to `token` and everything else to `api`.
-function routedFetch(t, { token, api }) {
-  const calls = { token: 0, api: [] };
-  mockFetch(t, async (url, options) => {
-    if (String(url).startsWith('http://token.test/')) { calls.token++; return token(calls.token, JSON.parse(options.body)); }
-    calls.api.push(new Headers(options.headers).get('authorization'));
-    return api(calls.api.length);
-  });
-  return calls;
-}
-const granted = (n) => new Response(JSON.stringify({ access_token: `renewed-${n}`, refresh_token: `refresh-${n + 1}`, expires_in: 28_800, scope: 'user:inference' }), { status: 200, headers: { 'content-type': 'application/json' } });
-const refused = () => new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Refresh token not found or invalid' }), { status: 400, headers: { 'content-type': 'application/json' } });
-
-test('a login that expired during the pause is renewed by this program at once, not waited for', async (t) => {
-  const { config, write } = renewableFixture(t);
-  let expired = false;
-  const clock = fakeClock(t, { onSleep: () => { if (!expired) { expired = true; write('test-oauth-token', Date.now() - 1000); } } });
-  const started = clock.now;
-  const calls = routedFetch(t, { token: (n) => granted(n), api: (n) => (n === 1 ? limited(unified(started + 5 * HOUR)) : okResponse('back')) });
-  const events = [];
-  const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
-  assert.equal(res.message.content[0].text, 'back');
-  assert.deepEqual(calls.api, ['Bearer test-oauth-token', 'Bearer renewed-1']);
-  assert.equal(calls.token, 1, 'renewed once, when the pause was over');
-  assert.equal(events.filter((ev) => ev.waitingForLogin).length, 0, 'there was nothing to wait for');
-  assert.equal(JSON.parse(fs.readFileSync(config.claudeCodeCredentialsFile, 'utf8')).claudeAiOauth.refreshToken, 'refresh-2');
-  const wait = events.find((ev) => ev.type === 'rate_limit_wait');
-  assert.equal(wait.loginExpiresAt, null, 'no "your login expires before the limit resets" warning when it renews itself');
-});
-
-test('a refused renewal after the pause is retried every five minutes while waiting, and a login done meanwhile is used', async (t) => {
-  const { config, write } = renewableFixture(t);
-  let step = 0;
-  const clock = fakeClock(t, {
-    onSleep: () => {
-      const at = clock.now - started;
-      if (step === 0 && at >= HOUR) { step = 1; write('test-oauth-token', Date.now() - 1000); }
-      else if (step === 1 && at >= 2 * HOUR + 12 * MIN) { step = 2; write('signed-in-again', Date.now() + 8 * HOUR, 'refresh-new'); } // /login in claude
-    },
-  });
-  const started = clock.now;
-  const calls = routedFetch(t, { token: () => refused(), api: (n) => (n === 1 ? limited(unified(started + 2 * HOUR)) : okResponse('back')) });
-  const events = [];
-  const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
-  assert.equal(res.message.content[0].text, 'back');
-  assert.deepEqual(calls.api, ['Bearer test-oauth-token', 'Bearer signed-in-again']);
-  assert.ok(calls.token >= 2 && calls.token <= 4, `renewal tried every 5 minutes for 12 minutes, not at every 15 second check: ${calls.token} tries`);
-  const waits = events.filter((ev) => ev.waitingForLogin);
-  assert.ok(waits.length > 20);
-  assert.match(waits[0].renewError, /can no longer be renewed \(invalid_grant: Refresh token not found or invalid\)/);
-  assert.match(describePause(waits[0]), /^The limit has reset, but the login could not be renewed: .*Sign in again/);
-});
-
-test('when the wait for a login ends, the error says why renewing failed', async (t) => {
-  const { config, write } = renewableFixture(t, { CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: String(2 * HOUR + 10 * MIN) });
-  let expired = false;
-  const clock = fakeClock(t, { onSleep: () => { if (!expired) { expired = true; write('test-oauth-token', Date.now() - 1000); } } });
-  const started = clock.now;
-  routedFetch(t, { token: () => refused(), api: () => limited(unified(started + 2 * HOUR)) });
-  await assert.rejects(streamMessage(config, request(config)), (err) => {
-    assert.match(err.message, /^The Claude subscription login can no longer be renewed \(invalid_grant/);
-    assert.match(err.message, /Waited 9m \d+s for it after the limit reset\./);
-    return true;
-  });
-});
-
-test('after a pause the quick retries start over', async (t) => {
-  const clock = fakeClock(t);
-  const overloaded = () => new Response(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Overloaded' } }), { status: 503, headers: { 'content-type': 'application/json' } });
-  // 3 retries are allowed. Two failures before the limit and three after it only fit if the count restarts.
-  const answers = [overloaded, overloaded, () => limited(unified(clock.now + HOUR)), overloaded, overloaded, overloaded, () => okResponse('made it')];
-  let call = 0;
-  mockFetch(t, async () => answers[call++]());
-  const config = configWith();
-  const res = await streamMessage(config, request(config));
-  assert.equal(res.message.content[0].text, 'made it');
-  assert.equal(call, 7);
-});
-
-test('planRetry: an overloaded API backs off as configured, then pauses at the longest delay within its own budget', () => {
-  const e529 = { status: 529, retryable: true, message: 'Overloaded', retryAfterMs: null };
-  const state = fresh();
-  const config = cfg({ maxRetries: 3, overloadedRetryBaseDelay: 1000, overloadedRetryMaxDelay: 32_000, overloadedMaxWait: 100_000 });
-  const plans = [];
-  for (let p = plan(e529, state, config); p.action === 'wait'; p = plan(e529, state, config)) plans.push(p);
-  assert.deepEqual(plans.map((p) => [p.kind, p.delayMs]), [
-    ['retry', 1000], ['retry', 2000], ['retry', 4000],
-    ['rate_limit', 8000], ['rate_limit', 16_000], ['rate_limit', 32_000], ['rate_limit', 32_000],
-  ]);
-  assert.ok(plans.slice(3).every((p) => p.overloaded && p.polling));
-  assert.match(plan(e529, state, config).message, /still overloaded after \d+ retries and 1m 28s of waiting/);
-  assert.match(describePause({ ...plans[3], resumeAt: NOW + 8000 }, NOW), /^The API is overloaded/);
-  assert.deepEqual([2, 3].map(() => plan({ ...e529, status: 500, overloaded: true }, fresh(), cfg({ overloadedRetryBaseDelay: 5000 })).delayMs), [5000, 5000], 'a mid-stream overloaded_error and its own base delay');
-  assert.equal(plan(e529, { ...fresh(), overloaded: 3 }, config, { allowWait: false }).action, 'throw', 'side queries do not pause');
-});
-
-test('a stream that keeps answering 529 is waited out and then goes on', async (t) => {
-  fakeClock(t);
-  const busy = () => new Response(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }), { status: 529, headers: { 'content-type': 'application/json' } });
-  let call = 0;
-  mockFetch(t, async () => (++call <= 6 ? busy() : okResponse('made it')));
-  const config = configWith({ CLAUDE_PRO_MAX_RETRIES: '2' });
-  const events = [];
-  const res = await streamMessage(config, request(config), { onEvent: (ev) => events.push(ev) });
-  assert.equal(res.message.content[0].text, 'made it');
-  const waits = events.filter((ev) => /retry|rate_limit/.test(ev.type));
-  assert.deepEqual(waits.map((ev) => ev.type), ['retry', 'retry', 'rate_limit_wait', 'rate_limit_wait', 'rate_limit_wait', 'rate_limit_wait', 'rate_limit_resume']);
-  assert.equal(waits.at(-1).overloaded, true);
-  assert.match(resumeText(waits.at(-1)), /answering again/);
 });

@@ -10,7 +10,7 @@ import { Agent } from '../src/agent.js';
 import { GlobTool } from '../src/tools/search.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-resilience-'));
-const configWith = (env) => new Config({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
+const configWith = (env) => new Config({ CLAUDE_PRO_GATEWAY_URL: 'http://127.0.0.1:9', CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
 const request = (cfg) => ({ model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'hi' }] });
 
 function mockFetch(t, handle) {
@@ -159,7 +159,7 @@ test('aborting while waiting to retry stops at once', async (t) => {
 
 test('Agent.assistantText keeps what a failed run had already written', async () => {
   const dir = tmp();
-  const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
+  const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
   const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
@@ -178,7 +178,7 @@ test('Agent.assistantText keeps what a failed run had already written', async ()
 });
 
 test('Agent.assistantText is empty when nothing was written', () => {
-  const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
+  const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
   const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: process.cwd() });
   agent.messages.push({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
   assert.equal(agent.assistantText(), '');

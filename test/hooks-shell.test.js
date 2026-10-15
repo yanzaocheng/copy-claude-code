@@ -7,7 +7,7 @@ import { Config } from '../src/config.js';
 import { HookRunner } from '../src/hooks.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-hooks-'));
-const makeConfig = (cwd, hooks) => new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { mcpServers: {}, hooks }, cwd);
+const makeConfig = (cwd, hooks) => new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { mcpServers: {}, hooks }, cwd);
 const hook = (command, timeout) => [{ matcher: '*', hooks: [{ type: 'command', command, ...(timeout ? { timeout } : {}) }] }];
 
 test('a hook that leaves a background process running returns at once instead of waiting for its timeout', async () => {

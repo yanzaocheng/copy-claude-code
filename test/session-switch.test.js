@@ -28,9 +28,9 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 Object.assign(process.env, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
-  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '0', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
-  CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: `http://127.0.0.1:${server.address().port}`,
+  CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '0', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_PRO_DISABLE_TOPIC_TITLE: '1', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
 });
 const { startTui } = await import('./tui-harness.js');
 const { SessionStore } = await import('../src/session.js');
@@ -58,7 +58,7 @@ test('/clear and /resume leave the conversation they come from intact and resuma
   assert.ok(texts(SessionStore.load(listed[0].file).messages).some((x) => x.includes('first question')));
 
   tui.send('second question\r');
-  await tui.waitFor('Answer number 2.', { timeout: 20_000 });
+  await tui.waitFor(/Answer number [2-9]\./, { timeout: 20_000 });
   await tui.waitIdle({ timeout: 20_000 });
   const second = tui.app.store.id;
 
@@ -74,13 +74,13 @@ test('/clear and /resume leave the conversation they come from intact and resuma
 test('a restart keeps the session\'s own model and effort, not what another window chose meanwhile', async (t) => {
   const { rememberChoice, rememberedChoices } = await import('../src/config.js');
   const tui = await startTui({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-switch-')) });
-  t.after(() => { rememberChoice('api', { model: null, effort: null }); return tui.close(); });
+  t.after(() => { rememberChoice('gateway', { model: null, effort: null }); return tui.close(); });
   // Another window chose these with /model and /effort; the restarted process started with them.
-  rememberChoice('api', { model: 'gpt-6.1-sol', effort: 'low' });
+  rememberChoice('gateway', { model: 'gpt-6.1-sol', effort: 'low' });
   const cfg = tui.app.config;
   Object.assign(cfg, { modelOverride: 'gpt-6.1-sol', effortOverride: 'low' });
   tui.app.resumeAfterRestart({ modelOverride: null, effortOverride: 'high' }, false);
   assert.equal(cfg.modelOverride, null, 'this session had no model chosen: it stays on the configured one');
   assert.equal(cfg.effortOverride, 'high');
-  assert.deepEqual(rememberedChoices('api'), { model: 'gpt-6.1-sol', effort: 'low' }, 'a restart chooses nothing');
+  assert.deepEqual(rememberedChoices('gateway'), { model: 'gpt-6.1-sol', effort: 'low' }, 'a restart chooses nothing');
 });

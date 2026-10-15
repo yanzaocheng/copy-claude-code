@@ -167,16 +167,13 @@ test('ripgrepPath: "off" disables ripgrep and an unusable path is skipped', () =
   assert.ok(bogus === null || bogus === 'rg', `the bogus path must not be returned, got ${bogus}`);
 });
 
-test('configuredModelSpec follows the provider and a /model override wins over it', () => {
-  const env = { ANTHROPIC_MODEL: 'deepseek-pro', CLAUDE_PRO_CLAUDE_CODE_MODEL: 'opus' };
-  const api = new Config({ ...env }, {}, {}, process.cwd());
-  assert.equal(api.configuredModelSpec, 'deepseek-pro');
-  const cc = new Config({ ...env, CLAUDE_PRO_PROVIDER: 'claude-code' }, {}, {}, process.cwd());
-  assert.equal(cc.configuredModelSpec, 'opus');
-  cc.modelOverride = 'haiku';
-  assert.equal(cc.mainModelSpec, 'haiku');
-  assert.equal(cc.configuredModelSpec, 'opus');
-  assert.equal(new Config({ CLAUDE_PRO_PROVIDER: 'api' }, {}, {}, process.cwd()).configuredModelSpec, 'sonnet');
+test('configuredModelSpec follows the gateway setting and a /model override wins over it', () => {
+  const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'deepseek-pro' }, {}, {}, process.cwd());
+  assert.equal(cfg.provider, 'gateway');
+  assert.equal(cfg.configuredModelSpec, 'deepseek-pro');
+  cfg.modelOverride = 'haiku';
+  assert.equal(cfg.mainModelSpec, 'haiku');
+  assert.equal(cfg.configuredModelSpec, 'deepseek-pro');
   const fresh = new Config({}, {}, {}, process.cwd());
-  assert.deepEqual([fresh.provider, fresh.configuredModelSpec], ['gateway', 'opus'], 'nothing configured: the gateway, logged in to with /login');
+  assert.deepEqual([fresh.provider, fresh.configuredModelSpec], ['gateway', 'opus']);
 });

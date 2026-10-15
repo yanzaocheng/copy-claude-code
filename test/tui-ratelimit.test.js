@@ -53,9 +53,9 @@ const server = http.createServer((req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
 Object.assign(process.env, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
-  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
-  CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: `http://127.0.0.1:${server.address().port}`,
+  CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_PRO_DISABLE_TOPIC_TITLE: '1', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
 });
 const { startTui } = await import('./tui-harness.js');
 const { timing } = await import('../src/ratelimit.js');
@@ -220,31 +220,6 @@ test('interactive: a notice of several lines keeps its lines, each indented, and
   assert.ok(wrapped.length >= 2, `the long notice takes several lines: ${JSON.stringify(wrapped)}`);
   assert.ok(wrapped.every((line) => line.length <= tui.term.cols - 1), 'and none of them is wider than the screen');
   assert.equal(wrapped.join(' ').replace(/\s+/g, ' ').trim(), `${'word '.repeat(40)}end`, 'no word was lost or cut');
-});
-
-test('interactive: while the login is being waited for the countdown line says so, and the notice comes once', async (t) => {
-  controlledClock(t);
-  reset(0);
-  const tui = await startTui({ cwd: project() });
-  t.after(() => tui.close());
-  // what streamMessage reports after a pause whose login has expired: a check every 15 seconds
-  const waiting = () => ({ type: 'rate_limit_wait', label: 'login', polling: true, waitingForLogin: true, resumeAt: Date.now() + 15_000, giveUpAt: Date.now() + HOUR });
-  tui.app.busy = true;
-  tui.app.turnStart = Date.now();
-  tui.app.rateLimitEvent({ type: 'rate_limit_wait', label: '5-hour limit', polling: false, resumeAt: Date.now() + HOUR });
-  tui.app.rateLimitEvent(waiting());
-  tui.app.rateLimitEvent(waiting());
-  tui.app.rateLimitEvent(waiting());
-  const screen = await tui.waitFor(/Waiting for the Claude subscription login to be renewed · checking again in \d+s/, { timeout: 10_000 });
-  assert.match(screen, /esc to cancel/);
-  assert.equal((screen.match(/The limit has reset, but the Claude subscription login has expired/g) || []).length, 1, 'announced once, not at every check');
-  assert.match(screen.replace(/\s+/g, ' '), /run claude once, and this continues by itself\./, 'the notice says what to do (it may wrap at the terminal width)');
-  // a long notice breaks between words: "claude" used to be cut into "clau" and "de" at the 100th column
-  for (const word of ['claude', 'continues', 'itself', 'expired', 'Giving']) assert.match(screen, new RegExp(`\\b${word}\\b`), `"${word}" must not be split across two lines`);
-  assert.doesNotMatch(screen.split('\n').slice(-6).join('\n'), /5-hour limit reached · resumes/, 'the countdown line is the login one now');
-  tui.app.rateLimitEvent({ type: 'rate_limit_resume' });
-  tui.app.busy = false;
-  assert.equal(tui.app.rateWait, null);
 });
 
 test('interactive: a pause while a sub-agent compacts its own conversation is announced under its name too', async (t) => {

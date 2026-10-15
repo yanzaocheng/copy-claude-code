@@ -5,14 +5,14 @@ import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
 
-A command line coding agent: through the gateway, an Anthropic-compatible API, or your Claude subscription.
+A command line coding agent using the codex-gateway.
 Starts an interactive session by default; use -p for non-interactive output.
 
 Options:
   -p, --print                      Print the response and exit (useful for pipes)
   -c, --continue                   Continue the most recent conversation in this directory
   -r, --resume [sessionId]         Resume a conversation (picker if no id given)
-  --provider <backend>            api (default) | claude-code (direct HTTP with existing local login)
+  --provider <backend>            gateway only (the codex-gateway account)
   --model <model>                  Model for this session (name or alias: opus, sonnet, haiku)
   --effort <level>                 Reasoning effort: none|minimal|low|medium|high|xhigh|max
   --output-format <format>         text | json | stream-json (with --print)

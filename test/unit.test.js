@@ -33,18 +33,16 @@ test('parseDotEnv handles quotes, comments and export', () => {
 
 test('model resolution: [1m] suffix, aliases, sub-agent model, compaction window', () => {
   const cfg = makeConfig({
-    ANTHROPIC_MODEL: 'deepseek-flash[1m]',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-flash',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'big-model[1m]',
-    CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-flash',
+    CLAUDE_PRO_GATEWAY_MODEL: 'deepseek-flash[1m]',
     CLAUDE_CODE_EFFORT_LEVEL: 'max',
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
   });
   assert.equal(cfg.mainModel.id, 'deepseek-flash');
   assert.equal(cfg.mainModel.contextWindow, 1_000_000);
-  assert.equal(cfg.smallModel.id, 'deepseek-flash');
-  assert.equal(cfg.subagentModel.contextWindow, 200_000);
-  assert.equal(cfg.resolveModel('opus').id, 'big-model');
+  assert.equal(cfg.smallModel.id, 'claude-haiku-5-5');
+  assert.equal(cfg.subagentModel.id, 'deepseek-flash');
+  assert.equal(cfg.subagentModel.contextWindow, 1_000_000);
+  assert.equal(cfg.resolveModel('opus').id, 'claude-opus-5-5');
   assert.equal(cfg.resolveModel('opus').contextWindow, 1_000_000);
   assert.equal(cfg.effort, 'max');
   assert.equal(cfg.compactWindow(), 786432);
@@ -52,7 +50,7 @@ test('model resolution: [1m] suffix, aliases, sub-agent model, compaction window
   cfg.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '50';
   assert.equal(cfg.autoCompactThreshold(), 393216);
   // The window is capped by the model's real context size.
-  assert.equal(makeConfig({ ANTHROPIC_MODEL: 'x', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '999999' }).compactWindow(), 200_000);
+  assert.equal(makeConfig({ CLAUDE_PRO_GATEWAY_MODEL: 'x', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '999999' }).compactWindow(), 200_000);
 });
 
 test('applyEdit: uniqueness, replace_all, not found, curly quotes', () => {
@@ -226,7 +224,7 @@ test('MCP stdio client lists and calls tools', async () => {
 
 test('agent loop runs tools and feeds results back (mock model)', async () => {
   const dir = tmp();
-  const cfg = makeConfig({ ANTHROPIC_MODEL: 'mock' }, dir);
+  const cfg = makeConfig({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, dir);
   const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
@@ -245,7 +243,7 @@ test('agent loop runs tools and feeds results back (mock model)', async () => {
 test('Effort tool: raises the effort for the current request, the next user message goes back', async () => {
   const { makeEffortTool } = await import('../src/tools/effort.js');
   const { toolsForSubagent, buildTools } = await import('../src/tools/index.js');
-  const cfg = makeConfig({ CLAUDE_PRO_PROVIDER: 'claude-code', CLAUDE_PRO_CLAUDE_CODE_MODEL: 'opus' });
+  const cfg = makeConfig({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_MODEL: 'opus' });
   const tool = makeEffortTool(cfg);
   assert.equal(cfg.effort, null);
   const res = await tool.call({ level: 'max', reason: 'hard bug' });

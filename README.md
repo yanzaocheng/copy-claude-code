@@ -1,6 +1,6 @@
 # claude-pro — 完全访问的命令行编程 Agent
 
-`claude-pro` 是一个**自己实现**的终端 AI 编程助手：模型请求可以走网关，可以直接接 **Anthropic 兼容 API**（DeepSeek 的 `https://api.deepseek.com/anthropic`、Anthropic 官方 API 等），也可以用你的 **Claude 订阅**（读取本机官方 `claude` 命令的登录）。
+`claude-pro` 是一个**自己实现**的终端 AI 编程助手：模型请求只通过 **codex-gateway** 发送。网关负责上游模型和账户计费，claude-pro 本地只保存网关登录得到的机器专用 key。
 
 最大的特点：**没有任何权限确认**。Bash 命令、文件读写、联网、MCP 工具，模型要用就直接执行，不弹窗、不问、没有 allow/deny 规则。它面向你自己的测试机器，目的是让模型的能力不被打断地发挥出来。作为补偿，每次文件修改都会做检查点，`/rewind` 可以撤销。
 
@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：`api` 后端使用 `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`；Claude 订阅（`claude-code` 后端）读取本机官方 `claude` 命令保存的登录凭据，直接请求 Anthropic。本项目没有登录流程，不复制凭据，也不启动官方 CLI 来生成回复；访问令牌过期时，它用凭据文件里的刷新令牌**自己续期**（见下）。
+> **认证**：只使用网关登录。`/login` 会在浏览器完成授权，再把本机专用 key 保存到 `~/.claude-pro/gateway.json`；模型请求和远程控制都只发往网关。
 
 ## 安装与运行
 
@@ -47,67 +47,57 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 
 > 在 Git Bash 自带的 mintty 窗口里交互模式需要 `winpty claude-pro`；推荐在 Windows Terminal / PowerShell / cmd 中运行。
 
-## 用 Claude 订阅
+## 网关登录
 
-本机的官方 `claude` 命令已经登录了 Claude 订阅时，选择 `claude-code` 认证即可，不需要在本项目中登录或填写 API key：
-
-```powershell
-node bin/claude-pro.js --provider claude-code
-node bin/claude-pro.js --provider claude-code --model opus
-node bin/claude-pro.js --provider claude-code -p "用 Read 工具读取 package.json，告诉我项目版本"
-```
-
-希望**所有目录**默认都复用该登录态（写入 `~/.claude-pro/settings.json`）：
+claude-pro 只支持 codex-gateway。交互式启动时如果没有网关登录，会自动打开浏览器；也可以手动运行：
 
 ```powershell
-claude-pro config set CLAUDE_PRO_PROVIDER claude-code
+claude-pro /login
+claude-pro --provider gateway
+claude-pro --provider gateway --model opus
+claude-pro --provider gateway -p "用 Read 工具读取 package.json，告诉我项目版本"
 ```
 
-只对当前项目生效时加 `--local`（写入 `<项目>/.claude-pro/settings.local.json`，优先于用户级设置）。反过来，某个项目要继续用 `.env` 里的 API（如 DeepSeek）：在那个项目里 `claude-pro config set CLAUDE_PRO_PROVIDER api --local`，或者只这一次 `claude-pro --provider api`。
+登录得到的 key 保存在 `~/.claude-pro/gateway.json`（Windows 对应 `%USERPROFILE%\.claude-pro\gateway.json`），不会读取 Claude CLI 或 Codex CLI 的登录文件。
 
-`~/.claude.json` 保存设备 ID 和 OAuth 账号信息，实际访问令牌保存在 `~/.claude/.credentials.json` 的 `claudeAiOauth.accessToken` 中。Windows 对应 `%USERPROFILE%\.claude.json` 和 `%USERPROFILE%\.claude\.credentials.json`。可用 `CLAUDE_PRO_CLAUDE_CONFIG_FILE` 和 `CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE` 指向现有文件；`CLAUDE_CONFIG_DIR` 可以指定凭据目录。凭据位置参考[官方认证文档](https://code.claude.com/docs/en/authentication#credential-management)。
+## /login：网关账户
 
-调用方式是：本项目 → `https://api.anthropic.com/v1/messages?beta=true`。请求复用 `Authorization: Bearer <accessToken>`，带上订阅接口要求的 OAuth beta、`x-app: cli`、User-Agent、系统标识，以及来自 `.claude.json` 的设备和账号 metadata。流式响应、原生 `tool_use` / `tool_result`、工具执行、hooks、检查点及会话功能都由本项目原有逻辑处理。
+`/login` 只有一个选项：网关。第一次登录会在浏览器打开网关授权页，授权后 claude-pro 用一次性 code 换取本机专用 API key。
 
-此模式默认 `sonnet` → `claude-sonnet-5-5`，`opus` → `claude-opus-5-5`，`haiku` → `claude-haiku-5-5`（话题标题、WebFetch 摘要等小请求用它）；子 agent 默认用 `sonnet`（`CLAUDE_PRO_CLAUDE_CODE_SUBAGENT_MODEL` 可改）。使用 `--model`、`/model` 或 `CLAUDE_PRO_CLAUDE_CODE_MODEL` 指定模型。**`/model`、`/effort` 的选择会一直保留**：按后端记在 `~/.claude-pro/settings.json` 的 `remembered` 里，之后每次启动（交互式和 `-p`）都沿用，优先于 `.env`/settings/环境变量里的配置；命令行 `--model`/`--effort` 只覆盖当次启动；`/model default`、`/effort default` 删掉记住的选择，回到配置的值。`claude-pro config list` 会显示当前记住的选择。已有的 DeepSeek API URL、API key 和 API 模型别名不会参与订阅请求。OAuth 令牌始终只发往 Anthropic，原 API 配置可以通过 `--provider api` 继续使用。
+```text
+/login
+/logout
+/cost
+```
 
-每次请求重新读取现有凭据；如果官方 `claude` 命令更新了令牌，下次请求自动使用新值。
-
-**令牌自动续期**：访问令牌有效期 8 小时。发请求前如果它已过期或不到 5 分钟就过期，本项目会用同一个文件里的刷新令牌向官方令牌接口续期，把新令牌写回 `.credentials.json`——刷新会**轮换刷新令牌**，所以必须写回，否则官方 `claude` 命令手里的就是失效的。写回只改令牌相关字段、原子替换、保持原有缩进；和官方 `claude` 命令使用同样的目录锁（`.claude/.oauth_refresh.lock` 与 `.claude.lock`），两边不会同时刷新，抢先被对方刷新过就直接用对方的结果。请求收到 401 时也会强制续期一次再重试。只有刷新令牌本身被拒绝或过期（约 30 天不用）时才需要你运行 `claude` 再 `/login`，此时报错会写明原因。不想让本项目改写凭据文件：`CLAUDE_PRO_DISABLE_TOKEN_REFRESH=1`。令牌接口地址固定，不能通过任何设置（包括项目里的 `.env`）改掉，避免刷新令牌被发到别处。订阅接口的约定由 Anthropic 决定，它变化时可能需要同步调整；可用 `CLAUDE_PRO_CLAUDE_CODE_VERSION` 指定 User-Agent 中的版本（默认读取本机 npm 安装版本）。
-
-## /login：Claude 订阅、网关、Codex 订阅三选一
-
-什么都没配置时（没有 `CLAUDE_PRO_PROVIDER`，也没有 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`）默认用**网关**，第一次启动直接弹出登录选择（网关排第一）；配置了 API 端点、密钥或模型的老用户仍然默认 `api`。交互界面里 `/login` 选择模型请求发往哪里（记在 `~/.claude-pro/settings.json` 的 `CLAUDE_PRO_PROVIDER`，每个后端各自记住 `/model`、`/effort`）：
-
-- **Claude 订阅**（`claude-code`）：本机官方 `claude` 命令的登录，见上一节。
-- **网关**（`gateway`）：[codex-gateway](../codex-gateway) 的账户，默认 `https://gw.predix.icu`（`CLAUDE_PRO_GATEWAY_URL` 可改）。第一次选它会在浏览器打开网关的登录页，登录（或注册）后点“授权”，浏览器被带回本机，claude-pro 用一次性 code 换到这台电脑专用的 API Key，存在 `~/.claude-pro/gateway.json`（仅本人可读）。费用从网关账户余额扣，`/cost` 显示余额，充值和用量在网关的 `/user` 页面。模型默认 `opus`，`/model` 可选 `sonnet`、`haiku`、`gpt-6.1-sol`（网关用它自己的 Codex 登录转发，按 OpenAI 官方价扣费）；子 agent 在 Claude 主模型下没有固定模型：主 agent 每次调用 `Task` 按任务难易自己选 `haiku`（查找、读文件）、`sonnet`（搜索、步骤清楚的子任务）或 `opus`（难调的 bug、设计、审查等结论要依赖的分析），`Task` 的说明里列着三者的实际模型和价格；没选时用主模型（GPT 主模型下子 agent 用主模型）。网关每次请求按 `max_tokens` 预扣余额，所以这里默认 `max_tokens` 是 48K（Opus 预扣 $0.96，请求结束按实际输出扣费；`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 可改）。每个请求带上会话 ID（`X-Claude-Code-Session-Id` 请求头；子 agent 用主对话的，`/clear` 换新的，`--resume` 和自动重启沿用原来的），网关据此让同一个对话 1 小时内继续用同一个上游账号，提示词缓存才不会因为换账号而失效。`/logout` 删除本机的网关 Key。
-- **Codex 订阅**（`codex`）：本机 `codex login`（ChatGPT 套餐）写下的 `~/.codex/auth.json`（`CODEX_HOME` 可改）。请求直接发往 Codex 后端，Anthropic 格式在本机和 OpenAI Responses 格式互相转换（工具调用、推理、缓存用量都对应上）；访问令牌快到期时用同一文件里的刷新令牌续期并写回，Codex CLI 也能接着用。模型默认取 `~/.codex/config.toml` 的 `model`，否则 `gpt-6.1-sol`；不设 effort 时用模型自己的默认值（`models_cache.json` 里写的）。
+网关地址默认是 `https://gw.predix.icu`，也可以通过 `CLAUDE_PRO_GATEWAY_URL` 修改。账户余额和用量在网关用户页查看。
 
 ## 配置
 
-一般不用配置：`/login` 选好提供方就能用。要接 DeepSeek 之类兼容 Anthropic 接口的端点时，写环境变量，例如：
+只需要配置网关地址、模型和可选的本机网关 key：
 
 ```bash
-ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-ANTHROPIC_AUTH_TOKEN=sk-...
-ANTHROPIC_MODEL=deepseek-flash[1m]          # [1m] 后缀 = 1M 上下文窗口（发送时自动去掉）
-ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-flash # 小模型：WebFetch 摘要、标题等
+CLAUDE_PRO_PROVIDER=gateway
+CLAUDE_PRO_GATEWAY_URL=https://gw.predix.icu
+CLAUDE_PRO_GATEWAY_MODEL=opus
 ```
 
-可以写在 `<安装目录>/.env`（参考 `.env.example`）、`~/.claude-pro/settings.json` 的 `"env"` 里（全局）、`<项目>/.claude-pro/settings.json`（项目）、`<项目>/.claude-pro/settings.local.json`（项目本地，不提交）、shell 环境变量或命令行参数（`--model`、`--effort`），后面的覆盖前面的。全部可设的项见 `claude-pro config list`。用 Claude 订阅时，`.env` 里为 API 端点调的 effort、压缩窗口等不生效（`/config` 会列出来），要改就用 `/effort`、`/config set`。
+通常不需要手动填写 key；运行 `/login` 后它会保存到 `~/.claude-pro/gateway.json`。无浏览器的自动化场景也可以设置 `CLAUDE_PRO_GATEWAY_API_KEY`。
+
+项目、用户和本地配置文件仍按原来的优先级加载：
 
 ```bash
-claude-pro config list                                   # 生效的设置、来源，以及全部可设的项
-claude-pro config set ANTHROPIC_MODEL deepseek-pro      # 写入 ~/.claude-pro/settings.json
+claude-pro config list
+claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 ```
 
-会话中用 `/config`、`/model`、`/effort` 修改。
+会话中用 `/config`、`/model`、`/effort` 修改。`--provider` 仅接受 `gateway`，其他 provider 已移除。
 
 ## 提示词缓存：自动的，尽量少花钱
 
 每次请求都要把整个对话发给模型，用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
 
-- 订阅登录和网关下对话用 1 小时缓存（停顿一会儿回来不用整段重写），其他端点用 5 分钟；子 agent、压缩等用 5 分钟。改缓存时长、关闭缓存的设置见 `claude-pro config list`。
+- 网关对话用 1 小时缓存（停顿一会儿回来不用整段重写）；子 agent、压缩等用 5 分钟。改缓存时长、关闭缓存的设置见 `claude-pro config list`。
 - 页脚的 `◷ 12m` 是缓存还能保留多久；变红表示已过期，下一条消息会把整个对话重新写入缓存。`/cost` 显示命中率和没命中的原因。
 - 缓存还热时 `/model`、`/effort` 会先确认（切换会让缓存失效）；离开一个多小时回来时，清掉较早的工具结果，少重写一些。
 
@@ -115,7 +105,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro      # 写入 ~/.claude-pro/s
 
 ## 限流：自动暂停，到点自动恢复
 
-订阅账号的 5 小时和每周限额用完时，不报错停下，而是暂停并显示倒计时（`✻ 5-hour limit reached · resumes at 23:41 (in 2h 13m)`，Esc 可取消），到重置时间原样重发同一个请求，任务接着做完；期间过期的登录令牌会自己续期。API 过载（529）同样先重试、再暂停等它恢复。最多等 6 小时（`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，`0` = 不等直接报错）；重置时间更远（比如周限额还有几天）时直接报错，并写明几点重置。
+网关账户的 5 小时和每周限额用完时，不报错停下，而是暂停并显示倒计时（`✻ 5-hour limit reached · resumes at 23:41 (in 2h 13m)`，Esc 可取消），到重置时间原样重发同一个请求，任务接着做完。网关过载（529）同样先重试、再暂停等它恢复。最多等 6 小时（`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，`0` = 不等直接报错）；重置时间更远（比如周限额还有几天）时直接报错，并写明几点重置。
 
 ## 终端标题、页脚与窗口缩放
 
@@ -138,9 +128,9 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro      # 写入 ~/.claude-pro/s
 
 ## 远程控制：在浏览器或手机上看执行过程、下发指令
 
-可以在手机或另一台电脑上看着会话干活，并给它发指令，**不用任何命令或设置**。会话经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里按电脑分组列出自己的会话，可以查看、操作，也可以在某台电脑上新建、结束、重启会话，恢复历史对话（见下面"网页管理电脑和后台会话"）。模型请求走哪个提供方都可以，远程控制只用网关的登录。
+可以在手机或另一台电脑上看着会话干活，并给它发指令，**不用任何命令或设置**。会话经**网关**（gw.predix.icu，即 `CLAUDE_PRO_GATEWAY_URL`）中转：claude-pro 只向网关发出站请求，**不监听任何端口，不走局域网**；在网关用户端登录后，左侧菜单"**远程控制**"里按电脑分组列出自己的会话，可以查看、操作，也可以在某台电脑上新建、结束、重启会话，恢复历史对话（见下面"网页管理电脑和后台会话"）。模型请求和远程控制都使用同一个网关登录。
 
-- **默认在线**：这台电脑登录了网关（`/login` 选网关）以后，每个交互会话启动时自动连上网关（不阻塞启动，断开后自动重连），网页上能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`/login` 登录成功后当前会话**马上上线**（不用重启），并打印它的链接；`/logout` 后马上下线；在别的窗口登录或退出，这个窗口几秒内跟上。想让模型请求走 Claude 订阅：先 `/login` 选网关登录，再 `/login` 选 Claude 订阅，网关登录保留，会话照样在线。
+- **默认在线**：这台电脑登录了网关（`/login`）以后，每个交互会话启动时自动连上网关（不阻塞启动，断开后自动重连），网页上能看到这台电脑上所有开着的会话，别的电脑也能给它们发任务（见下一节）。`/login` 登录成功后当前会话**马上上线**（不用重启），并打印它的链接；`/logout` 后马上下线；在别的窗口登录或退出，这个窗口几秒内跟上。模型请求和远程控制共用这个网关登录。
 - **在网页上找到会话**：网关用户端的"远程控制"（`/user#remote`）按电脑列出所有会话，点开即可。`/status` 显示这个会话的远程状态（在线、连接中、没登录、key 被拒…）。在线时输入框右上角显示 `⇄ &名字`，有网页在看时页脚显示 `⇄ N watching`。
 - **网页上能看到**：完整对话（用户消息、流式输出的回答、可展开的思考、工具调用和结果，包括 diff 和正在运行的命令的最新几行输出）、斜杠命令和提示的输出、当前状态（正在想/运行多久/多少 token、限流暂停的倒计时）、待办列表、排队中的消息。
 - **网页上能做**：发消息（和在终端里输入完全一样：忙的时候排队插入，`/命令`、`!shell` 都可以）、**Stop**（等于 Esc）、回答模型的提问（`AskUserQuestion`，含多选和"其他"）、以及 `/model`、`/rewind` 之类命令弹出的选择框。网页顶部可以直接改会话的名字、工作目录（`/cd`，带目录浏览）、模型和 effort（都是替你发对应的斜杠命令，终端里显示同样的结果；任务进行中不能改）。网页输入框里输入 `/`、`@`、`&` 有和终端一样的补全，也能粘贴或拖入图片（每次最多 6 张、每张不超过 5 MB，PNG/JPEG/GIF/WebP）。终端和网页可以交替使用，两边同步。
@@ -194,7 +184,7 @@ claude-pro config set ANTHROPIC_MODEL deepseek-pro      # 写入 ~/.claude-pro/s
 
 | 项目 | 以前 | 现在 |
 |---|---|---|
-| 单次输出 `max_tokens` | 32000 | 128000（网关 48000，网关按它预扣余额）；如果 API 允许的更少，会从报错里读出真实上限并自动降下来 |
+| 单次输出 `max_tokens` | 32000 | 48000（网关按它预扣余额）；如果网关允许的更少，会从报错里读出真实上限并自动降下来 |
 | Bash 默认 / 最长超时 | 2 分钟 / 10 分钟 | 10 分钟 / 1 小时 |
 | Bash 输出返回给模型的上限 | 30000 字符 | 60000 字符，超出部分的全文保存到文件 |
 | 单个工具结果上限（超出落盘） | 50000 字符 | 100000 字符 |
@@ -305,8 +295,6 @@ src/main.js           参数解析、config 子命令
 src/config.js         配置加载（.env / settings.json / 环境变量）与模型解析
 src/api.js            后端路由、Anthropic SDK 封装：流式、重试、effort/thinking 参数
 src/ratelimit.js      限流：解析重置时间响应头、决定等多久、墙上时钟休眠、提示文案
-src/claude-code.js    读取 Claude 订阅的登录（官方 claude 命令保存的），生成认证头和账号 metadata
-src/oauth.js          访问令牌过期时用刷新令牌续期，加锁、原子写回凭据文件
 src/agent.js          Agent 循环：工具调度、并行只读工具、中断、自动压缩、验证循环
 src/checkpoints.js    检查点与 /rewind
 src/filestate.js      恢复会话时从记录重建"已读文件"状态（文件自读取后没变过才信任）

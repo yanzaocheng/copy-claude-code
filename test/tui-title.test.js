@@ -39,8 +39,8 @@ const server = http.createServer((req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
 Object.assign(process.env, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
-  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: `http://127.0.0.1:${server.address().port}`,
+  CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
   CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: '', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '',
 });
 const { startTui } = await import('./tui-harness.js');
@@ -81,10 +81,10 @@ test('modelTag says the model as people do', () => {
 });
 
 test('modelInfo leaves the effort out when none is sent and for a model that does not take one', () => {
-  const config = (env) => new Config({ CLAUDE_PRO_PROVIDER: 'claude-code', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
-  assert.deepEqual(modelInfo(config({ CLAUDE_CODE_EFFORT_LEVEL: 'high' })), { model: 'sonnet-5-5', effort: 'high' });
-  assert.deepEqual(modelInfo(config({})), { model: 'sonnet-5-5', effort: null });
-  assert.deepEqual(modelInfo(config({ CLAUDE_CODE_EFFORT_LEVEL: 'auto' })), { model: 'sonnet-5-5', effort: null });
+  const config = (env) => new Config({ CLAUDE_PRO_PROVIDER: 'gateway', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
+  assert.deepEqual(modelInfo(config({ CLAUDE_CODE_EFFORT_LEVEL: 'high' })), { model: 'opus-5-5', effort: 'high' });
+  assert.deepEqual(modelInfo(config({})), { model: 'opus-5-5', effort: null });
+  assert.deepEqual(modelInfo(config({ CLAUDE_CODE_EFFORT_LEVEL: 'auto' })), { model: 'opus-5-5', effort: null });
 });
 
 test('defaultEffort is the effort a model uses when none is sent', () => {

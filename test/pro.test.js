@@ -12,7 +12,7 @@ import { NotebookEditTool } from '../src/tools/notebook.js';
 import { makeBashTool } from '../src/tools/bash.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-pro-'));
-const makeConfig = (cwd, hooks = {}) => new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { mcpServers: {}, hooks }, cwd);
+const makeConfig = (cwd, hooks = {}) => new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { mcpServers: {}, hooks }, cwd);
 const hookEntry = (matcher, command) => [{ matcher, hooks: [{ type: 'command', command }] }];
 
 test('hooks: exit 2 blocks, exit 0 keeps stdout, other codes warn', async () => {

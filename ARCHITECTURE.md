@@ -1,17 +1,14 @@
 # copy-claude-code 架构说明
 
-本文档说明当前项目的运行时架构、请求链路、工具执行模型、会话持久化方式，以及使用 Claude 订阅（本机官方 claude 命令的登录）的实现边界。文档对应仓库当前实现；代码发生变化时，应同步更新本文档。
+本文档说明当前项目的运行时架构、请求链路、工具执行模型、会话持久化方式，以及仅使用 codex-gateway 的实现边界。文档对应仓库当前实现；代码发生变化时，应同步更新本文档。
 
 ## 1. 项目定位
 
-`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。它自己实现 Agent 循环和工具系统，模型侧支持两种后端：
+`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。模型请求只走 codex-gateway：本地通过 `/login` 得到网关 key，网关负责上游模型、账户和计费。claude-pro 不再读取 Anthropic API key、Claude CLI OAuth 或 Codex CLI 登录文件。
 
 | 后端 | 用途 | 凭据来源 | 请求目标 |
 |---|---|---|---|
-| `api` | Anthropic 兼容 API，例如 Anthropic、DeepSeek 兼容接口 | `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL`，默认 `https://api.anthropic.com` |
-| `claude-code` | Claude 订阅（本机官方 claude 命令的登录） | 只读官方 claude 命令的元数据和 OAuth 凭据文件 | 固定 `https://api.anthropic.com` |
-
-第二种模式不会在本项目中登录或复制凭据，也不会启动官方 `claude` CLI 子进程。项目读取已经存在的登录态，在访问令牌过期时用其中的刷新令牌续期并把新令牌写回同一个文件（唯一会写它的代码是 `src/oauth.js`，见 6.2），然后直接构造订阅接口要求的 Anthropic Messages HTTP 请求。
+| `gateway` | codex-gateway 账户和模型 | `/login` 保存的网关 key，或 `CLAUDE_PRO_GATEWAY_API_KEY` | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://gw.predix.icu` |
 
 ## 2. 总体架构
 
@@ -30,13 +27,8 @@ flowchart TB
     RUNTIME --> HOOKS[src/hooks.js\n生命周期 hooks]
     RUNTIME --> STATE[src/session.js + checkpoints.js\n会话/检查点/记忆]
     AGENT --> API[src/api.js\nAnthropic SDK + SSE]
-    API --> BACKEND{provider}
-    BACKEND --> APIMODE[兼容 API\nAPI key/token]
-    BACKEND --> OAUTH[src/claude-code.js\n本机 OAuth 读取器]
-    API --> RENEW[src/oauth.js\n令牌续期 + 写回]
-    OAUTH --> CREDS[~/.claude.json\n~/.claude/.credentials.json]
-    RENEW --> CREDS
-    API --> ANTHROPIC[Anthropic Messages API]
+    API --> GATEWAY[src/gateway.js\n网关登录、模型和 key]
+    GATEWAY --> ANTHROPIC[网关的 Anthropic Messages API]
 ```
 
 核心分层可以概括为：
@@ -90,7 +82,7 @@ sequenceDiagram
 
 ### 3.1.2 远程控制
 
-登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），`CLAUDE_PRO_ONLINE=0` 只给自检和测试用。会话只发出站请求、不监听端口；鉴权用 `/login` 存下的网关 API key（`readGatewayLogin`），与模型请求走哪个提供方无关。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），`CLAUDE_PRO_ONLINE=0` 只给自检和测试用。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/login` 保存的 key 或 `CLAUDE_PRO_GATEWAY_API_KEY`（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
 
 - **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者有 `--remote-id`（网页经电脑服务打开的会话，见 3.1.5：用网关给的 id 立即上线，不看 `CLAUDE_PRO_ONLINE`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线并打印链接，同时 `ensureHost()`），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒），以及电脑服务的状态（`describeHost`）。
 
@@ -142,7 +134,7 @@ sequenceDiagram
   - `DELETE /v1/remote/hosts/:id`：从网页列表移除。`claude-pro host stop` 在进程结束后调用；登录变了（`/logout`、换账号）时服务用旧 key 调用。普通断线不调。
 - **list `{path}`**：`listDirectory`。`""`/`~` 是 home；Windows 上 `D:` 是盘根、正斜杠也可以（`normalizeDir`，盘符大写）；不是绝对路径就报错。只列目录（指向目录的符号链接/junction 也算，但打不开的跳过；Windows 在 home 里指向 AppData 的兼容 junction，如 "Application Data"、各语言的「开始」菜单，也跳过，和资源管理器一样）；按名字不分大小写、数字按数值排序，`.` 开头的排后面；最多 1000 个（`truncated`）。`roots`：Windows 上存在的盘符（每个最多等 1.5 秒，缓存 30 秒），其他系统 `["/"]`。`recent`：`recentDirectories()`，每个项目目录读最新会话文件的第一行（`{type:'meta', cwd}`），新的在前，只留还存在的，最多 15 个，缓存 30 秒。
 - **open `{sessionId, cwd, create, name}`**：校验 id 和绝对路径；目录不存在时 `create` 才递归创建；`name` 经 `cleanName`。用 `terminalFor()` 选终端、`launchCommand()` 拼命令、`runLaunch()` 执行，命令行是 `process.execPath` + 本仓库的 `bin/claude-pro.js` + `--remote-id <id> [--name <name>]`（源码运行和 npm 安装都对）：
-  - Windows Terminal（`wt.exe` 是"应用执行别名"，`existsSync` 看不见，`findCommand` 用 `lstat`）：`wt -w new -d <cwd> node [--env-file=…] bin …`，每个参数里的 `;` 转成 `\;`（wt 的命令分隔符）。wt 新开的窗口用 Windows Terminal 自己的环境变量，不继承调用者的，所以服务把自己环境里的 `CLAUDE_PRO_*`、`ANTHROPIC_*`、`CLAUDE_CODE_*`、`CLAUDE_CONFIG_DIR`（`passedEnv()`：不含 TOKEN/KEY/SECRET/PASSWORD/HEADERS 和监督进程的变量）写进 `CONFIG_DIR/launch/<id>.env`，用 `node --env-file` 带过去（值用单引号或反引号，Node 的 dotenv 解析不转义里面的反斜杠；双引号会把 `C:\Users\nick` 里的 `\n` 变成换行）。这些文件 10 分钟后在下次打开时删除。
+  - Windows Terminal（`wt.exe` 是"应用执行别名"，`existsSync` 看不见，`findCommand` 用 `lstat`）：`wt -w new -d <cwd> node [--env-file=…] bin …`，每个参数里的 `;` 转成 `\;`（wt 的命令分隔符）。wt 新开的窗口用 Windows Terminal 自己的环境变量，不继承调用者的，所以服务把自己环境里的 `CLAUDE_PRO_*`、`CLAUDE_CODE_*`（`passedEnv()`：不含 TOKEN/KEY/SECRET/PASSWORD/HEADERS 和监督进程的变量）写进 `CONFIG_DIR/launch/<id>.env`，用 `node --env-file` 带过去（值用单引号或反引号，Node 的 dotenv 解析不转义里面的反斜杠；双引号会把 `C:\Users\nick` 里的 `\n` 变成换行）。这些文件 10 分钟后在下次打开时删除。
   - 没有 wt：PowerShell `Start-Process`（新控制台窗口；若系统默认终端是 Windows Terminal 就在它里面）。参数用 `quoteWindowsArg` 按 C 运行库规则拼成一个字符串，经环境变量交给脚本；PowerShell 本身隐藏、**不能 detached**（没有控制台的 PowerShell 直接以 0 退出、什么都不做）；出错时脚本只把 `$_.Exception.Message` 以 UTF-8 写到 stdout（否则是系统代码页的 CLIXML）。
   - macOS：`osascript` 让 Terminal.app `do script "cd '<cwd>' && exec env K=V … 'node' 'bin' …"`（单引号转义后再按 AppleScript 字符串转义）。
   - Linux 有 `DISPLAY`/`WAYLAND_DISPLAY`：`x-terminal-emulator`/`gnome-terminal`/`konsole`/`xterm` 里第一个有的，经 `sh -c 'cd "$0" && exec "$@"'` 进入目录；没有桌面时 `tmux new-session -d -s claude-pro-<id> -c <cwd>`；都没有就报错。环境变量用 `env K=V` 前缀带过去。
@@ -213,63 +205,37 @@ sequenceDiagram
 
 子 Agent 使用同一个配置、模式、检查点和 hooks，但拥有自己的消息上下文、IO 和深度。`toolsForSubagent()` 会按 Agent 定义过滤工具，并使用 `maxSubagentDepth`（2）。
 
-## 5. 配置体系与 provider 选择
+## 5. 配置体系与 gateway provider
 
 ### 5.1 配置优先级
 
-[`src/config.js`](src/config.js) 从低到高合并以下来源：
+[`src/config.js`](src/config.js) 从低到高合并：
 
-1. 内置默认值。
-2. 安装目录下的 `.env`。
-3. `~/.claude-pro/settings.json` 的 `env` 块。
-4. 当前项目 `.claude-pro/settings.json` 的 `env` 块。
-5. 当前项目 `.claude-pro/settings.local.json` 的 `env` 块。
-6. 进程环境变量。
-7. 命令行 flags，例如 `--provider`、`--model`、`--effort`。
+1. 内置默认值；
+2. 安装目录 `.env`；
+3. `~/.claude-pro/settings.json`；
+4. 当前项目 `.claude-pro/settings.json`；
+5. 当前项目 `.claude-pro/settings.local.json`；
+6. 进程环境变量；
+7. 命令行 flags。
 
-另外，`/model`、`/effort` 的选择按 provider 记在 `~/.claude-pro/settings.json` 的 `remembered` 块（`rememberChoice`），`createRuntime()` 用 `applyRememberedChoices()` 把它设为本次会话的 `modelOverride`/`effortOverride`：它压过 1–6，但命令行 `--model`/`--effort` 存在时不应用（flag 只管当次）。`/model default`、`/effort default` 删掉它。自重启交接的 override 也会写回这里。`updateSettingsFile()` 遇到不是合法 JSON 的设置文件会报错，不会用空对象覆盖它。
-
-因此，`.env` 没有 `CLAUDE_PRO_PROVIDER` 时，代码默认使用 `api`。只有更高优先级来源设置了 `CLAUDE_PRO_PROVIDER=claude-code`，最终 provider 才会是 `claude-code`。可用下面的命令查看最终值和来源：
+provider 固定为 `gateway`。`--provider api`、`--provider claude-code` 和 `--provider codex` 会被拒绝；旧的 API、Claude CLI 和 Codex CLI 凭据不会参与配置解析。模型使用 `CLAUDE_PRO_GATEWAY_MODEL`，也可以用 `/model` 或 `--model` 临时覆盖。
 
 ```powershell
 node bin/claude-pro.js config list
+node bin/claude-pro.js config set CLAUDE_PRO_GATEWAY_MODEL sonnet
+node bin/claude-pro.js --provider gateway --model opus
 ```
 
-临时切换：
+### 5.2 gateway 请求路径
 
-```powershell
-node bin/claude-pro.js --provider claude-code
-node bin/claude-pro.js --provider api
-```
+`src/api.js` 每次请求从 `gateway.json` 或 `CLAUDE_PRO_GATEWAY_API_KEY` 读取 key，通过 Anthropic Messages 格式向 `${CLAUDE_PRO_GATEWAY_URL}/v1/messages` 发送请求。模型、工具 schema、SSE 事件、重试、上下文压缩和取消逻辑都在本地 Agent 层保持不变；远程控制也复用同一个网关账户，但使用独立的 remote API 路径。
 
-当前项目固定使用本机订阅时，可以把配置写入被 `.gitignore` 忽略的项目本地文件：
+## 6. gateway 请求与限流
 
-```powershell
-node bin/claude-pro.js config set CLAUDE_PRO_PROVIDER claude-code --local
-```
+### 6.1 gateway 后端
 
-### 5.2 Claude 订阅模式的路径解析
-
-`claude-code` 模式涉及两个不同文件：
-
-| 文件 | 默认路径 | 内容 |
-|---|---|---|
-| 账号元数据 | `~/.claude.json` | `userID`、`oauthAccount.accountUuid`、最近 onboarding 版本等 |
-| OAuth 凭据 | `~/.claude/.credentials.json` | `claudeAiOauth.accessToken`、`expiresAt` 等 |
-
-Windows 中的 `~` 是当前用户目录，例如 `%USERPROFILE%`。也可以通过以下变量选择已有登录态：
-
-- `CLAUDE_PRO_CLAUDE_CONFIG_FILE`：指定元数据文件。
-- `CLAUDE_PRO_CLAUDE_CREDENTIALS_FILE`：直接指定凭据文件。
-- `CLAUDE_CONFIG_DIR`：在未直接指定凭据文件时，指定包含 `.credentials.json` 的目录。
-
-相对路径会按当前工作目录解析。项目只读取文件；找不到文件、JSON 无效、缺少 access token 或 token 已过期时会给出明确错误。
-
-## 6. 模型后端与 Claude 订阅的 OAuth 请求
-
-### 6.1 后端抽象
-
-[`src/api.js`](src/api.js) 对上层暴露统一的 `streamMessage()` 和 `quickQuery()`。上层不需要知道当前使用 API key 还是 OAuth：
+[`src/api.js`](src/api.js) 对上层暴露统一的 `streamMessage()` 和 `quickQuery()`。上层只看到 gateway 的 Anthropic Messages 兼容接口：
 
 ```text
 Agent / WebFetch / 标题摘要
@@ -277,15 +243,12 @@ Agent / WebFetch / 标题摘要
           ▼
       streamMessage
           │
-          ├─ provider=api         → config.baseURL + API token/key
-          └─ provider=claude-code  → readClaudeCodeLogin + Anthropic OAuth HTTP
+          └─ gateway → CLAUDE_PRO_GATEWAY_URL + gateway key
 ```
-
-两种后端共用模型消息、工具 schema、SSE 事件、重试、上下文压缩和取消逻辑。`claude-code` 模式会忽略 `.env` 中残留的 DeepSeek/API endpoint 凭据，始终把订阅 token 发往 Anthropic 官方 endpoint。
 
 ### 6.1.1 限流：暂停到窗口重置再自动继续
 
-订阅有滚动窗口限额（5 小时、每周）。窗口用完时 API 返回 429，并在响应头里给出是哪个窗口、何时重置（真实响应已核对，字段与官方 claude 命令读取的一致）：
+网关账户有滚动窗口限额（5 小时、每周）。窗口用完时网关返回 429，并在响应头里给出是哪个窗口、何时重置：
 
 | 响应头 | 含义 |
 |---|---|
@@ -309,69 +272,28 @@ Agent / WebFetch / 标题摘要
 - 轮询型暂停每隔几分钟会再发一次 `rate_limit_wait`，`shouldAnnounce(prev, ev)` 决定是否值得再告诉用户一次（只有首次，或重置时间移动超过 2 分钟）。REPL（主 agent 和每个子 agent）与 `-p` 都用它；新增界面时别忘了。
 - 等待用墙上时钟分段休眠（`sleepUntil`，每段最多 15 秒）：电脑睡眠后醒来立刻发现已过重置时间。`timing` 对象可被测试替换，几小时的等待在测试里瞬间完成。
 - 暂停可被 `AbortSignal` 取消（Esc）。自动压缩期间也一样：`Agent.compactOnTheWay()` 把压缩中的中断映射成"本轮被打断"（`handleInterrupt`），而不是让 `AbortError` 逃出 `run()` 变成"API Error: aborted"。
-- 醒来后由 `loginAfterPause()` 取得登录：先 `renewLogin()`（访问令牌八小时有效，等五小时窗口时多半已过期，直接用刷新令牌续期，见 6.2），再读凭据文件。续期不成（刷新令牌被拒、令牌接口暂时连不上、自动续期被关闭）或文件正好被别的进程写到一半时，不立刻失败，而是每 15 秒查一次文件、每 5 分钟重试续期，发出 `rate_limit_wait`（`waitingForLogin: true`，带 `giveUpAt` 和 `renewError`），直到拿到有效登录或用完剩余等待预算（`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS` 减去已等的），之后才报错，错误里是续期失败的原因而不只是"已过期"，并写明已等多久。用户在这期间 `claude` → `/login` 也会被读到。无人值守的 `-p` 因此不会在等了五小时后因为令牌过期而白费。能自己续期时，暂停开始前不再提示"登录会在恢复前过期"（`loginExpiryToWarnAbout`）。暂停结束后 `retryState.attempt` 清零：暂停之前的快速重试不占暂停之后的名额。
+- 醒来后重新发送原请求；暂停结束后 `retryState.attempt` 清零，暂停之前的快速重试不占暂停之后的名额。
 - `quickQuery()` 默认 `waitForRateLimit: false`：旁路请求（`/doctor`、WebFetch 的摘要）没有事件通道，无法告诉用户自己停住了，所以直接报告限流。没人等限流的场景（这个选项，或 `CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS=0`）里，`planRetry` 对 ≥30 秒的 429 立即报告重置时间，不再按 Retry-After 一次次静默地等。
 - 界面里"忙碌"的东西（一轮、压缩、`/doctor`、`!` 命令）结束时都要调用 `App.sendWhatWaited()`：忙碌期间排队的输入和刚结束的后台 agent 的报告由它发出。漏掉它，排队的消息就一直停在"queued"。
 - `CLAUDE_PRO_MAX_RETRIES=0` 关闭一切重试，包括等待。
 
-### 6.2 OAuth 读取器
+### 6.2 请求形态
 
-[`src/claude-code.js`](src/claude-code.js) 的职责很窄：
-
-1. 读取元数据 JSON 和凭据 JSON。
-2. 提取 `credentials.claudeAiOauth.accessToken`。
-3. 检查 `expiresAt`。
-4. 从元数据生成 `user_id`：包含 `device_id`、`account_uuid` 和当前进程生成的一次 session UUID。
-5. 推断官方 claude 命令的版本，用于 User-Agent；可用 `CLAUDE_PRO_CLAUDE_CODE_VERSION` 显式覆盖。
-6. 生成订阅接口要求的请求头。
-
-它不执行登录流程，也不写文件；本项目每次请求都会重新读取凭据文件，因此官方会话轮换 token 后，后续请求可以使用新值。
-
-### 6.1.2 终端渲染：缩放、标题、页脚
-
-- `Screen`（[`src/ui/screen.js`](src/ui/screen.js)）把输出分为静态日志和底部实时区。窗口缩放时终端（Windows 上是 ConPTY + xterm.js）会重排内容并移动光标，按"估算的光标行"向上擦除必然留下残影，所以缩放期间 `flush()` 直接返回，静默 80ms（最长 300ms）后 `repaint()`：`\x1b[H` 绝对定位，写最近的静态行（`history`，最多 600 行）加实时区，每行 `\x1b[K`，最后清到屏幕底，不依赖任何相对移动。
-- **全屏模式**（默认，`CLAUDE_PRO_TUI=fullscreen`，`/tui` 切换，`Screen.setFull`）：进入备用屏幕并打开鼠标报告（`?1049h ?1000h ?1006h`）。对话就是 `history`（全屏时最多保留 2 万行），按当前宽度减一折行后缓存在 `wrapped`（宽度变了整体作废）。`draw()` 每次算出整屏的行：上面是对话里结束在 `scroll` 行之上的那一段（不够时下面补空行，内容从顶部开始），下面是实时区，往上翻时对话区最后一行盖上 Jump to bottom 条；只重写和上一帧（`frame`）不同的行（`\x1b[行;1H` + 内容 + `\x1b[K`），光标用绝对位置放回输入框。往上翻时到达的新行让 `scroll` 同步增加（画面不动）并计入 `unseen`。`repaint()`（缩放、Ctrl+L）整屏重画，`clearScreen()`（/clear）清空 `history`，`close()` 关鼠标报告、离开备用屏幕。鼠标报告用 `?1002h`（按住按钮时的移动也报告）。选中（`Screen.mouse`）：点和拖动的位置换成对话坐标 `{line, sub, col}`（history 的行、它折出来的第几行、列），所以滚动时选中跟着文字走；`draw()` 记下每个对话行显示的是什么（`viewMap`）和 Jump to bottom 条的行（`barRow`），选中的行去掉颜色、反色画出选中的列（`paintRow`）；松开、双击（词）、三击（行）时返回 `{copy: text}`（`selectedText` 把同一行折出来的几段接回去），App 用 `writeClipboard`（Windows PowerShell 从 stdin 读 UTF-8，macOS pbcopy，Linux wl-copy/xclip/xsel）放进剪贴板；单击清除，点 Jump to bottom 条回到底部，拖到上下边缘时滚动。右键（终端拿不到了）由 `App.onMouse` 处理：有选中时复制，否则 `readClipboardText` 读出文字、包成 `\x1b[200~…\x1b[201~` 写进按键流 `this.keys`，和终端自己的粘贴走同一条路。有选中时 `onKey`：滚动键保留，Ctrl+C 复制不中断，Esc 只清除，其他键清除后照常处理。宽度变化、`/clear` 清除选中。按键从 `mouseFilter(stdin)` 读：它把 SGR 鼠标报告（`ESC [ < b ; x ; y M/m`，跨块的拼起来）交给 `App.onMouse`（滚轮：button 64/65），其余原样交给 readline。重启时 `screenHistory`（最后 3000 行）放进重启状态，新进程放回 `history`；没有它（旧版本、经典模式过来的）就用 `printTranscript` 按会话重画最近 80 条消息。监督进程在子进程意外退出时也关掉备用屏幕和鼠标报告。测试（`noProcessExit`）默认经典模式。
-- **输入框贴底**（经典模式）：实时区的顶部可以带空行（`gapFor`），让它的最后一行始终是屏幕的最后一行；`pinned` 记着实时区从顶部到屏幕底有几行，每次 `flush()` 先写静态行、再补空行到原来的高度，写完后 `pinned` = 实时区的行数（输出多到滚屏时也一样，因为它本来就在屏幕底）。这需要知道实时区从哪一行开始：启动时 `queryCursorRow` 向终端发 DSR 6（`\x1b[6n`），在读按键之前读回 `\x1b[行;列R`（300ms 没回答就不贴底，其余输入放回 stdin），`pinFrom(行)`；`repaint()` 和 `clearScreen()` 从左上角写，位置已知；`clearLive()` 之后不知道光标在哪，`close()` 时去掉空行（shell 或重启后的新进程紧接着输出往下写，新进程再查一次光标）。迟到的 DSR 回答在 `onKey` 之前丢掉。测试终端（`tui-harness.js`）把 xterm 的回答转给程序的 stdin，所以 TUI 测试里也是贴底的。
-- 标题：`setTitle(provider, exitTitle)`，每次 flush/repaint 前 `titleUpdate()` 仅在文本变化时输出 OSC `\x1b]0;…\x07`（首次先 `\x1b[22;0t` 压栈，退出时 `\x1b[23;0t` 弹栈）；`cleanTitle` 去掉控制字符，防止提问里的 BEL/ESC 提前结束标题。内容由 `App.terminalTitle()` 生成：`<状态> <话题> | <目录> · <模型> · <effort>`。话题由 `refreshTopic()` 维护：每条用户消息（`startTurn`、回合中途取走的排队消息 `takeQueued`）都在后台用 `quickQuery` 问小模型 `topicTitlePrompt(当前话题, 消息)`，回答 JSON `{isNewTopic, title}`，`parseTopicTitle()` 清洗；只采用比已采用的更新的请求的回答，切换会话后到达的回答丢弃。话题以 `{type:"meta", topic}` 追加进会话 JSONL（`SessionStore.setTopic`），`load()` 取最新一条，`list()` 用它作 `/resume` 列表的标题；加载没有话题的旧会话时按 `latestPrompt()` 生成一次。失败（限流、断网）静默保留原标题。测试工具默认设 `CLAUDE_PRO_DISABLE_TOPIC_TITLE=1`，免得每个假服务器多收一个请求。VS Code 1.140 只在识别出 AI 命令行时用 `${sequence}`(程序设置的标题)作标签,否则用 `${process}`(进程名);Windows 上的识别看进程树里 `node.exe` 的命令行是否含 `[\\/]claude-code[\\/]`(`ptyHostMain.js` 的 `traverseTree`),所以 `supervisor.js` 的 `sessionEntry()` 在 win32 上用 `bin\claude-code\..\claude-pro.js` 启动会话。
-- 查找（`ctrl+f`，只在全屏）：`Screen.finding`（`openFind`/`setFind`/`findStep`/`closeFind`）。匹配按从新到旧排列（从对话底部往上），每个记 `abs`（`dropped` + 行号，顶部丢弃行之后仍能认出）、`offset`（在该行纯文本里的位置）、`fromEnd`（离对话末尾多少行），`byRow` 按 `行:折行` 存要高亮的列区间。在 `wrappedAt` 折好的各行去掉颜色后拼起来再搜（`wrapLine` 是硬折行，拼起来就是原文），所以跨折行的匹配也能找到；不分大小写，按字面（正则特殊字符转义）。`refreshFind` 在 `draw` 前检查：宽度、`dropped` 没变而只是追加了行时只搜新行，把旧匹配的 `fromEnd` 加上新行数；否则全部重搜，按 `abs`+`offset` 保住当前匹配。`revealMatch` 在当前匹配不在视图里（"Jump to bottom" 条盖住的最后一行不算）时把它滚到中间。`paintRow` 对有选中或匹配的行去掉原有颜色逐字重画：选中反色，当前匹配橙色（256 色 208），其他黄色。第一个显示的是 `openFind` 时视图底部往上最近的匹配。`App.finder` 是查找框（输入框的位置，`renderFind`）：文字、光标、`selected`（上次的关键字带回来时是选中的，输入即替换）、粘贴缓冲；`findKey` 处理按键。
-- 用户提问的背景：`renderUserMessage` 每行包在 `c.userBg(…+'\x1b[K')` 里，靠终端用当前背景色擦除行尾（BCE）铺满整行；没有颜色时不加。`Screen` 里含 `\x1b[K` 的行（`FILL`）是"铺满行"：`endRow` 画完这种行只复位颜色，不再追加 `\x1b[K`——擦除不移动光标，复位后的第二次擦除会从同一列把背景条擦掉（全屏 `draw` 和 `repaint` 以前就是这样，只剩文字下面有背景）。窗口变窄、一行折成几行时，`wrappedAt` 给后面的行补上行首的颜色，每行末尾都在背景色下擦除；查找或选中时 `paintRow` 把未高亮的部分画回行首颜色，背景条不丢。
-- 页脚右侧由 `modelInfo(config)` 提供模型和 effort，`effortSupported()`（api.js 学到某模型拒绝 effort 后记住）为假时不显示 effort。
-- 对话花费：[`src/pricing.js`](src/pricing.js) 的 `costOf(model, usage)` 按网关 `pricing.mjs` 同一张官方价目表算一个请求的美元数（`cache_creation.ephemeral_1h_input_tokens` 按 1 小时价，其余写入按 5 分钟价；超过 `longContext.threshold` 的提示词整体按长上下文价；表里没有的 Claude 型号按同系列当前型号算，和网关一样；其他未知型号返回 null）。`streamMessage` 每个请求结束时 `charge()`：先按响应里的模型、再按请求的模型算价，交给 `config.onCost`；被中断的请求按 `message_start` 的用量加已流出内容的估算（字符数/4）计。交互模式下 `App` 把它累加到 `this.cost`，每次用 `{type:'meta', cost}` 写进会话 JSONL（`SessionStore.setCost`，`load()` 返回最新的 `cost`），`loadSession`（`/resume`、重启）恢复，`newSession`（`/clear`）清零；页脚把它放在模型前面，空间不够时先省掉它。`print.js` 另记本次运行的 `total_cost_usd`。
-- 缓存时钟：`CacheStats.clockUntil` 在报告了缓存读写（`caching` 且 read 或 write > 0）的请求后设为 `开始时间 + TTL`，`noteCompacted()`（`compact()` 和 `summarizePart` 的 before 部分，在 `replaceMessages` 之后调用）把它设为 0，`newConversation()`（`/clear`）设为 null；模型、effort 等其他让缓存失效的操作不动它，和官方一样。`clock()` 返回 `{minutes}`（向上取整）、`{cold: true}` 或 null。`App.cacheClock()` 画成 `◷ 12m` 或红色的 `◷`，放在花费前面；spinner 定时器每 120ms 算一次时钟文字，变了才重画，所以空闲时也会倒数。`App.usage`（主 agent 每个请求之后）和 `compactEnd` 用 `SessionStore.setCacheUntil` 写 `{type:'meta', cacheUntil}`（值没变不写），`loadSession` 恢复。
-
-### 6.2.1 令牌续期
-
-[`src/oauth.js`](src/oauth.js) 负责续期，协议和官方 claude 命令的一样（两边共用同一份凭据）：
-
-- **时机**：`streamMessage()` 发请求前，`expiresAt` 已过或不足 5 分钟（`needsRefresh`）；请求收到 401 时（令牌被提前吊销、本机时钟不准、请求过程中过期）强制续期一次再重试；暂停恢复后（`loginAfterPause`）。
-- **请求**：`POST https://platform.claude.com/v1/oauth/token`，JSON `{grant_type: "refresh_token", refresh_token, client_id, scope}`；应答里的 `access_token`、`refresh_token`、`expires_in`、`refresh_token_expires_in`、`scope` 写回文件。服务端说 `invalid_scope` 时去掉 scope 重试一次。接口地址是常量（`endpoint.url` 只有测试会替换），不是配置项：刷新令牌会发到那里，而配置可能来自任意项目的 `.env`。
-- **轮换**：刷新会让旧刷新令牌失效，所以新值必须落盘。`storeTokens()` 只改 `accessToken/refreshToken/expiresAt/refreshTokenExpiresAt/scopes`，保留其他字段、缩进和结尾换行；用临时文件 + rename 原子替换（Windows 上文件被占用时重试），写完回读校验。
-- **锁**：和官方 claude 命令同样的目录锁（两边不能同时刷新）（`mkdir` 取锁、`rmdir` 放锁、持有者每 5 秒 touch、60 秒没 touch 视为陈旧并清除），先 `<配置目录>/.oauth_refresh.lock` 再 `<配置目录>.lock`，最多等 30 秒。拿到锁后重读文件：别的进程刚刷新过就直接采用它的结果，不再请求。刷新被拒（400/401/403）时也先看文件里是不是已经被别人换成了新令牌，然后才判定"需要重新登录"。
-- **同进程去重**：同一文件的并发续期共享一次请求（`inflight`）；某个调用方被取消只是不再等它，不会取消大家共享的那次续期。
-- **失败的处理**：令牌还有几分钟时续期失败（断网、服务端 5xx）不是错误，继续用旧令牌；已经过期则报错并写明原因；刷新令牌被拒或过期报"需要运行 `claude` 再 /login"。错误文本里不含任何令牌（`describeFailure` 会抹掉长得像令牌的串）。
-- **开关**：`CLAUDE_PRO_DISABLE_TOKEN_REFRESH=1` 关闭自动续期，回到只读。
-- 实测：对真实令牌接口做过一次强制续期，返回新的访问/刷新令牌，写回后文件格式不变，新令牌可正常发请求。测试（`test/oauth.test.js`）用本机假令牌服务器和临时凭据文件，且任何测试都不会碰到真实接口（`endpoint.url` 默认指向不存在的地址）。
-
-### 6.3 请求形态
-
-SDK 最终调用 Anthropic Messages API，逻辑路径相当于：
+SDK 最终调用网关提供的 Anthropic Messages 兼容接口，逻辑路径相当于：
 
 ```text
-POST https://api.anthropic.com/v1/messages?beta=true
-Authorization: Bearer <订阅的 accessToken>
-anthropic-beta: claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14
-user-agent: claude-cli/<version> (external, cli)
-x-app: cli
+POST https://gw.predix.icu/v1/messages
+Authorization: Bearer <gateway API key>
+X-Claude-Code-Session-Id: <session id>
 ```
 
 请求体由 `buildParams()` 生成，关键字段包括：
 
 - `model`、`max_tokens`、`stream: true`。
-- 系统提示词；OAuth 模式最前面会追加 `You are Claude Code, Anthropic's official CLI for Claude.`（订阅接口只接受带这一句身份声明的请求；它只在订阅模式的请求里，claude-pro 自己的提示词里没有）。
+- claude-pro 自己生成的一个 system prompt block；不会追加 Claude Code 身份声明。
 - `messages`，保留 Anthropic 的 `tool_use` / `tool_result` 结构。
-- `metadata.user_id`，来源于本机账号元数据和本进程 session UUID。
 - 工具 JSON Schema；最后一个工具带 `cache_control`（提示词缓存，见 6.5）。
-- `output_config.effort` 和可选的 thinking budget。
+- `output_config.effort` 和可选的 thinking budget；GPT 模型的思考签名按网关 Codex 后端协议保留。
 
 图片（[`src/utils/images.js`](src/utils/images.js)）：每次请求都带着整个对话，所以图片的字节数决定请求有多大（token 按像素算，与字节无关）。`fitImage` 把长边超过 1568 px 的缩到 1568；超过 `PNG_AS_JPEG_BYTES`（512 KB）的 PNG 另存一份 JPEG（质量 85，透明部分铺白），更小就用 JPEG。3D 场景、照片类截图用 PNG 几乎压不动：723×1568 的游戏截图 PNG 2.3 MB，JPEG 180 KB。没有图片库：Windows 用 PowerShell 的 System.Drawing，macOS 用 sips，其他系统用 ImageMagick。Read、粘贴/拖入的图片、所有工具结果都先经过它。已经在对话里的重 PNG（这个功能之前读的截图）由 `Agent.lightenImages()` 处理：`callModel`、`compact`、`summarizePart` 发请求前调用 `lightenImagesIn(this.messages)` 原地换成 JPEG（每批 4 个并发），有改动就 `replaceMessages` 写一条 reset 进会话文件，并告诉 `CacheStats` 接下来的整段重写是预期的；转不了或 JPEG 不更小的按数据 sha1 记住，不再每次请求都试。2026-10-12 的事故：一个对话读了 11 张 PNG 截图，请求体到了 31 MB，网关处理时内存 350–450 MB，被 pm2 的 300M 上限每 30 秒杀一次，客户端看到的是 `terminated` 和 Caddy 的 `502 (no body)`；网关和 API 对单个请求的上限都是 32 MB。
 
@@ -384,7 +306,6 @@ x-app: cli
 - Abort signal 取消请求和工具执行。
 - 400 返回 `max_tokens` 过大时，学习服务端上限并立即重试。
 - 408/409/429/5xx 的指数退避重试。
-- 订阅的 OAuth 请求遇到 401 时重新读取凭据一次，token 没变（或已过期）就强制续期一次（6.2.1）；只有 token 确实变化才重建 client 并重试，避免对同一失效 token 无限重试。续期不成而令牌确已过期时，报的是续期失败的原因，不是笼统的 401。
 - 400 "This model does not support the effort parameter"（Haiku）时去掉 `output_config` 立即重试，并记住这个模型（`effortSupported()`），之后不再发送。
 - prompt too long 时通知 Agent 触发上下文压缩。
 - 400 报 `cache_control`（或 `ttl`）不被接受时，`refuseCache()` 在被点名的位置去掉标记（报 `ttl` 则退回 5 分钟）后立即重发；没点名位置的报错一次去掉一处（messages → tools → system）。去掉了什么先记在这次调用里，请求成功后才按"端点 + 模型"记住（`cacheRefusals()` 给 `/status`），所以只是碰巧提到 `cache_control` 的报错不会让缓存永久关闭；没有可去掉的标记时照常报错，不会循环。
@@ -393,16 +314,16 @@ x-app: cli
 
 实现在 [`src/cache.js`](src/cache.js)（TTL 规则、`cache_control` 构造、命中统计）、`buildParams()` / `streamMessage()`（标记与降级）和 `Agent`（用量记录、压缩）：
 
-- **断点**：最后一个工具、系统提示词、最新消息的最后一个块，共 3 个。OAuth 模式追加在最前面的 `You are Claude Code…` 那一块不带标记。`quickQuery()`（WebFetch 摘要、标题等一次性请求）传 `cacheMessages: false`，消息不标记：整页内容只发一次，写缓存只会多收 1.25 倍。
-- **TTL 桶**：`buildParams(…, { cacheBucket })`，`main`（主 agent 的每轮请求）和 `other`（子 agent、压缩、`quickQuery`）。`Config.cacheTtl(bucket)` 的优先级：`FORCE_PROMPT_CACHING_5M` → 桶自己的变量/设置（`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`，设置项 `promptCacheTtl`、`subagentPromptCacheTtl`）→ `ENABLE_PROMPT_CACHING_1H` → 默认值：订阅登录（`claude-code` 提供方）的 `main` 桶是 1 小时，其余一律 5 分钟。变量优先于设置项，无论来自哪个文件（设置项单独保存在 `config.settings`，不写进 env）；无效的值被忽略。5 分钟不发 `ttl` 字段；端点不认 `ttl` 时退回 5 分钟（见上）；一个请求里所有标记同一个 TTL（API 要求长 TTL 在前）。
-- **`.env` 不漏进订阅模式**：`loadConfig()` 在 `claude-code` 提供方下丢弃来自安装目录 `.env` 的 `API_ONLY_DOTENV_KEYS`（effort、自动压缩窗口/百分比、最大输出、thinking 预算），它们是 API 提供方（DeepSeek 等）的调参；订阅模式因此从默认值开始（模型自己的 effort、整个上下文窗口）。设置文件、shell 环境变量、flag 和 `/effort` 照常生效；`Config.ignoredFromDotEnv` 记录被丢弃的键，`/config` 会显示。
+- **断点**：最后一个工具、系统提示词、最新消息的最后一个块，共 3 个。gateway 请求只有 claude-pro 自己生成的 system prompt block。`quickQuery()`（WebFetch 摘要、标题等一次性请求）传 `cacheMessages: false`，消息不标记：整页内容只发一次，写缓存只会多收 1.25 倍。
+- **TTL 桶**：`buildParams(…, { cacheBucket })`，`main`（主 agent 的每轮请求）和 `other`（子 agent、压缩、`quickQuery`）。`Config.cacheTtl(bucket)` 的优先级：`FORCE_PROMPT_CACHING_5M` → 桶自己的变量/设置（`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`，设置项 `promptCacheTtl`、`subagentPromptCacheTtl`）→ `ENABLE_PROMPT_CACHING_1H` → 默认值：gateway 的 `main` 桶是 1 小时，`other` 桶是 5 分钟。变量优先于设置项，无论来自哪个文件（设置项单独保存在 `config.settings`，不写进 env）；无效的值被忽略。5 分钟不发 `ttl` 字段；端点不认 `ttl` 时退回 5 分钟（见上）；一个请求里所有标记同一个 TTL（API 要求长 TTL 在前）。
+- **配置直接传给网关**：gateway 使用配置文件和环境变量中的 effort、自动压缩窗口、最大输出和 thinking 预算。
 - **开关**：`Config.promptCachingDisabled(modelId)`，`DISABLE_PROMPT_CACHING` 和按别名/模型的变体；关闭时请求里没有任何 `cache_control`。
 - **压缩**：`Agent.requestSummary()` 发的是对话自己的请求（同一模型、系统提示词、工具、effort、思考设置），摘要指令作为最后一条用户消息的末尾块，属于 `other` 桶。得不到摘要（模型调工具）或 prompt too long 时退回 `SUMMARY_SYSTEM` + 无 effort 的普通请求，这一次不计为 miss。压缩完成后 `refreshSystemPrompt()` 让系统提示词在下一次请求时重建。**不要给压缩请求加 `tool_choice`、改 effort 或 `max_tokens` 与 thinking 的关系**：这些会改变缓存键。调用了工具的回复、被输出上限截断且没写完 `</summary>` 的回复都不算摘要（`Agent.summaryOf()`），会退回普通请求；仍不行则报错并保留对话。子 agent 自己的压缩不会让主对话的检查点失效。压缩之后不会再有请求以这段历史开头，所以只在能从缓存读到它时才给消息加标记：`Agent.cacheExpired()` 确定缓存已过期时（本进程上次请求的 `expiresAt`；恢复/重启的对话用最后一条消息的时间加主对话 TTL，不知道就当没过期），以及退回的普通请求，都传 `cacheMessages: false`，历史按普通输入计费（4 美元/M），不按缓存写入（5 美元/M）；工具和系统提示词的标记保留，下一轮还要读。
 - **系统提示词不在会话中途变化**：`runtime.systemPrompt()` 构建一次并保持。保存记忆、`/config set` 只调用 `deferSystemPromptRefresh()`（`systemPromptStale`），`/clear`、压缩、`/model` 调用 `invalidateSystemPrompt()`。日期和 git 状态是一份快照（`takeEnvSnapshot()`），主提示词和子 agent 提示词共用，所以同类型子 agent 反复启动的前缀相同。
 - **恢复**：`SessionStore.setSystemPrompt()` 把当时的系统提示词写进会话文件（`meta` 记录，最新的生效）；`runtime.resumeSystemPrompt()` 在恢复时继续使用它（模型不同、或本次 `--append-system-prompt` 文本不同则不用），`Agent.resetConversation()` 清掉 `recordedSystem`，所以 `/clear` 之后的新会话文件也会写入（即使文本相同），日期不同则通过 `Agent.addReminder()` 在下一条用户消息末尾附一条提醒（在已缓存部分之后，不破坏缓存）。
 - **统计**：`CacheStats`（`agent.cache`）按 API 报告的 `cache_read_input_tokens` / `cache_creation_input_tokens` 记录命中率、miss 次数、是否还热（TTL 从请求开始算）和最近一次 miss 的可能原因（模型/系统提示词/工具/effort/思考设置变了，或缓存已过期）。历史被改写（压缩、`/rewind`）和新对话不算 miss。`Agent.recordUsage()` 是唯一累计用量的地方，压缩请求也走它；子 agent 的用量在结束时（无论成败）并入主 agent（`addSubUsage()`），`totalUsage()` 给出总数。
 - **切换确认**：缓存还热（`agent.cache.isWarm()`）时 `/model`、`/effort` 先确认；已经过期、新对话、端点不报告缓存用量时不问。
-- **空闲后清理**：`Agent.clearAfterIdle()` 在主 agent 每轮开始时（`beforeTurn` 之后）看距 `lastActivityAt` 是否超过 65 分钟（`IDLE_CLEARING`；`pushMessage()` 更新它，恢复会话时取会话文件里最后一条消息或 reset 的时间 `SessionStore.load().lastAt`），超过就调 `clearOldToolResults()`：可清的工具（Read、Bash、BashOutput、Grep、Glob、WebFetch、WebSearch、Edit、Write）的结果里，最近 5 个以外、不小于 100 token、还没清过也不是落盘预览的，换成 `[Old tool result content cleared]` 占位（Read 提示重读；其他的全文存到 `tool-results/<id>.txt`，占位里给出路径），合计不足 2 万 token 就不动。同时去掉所有 thinking 块：改了早先的 tool_result，后面的 thinking 就失效（新账号直接 400）。结果经 `replaceMessages()` 写进会话文件（reset 记录），被清的 Read 所在文件若再没有可见的 Read 就移出 `fileState`（Edit/Write 前必须重读），`lastContextTokens` 按清掉的量下调。上一轮停在未完成的工具调用（最后一条助手消息带 tool_use，比如工具结果之后的请求失败或被中断）时，只有手动思考（`MAX_THINKING_TOKENS`，`thinking.type: "enabled"`）不清：API 要求这条消息以它的 thinking 开头。自适应思考（不发 thinking 字段时的默认，5.x 模型只有这一种）没有这个要求，文档也允许删掉全部 thinking，照常清。`Config.clearAfterIdle` 只对订阅、网关和 `api.anthropic.com` 开：其他端点的缓存可能保留几个小时，清了反而不命中。
+- **空闲后清理**：`Agent.clearAfterIdle()` 在主 agent 每轮开始时（`beforeTurn` 之后）看距 `lastActivityAt` 是否超过 65 分钟（`IDLE_CLEARING`；`pushMessage()` 更新它，恢复会话时取会话文件里最后一条消息或 reset 的时间 `SessionStore.load().lastAt`），超过就调 `clearOldToolResults()`：可清的工具（Read、Bash、BashOutput、Grep、Glob、WebFetch、WebSearch、Edit、Write）的结果里，最近 5 个以外、不小于 100 token、还没清过也不是落盘预览的，换成 `[Old tool result content cleared]` 占位（Read 提示重读；其他的全文存到 `tool-results/<id>.txt`，占位里给出路径），合计不足 2 万 token 就不动。同时去掉所有 thinking 块：改了早先的 tool_result，后面的 thinking 就失效（新账号直接 400）。结果经 `replaceMessages()` 写进会话文件（reset 记录），被清的 Read 所在文件若再没有可见的 Read 就移出 `fileState`（Edit/Write 前必须重读），`lastContextTokens` 按清掉的量下调。上一轮停在未完成的工具调用（最后一条助手消息带 tool_use，比如工具结果之后的请求失败或被中断）时，只有手动思考（`MAX_THINKING_TOKENS`，`thinking.type: "enabled"`）不清：API 要求这条消息以它的 thinking 开头。自适应思考（不发 thinking 字段时的默认，5.x 模型只有这一种）没有这个要求，文档也允许删掉全部 thinking，照常清。gateway 始终启用这项清理，因为网关提示词缓存会过期。
 - **日期**：系统提示词在会话中不重建，所以跨过午夜后它的日期是旧的。`runtime.noteDateChange()` 在主 agent 每轮开始时（`Agent.beforeTurn`）比较提示词里的日期和今天，不同就用 `addReminder()` 附一条新日期的提醒，每天一次；恢复会话时 `resumeSystemPrompt()` 做同样的事。
 
 改动会影响请求前缀的东西（系统提示词、工具描述、`output_config`、`thinking`）之前，先想一想它会不会在会话中途变化：变一次就是整段历史重写一次。
@@ -491,7 +412,7 @@ flowchart TD
    └─ memory/                    # 自动记忆索引和主题文件
 ```
 
-这些是本项目自己的会话状态，不是官方 claude 命令的会话记录。Claude 订阅只用它的登录凭据，不用它的对话历史；`--continue` 和 `--resume` 读取的是上述 JSONL。
+这些是本项目自己的会话状态；模型请求使用网关登录，不读取其他 CLI 的凭据或对话历史。`--continue` 和 `--resume` 读取的是上述 JSONL。
 
 检查点只覆盖文件工具在修改前记录的文件。通过 `/rewind` 可选择恢复代码、恢复对话或两者同时恢复；Bash 的任意副作用需要用户自行处理或通过 hooks/验证命令控制。
 
@@ -503,7 +424,7 @@ flowchart TD
 
 - `Bash`、网络访问、文件写入和 MCP 工具默认可以立即执行。
 - 生产或共享环境应使用 hooks、隔离工作目录、版本控制和验证命令增加保护。
-- OAuth 认证只解决模型请求认证，不会限制模型可以调用的本地工具。
+- 网关认证只解决模型请求认证，不会限制模型可以调用的本地工具。
 
 ## 11. 目录与模块索引
 
@@ -520,8 +441,6 @@ flowchart TD
 | [`src/utils/shell.js`](src/utils/shell.js) | Shell 启动、`watchShell`（输出收集与结束判定）、Windows 进程树终止 |
 | [`src/supervisor.js`](src/supervisor.js) | 监督进程：子进程退出码 75 时重启它（只用 Node 内置模块） |
 | [`src/restart.js`](src/restart.js) / [`src/selfcheck.js`](src/selfcheck.js) | 重启状态交接、启动检查、源码监视 |
-| [`src/claude-code.js`](src/claude-code.js) | Claude 订阅：读取官方 claude 命令的登录、生成请求头 |
-| [`src/oauth.js`](src/oauth.js) | 访问令牌续期：刷新请求、与官方 claude 命令相同的锁、原子写回凭据文件 |
 | [`src/tools/`](src/tools/) | 文件、Shell、搜索、Web、Task、Skill 等工具 |
 | [`src/mcp.js`](src/mcp.js) | MCP stdio/HTTP 客户端 |
 | [`src/hooks.js`](src/hooks.js) | 生命周期 command hooks |
@@ -533,7 +452,7 @@ flowchart TD
 | [`src/background.js`](src/background.js) / [`src/ui/vterm.js`](src/ui/vterm.js) | 后台会话：服务对 `--headless` 进程的管理（崩溃拉起、恢复、日志）；后台会话的虚拟终端 |
 | [`src/history.js`](src/history.js) / [`src/connect.js`](src/connect.js) / [`src/attach.js`](src/attach.js) | 本机保存的对话（网页的历史）；`claude-pro connect` 配对接入；`claude-pro attach` 在终端里接上后台会话 |
 | [`src/print.js`](src/print.js) | 非交互输出协议 |
-| [`test/`](test/) | 单元、Agent、UI、OAuth 和集成测试 |
+| [`test/`](test/) | 单元、Agent、UI、gateway 和集成测试 |
 
 ## 12. 测试与验证
 
@@ -543,22 +462,20 @@ flowchart TD
 npm test
 ```
 
-与本架构最相关的测试是 [`test/claude-code.test.js`](test/claude-code.test.js)，覆盖：
+与本架构最相关的测试是 [`test/providers.test.js`](test/providers.test.js)，覆盖：
 
 - provider 和模型 alias 解析。
-- OAuth headers、请求体和订阅账号的 metadata。
-- 凭据文件轮换后的重新读取。
-- 401 token 变化时重试，以及 token 未变化时不循环重试。
-- OAuth 模式的完整 tool loop。
-- `api` 模式没有被破坏。
+- gateway key、请求体和 gateway system prompt。
+- gateway key、请求失败重试，以及 key 不可用时的明确错误。
+- gateway 模式的完整 tool loop、SSE 组装和缓存降级。
 
-真实网络测试由 `CLAUDE_PRO_LIVE_TEST` 显式开启，默认不在普通测试中访问 Anthropic。
+真实网络测试由 `CLAUDE_PRO_LIVE_TEST` 显式开启，默认不在普通测试中访问网关。
 
 `npm test` 带 `--test-force-exit`(测试结束后有残留句柄也立即退出)和 `--test-timeout=60000`(单个测试卡住 60 秒即判失败),一个卡住的测试不会拖住整轮。`npm run check` 是约 1 秒的启动自检(`--self-check`)。验证按风险分级:语法检查 → `npm run check` → 相关测试文件 → 较大改动最后跑一次 `npm test`,细则见仓库根目录的 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 13. 修改代码时的建议
 
-新增模型后端时，应保持 `Agent` 不感知认证细节，只在 `config.js`、后端适配器和 `api.js` 的 client/params 边界扩展。新增工具时，通过 `buildTools()` 注册，并明确 `readOnly`、`editsFiles`、输入 schema 和中断行为。涉及文件修改的工具应接入 `CheckpointStore`，涉及外部命令的功能应考虑 hooks、超时和输出截断。
+网关协议或模型能力变化时，应保持 `Agent` 不感知认证细节，只在 `config.js`、`gateway.js` 和 `api.js` 的 client/params 边界扩展。新增工具时，通过 `buildTools()` 注册，并明确 `readOnly`、`editsFiles`、输入 schema 和中断行为。涉及文件修改的工具应接入 `CheckpointStore`，涉及外部命令的功能应考虑 hooks、超时和输出截断。
 
-任何会影响请求格式的改动，都应同时验证：API 模式、Claude 订阅模式、SSE tool_use、取消、401 轮换、上下文压缩和非交互输出。
+任何会影响请求格式的改动，都应同时验证：gateway 请求、SSE tool_use、取消、限流重试、上下文压缩和非交互输出。
 

@@ -1,11 +1,10 @@
 // Rate limits: reading when a limit resets from the response headers, deciding how long to wait
 // before retrying, and the wording shown to the user.
 //
-// Subscription (Claude Code OAuth) requests are limited by rolling windows, 5 hours and 7 days. When
-// one is used up the API answers 429, and the anthropic-ratelimit-unified-* headers say which window
-// it was and when it resets (epoch seconds; these are the fields the official client reads).
-// Waiting for such a reset takes hours, so it is a pause that ends by itself rather than one of the
-// few quick retries used for transient errors.
+// Gateway requests can be limited by rolling windows, 5 hours and 7 days. When one is used up the
+// gateway answers 429, and the anthropic-ratelimit-unified-* headers say which window it was and when it
+// resets (epoch seconds). Waiting for such a reset takes hours, so it is a pause that ends by itself
+// rather than one of the few quick retries used for transient errors.
 
 export const LONG_WAIT_MS = 30_000; // waits this long or longer are shown as "rate limit reached, resuming at ..."
 export const MAX_RETRY_AFTER_MS = 5 * 60_000; // when waiting for limits is off, a longer Retry-After is reported instead
@@ -235,34 +234,22 @@ export function planRetry(err, state, config, { now = Date.now(), rand = Math.ra
 
 // Words for the pause notice, shared by the interactive and the print mode.
 export function describePause(ev, now = Date.now()) {
-  // The limit is over but the subscription login has expired meanwhile (its token lives 8 hours) and could
-  // not be renewed by this program: the request goes on as soon as there is a valid login in the file.
-  if (ev.waitingForLogin) {
-    const until = ev.giveUpAt ? ` Giving up at ${formatClock(ev.giveUpAt, now)}.` : '';
-    if (ev.renewError) return `The limit has reset, but the login could not be renewed: ${ev.renewError} Trying again every 5 minutes, and this continues by itself as soon as the login is valid.${until}`;
-    return `The limit has reset, but the Claude subscription login has expired and cannot be renewed from here. Waiting for it to be renewed: run claude once, and this continues by itself.${until}`;
-  }
   const label = capitalize(ev.label || 'rate limit');
   const left = humanDuration(Math.max(0, ev.resumeAt - now));
   if (ev.overloaded) return `The API is overloaded and kept refusing the request. Trying again at ${formatClock(ev.resumeAt, now)} (in ${left}), and every so often after that, then continuing automatically.`;
   const text = ev.polling
     ? `${label} reached and the server gave no reset time. Checking again at ${formatClock(ev.resumeAt, now)} (in ${left}), and every few minutes after that, then continuing automatically.`
     : `${label} reached. Pausing until ${formatClock(ev.resumeAt, now)} (in ${left}), then continuing automatically.`;
-  const warning = ev.loginExpiresAt && ev.loginExpiresAt < ev.resumeAt
-    ? ` The Claude subscription login expires at ${formatClock(ev.loginExpiresAt, now)}, before that, and it cannot be renewed from here. If no claude command is running to renew it, run claude once after the reset: this continues by itself once the login is valid again.`
-    : '';
-  return text + warning;
+  return text;
 }
 
 // Whether a rate_limit_wait event should be announced to the user. `prev` is the wait that was last
 // announced for the same pause (null at the first one). Polling repeats every few minutes and the
 // announced reset moves a little between waits: those only continue the pause already announced,
-// unless the reset moved by more than two minutes. Waiting for the login to be renewed is a different
-// kind of wait from waiting for the limit, and always worth saying when it begins.
+// unless the reset moved by more than two minutes.
 export const resumeText = (ev) => (ev?.overloaded ? 'The API is answering again; continuing.' : 'The limit has cleared; continuing.');
 
 export function shouldAnnounce(prev, ev) {
   if (!prev) return true;
-  if (Boolean(prev.waitingForLogin) !== Boolean(ev.waitingForLogin)) return true;
   return !ev.polling && Math.abs(ev.resumeAt - prev.resumeAt) > 120_000;
 }

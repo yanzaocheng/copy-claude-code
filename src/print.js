@@ -17,7 +17,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     return (ev) => {
       if (ev.type === 'rate_limit_wait') {
         if (shouldAnnounce(paused, ev)) err(c.yellow(who + describePause(ev)));
-        paused = { resumeAt: ev.resumeAt, waitingForLogin: Boolean(ev.waitingForLogin) };
+        paused = { resumeAt: ev.resumeAt };
       }
       if (ev.type === 'rate_limit_resume') {
         paused = null;

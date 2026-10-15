@@ -107,7 +107,7 @@ test('a resumed conversation can edit files it remembers reading, but not ones c
     use('r1', 'Read', { file_path: a }), ok('r1', '     1\tone\n     2\ttwo'),
     use('r2', 'Read', { file_path: b }), ok('r2', '     1\talpha\n     2\tbeta'),
   ];
-  const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
+  const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
   const agent = new Agent({ config: cfg, tools: [ReadTool, EditTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   agent.fileState.set(path.join(dir, 'left-over.txt'), { mtimeMs: 1 }); // from the conversation being replaced
   agent.messages = messages;
@@ -155,7 +155,7 @@ test('a restored partial read stays partial, so Write still refuses to overwrite
   assert.equal(state.get(edited).partial, true, 'an Edit does not show the rest of the file');
   assert.equal(state.get(written).partial, false, 'after a Write the model knows the whole file');
 
-  const cfg = new Config({ ANTHROPIC_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
+  const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
   const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
   agent.restoreFileState(messages, messages.map((_, i) => T + i * 1000));
   const refused = await WriteTool.call({ file_path: head, content: 'x\n' }, agent.makeCtx());

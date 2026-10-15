@@ -13,10 +13,8 @@ test('a gateway with no login opens the login choice at start, the gateway first
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-tui-login-cwd-'));
   const tui = await startTui({ cwd, flags: { provider: 'gateway' } });
   t.after(() => tui.close());
-  await tui.waitFor('Log in', { timeout: 20_000 });
+  await tui.waitFor('Opening the gateway login', { timeout: 20_000 });
   const screen = await tui.snapshot();
   assert.match(screen, /Not logged in to the gateway http:\/\/127\.0\.0\.1:9/);
-  const gateway = screen.indexOf('Gateway http://127.0.0.1:9');
-  const claude = screen.indexOf('Claude subscription');
-  assert.ok(gateway > 0 && gateway < claude, screen);
+  assert.doesNotMatch(screen, /Claude subscription|Codex subscription/);
 });

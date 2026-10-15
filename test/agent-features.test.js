@@ -20,7 +20,7 @@ const { loadAutoMemoryIndex } = await import('../src/context.js');
 const { toolResultsDir } = await import('../src/session.js');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-feat-'));
-const makeConfig = (cwd, env = {}) => new Config({ ANTHROPIC_MODEL: 'mock', ...env }, {}, { mcpServers: {}, hooks: {} }, cwd);
+const makeConfig = (cwd, env = {}) => new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock', ...env }, {}, { mcpServers: {}, hooks: {} }, cwd);
 const reply = (content, stopReason = 'end_turn') => ({ message: { role: 'assistant', content }, stopReason });
 const toolUse = (id, name, input) => reply([{ type: 'tool_use', id, name, input }], 'tool_use');
 const lastUser = (agent) => agent.messages[agent.messages.length - 1];

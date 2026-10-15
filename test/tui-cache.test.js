@@ -9,6 +9,7 @@ import path from 'node:path';
 // input came from the cache, and /model and /effort ask first while that cache is still warm.
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-cachetui-config-'));
 let requests = 0;
+let costRequests = 0;
 let withCache = true; // report cache use in the usage, as Anthropic does
 let replyModel = 'mock'; // the model the replies say answered: one with a price is billed (see pricing.js)
 
@@ -22,10 +23,18 @@ const sse = (usage) => [
 ].map((ev) => `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`).join('');
 
 const server = http.createServer((req, res) => {
-  req.resume();
+  let raw = '';
+  req.on('data', (chunk) => { raw += chunk; });
   req.on('end', () => {
     requests++;
-    const usage = !withCache ? {} : requests === 1 ? { cache_creation_input_tokens: 4000 } : { cache_read_input_tokens: 4000 + 200 * (requests - 2), cache_creation_input_tokens: 200 };
+    let body;
+    try { body = JSON.parse(raw); } catch { return; }
+    const last = body.messages?.at(-1)?.content;
+    const text = Array.isArray(last) ? last.map((b) => b.text || '').join(' ') : String(last || '');
+    const isCostTurn = text.includes('cost first question') || text.includes('cost second question');
+    if (isCostTurn) costRequests++;
+    const n = isCostTurn ? costRequests : requests;
+    const usage = !withCache ? {} : n === 1 ? { cache_creation_input_tokens: 4000 } : { cache_read_input_tokens: 4000 + 200 * (n - 2), cache_creation_input_tokens: 200 };
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end(sse(usage));
   });
@@ -34,8 +43,8 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
 delete process.env.NO_COLOR; // colours on (FORCE_COLOR below): the band behind the user's messages
 Object.assign(process.env, {
-  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'api', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`,
-  ANTHROPIC_AUTH_TOKEN: 'test-token', ANTHROPIC_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1',
+  CLAUDE_PRO_CONFIG_DIR: configDir, CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: `http://127.0.0.1:${server.address().port}`,
+  CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', CLAUDE_PRO_DISABLE_AUTO_MEMORY: '1', CLAUDE_PRO_DISABLE_TOPIC_TITLE: '1',
   FORCE_COLOR: '1',
   CLAUDE_PRO_RIPGREP_PATH: 'off', CLAUDE_CODE_EFFORT_LEVEL: 'auto', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '0', // "auto" and "0": an empty value would not override the repository's own .env
   CLAUDE_CODE_PROMPT_CACHE_TTL: '5m', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '5m', ENABLE_PROMPT_CACHING_1H: '0', FORCE_PROMPT_CACHING_5M: '0', DISABLE_PROMPT_CACHING: '0',
@@ -50,8 +59,9 @@ const project = (name = 'cache-project') => {
   fs.mkdirSync(dir);
   return dir;
 };
+const serialTest = (name, fn) => test(name, { concurrency: false }, fn);
 
-test('/cost says how much of the input came from the prompt cache, and /status says how it is set', async (t) => {
+serialTest('/cost says how much of the input came from the prompt cache, and /status says how it is set', async (t) => {
   requests = 0;
   withCache = true;
   const tui = await startTui({ cwd: project() });
@@ -74,17 +84,18 @@ test('/cost says how much of the input came from the prompt cache, and /status s
   assert.match(status, /Prompt cache +on · TTL 5m for the conversation, 5m for sub-agents and compaction/);
 });
 
-test('the footer and /cost show what the conversation has cost: kept with the session, back to nothing after /clear', async (t) => {
+serialTest('the footer and /cost show what the conversation has cost: kept with the session, back to nothing after /clear', async (t) => {
   requests = 0;
+  costRequests = 0;
   withCache = true;
   replyModel = 'claude-opus-5-5';
   t.after(() => { replyModel = 'mock'; });
   const tui = await startTui({ cwd: project() });
   t.after(() => tui.close());
-  tui.send('first question\r');
+  tui.send('cost first question\r');
   await tui.waitFor('All done.', { timeout: 20_000 });
   await tui.waitIdle({ timeout: 20_000 });
-  tui.send('second question\r');
+  tui.send('cost second question\r');
   await tui.waitIdle({ timeout: 20_000 });
   // Opus 5.5: 5 in, 3 out, 4,000 written for 5 minutes; then 5 in, 3 out, 4,000 read, 200 written
   const expected = (5 * 4 + 3 * 20 + 4000 * 5 + 5 * 4 + 3 * 20 + 4000 * 0.2 + 200 * 5) / 1e6;
@@ -105,7 +116,7 @@ test('the footer and /cost show what the conversation has cost: kept with the se
   assert.ok(Math.abs(tui.app.cost - expected) < 1e-9, 'a resumed conversation goes on from its total');
 });
 
-test('the footer\'s prompt cache clock counts down, is cold once the cache ran out or after a compaction, and is kept with the session', async (t) => {
+serialTest('the footer\'s prompt cache clock counts down, is cold once the cache ran out or after a compaction, and is kept with the session', async (t) => {
   requests = 0;
   withCache = true;
   const tui = await startTui({ cwd: project() });
@@ -141,7 +152,7 @@ test('the footer\'s prompt cache clock counts down, is cold once the cache ran o
   assert.deepEqual(tui.app.agent.cache.clock(), { cold: true });
 });
 
-test('the user\'s messages are on a band of colour; ctrl+f in fullscreen finds in the conversation, newest first', async (t) => {
+serialTest('the user\'s messages are on a band of colour; ctrl+f in fullscreen finds in the conversation, newest first', async (t) => {
   requests = 0;
   withCache = true;
   const tui = await startTui({ cwd: project() });
@@ -185,7 +196,7 @@ test('the user\'s messages are on a band of colour; ctrl+f in fullscreen finds i
   await tui.waitFor(/\? for shortcuts/, { timeout: 5000, all: false });
 });
 
-test('/effort and /model ask first while the cache is warm; a "no" changes nothing, a "yes" does', async (t) => {
+serialTest('/effort and /model ask first while the cache is warm; a "no" changes nothing, a "yes" does', async (t) => {
   requests = 0;
   withCache = true;
   const tui = await startTui({ cwd: project() });
@@ -230,7 +241,7 @@ test('/effort and /model ask first while the cache is warm; a "no" changes nothi
   assert.equal(tui.app.runtime.systemPromptStale, false);
 });
 
-test('nothing is asked once the cache has expired, or in a new conversation', async (t) => {
+serialTest('nothing is asked once the cache has expired, or in a new conversation', async (t) => {
   requests = 0;
   withCache = true;
   const tui = await startTui({ cwd: project() });
@@ -251,7 +262,7 @@ test('nothing is asked once the cache has expired, or in a new conversation', as
   assert.ok(!tui.app.dialogs.length, 'a new conversation has nothing cached');
 });
 
-test('an endpoint that reports no cache use: nothing is known to be cached, so nothing is asked', async (t) => {
+serialTest('an endpoint that reports no cache use: nothing is known to be cached, so nothing is asked', async (t) => {
   requests = 0;
   withCache = false;
   const tui = await startTui({ cwd: project() });
@@ -267,7 +278,7 @@ test('an endpoint that reports no cache use: nothing is known to be cached, so n
   await tui.waitFor('nothing reported', { timeout: 20_000 });
 });
 
-test('a memory saved with # waits for /clear or a compaction instead of changing the system prompt at once', async (t) => {
+serialTest('a memory saved with # waits for /clear or a compaction instead of changing the system prompt at once', async (t) => {
   requests = 0;
   withCache = true;
   const cwd = project();
@@ -289,7 +300,7 @@ test('a memory saved with # waits for /clear or a compaction instead of changing
   assert.equal(tui.app.runtime.systemPromptStale, false);
 });
 
-test('the system prompt goes into every session file, /clear included, and a resumed conversation continues behind its own', async (t) => {
+serialTest('the system prompt goes into every session file, /clear included, and a resumed conversation continues behind its own', async (t) => {
   requests = 0;
   withCache = true;
   const cwd = project();
@@ -320,7 +331,7 @@ test('the system prompt goes into every session file, /clear included, and a res
   assert.doesNotMatch(tui.app.runtime.systemPrompt(), /MARKER-NEW/);
 });
 
-test('/model to the model in use changes nothing, /config set only marks the prompt, another model rebuilds it', async (t) => {
+serialTest('/model to the model in use changes nothing, /config set only marks the prompt, another model rebuilds it', async (t) => {
   requests = 0;
   withCache = true;
   const cwd = project();
@@ -353,19 +364,19 @@ test('/model to the model in use changes nothing, /config set only marks the pro
   assert.equal(tui.app.runtime.systemPromptStale, false);
 });
 
-test('a model chosen with /config set is a switch: the prompt names it from then on', async (t) => {
+serialTest('a model chosen with /config set is a switch: the prompt names it from then on', async (t) => {
   requests = 0;
   withCache = true;
-  const saved = process.env.ANTHROPIC_MODEL; // the shell's variable would win over a settings file
-  delete process.env.ANTHROPIC_MODEL;
-  t.after(() => { process.env.ANTHROPIC_MODEL = saved; });
+  const saved = process.env.CLAUDE_PRO_GATEWAY_MODEL; // the shell's variable would win over a settings file
+  delete process.env.CLAUDE_PRO_GATEWAY_MODEL;
+  t.after(() => { process.env.CLAUDE_PRO_GATEWAY_MODEL = saved; });
   const tui = await startTui({ cwd: project() });
   t.after(() => tui.close());
   tui.send('/model default\r'); // forget what an earlier test chose
   await tui.waitFor('Model set to', { timeout: 20_000 });
   assert.doesNotMatch(tui.app.runtime.systemPrompt(), /You are powered by the model third-model\./);
-  tui.send('/config set ANTHROPIC_MODEL third-model\r');
-  await tui.waitFor('Set ANTHROPIC_MODEL', { timeout: 20_000 });
+  tui.send('/config set CLAUDE_PRO_GATEWAY_MODEL third-model\r');
+  await tui.waitFor('Set CLAUDE_PRO_GATEWAY_MODEL', { timeout: 20_000 });
   assert.equal(tui.app.runtime.config.mainModel.id, 'third-model');
   assert.match(tui.app.runtime.systemPrompt(), /You are powered by the model third-model\./);
   assert.equal(tui.app.runtime.systemPromptStale, false);

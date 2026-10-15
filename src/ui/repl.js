@@ -18,7 +18,7 @@ import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
-import { readGatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
+import { gatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands, modelChoices, effortChoices } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -325,9 +325,9 @@ export class App {
     }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
-    // Nothing configured yet: the gateway is the default, and its login comes first, as in Claude Code. (Not in a
+    // Nothing configured yet: the gateway is the default, and its browser login starts first. (Not in a
     // background session: nobody sits at this computer to log in in its browser.)
-    else if (this.config.usesGateway && !readGatewayLogin(this.config.gatewayUrl) && !this.headless) {
+    else if (this.config.usesGateway && !gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY) && !this.headless) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
     this.fileIndex.refresh();
@@ -845,7 +845,7 @@ export class App {
     const env = this.config.env;
     if (!onlineEnabled(env)) return false;
     if (this.driven && !/^(1|true|yes|on)$/i.test(env.CLAUDE_PRO_ONLINE || '')) return false;
-    return Boolean(readGatewayLogin(this.config.gatewayUrl));
+    return Boolean(gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY));
   }
 
   // Online at the gateway from the start, without holding the start up: when this computer is logged in to it; with
@@ -862,9 +862,9 @@ export class App {
   }
 
   // Connect this session to the gateway (see remote.js): the web page and the sessions on the account's other
-  // computers reach it from then on. Needs the gateway login of /login (the provider of the model requests can be
-  // another one); throws {code: 'NO_GATEWAY_LOGIN'} without it. A gateway that cannot be reached now is tried
-  // again in the background; one that refuses the key throws, and that key is not tried again (see syncRemote).
+  // computers reach it from then on. Needs the gateway login from /login or CLAUDE_PRO_GATEWAY_API_KEY; throws
+  // {code: 'NO_GATEWAY_LOGIN'} without it. A gateway that cannot be reached now is tried again in the background;
+  // one that refuses the key throws, and that key is not tried again (see syncRemote).
   startRemote({ id } = {}) {
     if (this.remote) return Promise.resolve(this.remote);
     this.remoteStarting ??= this.connectRemote({ id }).finally(() => { this.remoteStarting = null; });
@@ -876,7 +876,7 @@ export class App {
   syncRemote() {
     if (this.exiting) return Promise.resolve(null);
     if (this.remoteStarting) return this.remoteStarting.catch(() => null);
-    const login = readGatewayLogin(this.config.gatewayUrl);
+    const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
     const r = this.remote;
     // logged out, or another account: not this account's session any more
     if (r && (!login || login.apiKey !== r.apiKey || normalizeGatewayUrl(login.url || this.config.gatewayUrl) !== normalizeGatewayUrl(r.base))) this.stopRemote();
@@ -894,7 +894,7 @@ export class App {
   ensureHost({ login = false } = {}) {
     const env = this.config.env;
     if (this.driven || this.selfCheck || process.env.NODE_TEST_CONTEXT || this.exiting) return;
-    if (!onlineEnabled(env) || !hostEnabled(env) || !readGatewayLogin(this.config.gatewayUrl)) return;
+    if (!onlineEnabled(env) || !hostEnabled(env) || !gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY)) return;
     try { startHostIfNeeded(); } catch { /* the next session tries again */ }
     try {
       const auto = ensureAutostart({ force: login, env });
@@ -903,7 +903,7 @@ export class App {
   }
 
   async connectRemote({ id }) {
-    const login = readGatewayLogin(this.config.gatewayUrl);
+    const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
     if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login logs in)`), { code: 'NO_GATEWAY_LOGIN' });
     const remote = new RemoteControl({
       gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
@@ -967,7 +967,7 @@ export class App {
       return { text };
     }
     if (this.remoteStarting) return { text: 'connecting…' };
-    const login = readGatewayLogin(this.config.gatewayUrl);
+    const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
     if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login)`) };
     if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/logout, then /login)') };
     if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)') };
@@ -983,7 +983,7 @@ export class App {
     if (w) {
       const label = w.label.charAt(0).toUpperCase() + w.label.slice(1);
       rateWait = {
-        text: w.waitingForLogin ? 'Waiting for the Claude subscription login to be renewed' : `${w.overloaded ? label : `${label} reached`}${w.polling ? ' · checking again' : ` · resumes at ${formatClock(w.resumeAt)}`}`,
+        text: `${w.overloaded ? label : `${label} reached`}${w.polling ? ' · checking again' : ` · resumes at ${formatClock(w.resumeAt)}`}`,
         resumeIn: w.resumeAt - Date.now(),
       };
     }
@@ -1435,11 +1435,7 @@ export class App {
       c.claude('╰' + '─'.repeat(w - 2) + '╯'),
     ];
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
-    if (cfg.usesGateway && !readGatewayLogin(cfg.gatewayUrl)) {
-      lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
-    } else if (cfg.provider === 'api' && !cfg.authToken && !cfg.apiKey) {
-      lines.push('', c.yellow(' ⚠ No API credentials found. Set ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY in .env, ~/.claude-pro/settings.json or the environment.'));
-    }
+    if (!gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY)) lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
     const mcp = this.runtime.mcp.status();
     if (mcp.length) {
       const ok = mcp.filter((m) => m.status === 'connected').length;
@@ -2260,7 +2256,7 @@ export class App {
     }
     // Say it once; later waits of the same pause only move the countdown (unless the reset moved a lot).
     const prev = this.rateWait;
-    this.rateWait = { resumeAt: ev.resumeAt, label: ev.label, polling: ev.polling, waitingForLogin: Boolean(ev.waitingForLogin), overloaded: Boolean(ev.overloaded) };
+    this.rateWait = { resumeAt: ev.resumeAt, label: ev.label, polling: ev.polling, overloaded: Boolean(ev.overloaded) };
     if (shouldAnnounce(prev, ev)) this.notice(`${describePause(ev)} Esc cancels.`, 'warn');
     this.screen.schedule();
   }
@@ -2358,7 +2354,7 @@ export class App {
     const rateLimit = (ev) => {
       if (ev.type === 'rate_limit_wait') {
         if (shouldAnnounce(paused, ev)) app.notice(`[${def.name}] ${describePause(ev)}`, 'warn');
-        paused = { resumeAt: ev.resumeAt, waitingForLogin: Boolean(ev.waitingForLogin) };
+        paused = { resumeAt: ev.resumeAt };
       }
       if (ev.type === 'rate_limit_resume') {
         paused = null;
@@ -2453,7 +2449,6 @@ export class App {
       const w = this.rateWait;
       const left = humanDuration(w.resumeAt - Date.now()); // the same wording as the notice above it
       const esc = c.dim(`(${this.controller?.signal.aborted ? 'cancelling…' : 'esc to cancel'})`);
-      if (w.waitingForLogin) return c.yellow(`${frame} Waiting for the Claude subscription login to be renewed · checking again in ${left}`) + ' ' + esc;
       const label = w.label.charAt(0).toUpperCase() + w.label.slice(1);
       const when = w.polling ? `checking again in ${left}` : `resumes at ${formatClock(w.resumeAt)} (in ${left})`;
       return c.yellow(`${frame} ${w.overloaded ? label : `${label} reached`} · ${when}`) + ' ' + esc;
