@@ -2,12 +2,9 @@
 
 本仓库就是 claude-pro 自身(Node 24 ESM,Windows + Git Bash 开发)。claude-pro 在这里工作时,运行的就是这份代码。例外:`bin/claude-pro.js` 和 `src/supervisor.js` 属于正在运行的监督进程,改了它们,Restart 和自动重启都不会加载,只有用户手动重新启动才生效。
 
-## 验证命令(由便宜到贵)
+## 验证
 
-1. `node --check <file>`:瞬间。
-2. `npm run check`:在假终端里把整个程序启动一遍,约 1 秒。Restart 前也会自动跑同样的检查。
-3. 相关测试文件,如 `node --test --test-force-exit --test-reporter=dot test/oauth.test.js`,几秒。要用 dot 报告器:它只在失败时打印细节,而默认的 TAP 输出全量约 1.5 万 token,读进上下文后每轮都要重读。不确定是哪些文件,就在 `test/` 里 grep 改动的函数名或命令名。
-4. `npm test`:全部约 280 项,约 15 秒,已经用 dot 报告器。共享代码指 `api.js`、`agent.js`、`config.js`、`runtime.js`、`ui/repl.js`、`ui/screen.js`、`tools/`、`utils/shell.js`。
+不设固定的测试流程。根据改动风险和用户目标自行决定是否运行检查或测试，避免把测试作为每次修改的必经步骤。
 
 ## 改完就提交(用户的要求,2026-10-12)
 
