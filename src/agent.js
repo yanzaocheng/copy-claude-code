@@ -10,6 +10,7 @@ import { rebuildFileState } from './filestate.js';
 import { CacheStats, TTL_MS } from './cache.js';
 import { resolvePath } from './utils/paths.js';
 import { fitImagesIn, lightenImagesIn } from './utils/images.js';
+import { latestWorkState, workStateFromText } from './work-state.js';
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]';
 export const INTERRUPT_TOOL_MESSAGE = '[Request interrupted by user for tool use]';
@@ -188,6 +189,7 @@ export class Agent {
     this.spawnSubagent = spawnSubagent;
     this.messages = [];
     this.todos = [];
+    this.workState = null; // last validated state emitted by compaction; the transcript remains the source on resume
     this.userTurns = 0; // turns the user started (see noteUserTurn)
     this.todosTurn = 0; // ... and the one in which the todo list was last written
     this.fileState = new Map();
@@ -331,6 +333,7 @@ export class Agent {
   resetConversation() {
     this.messages = [];
     this.todos = [];
+    this.workState = null;
     this.fileState.clear();
     this.lastContextTokens = 0;
     this.tokensSinceUsage = 0;
@@ -754,6 +757,26 @@ export class Agent {
     return summary.replace(/<\/?(?:summary|analysis)>/g, '').trim();
   }
 
+  static workStateOf(res) {
+    const text = res.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    return workStateFromText(text);
+  }
+
+  // Keep a valid state when the model emits one; if a legacy or malformed response is returned, retain the last
+  // state from this process or the transcript instead of replacing it with unvalidated data.
+  compactWorkState(res) {
+    const parsed = Agent.workStateOf(res);
+    if (parsed.present && !parsed.state) {
+      const reason = parsed.errors.slice(0, 3).join('; ');
+      this.io.notice?.(`Compaction returned an invalid structured work state${reason ? ` (${reason})` : ''}; keeping the narrative summary.`, 'warn');
+    }
+    if (parsed.state) this.workState = parsed.state;
+    return {
+      state: parsed.state || this.workState || latestWorkState(this.messages),
+      warning: parsed.present && !parsed.state ? 'The structured work state failed validation during compaction. Verify the state below against the narrative summary before relying on it.' : '',
+    };
+  }
+
   // Ask the model for the summary. The request is the conversation's own request with the summary instruction
   // at its end: the same model, system prompt, tools and effort, so that the API reads the conversation from the
   // cache the turns have been filling instead of processing it all again (this is what Claude Code does; it is
@@ -803,7 +826,8 @@ export class Agent {
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
-    const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary) }] };
+    const state = this.compactWorkState(res);
+    const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary, state.state) }] };
     this.replaceMessages(part === 'before' ? [note, ...after] : [...before, note]);
     if (part === 'before') this.cache.noteCompacted(); // from its first message on: nothing of it is cached (the start of "after" still is)
     if (part === 'after') this.todos = []; // what they were about may be summarized away; the model keeps them in the summary
@@ -834,13 +858,14 @@ export class Agent {
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
+    const state = this.compactWorkState(res);
     const todoNote = this.todos.length ? `\n\n<system-reminder>Current todo list:\n${this.todos.map((t) => `- [${t.status}] ${t.content}`).join('\n')}</system-reminder>` : '';
-    this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto }) + todoNote }] }]);
+    this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto, workState: state.state, workStateWarning: state.warning }) + todoNote }] }]);
     this.cache.noteCompacted();
     this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
     this.fileState.clear();
     if (!this.isSubagent) this.checkpoints?.markConversationStale(); // the checkpoints are the main conversation's: a sub-agent's own compaction does not end them
-    this.lastContextTokens = estimateTokens(summary) + estimateTokens(this.toolSchemas()) + 2000;
+    this.lastContextTokens = estimateTokens(this.messages) + estimateTokens(this.toolSchemas()) + 2000;
     this.tokensSinceUsage = 0;
     this.postCompactTokens = null; // measured on the next request
     this.compactFailures = 0;

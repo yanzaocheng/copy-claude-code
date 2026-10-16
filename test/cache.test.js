@@ -440,9 +440,22 @@ function makeAgent(cfg, { systemPrompt = 'MAIN SYSTEM', io = {}, ...rest } = {})
 
 test('the summary request is the conversation\'s own request with the instruction at the end', async (t) => {
   const bodies = [];
+  const state = {
+    schema_version: 1,
+    objective: 'preserve the conversation state',
+    constraints: ['keep the cache-aware summary request'],
+    decisions: ['store structured state beside the narrative summary'],
+    files: ['src/agent.js'],
+    edits: ['added work-state validation'],
+    tests: ['npm test'],
+    failures: [],
+    open_questions: [],
+    next_action: 'continue with the remaining implementation',
+    tool_artifacts: ['C:/tmp/summary.txt'],
+  };
   const answers = [
     () => replyWith({ text: 'first answer', usage: usageOf(0, 12_000, 20, { cache_creation: { ephemeral_5m_input_tokens: 12_000, ephemeral_1h_input_tokens: 0 } }) }),
-    () => replyWith({ text: '<analysis>x</analysis><summary>THE SUMMARY</summary>', usage: usageOf(12_000, 300, 15) }),
+    () => replyWith({ text: `<work-state>${JSON.stringify(state)}</work-state><analysis>x</analysis><summary>THE SUMMARY</summary>`, usage: usageOf(12_000, 300, 15) }),
   ];
   mockFetch(t, async (url, init) => { bodies.push(bodyOf(init)); return answers[bodies.length - 1](); });
   const cfg = makeConfig({ CLAUDE_CODE_EFFORT_LEVEL: 'high' });
@@ -474,6 +487,8 @@ test('the summary request is the conversation\'s own request with the instructio
   assert.equal(refreshed, 1, 'the new conversation may start from a rebuilt system prompt');
   assert.equal(agent.messages.length, 1);
   assert.match(agent.messages[0].content[0].text, /THE SUMMARY/);
+  assert.deepEqual(agent.workState, state);
+  assert.match(agent.messages[0].content[0].text, /<work-state>[\s\S]*\"next_action\": \"continue with the remaining implementation\"/);
   assert.equal(agent.usage.requests, 1);
   assert.equal(agent.usage.compactions, 1);
   assert.equal(agent.usage.cacheRead, 12_000, 'the summary request counts in the usage');
@@ -483,6 +498,18 @@ test('the summary request is the conversation\'s own request with the instructio
   assert.ok(agent.cache.expected == null, 'and the new conversation has nothing in the cache yet');
   assert.deepEqual(agent.totalUsage().requests, 1);
   assert.deepEqual(agent.totalUsage().compactions, 1);
+});
+
+test('compaction validates work-state without discarding a usable narrative summary', async (t) => {
+  const notices = [];
+  mockFetch(t, async () => replyWith({ text: '<work-state>{"schema_version":1}</work-state><summary>KEEP THIS SUMMARY</summary>' }));
+  const agent = makeAgent(makeConfig(), { io: { notice: (text, kind) => notices.push([text, kind]) } });
+  agent.messages = [{ role: 'user', content: 'hello' }];
+  assert.equal(await agent.compact(), 'KEEP THIS SUMMARY');
+  assert.equal(agent.workState, null);
+  assert.doesNotMatch(agent.messages[0].content[0].text, /<work-state>/);
+  assert.match(notices[0][0], /invalid structured work state/);
+  assert.equal(notices[0][1], 'warn');
 });
 
 test('the summary request misses on purpose only when the shared one fails: no summary, or a prompt that is too long', async (t) => {
