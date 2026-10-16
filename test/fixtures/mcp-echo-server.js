@@ -20,7 +20,7 @@ rl.on('line', (line) => {
   if (msg.id === undefined) return; // notification
   switch (msg.method) {
     case 'initialize':
-      send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'echo-server', version: '1.0.0' } } });
+      send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'echo-server', version: '1.0.0' }, instructions: 'Use echo for reversible text checks; use add for numeric calculations.' } });
       break;
     case 'tools/list':
       send({ jsonrpc: '2.0', id: msg.id, result: { tools } });

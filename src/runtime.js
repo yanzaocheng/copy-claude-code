@@ -61,7 +61,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
       promptCache = flags.systemPrompt !== undefined
         ? flags.systemPrompt
-        : mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
+        : mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;
@@ -114,13 +114,14 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     const subIo = io.subagentIo ? io.subagentIo({ def, description, parentCtx: ctx }) : {};
     // The main agent is depth 0; an agent below the nesting limit may start sub-agents itself.
     const depth = (ctx.depth ?? ctx.agent?.depth ?? 0) + 1;
+    const subTools = toolsForSubagent(runtime.tools, def, { allowTask: depth < config.maxSubagentDepth });
     const sub = new Agent({
       config,
       checkpoints,
       depth,
       spawnSubagent: runtime.spawnSubagent,
-      tools: toolsForSubagent(runtime.tools, def, { allowTask: depth < config.maxSubagentDepth }),
-      systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt, snapshot: snapshotFor(ctx.cwd), readOnly: Boolean(def.readOnly) }),
+      tools: subTools,
+      systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt, snapshot: snapshotFor(ctx.cwd), mcpInstructions: subTools.some((tool) => tool.mcp) ? mcp.promptInstructions() : '', readOnly: Boolean(def.readOnly) }),
       io: subIo,
       model,
       isSubagent: true,

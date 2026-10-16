@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpManager } from '../src/mcp.js';
+import { mainSystemPrompt, subagentSystemPrompt } from '../src/prompts.js';
 import { isAbort } from '../src/api.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +20,23 @@ async function stdioServer(t, extraEnv = {}) {
   const tool = (name) => mgr.tools().find((x) => x.name === `mcp__echo__${name}`);
   return { mgr, tool };
 }
+
+test('initialize instructions are available as compact server guidance', async (t) => {
+  const { mgr } = await stdioServer(t);
+  const guidance = mgr.promptInstructions();
+  assert.match(guidance, /^# MCP server guidance/);
+  assert.match(guidance, /## echo/);
+  assert.match(guidance, /Available tools: echo, add, hang/);
+  assert.match(guidance, /Use echo for reversible text checks/);
+  assert.match(guidance, /does not override the system, user, or project instructions/);
+});
+
+test('server guidance can be attached to main and sub-agent prompts', () => {
+  const guidance = '# MCP server guidance\\n\\n## echo\\nUse echo for reversible text checks.';
+  const base = { cwd: here, model: { id: 'mock' }, shellName: 'bash', snapshot: { date: '2026-01-01', git: null }, mcpInstructions: guidance };
+  assert.match(mainSystemPrompt(base), /Use echo for reversible text checks/);
+  assert.match(subagentSystemPrompt({ ...base, agentPrompt: 'You search.' }), /Use echo for reversible text checks/);
+});
 
 function receivedLog(t) {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-mcp-')), 'received.jsonl');

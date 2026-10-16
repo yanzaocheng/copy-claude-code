@@ -44,7 +44,7 @@ function instructionFiles(cwd) {
 }
 
 // `autoCompact`: the conversation is summarized when it grows long (Config.autoCompactEnabled), which the model is told.
-export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, selfRestart = false, installedCopy = false, autoCompact = true, snapshot = null }) {
+export function mainSystemPrompt({ cwd, model, shellName, extra = '', autoMemory = null, mcpInstructions = '', selfRestart = false, installedCopy = false, autoCompact = true, snapshot = null }) {
   const files = instructionFiles(cwd);
   const memoryText = files
     ? `\n\n# Memory\nProject and user instructions are shown below: the facts of this project (its environment, mechanisms, commands) and how the user wants to work in it. Where they differ from the defaults above, they win.\n\n${files}`
@@ -96,12 +96,12 @@ You are ${APP_NAME}, installed in ${INSTALL_DIR} (an installed copy, e.g. from n
 ` : ''}# Code references
 When referencing specific functions or pieces of code include the pattern \`file_path:line_number\` so the user can navigate to the source.
 
-${environmentBlock(cwd, { model, shellName, snapshot })}${memoryText}${autoMemory ? `\n\n${autoMemorySection(autoMemory)}` : ''}${extra ? `\n\n${extra}` : ''}`;
+${environmentBlock(cwd, { model, shellName, snapshot })}${memoryText}${autoMemory ? `\n\n${autoMemorySection(autoMemory)}` : ''}${mcpInstructions ? `\n\n${mcpInstructions}` : ''}${extra ? `\n\n${extra}` : ''}`;
 }
 
 // `readOnly`: an agent whose own prompt forbids changing anything (Explore, Plan) gets neither the boundaries nor
 // the project's instructions, which only matter to an agent that changes things and cost tokens on every call.
-export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt, snapshot = null, readOnly = false }) {
+export function subagentSystemPrompt({ cwd, model, shellName, agentPrompt, snapshot = null, mcpInstructions = '', readOnly = false }) {
   const files = readOnly ? '' : instructionFiles(cwd);
   return `${agentPrompt}
 
@@ -116,7 +116,7 @@ ${readOnly ? '' : `
 - Do not commit, push or publish unless your task asks for it: the main agent decides that.
 - Edits made with Write, Edit and NotebookEdit can be undone with /rewind; changes made through Bash cannot.
 `}
-${environmentBlock(cwd, { model, shellName, snapshot })}${files ? `\n\n# Project instructions\nThe instructions that apply in this project: its environment, commands and conventions. Follow them for how you work here; committing, pushing and publishing stay the main agent's to decide, whatever they say.\n\n${files}` : ''}`;
+${environmentBlock(cwd, { model, shellName, snapshot })}${files ? `\n\n# Project instructions\nThe instructions that apply in this project: its environment, commands and conventions. Follow them for how you work here; committing, pushing and publishing stay the main agent's to decide, whatever they say.\n\n${files}` : ''}${mcpInstructions ? `\n\n${mcpInstructions}` : ''}`;
 }
 
 // The terminal tab's title follows the topic of the conversation: after each message the user sends, the
