@@ -482,12 +482,16 @@ export function buildCommands(app) {
       const u = a.totalUsage();
       const b = a.subUsage;
       const cacheLines = a.cache.describe();
+      const trace = a.trace?.summary();
+      const toolCalls = trace?.tools?.reduce((n, item) => n + item.calls, 0) || 0;
+      const toolSuccesses = trace?.tools?.reduce((n, item) => n + item.successes, 0) || 0;
       out([
         `Total cost:    ${formatUsd(app.cost)} ${c.dim('for this conversation, at list prices (sub-agents, compaction and side requests included)')}`,
         `Total input:   ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} tokens ${c.dim(`(${formatTokens(u.cacheRead)} cache read, ${formatTokens(u.cacheWrite)} cache write${u.cacheWrite1h ? `, ${formatTokens(u.cacheWrite1h)} of it for 1 hour` : ''})`)}`,
         `Total output:  ${formatTokens(u.output)} tokens`,
         `API requests:  ${u.requests}${u.compactions ? c.dim(` + ${u.compactions} to compact the conversation`) : ''}`,
         ...cacheLines.map((line, i) => (i ? c.dim(line) : line)),
+        ...(trace ? [`Trace:         ${trace.requests} requests · ${toolCalls} tool calls${toolCalls ? ` · ${Math.round((toolSuccesses / toolCalls) * 100)}% tool success` : ''} · ${trace.compactions} compactions · ${trace.verification_runs} verifications`] : []),
         ...(b.runs ? [c.dim(`Sub-agents:    ${b.runs} run${b.runs === 1 ? '' : 's'}, ${b.requests + b.compactions} request${b.requests + b.compactions === 1 ? '' : 's'}, ${formatTokens(b.input + b.cacheRead + b.cacheWrite)} input (${formatTokens(b.cacheRead)} cached), ${formatTokens(b.output)} output; included in the totals`)] : []),
         `Session time:  ${formatDuration(Date.now() - app.sessionStart)}`,
       ]);
@@ -503,6 +507,36 @@ export function buildCommands(app) {
       } catch (e) {
         out(c.yellow(`Gateway: could not read the balance (${e.message})`));
       }
+    },
+  });
+
+  add({
+    name: 'trace',
+    argHint: '[recent count]',
+    description: 'Show runtime quality metrics and the privacy-preserving trace file',
+    run(args) {
+      const trace = app.runtime.trace;
+      if (!trace) { out(c.dim('Runtime trace is unavailable.')); return; }
+      const summary = trace.summary();
+      const lines = [
+        `Trace file:    ${summary.file || c.dim('(not persisted: no session id)')}`,
+        `Enabled:       ${summary.enabled ? 'yes' : 'no'}`,
+        `Turns:         ${summary.turns}`,
+        `Requests:      ${summary.requests} (${summary.request_successes} succeeded, ${summary.request_failures} failed)`,
+        `Cache:         ${summary.cache_hits} hits${summary.cache_misses ? `, ${summary.cache_misses} misses` : ''}${summary.cache_hit_rate == null ? '' : ` (${Math.round(summary.cache_hit_rate * 100)}% request hit rate)`}`,
+        `Compactions:   ${summary.compactions}${summary.compaction_failures ? ` (${summary.compaction_failures} failed)` : ''}`,
+        `Verification:  ${summary.verification_runs}${summary.verification_runs ? ` (${Math.round((summary.verification_pass_rate || 0) * 100)}% passed)` : ''}`,
+      ];
+      if (summary.tools.length) {
+        lines.push('', 'Tools:');
+        for (const tool of summary.tools) lines.push(`  ${padEnd(tool.name, 18)} ${tool.calls} calls · ${Math.round((tool.success_rate || 0) * 100)}% success · ${Math.round(tool.avg_duration_ms)}ms avg · ${formatTokens(tool.output_tokens_estimate)} output tokens est.`);
+      }
+      const count = Math.max(0, Math.min(50, parseInt(args, 10) || 0));
+      if (count) {
+        lines.push('', `Recent events (${count}):`);
+        lines.push(...trace.recent(count).map((event) => c.dim(JSON.stringify(event))));
+      }
+      out(lines);
     },
   });
 

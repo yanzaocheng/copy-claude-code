@@ -16,9 +16,11 @@ import { BackgroundTasks, taskNotification } from './tasks.js';
 import { autoMemoryDir, pruneToolResults, pruneCheckpoints, projectDir } from './session.js';
 import { loadAutoMemoryIndex, takeEnvSnapshot, localDate } from './context.js';
 import { canRestart } from './restart.js';
+import { RuntimeTrace } from './trace.js';
 
-export async function createRuntime({ cwd, flags = {}, io }) {
+export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const config = loadConfig({ cwd, flags });
+  const trace = new RuntimeTrace({ cwd, sessionId, enabled: config.traceEnabled, dir: config.traceDir, maxBytes: config.traceMaxBytes });
   applyRememberedChoices(config, flags); // what /model and /effort chose last time
   if (flags.verify) config.verifyOverride = flags.verify;
   pruneToolResults(cwd);
@@ -35,7 +37,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
   const hooks = new HookRunner(config);
   const tasks = new BackgroundTasks();
   const memoryDir = autoMemoryDir(cwd);
-  const runtime = { config, checkpoints, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir };
+  const runtime = { config, checkpoints, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir, trace };
   runtime.skills = loadSkills(cwd);
   // The self-check builds the Restart tool too, so that a mistake in it is found before a restart relies on it.
   const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
@@ -130,6 +132,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
       hooks,
       effort: effort || def.effort,
       compactWindow: def.autoCompactWindow,
+      trace,
     });
     let result;
     try {
@@ -159,6 +162,7 @@ export async function createRuntime({ cwd, flags = {}, io }) {
     tasks,
     refreshSystemPrompt: () => runtime.invalidateSystemPrompt(), // a compaction starts the conversation over
     beforeTurn: () => runtime.noteDateChange(),
+    trace,
   });
 
   // A finished background agent's report is queued for the main agent; the UI decides

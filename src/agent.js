@@ -170,7 +170,7 @@ function validateInput(schema, input) {
 }
 
 export class Agent {
-  constructor({ config, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn, effort, compactWindow = 0 }) {
+  constructor({ config, tools, systemPrompt, io, model, isSubagent = false, cwd, name = 'main', spawnSubagent, hooks, tasks, checkpoints, depth = 0, refreshSystemPrompt, beforeTurn, effort, compactWindow = 0, trace = null }) {
     this.config = config;
     this.effort = effort || undefined; // a sub-agent's own effort level; undefined: the session's (config.effort)
     this.compactWindow = compactWindow; // a sub-agent's own auto-compact window (tokens); 0: the session's
@@ -187,6 +187,8 @@ export class Agent {
     this.isSubagent = isSubagent;
     this.name = name;
     this.spawnSubagent = spawnSubagent;
+    this.trace = trace;
+    this.traceTurnId = null;
     this.messages = [];
     this.todos = [];
     this.workState = null; // last validated state emitted by compaction; the transcript remains the source on resume
@@ -264,6 +266,56 @@ export class Agent {
     return typeof this.systemPrompt === 'function' ? this.systemPrompt() : this.systemPrompt;
   }
 
+  traceRequestStart({ kind = 'turn', messages = this.messages, cacheBucket = 'main', cacheMessages = true, compactionId = null } = {}) {
+    if (!this.trace?.enabled) return null;
+    const model = this.model;
+    return this.trace.requestStart({
+      turnId: this.traceTurnId,
+      agent: this.name,
+      depth: this.depth,
+      kind,
+      model: model?.id || model,
+      effort: this.effort || this.config.effort,
+      context_tokens: this.contextEstimate,
+      message_tokens: estimateTokens(messages),
+      system_tokens: estimateTokens(this.currentSystem()),
+      tool_tokens: estimateTokens(this.toolSchemas()),
+      message_count: Array.isArray(messages) ? messages.length : 0,
+      cache: {
+        bucket: cacheBucket,
+        messages: Boolean(cacheMessages),
+        caching: !this.config.promptCachingDisabled(model?.id || model),
+        ttl: this.config.cacheTtl(cacheBucket),
+      },
+      compaction_id: compactionId,
+    });
+  }
+
+  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {} } = {}) {
+    const handle = this.traceRequestStart({ kind, messages: request.messages, cacheBucket, cacheMessages, compactionId });
+    const forward = (ev) => {
+      this.trace?.requestEvent(handle, ev);
+      onEvent(ev);
+    };
+    try {
+      const res = await streamMessage(this.config, request, { signal, onEvent: forward });
+      const observed = cacheOverride ? { ...res, cache: { ...res.cache, ...cacheOverride } } : res;
+      const recorded = this.recordUsage(observed, kind === 'summary' ? 'summary' : 'turn');
+      this.trace?.requestEnd(handle, {
+        usage: res.usage,
+        cache: observed.cache,
+        model: res.model || request.model?.id || request.model,
+        stopReason: res.stopReason,
+        context_tokens: contextTokens(res.usage),
+        cacheMiss: recorded?.cacheMiss,
+      });
+      return res;
+    } catch (err) {
+      this.trace?.requestEnd(handle, { error: err, model: request.model?.id || request.model, context_tokens: this.contextEstimate });
+      throw err;
+    }
+  }
+
   // A note for the model that goes with the next user message (as a <system-reminder>), after the part of the
   // request that is already cached.
   addReminder(text) {
@@ -299,8 +351,11 @@ export class Agent {
     this.usage.cacheWrite1h += u.cache_creation?.ephemeral_1h_input_tokens || 0;
     if (kind === 'summary') this.usage.compactions++;
     else this.usage.requests++;
+    const misses = this.cache.misses;
     this.cache.record({ usage: u, ...res.cache });
+    const cacheMiss = this.cache.misses > misses ? this.cache.lastMiss : null;
     this.io.usage?.(u, this);
+    return { usage: u, cacheMiss };
   }
 
   // After resuming a conversation: drop what the previous one had read and rebuild the map from the
@@ -401,7 +456,14 @@ export class Agent {
   }
 
   async run(userContent, { signal } = {}) {
-    if (!this.isSubagent) {
+    const previousTraceTurn = this.traceTurnId;
+    const traceTurnId = this.trace?.turnStart({ agent: this.name, depth: this.depth, content: userContent });
+    this.traceTurnId = traceTurnId;
+    let traceResult = null;
+    let traceError = null;
+    const tracedReturn = (result) => { traceResult = result; return result; };
+    try {
+      if (!this.isSubagent) {
       this.beforeTurn?.();
       this.endEffortBoost();
       this.noteUserTurn(userContent);
@@ -414,7 +476,7 @@ export class Agent {
       for (const w of h.warnings) this.io.notice?.(w, 'warn');
       if (h.blocked) {
         this.io.notice?.(`Prompt blocked by hook: ${h.message}`, 'warn');
-        return { text: '', interrupted: false, rejected: true };
+        return tracedReturn({ text: '', interrupted: false, rejected: true });
       }
       if (h.context.length) content = [...content, { type: 'text', text: `<system-reminder>${h.context.join('\n')}</system-reminder>` }];
     }
@@ -434,10 +496,10 @@ export class Agent {
     let compactedForError = false;
     let finalText = '';
     for (;;) {
-      if (signal?.aborted) return this.handleInterrupt(null);
+      if (signal?.aborted) return tracedReturn(this.handleInterrupt(null));
       if (this.shouldAutoCompact()) {
         const outcome = await this.compactOnTheWay(signal);
-        if (outcome?.interrupted) return outcome;
+        if (outcome?.interrupted) return tracedReturn(outcome);
         if (outcome?.failed) compactedForError = true; // it has just failed: a too-long prompt in this turn is not tried again
       }
 
@@ -448,13 +510,13 @@ export class Agent {
         if (isAbort(err) || signal?.aborted) {
           // Keep whatever text the user already saw so the model knows what it said.
           if (err.partial?.length) this.pushMessage({ role: 'assistant', content: err.partial });
-          return this.handleInterrupt(null);
+          return tracedReturn(this.handleInterrupt(null));
         }
         if (err.promptTooLong && !compactedForError && this.messages.length > 2) {
           compactedForError = true;
           this.io.notice?.('Context limit reached; compacting conversation…', 'warn');
           const outcome = await this.compactOnTheWay(signal, { required: true });
-          if (outcome?.interrupted) return outcome;
+          if (outcome?.interrupted) return tracedReturn(outcome);
           continue;
         }
         throw err;
@@ -493,8 +555,8 @@ export class Agent {
         const verify = this.config.verifyCommand;
         if (verify && !this.isSubagent && this.editsThisRun > 0) {
           this.editsThisRun = 0;
-          const v = await this.runVerify(verify, signal);
-          if (signal?.aborted) return this.handleInterrupt(null);
+          const v = await this.runVerify(verify, signal, { attempt: verifyRounds + 1 });
+          if (signal?.aborted) return tracedReturn(this.handleInterrupt(null));
           if (!v.ok) {
             if (verifyRounds < this.config.verifyMaxRounds) {
               verifyRounds++;
@@ -514,7 +576,7 @@ export class Agent {
           }
         }
         if (!text) this.io.notice?.('The model ended its turn without a reply.', 'warn');
-        return { text: finalText, interrupted: false };
+        return tracedReturn({ text: finalText, interrupted: false });
       }
 
       const outcome = await this.runTools(toolUses, signal);
@@ -525,10 +587,23 @@ export class Agent {
       if (outcome.interrupted) {
         resultContent.push({ type: 'text', text: INTERRUPT_TOOL_MESSAGE });
         this.pushMessage({ role: 'user', content: resultContent });
-        return { text: finalText, interrupted: true };
+        return tracedReturn({ text: finalText, interrupted: true });
       }
       this.pushMessage({ role: 'user', content: resultContent });
-      if (outcome.stop) return { text: finalText, interrupted: false, rejected: true };
+      if (outcome.stop) return tracedReturn({ text: finalText, interrupted: false, rejected: true });
+    }
+    } catch (err) {
+      traceError = err;
+      throw err;
+    } finally {
+      this.trace?.turnEnd({
+        turnId: traceTurnId,
+        finalStatus: traceError ? 'error' : traceResult?.interrupted ? 'interrupted' : traceResult?.rejected ? 'rejected' : 'completed',
+        interrupted: Boolean(traceResult?.interrupted),
+        rejected: Boolean(traceResult?.rejected),
+        error: traceError,
+      });
+      this.traceTurnId = previousTraceTurn;
     }
   }
 
@@ -571,9 +646,10 @@ export class Agent {
   }
 
   // Run the verification command in the project root with the Bash tool. Returns {ok, output}.
-  async runVerify(command, signal) {
+  async runVerify(command, signal, { attempt = 1 } = {}) {
     const bash = this.tools.find((t) => t.name === 'Bash');
     if (!bash) return { ok: true, output: '' };
+    const verifyStartedAt = Date.now();
     const tool = { name: 'Verify', summarize: () => command };
     const input = { command, timeout: this.config.bashMaxTimeout };
     const handle = this.io.toolStart?.({ id: `verify_${Date.now()}`, name: 'Verify', input }, tool, input, this) || {};
@@ -584,12 +660,15 @@ export class Agent {
       result = await bash.call(input, ctx);
     } catch (err) {
       handle.done?.({ isError: true, content: 'Interrupted', interrupted: true });
-      if (isAbort(err) || signal?.aborted) return { ok: true, output: '' };
+      const aborted = isAbort(err) || signal?.aborted;
+      this.trace?.verification({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, command, attempt, ok: false, aborted, duration_ms: Date.now() - verifyStartedAt, error: aborted ? null : err });
+      if (aborted) return { ok: true, output: '' };
       return { ok: false, output: `Error: ${err.message}` };
     }
     const output = typeof result.content === 'string' ? result.content : '';
     const ok = !result.isError;
     handle.done?.({ ...result, display: { summary: ok ? 'Verification passed' : undefined } });
+    this.trace?.verification({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, command, attempt, ok, output, duration_ms: Date.now() - verifyStartedAt });
     return { ok, output: output.length > 15_000 ? `${output.slice(0, 3000)}\n...\n${output.slice(-12_000)}` : output };
   }
 
@@ -602,18 +681,23 @@ export class Agent {
       this.recordedSystem = system;
       this.io.systemPrompt?.(system, this);
     }
-    const res = await streamMessage(this.config, {
+    const request = {
       model: this.model,
       system,
       messages: normalizeMessages(this.messages),
       tools: this.toolSchemas(),
       cacheBucket: this.isSubagent ? 'other' : 'main',
       ...(this.effort ? { effort: this.effort } : {}),
-    }, { signal, onEvent: (ev) => this.io.streamEvent?.(ev, this) });
+    };
+    const res = await this.streamAgentRequest(request, {
+      signal,
+      kind: 'turn',
+      cacheBucket: request.cacheBucket,
+      onEvent: (ev) => this.io.streamEvent?.(ev, this),
+    });
     this.lastContextTokens = contextTokens(res.usage);
     this.tokensSinceUsage = 0;
     if (this.postCompactTokens === null) this.postCompactTokens = this.lastContextTokens;
-    this.recordUsage(res);
     return res;
   }
 
@@ -654,7 +738,7 @@ export class Agent {
       if (stop || interrupted) break;
       const run = async (tu) => {
         try {
-          const r = await this.runOne(tu, signal, map);
+          const r = await this.runOne(tu, signal, map, { parallel: batch.parallel });
           results.set(tu.id, r.block);
           if (r.stop) stop = true;
         } catch (err) {
@@ -670,6 +754,11 @@ export class Agent {
       else for (const tu of batch.items) { if (stop || interrupted) break; await run(tu); }
       if (signal?.aborted) interrupted = true;
     }
+    for (const tu of toolUses) {
+      if (results.has(tu.id)) continue;
+      const skipped = this.trace?.toolStart({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, name: tu.name, input: tu.input, parallel: false, toolUseId: tu.id });
+      this.trace?.toolEnd(skipped, { skipped: true, aborted: interrupted, error: true, error_type: interrupted ? 'aborted' : 'skipped' });
+    }
     const blocks = toolUses.map((tu) => results.get(tu.id) || {
       type: 'tool_result', tool_use_id: tu.id, is_error: true,
       content: interrupted ? 'Interrupted by user' : 'Skipped: the user rejected an earlier tool call in this batch.',
@@ -677,71 +766,92 @@ export class Agent {
     return { results: blocks, stop, interrupted };
   }
 
-  async runOne(tu, signal, map) {
-    const fail = (content, extra = {}) => ({ block: { type: 'tool_result', tool_use_id: tu.id, is_error: true, content }, ...extra });
+  async runOne(tu, signal, map, { parallel = false } = {}) {
     const tool = map.get(tu.name);
-    if (!tool) return fail(`Error: No such tool available: ${tu.name}`);
-    const input = tool.normalizeInput && tu.input && typeof tu.input === 'object' ? tool.normalizeInput({ ...tu.input }) : (tu.input || {});
-    if (input.__invalid_json !== undefined) {
-      return fail('Error: the tool input was not valid JSON (it may have been truncated by the output token limit). Try again with a smaller input, e.g. write large files in several steps.');
-    }
-    const schemaErr = validateInput(tool.input_schema, input);
-    if (schemaErr) return fail(`InputValidationError: ${tool.name} failed due to the following issue:\n${schemaErr}`);
-
-    const ctx = this.makeCtx(signal);
-    const invalid = tool.validate?.(input, ctx);
-    if (invalid) {
-      this.io.toolRejected?.(tu, tool, invalid, this);
-      return fail(invalid);
-    }
-
-    // Nothing is ever asked: tools run right away (a PreToolUse hook can still block one).
-    if (this.hooks?.has('PreToolUse')) {
-      const h = await this.hooks.run('PreToolUse', { tool_name: tool.name, tool_input: input }, { cwd: this.cwd, signal });
-      for (const w of h.warnings) this.io.notice?.(w, 'warn');
-      if (signal?.aborted) throw abortError();
-      if (h.blocked) {
-        this.io.toolRejected?.(tu, tool, h.message, this);
-        return fail(`Blocked by PreToolUse hook: ${h.message}`);
-      }
-    }
-
-    // Remember what the file looked like before this edit, so /rewind can put it back.
-    if (tool.editsFiles && this.checkpoints) {
-      try { const file = tool.filePath?.(input, ctx); if (file) this.checkpoints.track(file); } catch { /* never block an edit on bookkeeping */ }
-    }
-
-    this.toolUseCount++;
-    const handle = this.io.toolStart?.(tu, tool, input, this) || {};
-    ctx.onProgress = (p) => handle.progress?.(p);
-    let result;
+    const traceHandle = this.trace?.toolStart({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, name: tu.name, input: tu.input, parallel, toolUseId: tu.id });
+    const finish = (result, extra = {}) => {
+      this.trace?.toolEnd(traceHandle, {
+        ok: !result.block.is_error,
+        error: Boolean(result.block.is_error),
+        output: result.block.content,
+        ...extra,
+      });
+      return result;
+    };
+    const fail = (content, extra = {}) => finish({ block: { type: 'tool_result', tool_use_id: tu.id, is_error: true, content }, ...extra }, { error: true, ...extra });
     try {
-      result = await tool.call(input, ctx);
+      if (!tool) return fail(`Error: No such tool available: ${tu.name}`, { error_type: 'unknown_tool' });
+      const input = tool.normalizeInput && tu.input && typeof tu.input === 'object' ? tool.normalizeInput({ ...tu.input }) : (tu.input || {});
+      if (input.__invalid_json !== undefined) {
+        return fail('Error: the tool input was not valid JSON (it may have been truncated by the output token limit). Try again with a smaller input, e.g. write large files in several steps.', { validation_error: true, error_type: 'invalid_json' });
+      }
+      const schemaErr = validateInput(tool.input_schema, input);
+      if (schemaErr) return fail(`InputValidationError: ${tool.name} failed due to the following issue:\n${schemaErr}`, { validation_error: true, error_type: 'schema' });
+
+      const ctx = this.makeCtx(signal);
+      const invalid = tool.validate?.(input, ctx);
+      if (invalid) {
+        this.io.toolRejected?.(tu, tool, invalid, this);
+        return fail(invalid, { validation_error: true, error_type: 'tool_validation' });
+      }
+
+      // Nothing is ever asked: tools run right away (a PreToolUse hook can still block one).
+      if (this.hooks?.has('PreToolUse')) {
+        const h = await this.hooks.run('PreToolUse', { tool_name: tool.name, tool_input: input }, { cwd: this.cwd, signal });
+        for (const w of h.warnings) this.io.notice?.(w, 'warn');
+        if (signal?.aborted) throw abortError();
+        if (h.blocked) {
+          this.io.toolRejected?.(tu, tool, h.message, this);
+          return fail(`Blocked by PreToolUse hook: ${h.message}`, { error_type: 'pretooluse_blocked' });
+        }
+      }
+
+      // Remember what the file looked like before this edit, so /rewind can put it back.
+      if (tool.editsFiles && this.checkpoints) {
+        try { const file = tool.filePath?.(input, ctx); if (file) this.checkpoints.track(file); } catch { /* never block an edit on bookkeeping */ }
+      }
+
+      this.toolUseCount++;
+      const handle = this.io.toolStart?.(tu, tool, input, this) || {};
+      ctx.onProgress = (p) => handle.progress?.(p);
+      let result;
+      try {
+        result = await tool.call(input, ctx);
+      } catch (err) {
+        if (isAbort(err) || signal?.aborted) {
+          handle.done?.({ isError: true, content: 'Interrupted', interrupted: true, display: err.partialOutput ? { output: err.partialOutput } : undefined });
+          throw abortError();
+        }
+        result = { isError: true, content: `Error: ${err.message}` };
+      }
+      // Images from any tool (MCP servers, say) fit what the API takes before they join the conversation.
+      if (Array.isArray(result.content)) await fitImagesIn(result.content);
+      handle.done?.(result);
+      let content = typeof result.content === 'string' ? (result.content || '(no output)') : result.content;
+      if (this.hooks?.has('PostToolUse')) {
+        const h = await this.hooks.run('PostToolUse', { tool_name: tool.name, tool_input: input, tool_response: typeof content === 'string' ? content.slice(0, 20_000) : '[non-text result]' }, { cwd: this.cwd, signal });
+        for (const w of h.warnings) this.io.notice?.(w, 'warn');
+        const extra = [...(h.blocked ? [h.message] : []), ...h.context].join('\n');
+        if (extra && typeof content === 'string') content += `\n\n<system-reminder>PostToolUse hook:\n${extra}</system-reminder>`;
+      }
+      let largeOutputPersisted = false;
+      if (typeof content === 'string' && tool.name !== 'Read' && content.length > this.config.maxToolResultChars) {
+        content = persistLargeOutput(this.projectRoot, tu.id, content);
+        largeOutputPersisted = true;
+      }
+      if (tool.editsFiles && !result.isError) this.editsThisRun++;
+      return finish({
+        block: { type: 'tool_result', tool_use_id: tu.id, content, ...(result.isError ? { is_error: true } : {}) },
+        stop: !!result.stopTurn,
+      }, { error_type: result.isError ? 'tool_error' : null, large_output_persisted: largeOutputPersisted });
     } catch (err) {
       if (isAbort(err) || signal?.aborted) {
-        handle.done?.({ isError: true, content: 'Interrupted', interrupted: true, display: err.partialOutput ? { output: err.partialOutput } : undefined });
+        this.trace?.toolEnd(traceHandle, { error: true, aborted: true, error_type: 'aborted' });
         throw abortError();
       }
-      result = { isError: true, content: `Error: ${err.message}` };
+      this.trace?.toolEnd(traceHandle, { error: true, error_type: err.name || 'tool_exception' });
+      throw err;
     }
-    // Images from any tool (MCP servers, say) fit what the API takes before they join the conversation.
-    if (Array.isArray(result.content)) await fitImagesIn(result.content);
-    handle.done?.(result);
-    let content = typeof result.content === 'string' ? (result.content || '(no output)') : result.content;
-    if (this.hooks?.has('PostToolUse')) {
-      const h = await this.hooks.run('PostToolUse', { tool_name: tool.name, tool_input: input, tool_response: typeof content === 'string' ? content.slice(0, 20_000) : '[non-text result]' }, { cwd: this.cwd, signal });
-      for (const w of h.warnings) this.io.notice?.(w, 'warn');
-      const extra = [...(h.blocked ? [h.message] : []), ...h.context].join('\n');
-      if (extra && typeof content === 'string') content += `\n\n<system-reminder>PostToolUse hook:\n${extra}</system-reminder>`;
-    }
-    if (typeof content === 'string' && tool.name !== 'Read' && content.length > this.config.maxToolResultChars) {
-      content = persistLargeOutput(this.projectRoot, tu.id, content);
-    }
-    if (tool.editsFiles && !result.isError) this.editsThisRun++;
-    return {
-      block: { type: 'tool_result', tool_use_id: tu.id, content, ...(result.isError ? { is_error: true } : {}) },
-      stop: !!result.stopTurn,
-    };
   }
 
   // The summary in a summary request's reply: what is inside <summary>, else the text without its <analysis>.
@@ -786,19 +896,27 @@ export class Agent {
   // The messages are marked for the cache only where that can be read: no request after the summary starts with
   // this history, so writing it (25% over the plain input price) pays only for reading what is already there.
   // When the cache is known to have run out, and in the plain request, only the tools and system prompt are marked.
-  async requestSummary(messages, { signal, onEvent }) {
+  async requestSummary(messages, { signal, onEvent, compactionId = null }) {
     const cacheMessages = !this.cacheExpired();
-    const call = (request) => streamMessage(this.config, { model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', cacheMessages, ...(this.effort ? { effort: this.effort } : {}), ...request }, { signal, onEvent });
+    const call = (request, options = {}) => {
+      const useMessages = request.cacheMessages === undefined ? cacheMessages : request.cacheMessages;
+      return this.streamAgentRequest({ model: this.model, tools: this.toolSchemas(), messages, cacheBucket: 'other', cacheMessages: useMessages, ...(this.effort ? { effort: this.effort } : {}), ...request }, {
+        signal,
+        kind: 'summary',
+        cacheBucket: 'other',
+        cacheMessages: useMessages,
+        compactionId,
+        onEvent,
+        ...options,
+      });
+    };
     try {
       const res = await call({ system: this.currentSystem() });
-      this.recordUsage(res, 'summary');
       if (Agent.summaryOf(res)) return res;
     } catch (err) {
       if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
     }
-    const res = await call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false });
-    this.recordUsage({ ...res, cache: { ...res.cache, caching: false } }, 'summary'); // made to miss: not a miss to report
-    return res;
+    return call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false }, { cacheOverride: { caching: false } });
   }
 
   // Summarise part of the conversation, as /rewind's "Summarize from here" ('after': the messages from `index` on)
@@ -810,19 +928,24 @@ export class Agent {
     const before = this.messages.slice(0, index);
     const after = this.messages.slice(index);
     if (!(part === 'before' ? before : after).length) throw new Error('There is nothing in that part of the conversation to summarize.');
+    const compactionId = `compact_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const compactionStartedAt = Date.now();
+    const beforeContextTokens = this.contextEstimate;
     this.io.compactStart?.(false, this);
     await this.lightenImages(); // in place: `before` and `after` hold the same blocks
     const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: partialCompactPrompt(part, label, instructions) }] }]);
     let res;
     try {
-      res = await this.requestSummary(messages, { signal, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
+      res = await this.requestSummary(messages, { signal, compactionId, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
     } catch (err) {
+      this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, part, before_context_tokens: beforeContextTokens, duration_ms: Date.now() - compactionStartedAt, error: err });
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
     const summary = Agent.summaryOf(res);
     if (!summary) {
       const err = new Error(res.stopReason === 'max_tokens' ? 'The summary was cut off by the output token limit.' : 'The model returned an empty summary.');
+      this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, part, before_context_tokens: beforeContextTokens, duration_ms: Date.now() - compactionStartedAt, error: err });
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
@@ -834,6 +957,7 @@ export class Agent {
     this.lastContextTokens = estimateTokens(this.messages) + estimateTokens(this.toolSchemas()) + 2000;
     this.tokensSinceUsage = 0;
     this.postCompactTokens = null;
+    this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, part, before_context_tokens: beforeContextTokens, after_context_tokens: this.contextEstimate, summary_chars: summary.length, work_state_valid: Boolean(state.state), duration_ms: Date.now() - compactionStartedAt });
     this.io.compactEnd?.(summary, this, null, { part });
     return summary;
   }
@@ -841,20 +965,25 @@ export class Agent {
   // Summarise the conversation and replace it with the summary.
   async compact({ signal, auto = false, instructions = '' } = {}) {
     if (this.messages.length === 0) return null;
+    const compactionId = `compact_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const compactionStartedAt = Date.now();
+    const beforeContextTokens = this.contextEstimate;
     this.io.compactStart?.(auto, this);
     await this.lightenImages();
     const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: compactPrompt(instructions) }] }]);
     // If the last assistant turn has unanswered tool calls, the sequence is invalid; drop it.
     let res;
     try {
-      res = await this.requestSummary(messages, { signal, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
+      res = await this.requestSummary(messages, { signal, compactionId, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
     } catch (err) {
+      this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, auto, before_context_tokens: beforeContextTokens, duration_ms: Date.now() - compactionStartedAt, error: err });
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
     const summary = Agent.summaryOf(res);
     if (!summary) {
       const err = new Error(res.stopReason === 'max_tokens' ? 'Compaction failed: the summary was cut off by the output token limit.' : 'Compaction failed: the model returned an empty summary.');
+      this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, auto, before_context_tokens: beforeContextTokens, duration_ms: Date.now() - compactionStartedAt, error: err });
       this.io.compactEnd?.(null, this, err);
       throw err;
     }
@@ -869,6 +998,7 @@ export class Agent {
     this.tokensSinceUsage = 0;
     this.postCompactTokens = null; // measured on the next request
     this.compactFailures = 0;
+    this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, auto, before_context_tokens: beforeContextTokens, after_context_tokens: this.contextEstimate, summary_chars: summary.length, work_state_valid: Boolean(state.state), duration_ms: Date.now() - compactionStartedAt });
     this.io.compactEnd?.(summary, this);
     return summary;
   }

@@ -68,6 +68,9 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
   CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the small model for the current topic after each message (the tab title then shows the first message of the session)',
+  CLAUDE_PRO_TRACE: 'Set to 0 to disable the privacy-preserving runtime JSONL trace (enabled by default)',
+  CLAUDE_PRO_TRACE_DIR: 'Directory for runtime trace files (default: the project session directory)',
+  CLAUDE_PRO_TRACE_MAX_SIZE: 'Maximum size of one runtime trace file in bytes before rotating it (default 20 MB)',
 };
 
 const SECRET_KEYS = new Set(['CLAUDE_PRO_GATEWAY_API_KEY']);
@@ -313,6 +316,15 @@ export class Config {
   // How many times a failing verify command is sent back before giving up.
   get verifyMaxRounds() { return 3; }
   get autoMemoryEnabled() { return !/^(1|true|yes)$/i.test(this.env.CLAUDE_PRO_DISABLE_AUTO_MEMORY || ''); }
+  get traceEnabled() {
+    const value = this.env.CLAUDE_PRO_TRACE;
+    return value === undefined || !/^(0|false|no|off)$/i.test(String(value).trim());
+  }
+  get traceDir() {
+    const value = String(this.env.CLAUDE_PRO_TRACE_DIR || '').trim();
+    return value ? path.resolve(this.cwd, value) : null;
+  }
+  get traceMaxBytes() { return Math.max(100_000, int(this.env.CLAUDE_PRO_TRACE_MAX_SIZE, 20 * 1024 * 1024)); }
 
   display(key) {
     const v = this.env[key];

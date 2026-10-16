@@ -275,7 +275,7 @@ export class App {
     process.on('SIGHUP', () => this.exit(129));
 
     await this.startPeer();
-    this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this });
+    this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this, sessionId: this.store.id });
     // The conversation's id, sent to the gateway with each request (see streamMessage); it follows /clear and /resume.
     Object.defineProperty(this.runtime.config, 'sessionId', { get: () => this.store.id, configurable: true });
     // Every request's cost (the conversation's, its sub-agents', side queries'), kept with the session.
@@ -1909,6 +1909,7 @@ export class App {
     this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
     this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
+    this.runtime.trace?.setSessionId(id);
     this.peers?.update(); // the conversation, in the registry
     this.topic = loaded.topic;
     this.customTitle = loaded.name;
@@ -1957,6 +1958,7 @@ export class App {
 
   newSession() {
     this.store = new SessionStore(this.cwd);
+    this.runtime.trace?.setSessionId(this.store.id);
     this.peers?.update();
     this.seedOutput = [];
     this.topic = null;

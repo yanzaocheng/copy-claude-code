@@ -103,6 +103,17 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 （缓存标记放在哪、端点不认时怎么退、压缩如何复用缓存等细节见 ARCHITECTURE.md 6.5。）
 
+## 运行时 Trace：用真实数据优化模型和工具
+
+默认在每个会话写入独立的隐私保护 JSONL：`~/.claude-pro/projects/<项目>/traces/<session-id>.jsonl`。Trace 只保存 turn/request/tool/compaction/verification 的计数、耗时、token 数、缓存 fingerprint 和参数结构，不保存 API key、cookie、token、密码、完整 prompt、工具输入或工具输出。大输出只记录大小和是否落盘；单个文件默认 20 MB，超出后轮换为 `.1`。
+
+```text
+/trace       # 当前会话的请求、工具、缓存、压缩和验证汇总
+/trace 20    # 另外显示最近 20 条结构化事件
+```
+
+可用配置：`CLAUDE_PRO_TRACE=0` 关闭，`CLAUDE_PRO_TRACE_DIR` 指定目录，`CLAUDE_PRO_TRACE_MAX_SIZE` 调整单文件上限。`/cost` 也会显示轻量工具成功率和验证次数。Trace 是 best-effort，写入失败不会影响 Agent 主循环。
+
 ## 限流：自动暂停，到点自动恢复
 
 网关账户的 5 小时和每周限额用完时，不报错停下，而是暂停并显示倒计时（`✻ 5-hour limit reached · resumes at 23:41 (in 2h 13m)`，Esc 可取消），到重置时间原样重发同一个请求，任务接着做完。网关过载（529）同样先重试、再暂停等它恢复。最多等 6 小时（`CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`，`0` = 不等直接报错）；重置时间更远（比如周限额还有几天）时直接报错，并写明几点重置。
@@ -212,7 +223,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 

@@ -50,8 +50,8 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
       return { streamEvent: report, compactProgress: report };
     },
   };
-  const runtime = await createRuntime({ cwd, flags, io });
   let store = new SessionStore(cwd);
+  const runtime = await createRuntime({ cwd, flags, io, sessionId: store.id });
   let cost = 0; // what this run's requests cost (total_cost_usd)
   let conversationCost = 0; // and the conversation's, kept with the session
   runtime.config.onCost = (usd) => {
@@ -66,6 +66,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
     runtime.agent.restoreFileState(loaded.messages, loaded.times);
     runtime.agent.lastActivityAt = loaded.lastAt;
     store = new SessionStore(cwd, flags.resumeId);
+    runtime.trace?.setSessionId(store.id);
     store.systemPrompt = loaded.systemPrompt;
     runtime.resumeSystemPrompt(loaded.systemPrompt); // continue behind the prompt (and the cache) the conversation had
   }
