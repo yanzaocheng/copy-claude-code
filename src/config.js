@@ -15,6 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeTtl } from './cache.js';
+import { discoverVerifyCommand } from './verify.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A source checkout (a git clone, also when npm links to one), as opposed to a copy installed from npm: the agent
@@ -297,10 +298,17 @@ export class Config {
   // How deep sub-agents may nest: the main agent is depth 0; an agent below this depth gets the Task tool.
   get maxSubagentDepth() { return 2; }
 
-  // Verification after edits: session override (/verify, --verify) wins over the env setting.
+  // Verification after edits: session override (/verify, --verify) wins over the env setting. With neither set,
+  // use a conventional project test/check command when one is unambiguous; /verify off remains the opt-out.
   get verifyCommand() {
+    const explicit = this.verifyOverride != null || Object.prototype.hasOwnProperty.call(this.env, 'CLAUDE_PRO_VERIFY_COMMAND');
+    if (!explicit) return this.autoVerifyCommand;
     const v = this.verifyOverride ?? this.env.CLAUDE_PRO_VERIFY_COMMAND ?? '';
     return v.trim() && v.trim() !== 'off' ? v.trim() : null;
+  }
+  get autoVerifyCommand() { return discoverVerifyCommand(this.cwd); }
+  get verifyCommandAuto() {
+    return this.verifyOverride == null && !Object.prototype.hasOwnProperty.call(this.env, 'CLAUDE_PRO_VERIFY_COMMAND') && Boolean(this.autoVerifyCommand);
   }
   // How many times a failing verify command is sent back before giving up.
   get verifyMaxRounds() { return 3; }

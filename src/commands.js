@@ -567,12 +567,12 @@ export function buildCommands(app) {
   add({
     name: 'verify',
     argHint: '[command|off]',
-    description: 'Run a command (e.g. npm test) after turns that edit files; failures go back to the agent',
+    description: 'Run a command (e.g. npm test) after turns that edit files; auto-detects project tests when available; failures go back to the agent',
     run(args) {
       const cfg = app.runtime.config;
       if (args.trim()) cfg.verifyOverride = args.trim();
       out(cfg.verifyCommand
-        ? `Verify command: ${c.bold(cfg.verifyCommand)} ${c.dim(`(up to ${cfg.verifyMaxRounds} fix rounds; /verify off to disable)`)}`
+        ? `Verify command: ${c.bold(cfg.verifyCommand)} ${c.dim(`(${cfg.verifyCommandAuto ? 'auto-detected; ' : ''}up to ${cfg.verifyMaxRounds} fix rounds; /verify off to disable)`)}`
         : c.dim('Verification is off. Turn it on with /verify <command>, --verify <command> or CLAUDE_PRO_VERIFY_COMMAND.'));
     },
   });
