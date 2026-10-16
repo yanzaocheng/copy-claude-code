@@ -29,7 +29,7 @@ claude-pro                 # 在任意项目目录里运行
 ```
 
 自动更新：用 npm 全局安装的版本在启动时、以及运行中**每 5 分钟**查一次 npm 上的最新版（同一台电脑上的所有会话共用这个间隔，查到的新版本号也共享；查询绕过 npm 的 CDN 缓存）。
-- **不打断工作**：发现新版后先记下，底部显示 `update x.y.z ready · installs when idle`；**等这个会话和这台电脑上其他开着的会话都空闲**（没有在执行任务、没有等待回答的问题、没有后台 agent/命令/文件传输）才安装，有会话在忙就每 30 秒再看一次，本会话一轮结束时也会再试。
+- **不打断工作**：发现新版后先记下，底部显示 `update x.y.z ready · installs when idle`；**等这个会话和这台电脑上其他开着的会话都空闲**（没有在执行任务、没有等待回答的问题、没有后台 agent/命令）才安装，有会话在忙就每 30 秒再看一次，本会话一轮结束时也会再试。
 - **安装中有提示**：底部显示 `⇣ updating claude-pro to x.y.z…`（`npm install -g --prefer-online`），装好后提示并自动重启加载，对话保留；重启后显示 `↻ Restarted: updated to claude-pro x.y.z`。
 - **多个终端**：同一时间只有一个会话去安装（加锁），其他会话看到程序文件变了，会提示"x.y.z 已由另一个窗口安装"，各自在空闲时重启；正在工作的会话等它的任务结束才重启。
 - npm 刚发布时安装包要几分钟才能下载，期间安装失败会在 1 分钟后重试。所以发布后一般 5–10 分钟内各个客户端就用上新版。
@@ -165,9 +165,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
   - `&名字 任务`：本机的会话；
   - `&电脑名/名字 任务`：其他电脑上的会话；那台电脑只开着一个会话时直接 `&电脑名 任务`。
   - `@` 只用于引用文件。
-- **发送文件**：`/sendfile &公司 C:\Users\yzc\Pictures\a.jpg C:\Users\yzc\Pictures\b.jpg`（别名 `/sf`），文件存进对方电脑的「下载」文件夹（Windows 上是系统设置的下载位置；`CLAUDE_PRO_DOWNLOAD_DIR` 可改），同名文件不覆盖、存为「名字 (1).jpg」，对方存好后把保存位置回给你。不经过模型、不花 token。路径可以带空格（不加引号也行）、可以用 `@` 补全文件名；每次最多 20 个文件、每个最多 5 GB；文件夹要先压缩。
-  - **大文件、断点续传**：文件在后台分块发送，输入框下面显示进度（`⇡ 会议录像.mp4 → &公司/proj 42% · 921.6 MB/2.1 GB`），期间可以照常使用会话。网络断了会自动等待重试（最长 1 小时），恢复后从断开的地方接着传；中途关掉了 claude-pro 或 `/sendfile stop` 停掉了，之后再 `/sendfile` 同一个文件，会接着之前传到的位置继续（24 小时内）。接收方同样边下边存，断了用续传接着下，下完校验 sha256 再改成正式文件名；接收方中途退出的话，重新上线后会自动接着下载。也可以直接对 agent 说「把这几张图发到 &公司」，它用 MessagePeer 的 files 参数发送；文件也可以和任务一起发（对方收到任务时知道文件存在哪）。其他电脑之间的文件经网关中转（存 24 小时，对方取走后即删除），同一台电脑上直接复制。文件经网关服务器中转，传输速度受网关服务器带宽限制。
-- **`&` 可以写在句子中间**：输入时在空格后面打 `&` 也会弹出会话列表（比如 `/sendfile a.jpg &`）；在发给当前 agent 的消息里提到 `&名字`，agent 会被告知那是哪个会话、怎么联系它。输入法打出全角 `＆` 也可以。
+- **`&` 可以写在句子中间**：输入时在空格后面打 `&` 也会弹出会话列表；在发给当前 agent 的消息里提到 `&名字`，agent 会被告知那是哪个会话、怎么联系它。输入法打出全角 `＆` 也可以。
 - **`/rename 新名字`**：给当前会话改名（比如 `/rename web-server`），别的会话从此用 `&web-server` 找它；这个名字也成为对话标题（终端标签页、`/resume` 列表、网页），不再自动按话题改；`/resume` 这个对话时名字一起回来。
 - **`/peers`**：列出本机和其他电脑上在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
 - 回答会在对方这一轮做完后自动发回；对方正忙时，任务排在它当前工作之后。网关替离线的会话暂存回答（24 小时；网关重启会丢失还没送达的消息）。
@@ -214,7 +212,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/sendfile` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 

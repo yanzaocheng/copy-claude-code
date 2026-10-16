@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
 
 // Remote control through the gateway: the real App in a headless terminal connects out to a fake
 // gateway, which plays both the relay and the page. A command from the page runs a turn whose text and tool calls
@@ -35,14 +34,8 @@ const { applyEvent, hydrate } = await import('../src/remote.js');
 
 // The fake gateway: the model API, and the remote control relay with a page that keeps the transcript.
 const KEY = 'gw-test-key';
-const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], files: new Map(), deleted: [], uploads: new Map(), puts: [], ranges: [], cutAt: null, cutGet: false, order: [] };
+const gw = { sessions: new Map(), registrations: 0, stream: null, pending: new Map(), cid: 0, page: { state: hydrate([]), seq: 0, status: null, snapshots: 0, byes: [] }, others: [], messages: [], acks: [], order: [] };
 const MB = 1024 * 1024;
-const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
-const storeFile = (name, data) => {
-  const id = `f${gw.files.size + 1}xxxxxxxxxxxxxxx`;
-  gw.files.set(id, { id, name, size: data.length, sha256: sha256(data), data });
-  return { id, name, size: data.length, sha256: sha256(data) };
-};
 const readBody = (req) => new Promise((resolve) => { let b = ''; req.on('data', (d) => { b += d; }); req.on('end', () => resolve(b ? JSON.parse(b) : {})); });
 const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
 
@@ -69,56 +62,6 @@ const server = http.createServer(async (req, res) => {
     gw.registrations++;
     gw.sessions.set(body.id, body);
     return json(res, 200, { id: body.id, url: `https://gw.example/#remote/${body.id}` });
-  }
-  // resumable uploads: the same unfinished upload again for the same file; cutAt cuts the chunk sent at that offset in the middle
-  if (req.method === 'POST' && url.pathname === '/v1/remote/uploads') {
-    const body = await readBody(req);
-    let up = [...gw.uploads.values()].find((u) => u.sha256 === body.sha256 && u.size === body.size && !u.complete);
-    if (!up) {
-      up = { id: `u${gw.uploads.size + 1}xxxxxxxxxxxxxxx`, name: body.name, size: body.size, sha256: body.sha256, data: Buffer.alloc(0) };
-      gw.uploads.set(up.id, up);
-    }
-    return json(res, 200, { id: up.id, received: up.data.length, chunkSize: MB });
-  }
-  const upload = /^\/v1\/remote\/uploads\/([\w-]+)$/.exec(url.pathname);
-  if (upload) {
-    const up = gw.uploads.get(upload[1]);
-    if (!up) return json(res, 404, { error: { message: 'no such upload' } });
-    if (req.method === 'GET') return json(res, 200, { id: up.id, size: up.size, received: up.data.length, complete: Boolean(up.complete) });
-    const offset = Number(req.headers['x-upload-offset']);
-    gw.puts.push(offset);
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    if (offset !== up.data.length) return json(res, 409, { error: { message: 'wrong offset' }, received: up.data.length });
-    const chunk = Buffer.concat(chunks);
-    if (gw.cutAt === offset) { // half of it arrives, then the connection breaks
-      gw.cutAt = null;
-      up.data = Buffer.concat([up.data, chunk.subarray(0, chunk.length >> 1)]);
-      return req.socket.destroy();
-    }
-    up.data = Buffer.concat([up.data, chunk]);
-    if (up.data.length < up.size) return json(res, 200, { received: up.data.length });
-    if (sha256(up.data) !== up.sha256) return json(res, 422, { error: { message: 'checksum' } });
-    up.complete = true;
-    gw.files.set(up.id, { id: up.id, name: up.name, size: up.size, sha256: up.sha256, data: up.data });
-    return json(res, 200, { received: up.size, complete: true, file: { id: up.id, name: up.name, size: up.size, sha256: up.sha256 } });
-  }
-  // downloads with Range; cutGet breaks the next one after the first megabyte
-  const file = /^\/v1\/remote\/files\/([\w-]+)$/.exec(url.pathname);
-  if (file) {
-    const stored = gw.files.get(file[1]);
-    if (!stored) return json(res, 404, { error: { message: 'no such file' } });
-    if (req.method === 'DELETE') { gw.deleted.push(stored.id); return json(res, 200, { ok: true }); }
-    const from = Number(/^bytes=(\d+)-$/.exec(req.headers.range || '')?.[1] || 0);
-    gw.ranges.push(req.headers.range || null);
-    const body = stored.data.subarray(from);
-    res.writeHead(from ? 206 : 200, { 'content-type': 'application/octet-stream', 'content-length': body.length, 'x-file-sha256': stored.sha256, ...(from ? { 'content-range': `bytes ${from}-${stored.size - 1}/${stored.size}` } : {}) });
-    if (gw.cutGet) {
-      gw.cutGet = false;
-      res.write(body.subarray(0, MB));
-      return setTimeout(() => res.socket.destroy(), 50);
-    }
-    return res.end(body);
   }
   if (req.method === 'GET' && url.pathname === '/v1/remote/sessions') {
     const own = [...gw.sessions.values()].map((p) => ({ id: p.id, name: p.name, machine: p.machine, cwd: p.cwd, peerId: p.peerId, online: true, ended: false }));
@@ -314,100 +257,6 @@ test('sessions on other computers: &computer sends a task through the gateway, t
   await tui.waitFor('This session is now &web-server', { timeout: 5000 });
   await until('the new registration', () => gw.registrations > registrations && gw.sessions.get(me).name === 'web-server');
   assert.equal(tui.app.sessionLabel(), 'web-server');
-});
-
-test('files: /sendfile uploads them for a session on another computer, and files sent here land in the Downloads folder, never over a file', async (t) => {
-  const office = { id: 'office-session-1', name: 'proj', machine: '公司', host: 'OFFICE-PC', cwd: 'D:/work/proj', online: true, ended: false };
-  gw.others = [office];
-  gw.sessions.clear();
-  gw.messages.length = 0;
-  const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-downloads-'));
-  process.env.CLAUDE_PRO_DOWNLOAD_DIR = downloads;
-  t.after(() => { gw.others = []; delete process.env.CLAUDE_PRO_DOWNLOAD_DIR; });
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
-  fs.writeFileSync(path.join(cwd, 'a.txt'), 'hello');
-  fs.writeFileSync(path.join(cwd, 'photo 2.jpg'), Buffer.from([0xff, 0xd8, 1, 2, 3]));
-  const tui = await startTui({ cwd, flags: {} });
-  t.after(() => tui.close());
-  await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
-
-  // & in the middle of the line lists the sessions too
-  tui.send('/sendfile a.txt &公');
-  await tui.waitFor('&公司/proj', { timeout: 5000, all: false });
-  tui.send('\x7f'.repeat(20));
-
-  // a path with a space, not quoted
-  tui.send(`/sendfile &公司 a.txt ${path.join(cwd, 'photo 2.jpg')}\r`);
-  await until('the message with the files', () => gw.messages.length === 1);
-  const sent = gw.messages[0];
-  assert.equal(sent.to, office.id);
-  assert.equal(sent.kind, 'task');
-  assert.equal(sent.text, '');
-  assert.deepEqual(sent.files.map((x) => gw.files.get(x.id).name), ['a.txt', 'photo 2.jpg']);
-  assert.equal(gw.files.get(sent.files[0].id).data.toString(), 'hello');
-  await tui.waitFor('Sent 2 files', { timeout: 5000 });
-
-  // files from the other computer: saved (next to a file of the same name, not over it), then confirmed
-  fs.writeFileSync(path.join(downloads, '报告.txt'), 'old');
-  const ref = storeFile('报告.txt', Buffer.from('内容'));
-  gw.stream.write(`data: ${JSON.stringify({ type: 'peer', cid: 'x1', kind: 'task', text: '', files: [ref], from: { id: office.id, name: 'proj', machine: '公司', cwd: office.cwd } })}\n\n`);
-  await until('the confirmation', () => gw.messages.length === 2);
-  const reply = gw.messages[1];
-  assert.equal(reply.kind, 'reply');
-  assert.equal(reply.inReplyTo, 'x1');
-  assert.match(reply.text, /Saved 1 file in the Downloads folder/);
-  assert.equal(fs.readFileSync(path.join(downloads, '报告.txt'), 'utf8'), 'old');
-  assert.equal(fs.readFileSync(path.join(downloads, '报告 (1).txt'), 'utf8'), '内容');
-  assert.ok(reply.text.includes(path.join(downloads, '报告 (1).txt')));
-  await until('the file is taken off the gateway', () => gw.deleted.includes(ref.id));
-  assert.equal(tui.app.busy, false, 'files alone do not start a turn');
-});
-
-test('big files: an upload cut off in the middle continues where the gateway stopped, sending again continues an unfinished upload, a download cut off continues with a range', async (t) => {
-  const office = { id: 'office-session-1', name: 'proj', machine: '公司', host: 'OFFICE-PC', cwd: 'D:/work/proj', online: true, ended: false };
-  gw.others = [office];
-  gw.sessions.clear();
-  gw.messages.length = 0;
-  const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-downloads-'));
-  process.env.CLAUDE_PRO_DOWNLOAD_DIR = downloads;
-  t.after(() => { gw.others = []; delete process.env.CLAUDE_PRO_DOWNLOAD_DIR; });
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-remote-'));
-  const video = crypto.randomBytes(3 * MB + 123);
-  fs.writeFileSync(path.join(cwd, 'video.mp4'), video);
-  const tui = await startTui({ cwd, flags: {} });
-  t.after(() => tui.close());
-  await until('the session list', () => tui.app.remotePeers.length === 1 && gw.stream);
-
-  // the second chunk is cut in the middle: after a wait it continues from what the gateway has (a 409 says where)
-  gw.puts.length = 0;
-  gw.cutAt = MB;
-  tui.send('/sendfile &公司 video.mp4\r');
-  await tui.waitFor('Sending 1 file (3.0 MB) to &公司/proj in the background', { timeout: 5000 });
-  await until('the message with the video', () => gw.messages.length === 1, 20_000);
-  assert.deepEqual(gw.puts.slice(0, 3), [0, MB, MB], 'the cut chunk is sent again from where it was, and told where the gateway is');
-  assert.ok(gw.puts.includes(MB + MB / 2), 'then it continues from the half that arrived');
-  assert.ok(sha256(gw.files.get(gw.messages[0].files[0].id).data) === sha256(video), 'the gateway has the whole video');
-  await tui.waitFor('Sent 1 file (3.0 MB) to &公司/proj', { timeout: 5000 });
-
-  // an upload left unfinished (another day, another process): sending the same file continues it
-  const other = crypto.randomBytes(2 * MB);
-  fs.writeFileSync(path.join(cwd, 'other.bin'), other);
-  gw.uploads.set('u-old-xxxxxxxxxxxxxx', { id: 'u-old-xxxxxxxxxxxxxx', name: 'other.bin', size: other.length, sha256: sha256(other), data: other.subarray(0, MB) });
-  gw.puts.length = 0;
-  tui.send('/sendfile &公司 other.bin\r');
-  await until('the second message', () => gw.messages.length === 2, 20_000);
-  assert.deepEqual(gw.puts, [MB], 'only the part the gateway did not have');
-
-  // a download cut after the first megabyte continues with a range, and the message is acknowledged once saved
-  const ref = storeFile('clip.mp4', video);
-  gw.cutGet = true;
-  gw.ranges.length = 0;
-  gw.stream.write(`data: ${JSON.stringify({ type: 'peer', cid: 'big1', kind: 'task', text: '', files: [ref], from: { id: office.id, name: 'proj', machine: '公司', cwd: office.cwd } })}\n\n`);
-  await until('the confirmation', () => gw.messages.length === 3, 20_000);
-  assert.deepEqual(gw.ranges, [null, `bytes=${MB}-`]);
-  assert.ok(fs.readFileSync(path.join(downloads, 'clip.mp4')).equals(video));
-  assert.deepEqual(fs.readdirSync(downloads), ['clip.mp4'], 'no .part file left behind');
-  await until('the acknowledgement', () => gw.acks.includes('big1'));
 });
 
 test('remote control: a key the gateway refuses is reported once, not retried until the login changes', async (t) => {

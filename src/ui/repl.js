@@ -29,8 +29,6 @@ import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn, imageSize } from '../utils/images.js';
-import { downloadsDir, filesToSend, formatBytes } from '../utils/downloads.js';
-import { copyUnique } from '../transfer.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
@@ -227,8 +225,6 @@ export class App {
     this.remotePeersAt = 0;
     this.remotePeersLoading = null;
     this.remotePeersTimer = null;
-    this.transfers = new Map(); // files on their way to or from other sessions, for the footer
-    this.transferSeq = 0;
     this.cost = 0; // what this conversation's requests have cost so far (USD at list prices): the footer and /cost
     this.fileIndex = new FileIndex(cwd, () => this.runtime?.config);
     this.store = new SessionStore(cwd);
@@ -248,7 +244,6 @@ export class App {
       onSubmit: (value, raw, images) => { try { this.onSubmit(value, raw, images); } catch (e) { this.logError(e); } },
       onDoubleEscape: () => this.openRewind(),
       imageFromPath: (p) => {
-        if (/^\s*\/(sendfile|sf)\b/i.test(this.editor?.text || '')) return null; // a file to send, not to show the model
         const r = imageFromFile(resolvePath(p, this.cwd));
         if (r.error && !/not found|Not a file/.test(r.error)) this.flash(r.error, 'warn');
         if (r.image) this.flashMessage = null;
@@ -552,13 +547,7 @@ export class App {
   // `target`: a peer entry, or what names one (see resolvePeer): a session on this computer, or one on another
   // computer, reached through the gateway. `byModel`: the MessagePeer tool sent it, so the answer goes to the
   // model; otherwise the user typed `@name ...` and the answer is only shown (and noted for the model).
-  // `files`: paths of files on this computer to send along (see utils/downloads.js); the other session saves
-  // them in its Downloads folder.
-  //
-  // `background`: with files, return as soon as they are checked and the session is found, and send in the
-  // background (progress in the footer; a finished or failed sending is reported in the transcript).
-  async sendToPeer(target, text, { byModel = false, files: paths = [], background = false } = {}) {
-    const files = paths.length ? filesToSend(paths) : [];
+  async sendToPeer(target, text, { byModel = false } = {}) {
     let peer = target && typeof target === 'object' ? target : null;
     if (!peer) {
       const local = this.peers?.peers() || [];
@@ -572,80 +561,11 @@ export class App {
     }
     if (peer.remote && !this.remote) throw new Error(`&${peer.label} is on another computer, and this session is not online at the gateway (/status says why).`);
     if (!peer.remote && !this.peers) throw new Error('Talking to other sessions on this computer is off (CLAUDE_PRO_PEERS=0).');
-    const send = async () => {
-      let r;
-      if (peer.remote) {
-        const uploaded = [];
-        if (files.length) {
-          const job = this.startTransfer('up', files, peer);
-          try {
-            for (const f of files) uploaded.push(await this.remote.uploadFile(f, { signal: job.signal, onProgress: (p) => job.progress(f, p) }));
-          } finally {
-            job.end();
-          }
-        }
-        r = { ...(await this.remote.sendPeer(peer.id, { text, files: uploaded })), peer };
-      } else {
-        r = await this.peers.send(peer, { text, files });
-      }
-      r.files = files;
-      if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
-      return r;
-    };
-    if (!background || !files.length) return await send();
-    const label = peer.label || peer.name;
-    const what = `${files.length} file${files.length === 1 ? '' : 's'} (${formatBytes(files.reduce((n, f) => n + f.size, 0))})`;
-    send().then(
-      () => this.screen.log(c.dim(`  ⎿  Sent ${what} to &${label}; it saves them in its Downloads folder and confirms`), ''),
-      (e) => {
-        const why = e.name === 'AbortError'
-          ? `Stopped sending ${what} to &${label}. Send the same files again to continue where it stopped.`
-          : `Could not send ${what} to &${label}: ${e.message}${peer.remote ? ' (sending the same files again continues where it stopped)' : ''}`;
-        this.notice(why, 'warn');
-        if (byModel) this.agent.addReminder(`The files you sent with MessagePeer did not go out: ${why}`);
-      },
-    );
-    return { peer, files, background: true };
-  }
-
-  // A sending or receiving of files, shown in the footer while it runs: {signal, progress(file, p), end()}.
-  startTransfer(direction, files, peer) {
-    const id = ++this.transferSeq;
-    const controller = new AbortController();
-    const total = files.reduce((n, f) => n + (Number(f.size) || 0), 0);
-    const t = { direction, label: peer.label || peer.name, names: files.map((f) => f.name), total, done: new Map(), phase: 'starting', retryIn: 0, at: Date.now(), controller, shown: 0 };
-    this.transfers.set(id, t);
-    this.screen.schedule();
-    return {
-      signal: controller.signal,
-      progress: (file, p) => {
-        t.done.set(file, p.phase === 'hashing' || p.phase === 'checking' ? 0 : p.done);
-        t.phase = p.phase;
-        t.file = file.name;
-        t.retryIn = p.phase === 'waiting' ? Date.now() + (p.retryIn || 0) : 0;
-        if (p.phase === 'hashing' || p.phase === 'checking') t.hashed = p.total ? p.done / p.total : 0;
-        if (Date.now() - t.shown > 250) { t.shown = Date.now(); this.screen.schedule(); }
-      },
-      end: () => { this.transfers.delete(id); this.screen.schedule(); },
-    };
-  }
-
-  // The footer's word on the files on their way.
-  transferStatus() {
-    const all = [...this.transfers.values()];
-    if (!all.length) return '';
-    const t = all[0];
-    const done = [...t.done.values()].reduce((n, v) => n + v, 0);
-    const pct = t.total ? Math.floor((done / t.total) * 100) : 0;
-    const arrow = t.direction === 'up' ? '⇡' : '⇣';
-    const name = truncate(t.names.length === 1 ? t.names[0] : `${t.names.length} files`, 24);
-    const where = t.direction === 'up' ? `→ &${t.label}` : `← &${t.label}`;
-    let state;
-    if (t.phase === 'waiting') state = c.yellow(`${pct}% · network down, retrying…`);
-    else if (t.phase === 'hashing') state = c.dim(`preparing ${Math.floor((t.hashed || 0) * 100)}%`);
-    else if (t.phase === 'checking') state = c.dim('checking');
-    else state = c.dim(`${pct}% · ${formatBytes(done)}/${formatBytes(t.total)}`);
-    return `${c.blue(`${arrow} ${name}`)} ${c.dim(where)} ${state}${all.length > 1 ? c.dim(` +${all.length - 1}`) : ''}`;
+    const r = peer.remote
+      ? { ...(await this.remote.sendPeer(peer.id, { text })), peer }
+      : await this.peers.send(peer, { text });
+    if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
+    return r;
   }
 
   // The account's sessions on other computers that are online now, from the gateway (what was known stays when
@@ -686,7 +606,6 @@ export class App {
 
   onPeerMessage(msg) {
     if (this.exiting) return;
-    if (msg.files?.length && !msg.received) return this.receiveFiles(msg).catch((e) => this.logError(e)); // the gateway keeps the message until this is done
     const from = c.bold(`&${msg.from.name}`);
     const width = this.width - 1;
     if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
@@ -699,56 +618,6 @@ export class App {
     const item = { text: peerMessagePrompt(msg), images: [], display, peer: msg.kind === 'task' ? msg : null };
     if (this.busy) { this.queue.push(item); this.screen.schedule(); return; }
     this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });
-  }
-
-  // Files another session sent: saved in the Downloads folder (never over a file that is there) at once, whatever
-  // this session is doing. Files alone are answered right away with where they are, without a turn of the model;
-  // with a task, the task runs as usual and is told where they are.
-  async receiveFiles(msg) {
-    msg.received = true;
-    let dir;
-    try { dir = await downloadsDir(this.config.env); } catch { dir = path.join(os.homedir(), 'Downloads'); }
-    const saved = [];
-    const failed = [];
-    const remote = this.remote;
-    const job = msg.from.remote ? this.startTransfer('down', msg.files, msg.from) : null;
-    try {
-      for (const f of msg.files) {
-        try {
-          let file;
-          if (msg.from.remote) {
-            if (!remote) throw new Error('this session is not online at the gateway');
-            file = await remote.downloadFile(f, dir, { signal: job.signal, onProgress: (p) => job.progress(f, p) });
-            remote.deleteFile(f.id);
-          } else {
-            file = await copyUnique(f.path, dir, f.name);
-          }
-          saved.push({ path: file, size: fs.statSync(file).size });
-        } catch (e) {
-          failed.push(`${f.name}: ${e.message}`);
-        }
-      }
-    } finally {
-      job?.end();
-    }
-    this.screen.log(
-      `${c.blue('✉')} ${c.bold(`&${msg.from.name}`)} ${c.dim(`sent ${msg.files.length} file${msg.files.length === 1 ? '' : 's'}${saved.length ? `, saved in ${dir}:` : ':'}`)}`,
-      ...saved.map((s) => `  ${path.basename(s.path)} ${c.dim(formatBytes(s.size))}`),
-      ...failed.map((f) => c.red(`  ✗ ${f}`)),
-      '',
-    );
-    const where = `the Downloads folder of ${machineName(this.config.env)} (${dir})`;
-    const report = [
-      saved.length ? `Saved ${saved.length} file${saved.length === 1 ? '' : 's'} in ${where}:\n${saved.map((s) => `- ${s.path}`).join('\n')}` : '',
-      failed.length ? `Could not save:\n${failed.map((f) => `- ${f}`).join('\n')}` : '',
-    ].filter(Boolean).join('\n\n');
-    if (msg.kind === 'task' && !msg.text.trim()) {
-      this.agent.addReminder(`Another claude-pro session, ${msg.from.name}, sent files to this computer. ${report}`);
-      this.replyToPeer(msg, report);
-      return;
-    }
-    msg.text = `${msg.text}\n\n[Files that came with this message. ${report}]`;
-    this.onPeerMessage(msg);
   }
 
   // Send `text` as the answer to `msg`, a message of another session: here, or through the gateway.
@@ -766,48 +635,6 @@ export class App {
     const peer = findPeer(running, msg.from.id) || running.find((p) => p.name === msg.from.name && p.cwd === msg.from.cwd);
     if (!peer) { this.notice(`&${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); return; }
     this.peers.send(peer, { text, kind: 'reply', inReplyTo: msg.id }).then(done, failed);
-  }
-
-  // /sendfile &session file...: files on this computer to another session (here or on another computer), which
-  // saves them in its Downloads folder and confirms. Paths may be quoted, @-mentions, or have spaces unquoted.
-  async sendFiles(args) {
-    if (/^\s*(stop|cancel)\s*$/i.test(args)) {
-      const ups = [...this.transfers.values()].filter((t) => t.direction === 'up');
-      for (const t of ups) t.controller.abort();
-      this.screen.log(c.dim(ups.length ? `  ⎿  Stopping ${ups.length} sending${ups.length === 1 ? '' : 's'}` : '  ⎿  Nothing is being sent'));
-      return;
-    }
-    const tokens = [...String(args).matchAll(/@?"([^"]+)"|@?'([^']+)'|(\S+)/g)].map((m) => ({ text: m[1] ?? m[2] ?? m[3], quoted: m[3] === undefined }));
-    const targets = tokens.filter((t) => !t.quoted && /^[&＆]./u.test(t.text));
-    if (targets.length !== 1) {
-      this.notice(targets.length ? 'Send to one session at a time.' : 'Usage: /sendfile &session file... (type & for the list of sessions)', 'warn');
-      return;
-    }
-    const exists = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
-    const rest = tokens.filter((t) => t !== targets[0]);
-    const paths = [];
-    for (let i = 0; i < rest.length;) {
-      if (rest[i].quoted) { paths.push(resolvePath(rest[i].text, this.cwd)); i++; continue; }
-      // the longest run of words that is a file: a path with spaces that was not quoted
-      let j = i + 1;
-      for (let k = rest.length; k > i + 1; k--) {
-        if (rest.slice(i, k).some((t) => t.quoted)) continue;
-        if (exists(resolvePath(rest.slice(i, k).map((t) => t.text).join(' ').replace(/^@/, ''), this.cwd))) { j = k; break; }
-      }
-      paths.push(resolvePath(rest.slice(i, j).map((t) => t.text).join(' ').replace(/^@/, ''), this.cwd));
-      i = j;
-    }
-    let files;
-    try { files = filesToSend(paths); } catch (e) { this.notice(e.message, 'warn'); return; }
-    const total = files.reduce((n, f) => n + f.size, 0);
-    const what = `${files.length} file${files.length === 1 ? '' : 's'} (${formatBytes(total)})`;
-    try {
-      const r = await this.sendToPeer(targets[0].text, '', { files: paths, background: true });
-      const label = r.peer.label || r.peer.name;
-      this.screen.log(c.dim(`  ⎿  Sending ${what} to &${label} in the background (progress below; /sendfile stop stops it${r.peer.remote ? ', and sending the same files again later continues where it stopped' : ''})`));
-    } catch (e) {
-      this.notice(`Could not send the files: ${e.message}`, 'warn');
-    }
   }
 
   // The turn that handled tasks of other sessions ended: send each its answer.
@@ -1169,14 +996,13 @@ export class App {
 
   // What a restart would kill: agents and shells that are still running in the background.
   // Something is going on that an update must not cut into: a turn, a question waiting for an answer, messages
-  // waiting to be sent, background agents and shells, files on their way.
+  // waiting to be sent, background agents and shells.
   working() {
     return Boolean(this.busy || this.dialogs.length || this.queue.length || this.restartBlockers().length);
   }
 
   restartBlockers() {
     const found = [];
-    for (const t of this.transfers.values()) found.push(`files on their way ${t.direction === 'up' ? 'to' : 'from'} &${t.label}`);
     for (const t of this.runtime.tasks.running()) found.push(`background agent ${t.id} "${t.description}"`);
     for (const s of listBackgroundShells()) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
     return found;
@@ -1616,7 +1442,7 @@ export class App {
       return { items: files.map((f) => ({ value: value(f), label: f, noSpace: f.endsWith('/') })), from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
     }
     // `&name`: the other sessions, on this computer and (through the gateway) on the account's others. At the start
-    // it sends them the message; elsewhere it names them (/sendfile, or for the model).
+    // it sends them the message; elsewhere it names them or identifies them for the model.
     const amp = /(^|\s)[&＆]([^\s&＆]*)$/u.exec(before);
     if (amp) return this.peerSuggestions(amp[2], cursor, amp.index === 0 && !amp[1], { quiet });
     return null;
@@ -1901,7 +1727,7 @@ export class App {
       else if (found.ambiguous) notes.push(found.error);
     }
     if (!notes.length) return [];
-    return [{ type: 'text', text: `<system-reminder>The user refers to other sessions: ${notes.join('; ')}. MessagePeer (to: the name in quotes) sends a session a task; its files parameter sends files of this computer along, which the session saves in its computer's Downloads folder (files without a message are only saved and confirmed).</system-reminder>` }];
+    return [{ type: 'text', text: `<system-reminder>The user refers to other sessions: ${notes.join('; ')}. MessagePeer (to: the name in quotes) sends a session a task.</system-reminder>` }];
   }
 
   // alt+v (ctrl+v where the terminal passes it through): attach an image from the clipboard.
@@ -2569,7 +2395,6 @@ export class App {
     if (this.remote?.online && this.remote.viewers && !flash && !(this.exitArmed && Date.now() - this.exitArmed < 1500)) {
       left += c.dim(' · ') + c.green(`⇄ ${this.remote.viewers} watching`);
     }
-    if (this.transfers.size && !flash) left += c.dim(' · ') + this.transferStatus();
     if (!flash) {
       if (this.updating) left += c.dim(' · ') + c.blue(`⇣ updating ${APP_NAME} to ${this.updating}…`);
       else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`↻ ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);

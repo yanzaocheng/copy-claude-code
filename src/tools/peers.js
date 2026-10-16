@@ -1,8 +1,6 @@
 // ListPeers and MessagePeer: talk to the other claude-pro sessions, on this machine and, through the gateway, on the
 // user's other computers (see peers.js and remote.js).
 
-import { resolvePath } from '../utils/paths.js';
-
 const unavailable = { isError: true, content: 'Talking to other sessions is only available in an interactive session.' };
 
 export const ListPeersTool = {
@@ -32,20 +30,18 @@ Send it once and wait for the answer: do not send reminders or "please report" f
     type: 'object',
     properties: {
       to: { type: 'string', description: 'The name of the session as ListPeers shows it (computer/name for one on another computer)' },
-      message: { type: 'string', description: 'The task or question, self-contained (may be left out when only sending files)' },
-      files: { type: 'array', items: { type: 'string' }, description: 'Paths of files on this computer to send along (at most 20, 5 GB each; large ones go in the background and continue after a network outage). The other session saves them in its computer\'s Downloads folder, and is told where. With files and no message it only saves them and confirms, without working on anything.' },
+      message: { type: 'string', description: 'The task or question to send, written so it stands on its own' },
     },
-    required: ['to'],
+    required: ['to', 'message'],
   },
   summarize(input) { return `@${input.to}`; },
   async call(input, ctx) {
     if (!ctx.io?.sendToPeer) return unavailable;
-    const files = (Array.isArray(input.files) ? input.files : []).map((p) => resolvePath(String(p), ctx.cwd));
-    if (!String(input.message || '').trim() && !files.length) return { isError: true, content: 'Give a message, or files to send.' };
+    const message = String(input.message || '').trim();
+    if (!message) return { isError: true, content: 'Give a message to send.' };
     try {
-      const { peer, background } = await ctx.io.sendToPeer(input.to, String(input.message || ''), { byModel: true, files, background: true });
+      const { peer } = await ctx.io.sendToPeer(input.to, message, { byModel: true });
       const name = peer.label || peer.name;
-      if (background) return { content: `Sending ${files.length} file${files.length === 1 ? '' : 's'} to ${name} in the background (the user sees the progress); the message goes out once they are uploaded, and the answer of ${name} comes back later as a message. Carry on meanwhile, or end your turn.`, display: { summary: `Sending ${files.length} file${files.length === 1 ? '' : 's'} to ${name}` } };
       return { content: `Sent to ${name}. Its answer will arrive later as a message; carry on meanwhile, or end your turn if you need the answer first.`, display: { summary: `Sent to ${name}` } };
     } catch (e) {
       return { isError: true, content: e.message };

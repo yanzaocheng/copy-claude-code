@@ -203,10 +203,7 @@ export class PeerNode {
       if (typeof msg?.text !== 'string' || !msg.from?.name) return reply(400, { error: 'text and from are required' });
       const id = crypto.randomBytes(4).toString('hex');
       reply(200, { ok: true, id, name: this.name });
-      // files on this computer: [{path, name, size}] (the receiver copies them where it keeps what it is sent)
-      const files = (Array.isArray(msg.files) ? msg.files : []).filter((f) => f && typeof f.path === 'string' && path.isAbsolute(f.path))
-        .map((f) => ({ path: f.path, name: String(f.name || path.basename(f.path)), size: Number(f.size) || 0 }));
-      try { this.onMessage?.({ id, kind: msg.kind === 'reply' ? 'reply' : 'task', text: msg.text, inReplyTo: msg.inReplyTo || null, from: msg.from, ...(files.length ? { files } : {}) }); } catch { /* the receiver's problem */ }
+      try { this.onMessage?.({ id, kind: msg.kind === 'reply' ? 'reply' : 'task', text: msg.text, inReplyTo: msg.inReplyTo || null, from: msg.from }); } catch { /* the receiver's problem */ }
     });
   }
 
@@ -228,10 +225,10 @@ export class PeerNode {
   }
 
   // Send to a peer (an entry of peers(), or its name). Resolves with {id} (the id the receiver gave the message).
-  async send(target, { text, kind = 'task', inReplyTo = null, files = [] }) {
+  async send(target, { text, kind = 'task', inReplyTo = null }) {
     const peer = typeof target === 'string' ? findPeer(this.peers(), target) : target;
     if (!peer) throw new Error(`No running session called "${target}". /peers lists them.`);
-    const body = JSON.stringify({ kind, text, inReplyTo, from: { id: this.id, name: this.name, cwd: this.cwd }, ...(files.length ? { files } : {}) });
+    const body = JSON.stringify({ kind, text, inReplyTo, from: { id: this.id, name: this.name, cwd: this.cwd } });
     return await new Promise((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1', port: peer.port, path: '/message', method: 'POST', timeout: 10_000,

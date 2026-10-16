@@ -34,7 +34,6 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
   CLAUDE_PRO_ONLINE: 'Internal (the self-check and the tests set it): 0 keeps interactive sessions off the gateway. Otherwise a session is online there whenever this computer is logged in to the gateway: its 远程控制 page shows it, and sessions on your other computers can send it tasks (&computer/name)',
   CLAUDE_PRO_HOST: 'Set to 0 so that sessions do not start the computer service (claude-pro host) by themselves; the service lets the gateway\'s 远程控制 page open new sessions on this computer',
-  CLAUDE_PRO_DOWNLOAD_DIR: 'Where files that other sessions send this one are saved (default: the Downloads folder)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
   CLAUDE_PRO_TUI: 'fullscreen (default: the input box fixed at the bottom, the conversation scrolled inside) or default (classic: it scrolls in the terminal); /tui switches',
   CLAUDE_PRO_AUTO_RESTART: 'Restart by itself when a turn ends and claude-pro\'s own source files changed (default 1; 0 = only on /restart or the Restart tool)',

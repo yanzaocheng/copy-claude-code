@@ -9,12 +9,10 @@
 // calls, other terminal output) that events update. The same reducer (applyEvent) runs here, to send a snapshot
 // when one is needed, and in the page, which carries a copy of it.
 
-import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { stripAnsi } from './ui/ansi.js';
 import { toolHeader, renderToolResult, bashModeLines } from './ui/render.js';
-import { uploadFile, downloadFile } from './transfer.js';
 
 export const REMOTE_WIDTH = 100; // columns that tool headers and results are laid out for on the page
 const MAX_ITEMS = 800; // kept for a snapshot; the oldest are dropped beyond that
@@ -220,7 +218,6 @@ export class RemoteControl {
     this.streamAbort = null;
     this.registered = false;
     this.seenPeer = new Set(); // ids of the messages from other sessions already handled (the gateway sends again what was not acknowledged)
-    this.peerPending = new Set(); // messages being handled now, acknowledged when done
     this.replying = new Set(); // answers to the page's commands on their way
   }
 
@@ -373,35 +370,22 @@ export class RemoteControl {
   // A message from a session on another computer: handed to the App once, then acknowledged, so that the gateway
   // drops it from the session's mailbox (it sends what was not acknowledged again when the stream reconnects).
   peerMessage(cmd) {
-    if (this.peerPending.has(cmd.cid)) return; // still being handled (files on their way): acknowledged when done
     const ack = () => this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, { cid: cmd.cid, ok: true }).catch(() => { /* sent again on reconnect, and dropped here as seen */ });
-    let handling = null;
     try {
-      if (this.seenPeer.has(cmd.cid)) return;
+      if (this.seenPeer.has(cmd.cid)) { ack(); return; }
       this.seenPeer.add(cmd.cid);
       if (this.seenPeer.size > 500) this.seenPeer.delete(this.seenPeer.values().next().value);
       const f = cmd.from || {};
       const machine = f.machine || f.host || 'computer';
-      const files = (Array.isArray(cmd.files) ? cmd.files : [])
-        .filter((x) => x && typeof x.id === 'string')
-        .map((x) => ({ id: x.id, name: String(x.name || 'file'), size: Number(x.size) || 0, sha256: typeof x.sha256 === 'string' ? x.sha256 : null }));
-      handling = this.handlers.peerMessage?.({
+      this.handlers.peerMessage?.({
         id: cmd.cid,
         kind: cmd.kind === 'reply' ? 'reply' : 'task',
         text: String(cmd.text ?? ''),
         inReplyTo: cmd.inReplyTo || null,
         from: { id: f.id, name: `${machine}/${f.name || 'session'}`, cwd: f.cwd || '', machine, remote: true },
-        ...(files.length ? { files } : {}),
       });
-    } catch { /* the App's problem: the message is acknowledged anyway, or it would come back forever */ } finally {
-      if (typeof handling?.then === 'function') {
-        // until it is done the gateway keeps it: a session that ends meanwhile gets it again, and continues
-        this.peerPending.add(cmd.cid);
-        handling.catch(() => {}).finally(() => { this.peerPending.delete(cmd.cid); if (!this.closed) ack(); });
-      } else {
-        ack();
-      }
-    }
+    } catch { /* the App's problem: the message is acknowledged anyway, or it would come back forever */ }
+    ack();
   }
 
   // The sessions of this gateway account, on every computer, as the gateway lists them (this one included).
@@ -411,29 +395,11 @@ export class RemoteControl {
   }
 
   // A message to another session of the account: resolves with {id} (the message's id, which a reply names).
-  // `files`: uploaded ones ({id}, see uploadFile), which the gateway hands over with the message.
-  async sendPeer(targetId, { kind = 'task', text, inReplyTo = null, files = [] }) {
+  async sendPeer(targetId, { kind = 'task', text, inReplyTo = null }) {
     if (!this.registered) await this.register();
-    const body = { from: this.id, kind, text, ...(inReplyTo ? { inReplyTo } : {}), ...(files.length ? { files: files.map((x) => ({ id: x.id })) } : {}) };
+    const body = { from: this.id, kind, text, ...(inReplyTo ? { inReplyTo } : {}) };
     const data = await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(targetId)}/messages`, body, { retry: false });
     return { id: data.id, delivered: data.delivered !== false };
-  }
-
-  // ------------------------------------------------------------ files (for another computer's session)
-
-  get client() { return { base: this.base, apiKey: this.apiKey, fetch: this.fetch }; }
-
-  // A file of this computer (`{path, name, size}`) onto the gateway, resumably (see transfer.js): resolves with
-  // {id, name, size, sha256}, which a message's files refer to.
-  uploadFile(file, options) { return uploadFile(this.client, file, options); }
-
-  // A file another session sent (`{id, name, size, sha256}`) into `dir`: resolves with the path it got.
-  downloadFile(file, dir, options) { return downloadFile(this.client, file, dir, options); }
-
-  deleteFile(id) {
-    return this.fetch(`${this.base}/v1/remote/files/${encodeURIComponent(id)}`, {
-      method: 'DELETE', headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    }).then(() => {}, () => {});
   }
 
   // ------------------------------------------------------------ events

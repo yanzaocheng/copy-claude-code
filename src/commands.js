@@ -613,19 +613,10 @@ export function buildCommands(app) {
         ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('&' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
         ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
-          ? 'Type "&" for the list, "&name task" to send a task; its answer is shown here. On another computer: "&computer/name task", or "&computer task" when it runs one session. /sendfile &name file... sends files (saved in its Downloads folder). /rename names this session. The agent can use ListPeers / MessagePeer too.'
+          ? 'Type "&" for the list, "&name task" to send a task; its answer is shown here. On another computer: "&computer/name task", or "&computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
           : 'Type "&" for the list, "&name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login; /status says why it is not).'),
       ]);
     },
-  });
-
-  add({
-    name: 'sendfile',
-    aliases: ['sf'],
-    argHint: '&session <file...>',
-    argRequired: true,
-    description: 'Send files to another session, on this computer or on another one: it saves them in its Downloads folder',
-    async run(args) { await app.sendFiles(args); },
   });
 
   add({
