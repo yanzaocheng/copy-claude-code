@@ -853,7 +853,11 @@ export class HostService {
     if (other) throw new Error(`这段对话正开在会话 &${other.name} 里：先结束它`);
     // the service's own sessions with it: those in the registry, and those starting or restarting
     const running = [...(this.sessions?.sessions.values() || [])].filter((r) => (r.conversationId === id || open.some((p) => p.remoteId === r.sessionId)) && this.sessions.alive(r));
-    if (running.length && stop !== true) throw new Error(`这段对话正开在会话 &${running[0].name || running[0].sessionId} 里：先结束它`);
+    if (running.length && stop !== true) {
+      // the name it has in the registry: its record learns it only at the next tick (see BackgroundSessions.tick)
+      const name = open.find((p) => p.remoteId === running[0].sessionId)?.name || running[0].name || running[0].sessionId;
+      throw new Error(`这段对话正开在会话 &${name} 里：先结束它`);
+    }
     for (const r of running) await this.sessions.stop(r.sessionId);
     const logs = this.sessions ? this.sessions.forgetConversation(id) : [];
     const r = deleteConversation({ projects: path.join(configDir(), 'projects'), id, extra: logs });
