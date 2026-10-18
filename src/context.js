@@ -104,7 +104,9 @@ export function environmentBlock(cwd, { model, shellName, snapshot = null }) {
   if (git) {
     lines.push('', 'gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.');
     lines.push(`Current branch: ${git.branch}`);
-    if (git.main) lines.push(`Main branch (you will usually use this for PRs): ${git.main}`);
+    // Not Claude Code's wording ("Main branch (you will usually use this for PRs)"): the CodeBuddy channel behind the
+    // gateway refuses requests carrying that exact line (code 11128, shown as a 529 "overloaded") for its models.
+    if (git.main) lines.push(`Main branch: ${git.main}`);
     if (git.user) lines.push(`Git user: ${git.user}`);
     lines.push('', `Status:\n${git.status || '(clean)'}`, '', `Recent commits:\n${git.log || '(none)'}`);
   }
