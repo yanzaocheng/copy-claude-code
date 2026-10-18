@@ -124,7 +124,7 @@ test('WebFetch stops downloading at the size limit', async (t) => {
   });
   const tool = makeWebFetchTool(config());
   const r = await raw(tool, `${base}/endless`);
-  assert.ok(!r.isError);
+  assert.ok(!r.isError, String(r.content).slice(0, 500)); // it fails now and then under the full suite: say why
   assert.equal(r.content.length, 512 * 1024);
   assert.match(r.display.summary, /^Received 512\.0KB/);
   await sleep(300);
