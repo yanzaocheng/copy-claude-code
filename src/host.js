@@ -858,6 +858,9 @@ export class HostService {
       const name = open.find((p) => p.remoteId === running[0].sessionId)?.name || running[0].name || running[0].sessionId;
       throw new Error(`这段对话正开在会话 &${name} 里：先结束它`);
     }
+    // what the registry says it has open, before its record learns it at the next tick: ended with it, the session's
+    // log goes with the conversation
+    for (const r of running) r.conversationId = id;
     for (const r of running) await this.sessions.stop(r.sessionId);
     const logs = this.sessions ? this.sessions.forgetConversation(id) : [];
     const r = deleteConversation({ projects: path.join(configDir(), 'projects'), id, extra: logs });

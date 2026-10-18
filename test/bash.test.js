@@ -87,14 +87,19 @@ test('appendOutput trims the buffer and keeps readPos pointing at the same text'
 
 test('BashOutput delivers new output of a background shell after its buffer was trimmed', async () => {
   const bash = makeBashTool(config());
-  const started = await bash.call({ command: `node -e "console.log('first'); setTimeout(() => console.log('second'), 700)"`, run_in_background: true }, ctx());
+  const started = await bash.call({ command: `node -e "console.log('first'); setTimeout(() => console.log('second'), 2000)"`, run_in_background: true }, ctx());
   const id = /bash_\d+/.exec(started.content)[0];
-  await sleep(350);
-  const one = await BashOutputTool.call({ bash_id: id }, ctx());
-  assert.match(one.content, /first/);
+  // read until the output comes (a fixed wait was too short when the whole suite runs at once)
+  const readUntil = async (re) => {
+    for (let t = 0; t < 15_000; t += 50) {
+      const r = await BashOutputTool.call({ bash_id: id }, ctx());
+      if (re.test(r.content)) return r;
+      await sleep(50);
+    }
+    throw new Error(`no ${re} in the output`);
+  };
+  const one = await readUntil(/first/);
   assert.doesNotMatch(one.content, /second/);
-  await sleep(900);
-  const two = await BashOutputTool.call({ bash_id: id }, ctx());
-  assert.match(two.content, /second/);
+  const two = await readUntil(/second/);
   assert.doesNotMatch(two.content, /first/);
 });
