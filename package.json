@@ -1,6 +1,6 @@
 {
   "name": "@yanzc/claude-pro",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "claude-pro: a command line coding agent for the codex-gateway. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
   "repository": {
@@ -28,7 +28,9 @@
   "scripts": {
     "start": "node bin/claude-pro.js",
     "check": "node bin/claude-pro.js --self-check",
-    "test": "node --test --test-force-exit --test-timeout=60000 --test-reporter=dot \"test/**/*.test.js\""
+    "test": "npm run test:quick",
+    "test:quick": "node --test --test-force-exit --test-timeout=30000 --test-reporter=dot test/unit.test.js test/providers.test.js test/agents.test.js test/files.test.js test/grep.test.js test/limits.test.js test/ratelimit.test.js test/resilience.test.js test/screen.test.js test/tui-title.test.js",
+    "test:full": "node --test --test-force-exit --test-timeout=60000 --test-reporter=dot \"test/**/*.test.js\""
   },
   "engines": {
     "node": ">=22"

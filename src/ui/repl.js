@@ -2413,7 +2413,7 @@ export class App {
     const { model, effort } = modelInfo(cfg);
     // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
     const level = effort || defaultEffort(cfg.model.id, cfg);
-    const info = c.dim(level ? `${model} · effort ${level}` : model);
+    const info = c.dim(level ? `${model} · ${level}` : model);
     const version = c.dim(`v${VERSION}`);
     const compactTokens = (n) => formatTokens(n).replace(/\.0([kM])$/, '$1');
     const context = c.dim(`ctx ${compactTokens(used)}/${compactTokens(cfg.model.contextWindow)}`);

@@ -207,12 +207,12 @@ test('the footer always shows the model and effort in use', async (t) => {
   const tui = await startTui({ cwd: project(), flags: { effort: 'high' } });
   t.after(() => tui.close());
   const bottom = async () => (await tui.snapshot()).split('\n').filter((l) => l.trim()).at(-1);
-  assert.match(await bottom(), new RegExp(`^ {2}\\? for shortcuts {2,}ctx \\d+(?:\\.\\d+)?[kM]?/\\d+(?:\\.\\d+)?[kM]? · v\\d+\\.\\d+\\.\\d+ · mock · effort high$`));
+  assert.match(await bottom(), new RegExp(`^ {2}\\? for shortcuts {2,}ctx \\d+(?:\\.\\d+)?[kM]?/\\d+(?:\\.\\d+)?[kM]? · v\\d+\\.\\d+\\.\\d+ · mock · high$`));
 
   tui.send('/effort low\r');
   await tui.waitFor('Effort set to low', { timeout: 20_000 });
   await tui.wait(100);
-  assert.match(await bottom(), /\? for shortcuts {2,}ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock · effort low$/);
+  assert.match(await bottom(), /\? for shortcuts {2,}ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock · low$/);
 
   tui.send('/effort auto\r');
   await tui.waitFor('Effort set to auto', { timeout: 20_000 });
@@ -231,11 +231,11 @@ test('the footer drops the model when the window is too narrow, instead of overf
   const tui = await startTui({ cwd: project(), flags: { effort: 'high' }, cols: 60 });
   t.after(() => tui.close());
   const bottom = async () => (await tui.snapshot()).split('\n').filter((l) => l.trim()).at(-1);
-  assert.match(await bottom(), /\? for shortcuts +ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock · effort high$/);
+  assert.match(await bottom(), /\? for shortcuts +ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock · high$/);
   await tui.resize(24);
   const narrow = await bottom();
   assert.ok(narrow.length <= 24, `"${narrow}" fits the window`);
   assert.match(narrow, /\? for shortcuts/);
   await tui.resize(60);
-  assert.match(await bottom(), /\? for shortcuts +ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock · effort high$/, 'and it is back when there is room');
+  assert.match(await bottom(), /\? for shortcuts +ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock · high$/, 'and it is back when there is room');
 });

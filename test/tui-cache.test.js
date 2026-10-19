@@ -100,7 +100,7 @@ serialTest('the footer and /cost show what the conversation has cost: kept with 
   // Opus 5.5: 5 in, 3 out, 4,000 written for 5 minutes; then 5 in, 3 out, 4,000 read, 200 written
   const expected = (5 * 4 + 3 * 20 + 4000 * 5 + 5 * 4 + 3 * 20 + 4000 * 0.2 + 200 * 5) / 1e6;
   assert.ok(Math.abs(tui.app.cost - expected) < 1e-9, `cost ${tui.app.cost}, expected ${expected}`);
-  await tui.waitFor(/\$0\.02 · mock\s*$/m, { timeout: 5000, all: false });
+  await tui.waitFor(/\$0\.02 · ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock\s*$/m, { timeout: 5000, all: false });
   const first = { file: tui.app.store.file, id: tui.app.store.id };
   assert.ok(Math.abs(SessionStore.load(first.file).cost - expected) < 1e-9, 'kept in the session file');
 
@@ -125,23 +125,23 @@ serialTest('the footer\'s prompt cache clock counts down, is cold once the cache
   tui.send('first question\r');
   await tui.waitFor('All done.', { timeout: 20_000 });
   await tui.waitIdle({ timeout: 20_000 });
-  await tui.waitFor(/◷ 5m · mock\s*$/m, { timeout: 5000, all: false });
+  await tui.waitFor(/◷ 5m · ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock\s*$/m, { timeout: 5000, all: false });
   const cache = tui.app.agent.cache;
   const first = { file: tui.app.store.file, id: tui.app.store.id };
   assert.equal(SessionStore.load(first.file).cacheUntil, cache.clockUntil, 'kept with the session');
 
   cache.clockUntil = Date.now() + 90_000; // it counts down by itself while idle
-  await tui.waitFor(/◷ 2m · mock\s*$/m, { timeout: 5000, all: false });
+  await tui.waitFor(/◷ 2m · ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock\s*$/m, { timeout: 5000, all: false });
   cache.clockUntil = Date.now() - 1; // ran out: the icon alone
-  await tui.waitFor(/ ◷ · mock\s*$/m, { timeout: 5000, all: false });
+  await tui.waitFor(/ ◷ · ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock\s*$/m, { timeout: 5000, all: false });
   tui.send('second question\r');
   await tui.waitIdle({ timeout: 20_000 });
-  await tui.waitFor(/◷ 5m · mock\s*$/m, { timeout: 5000, all: false });
+  await tui.waitFor(/◷ 5m · ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock\s*$/m, { timeout: 5000, all: false });
 
   tui.send('/compact\r');
   await tui.waitFor('Conversation compacted', { timeout: 20_000 });
   await tui.waitIdle({ timeout: 20_000 });
-  await tui.waitFor(/ ◷ · mock\s*$/m, { timeout: 5000, all: false });
+  await tui.waitFor(/ ◷ · ctx \d+(?:\.\d+)?[kM]?\/\d+(?:\.\d+)?[kM]? · v\d+\.\d+\.\d+ · mock\s*$/m, { timeout: 5000, all: false });
   assert.equal(SessionStore.load(first.file).cacheUntil, 0, 'a conversation compacted after its last reply reads as cold when resumed');
 
   tui.send('/clear\r');
