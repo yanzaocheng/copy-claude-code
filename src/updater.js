@@ -1,10 +1,7 @@
-// Auto-update, as in Claude Code: an interactive session installed with `npm i -g claude-pro` looks for a newer
-// version on the npm registry (when it starts and every few minutes while it runs; the sessions of a machine share
-// the interval, and what one finds the others see in the state file). It is installed only once no session of the
-// machine is working (App.maybeInstallUpdate asks them), by one session at a time (a lock file), and the session
-// then loads it with a restart (the conversation carries over); the others see the files change and restart too,
-// each once it is idle (App.startSourceWatch). A git checkout (the development copy) is never touched. Off with
-// CLAUDE_PRO_AUTO_UPDATE=0 or DISABLE_AUTOUPDATER=1.
+// Manual update support for `npm i -g claude-pro`: the interactive session checks npm and installs a release only
+// when `/update` calls App.autoUpdate({ force: true }). Installation is serialized by a lock file and the session
+// loads the new package with a restart (the conversation carries over). A git checkout (the development copy) is
+// never touched. The environment switches remain for callers that want to disable even manual checks.
 
 import fs from 'node:fs';
 import path from 'node:path';

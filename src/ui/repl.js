@@ -29,7 +29,7 @@ import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn, imageSize } from '../utils/images.js';
-import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer, CHECK_EVERY_MS } from '../updater.js';
+import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
 import { ensureHost as startHostIfNeeded, ensureAutostart, hostEnabled, listDirectory, recentDirectories, computerId, markBackgroundEnded } from '../host.js';
@@ -328,10 +328,8 @@ export class App {
     this.fileIndex.refresh();
     this.startSourceWatch();
     if (!this.driven) {
-      if (!this.flags.restart) this.autoUpdate();
-      // and every few minutes while it runs, so that a release reaches a session that stays open for days
-      this.updateTimer = setInterval(() => { if (!this.exiting) this.autoUpdate({ quiet: true }); }, CHECK_EVERY_MS);
-      this.updateTimer.unref?.();
+      // Updates are deliberately manual: /update checks npm and installs the selected release.
+      // Do not query the registry or install/restart a running session in the background.
       // online or offline as this computer's gateway login changes (/login or /logout in another window)
       this.loginTimer = setInterval(() => this.syncRemote(), 10_000);
       this.loginTimer.unref?.();
@@ -2416,13 +2414,23 @@ export class App {
     // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
     const level = effort || defaultEffort(cfg.model.id, cfg);
     const info = c.dim(level ? `${model} · effort ${level}` : model);
-    // Before the model: the prompt cache clock, then what the conversation has cost so far; when room is short
-    // the cost goes first, then the clock.
+    const version = c.dim(`v${VERSION}`);
+    const compactTokens = (n) => formatTokens(n).replace(/\.0([kM])$/, '$1');
+    const context = c.dim(`ctx ${compactTokens(used)}/${compactTokens(cfg.model.contextWindow)}`);
+    // Before the context, version and model: the prompt cache clock, then what the conversation has cost so far;
+    // when room is short the cost goes first, then the clock.
     const spent = this.cost > 0 ? c.dim(formatUsd(this.cost)) : '';
     const clock = this.cacheClock();
     const join = (...parts) => parts.filter(Boolean).join(c.dim(' · '));
     const room = w - stringWidth(left) - 1;
-    const right = [join(notice, clock, spent, info), join(notice, clock, info), join(notice, info), notice, info].find((r) => r && stringWidth(r) < room) || '';
+    const right = [
+      join(notice, clock, spent, context, version, info),
+      join(notice, clock, context, version, info),
+      join(notice, context, version, info),
+      join(notice, context, version),
+      join(notice, version),
+      version,
+    ].find((r) => r && stringWidth(r) < room) || '';
     const gap = room - stringWidth(right);
     return right ? left + ' '.repeat(gap) + right : left;
   }
