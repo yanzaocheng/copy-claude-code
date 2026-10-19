@@ -152,6 +152,96 @@ export function normalizeMessages(messages) {
   return out;
 }
 
+const recoveredToolResult = (id) => ({
+  type: 'tool_result',
+  tool_use_id: id,
+  is_error: true,
+  content: '[Tool call did not complete before the session was interrupted.]',
+});
+
+// Repair a transcript before it reaches an API adapter. A process can die after the assistant
+// tool_use was persisted but before the user tool_result was appended; gateway adapters reject
+// that sequence as "No tool output found for function call". The repair is deterministic and
+// only adds an explicit interrupted result (or drops an orphan result), never a successful one.
+export function repairToolResults(messages) {
+  const out = [];
+  let pending = null;
+  let changed = false;
+  let recoveryIndex = 0;
+  const usedIds = new Set();
+  const freshId = () => {
+    let id;
+    do { id = `toolu_recovered_${recoveryIndex++}`; } while (usedIds.has(id));
+    usedIds.add(id);
+    return id;
+  };
+  const flushPending = () => {
+    if (!pending?.length) return;
+    out.push({ role: 'user', content: pending.map(recoveredToolResult) });
+    pending = null;
+    changed = true;
+  };
+
+  for (const original of messages) {
+    const source = Array.isArray(original.content) ? original.content : toBlocks(original.content);
+    const m = { ...original, content: source.map((b) => ({ ...b })) };
+    const uses = m.role === 'assistant' ? m.content.filter((b) => b.type === 'tool_use') : [];
+
+    if (uses.length) {
+      flushPending();
+      const ids = [];
+      for (const block of uses) {
+        let id = typeof block.id === 'string' && block.id ? block.id : null;
+        if (!id || usedIds.has(id)) {
+          id = freshId();
+          block.id = id;
+          changed = true;
+        } else usedIds.add(id);
+        ids.push(id);
+      }
+      pending = ids;
+      out.push(m);
+      continue;
+    }
+
+    if (m.role === 'user' && pending?.length) {
+      const expected = new Set(pending);
+      const seen = new Set();
+      const results = [];
+      const rest = [];
+      for (const block of m.content) {
+        if (block.type !== 'tool_result') { rest.push(block); continue; }
+        const id = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+        if (!expected.has(id) || seen.has(id)) { changed = true; continue; }
+        seen.add(id);
+        if (block.content === undefined || block.content === null) {
+          block.content = '(no output)';
+          changed = true;
+        }
+        results.push(block);
+      }
+      for (const id of pending) if (!seen.has(id)) { results.push(recoveredToolResult(id)); changed = true; }
+      const content = [...results, ...rest];
+      if (content.length !== m.content.length || content.some((b, i) => b !== m.content[i])) changed = true;
+      out.push({ ...m, content });
+      pending = null;
+      continue;
+    }
+
+    // A tool_result without a directly preceding assistant tool_use is invalid too.
+    if (m.role === 'user' && m.content.some((b) => b.type === 'tool_result')) {
+      const content = m.content.filter((b) => b.type !== 'tool_result');
+      if (content.length !== m.content.length) { changed = true; out.push({ ...m, content }); }
+      else out.push(m);
+    } else {
+      if (pending) flushPending();
+      out.push(m);
+    }
+  }
+  flushPending();
+  return { messages: out, changed };
+}
+
 // Minimal JSON-schema check for required fields and primitive types.
 function validateInput(schema, input) {
   if (!schema || typeof input !== 'object' || input === null) return 'Input must be an object';
@@ -681,10 +771,16 @@ export class Agent {
       this.recordedSystem = system;
       this.io.systemPrompt?.(system, this);
     }
+    const normalized = normalizeMessages(this.messages);
+    const repaired = repairToolResults(normalized);
+    if (repaired.changed) {
+      this.replaceMessages(repaired.messages);
+      this.io.notice?.('Recovered an unfinished tool call in the conversation; continuing with an interrupted result.', 'warn');
+    }
     const request = {
       model: this.model,
       system,
-      messages: normalizeMessages(this.messages),
+      messages: repaired.messages,
       tools: this.toolSchemas(),
       cacheBucket: this.isSubagent ? 'other' : 'main',
       ...(this.effort ? { effort: this.effort } : {}),
@@ -739,14 +835,16 @@ export class Agent {
       const run = async (tu) => {
         try {
           const r = await this.runOne(tu, signal, map, { parallel: batch.parallel });
-          results.set(tu.id, r.block);
+          // Key by the tool-use object, not its provider id. A malformed provider response
+          // can repeat an id; one duplicate must not overwrite the other result.
+          results.set(tu, r.block);
           if (r.stop) stop = true;
         } catch (err) {
           if (isAbort(err) || signal?.aborted) {
             interrupted = true;
-            results.set(tu.id, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: 'Interrupted by user' });
+            results.set(tu, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: 'Interrupted by user' });
           } else {
-            results.set(tu.id, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: `Error: ${err.message}` });
+            results.set(tu, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: `Error: ${err.message}` });
           }
         }
       };
@@ -755,11 +853,11 @@ export class Agent {
       if (signal?.aborted) interrupted = true;
     }
     for (const tu of toolUses) {
-      if (results.has(tu.id)) continue;
+      if (results.has(tu)) continue;
       const skipped = this.trace?.toolStart({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, name: tu.name, input: tu.input, parallel: false, toolUseId: tu.id });
       this.trace?.toolEnd(skipped, { skipped: true, aborted: interrupted, error: true, error_type: interrupted ? 'aborted' : 'skipped' });
     }
-    const blocks = toolUses.map((tu) => results.get(tu.id) || {
+    const blocks = toolUses.map((tu) => results.get(tu) || {
       type: 'tool_result', tool_use_id: tu.id, is_error: true,
       content: interrupted ? 'Interrupted by user' : 'Skipped: the user rejected an earlier tool call in this batch.',
     });
@@ -828,6 +926,7 @@ export class Agent {
       if (Array.isArray(result.content)) await fitImagesIn(result.content);
       handle.done?.(result);
       let content = typeof result.content === 'string' ? (result.content || '(no output)') : result.content;
+      if (content === undefined || content === null || (Array.isArray(content) && !content.length)) content = '(no output)';
       if (this.hooks?.has('PostToolUse')) {
         const h = await this.hooks.run('PostToolUse', { tool_name: tool.name, tool_input: input, tool_response: typeof content === 'string' ? content.slice(0, 20_000) : '[non-text result]' }, { cwd: this.cwd, signal });
         for (const w of h.warnings) this.io.notice?.(w, 'warn');
@@ -933,7 +1032,7 @@ export class Agent {
     const beforeContextTokens = this.contextEstimate;
     this.io.compactStart?.(false, this);
     await this.lightenImages(); // in place: `before` and `after` hold the same blocks
-    const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: partialCompactPrompt(part, label, instructions) }] }]);
+    const messages = repairToolResults(normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: partialCompactPrompt(part, label, instructions) }] }])).messages;
     let res;
     try {
       res = await this.requestSummary(messages, { signal, compactionId, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
@@ -970,8 +1069,9 @@ export class Agent {
     const beforeContextTokens = this.contextEstimate;
     this.io.compactStart?.(auto, this);
     await this.lightenImages();
-    const messages = normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: compactPrompt(instructions) }] }]);
-    // If the last assistant turn has unanswered tool calls, the sequence is invalid; drop it.
+    // A crash or forced restart can leave the last assistant tool_use without its result.
+    // Send an explicit interrupted result in the summary request so compaction itself can recover.
+    const messages = repairToolResults(normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: compactPrompt(instructions) }] }])).messages;
     let res;
     try {
       res = await this.requestSummary(messages, { signal, compactionId, onEvent: (ev) => this.io.compactProgress?.(ev, this) });

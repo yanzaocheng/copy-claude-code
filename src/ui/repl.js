@@ -184,6 +184,9 @@ export class App {
     this.driven = noProcessExit;
     this.screen = new Screen(stdout);
     this.busy = false;
+    // Attachment expansion is asynchronous. Claim the turn before the first await so two
+    // rapid submits cannot start two Agent.run() calls against the same message array.
+    this.turnStarting = false;
     this.controller = null;
     this.queue = [];
     this.dialogs = [];
@@ -257,6 +260,7 @@ export class App {
   get agent() { return this.runtime.agent; }
   get config() { return this.runtime.config; }
   get width() { return this.screen.width; }
+  isTurnRunning() { return this.busy || this.turnStarting; }
 
   // ---------------------------------------------------------------- lifecycle
 
@@ -315,7 +319,7 @@ export class App {
     this.screen.setLive((w) => this.renderLive(w));
     this.spinnerTimer = setInterval(() => {
       const clock = this.cacheClock(); // the footer's clock counts down while nothing else is drawn
-      if (this.busy || this.active.length || clock !== this.shownClock) this.screen.schedule();
+      if (this.isTurnRunning() || this.active.length || clock !== this.shownClock) this.screen.schedule();
       this.shownClock = clock;
     }, 120);
     if (restart) this.continueAfterRestart(restart);
@@ -392,7 +396,7 @@ export class App {
   terminalTitle() {
     const dir = path.basename(this.cwd) || this.cwd;
     const { model, effort } = modelInfo(this.config);
-    const state = this.rateWait ? '⏸' : this.busy ? (Math.floor(Date.now() / 1000) % 2 ? '⠐' : '⠂') : '✳';
+    const state = this.rateWait ? '⏸' : this.isTurnRunning() ? (Math.floor(Date.now() / 1000) % 2 ? '⠐' : '⠂') : '✳';
     const session = this.sessionLabel();
     const where = [dir, model, effort].filter(Boolean).join(' · ');
     return `${state} ${session ? `${truncate(session, 40).replace(/\x1b\[0m$/, '')} | ` : ''}${where}`;
@@ -614,7 +618,7 @@ export class App {
     }
     const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} &${msg.from.name}: ${msg.text}`;
     const item = { text: peerMessagePrompt(msg), images: [], display, peer: msg.kind === 'task' ? msg : null };
-    if (this.busy) { this.queue.push(item); this.screen.schedule(); return; }
+    if (this.isTurnRunning()) { this.queue.push(item); this.screen.schedule(); return; }
     this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });
   }
 
@@ -813,9 +817,9 @@ export class App {
       };
     }
     return {
-      busy: this.busy,
+      busy: this.isTurnRunning(),
       verb: this.status || (this.thinking ? 'Thinking' : this.verb),
-      elapsed: this.busy ? Date.now() - this.turnStart : 0,
+      elapsed: this.isTurnRunning() ? Date.now() - this.turnStart : 0,
       tokens: this.turnTokens,
       aborting: Boolean(this.controller?.signal.aborted),
       rateWait,
@@ -908,9 +912,9 @@ export class App {
     if (!value.trim() && pictures.length) value = pictures.map((_, i) => `[Image #${i + 1}]`).join(' ');
     if (!value.trim()) throw new Error('The message is empty.');
     if (this.exiting) throw new Error('The session is ending.');
-    if (this.busy && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
-    if (this.dialogs.length && !this.busy) throw new Error('A question is open: answer it first.');
-    const queued = this.busy;
+    if (this.isTurnRunning() && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
+    if (this.dialogs.length && !this.isTurnRunning()) throw new Error('A question is open: answer it first.');
+    const queued = this.isTurnRunning();
     this.onSubmit(value, value, pictures);
     this.screen.schedule();
     return { queued };
@@ -996,7 +1000,7 @@ export class App {
   // Something is going on that an update must not cut into: a turn, a question waiting for an answer, messages
   // waiting to be sent, background agents and shells.
   working() {
-    return Boolean(this.busy || this.dialogs.length || this.queue.length || this.restartBlockers().length);
+    return Boolean(this.isTurnRunning() || this.dialogs.length || this.queue.length || this.restartBlockers().length);
   }
 
   restartBlockers() {
@@ -1021,7 +1025,7 @@ export class App {
     if (blockers.length && !force) return { ok: false, message: `${cwd ? 'Changing the directory restarts the session, which would stop' : 'A restart would kill'}: ${blockers.join('; ')}.` };
     this.restartRequest = { reason, then, continueTurn, cwd };
     this.screen.schedule();
-    if (!this.busy) this.restartNow();
+    if (!this.isTurnRunning()) this.restartNow();
     return { ok: true };
   }
 
@@ -1077,7 +1081,7 @@ export class App {
   // state, the @ file index, the input history and where the conversation is kept. The conversation, the remote
   // page's id and a name given with /rename stay. Returns {ok, message}.
   changeDirectory(dir) {
-    if (this.busy) return { ok: false, message: 'Wait for the current task to finish (or press Esc) before changing the directory.' };
+    if (this.isTurnRunning()) return { ok: false, message: 'Wait for the current task to finish (or press Esc) before changing the directory.' };
     if (!canRestart()) return { ok: false, message: 'This session cannot change its directory: that restarts it, and it was not started by the claude-pro launcher. Start claude-pro in that directory instead.' };
     return this.requestRestart({ reason: `working directory ${dir}`, cwd: dir });
   }
@@ -1134,12 +1138,12 @@ export class App {
         this.pendingUpdate = null;
         this.notice(`${APP_NAME} ${disk} was installed (by another window or npm); this one restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
       }
-      if (!this.busy) this.maybeAutoReload();
+      if (!this.isTurnRunning()) this.maybeAutoReload();
     });
   }
 
   async maybeAutoReload() {
-    if (!this.sourceChanged || this.updating || this.reloading || this.busy || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
+    if (!this.sourceChanged || this.updating || this.reloading || this.isTurnRunning() || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
     if (this.skipAutoReload) { this.skipAutoReload = false; return; } // the user just interrupted: not now
     if (this.restartBlockers().length) return; // looked at again whenever the program is next idle
     const changed = this.sourceChanged;
@@ -1153,7 +1157,7 @@ export class App {
       this.notice(`The program's source changed but the new code does not start, so it was not restarted:\n${check.output.split('\n').slice(0, 12).join('\n')}\nFix it; the restart follows by itself (or run /restart).`, 'warn');
       return;
     }
-    if (this.busy || this.dialogs.length) { this.sourceChanged = changed; return; } // something started meanwhile: later
+    if (this.isTurnRunning() || this.dialogs.length) { this.sourceChanged = changed; return; } // something started meanwhile: later
     this.requestRestart({ reason: this.updateRestart ? `updated to ${APP_NAME} ${this.updateRestart}` : 'source changed', force: true });
   }
 
@@ -1181,7 +1185,7 @@ export class App {
     } else if (r.status === 'installed') {
       if (force || this.updateRestart !== r.version) this.notice(`${APP_NAME} ${r.version} is installed already; this session restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
       this.updateRestart = r.version;
-      if (canRestart()) { this.sourceChanged ||= true; if (!this.busy) this.maybeAutoReload(); }
+      if (canRestart()) { this.sourceChanged ||= true; if (!this.isTurnRunning()) this.maybeAutoReload(); }
     } else if (r.status === 'failed') {
       if (force || (r.version && !quiet)) this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
     } else if (force) {
@@ -1375,7 +1379,7 @@ export class App {
     if (key.ctrl && key.name === 't') { this.showTodos = !this.showTodos; this.screen.schedule(); return; }
     if (key.ctrl && key.name === 'l') { if (this.screen.full) this.screen.repaint(); else this.screen.clearScreen(); return; }
     if (key.ctrl && key.name === 'd' && !this.editor.text) { this.keyboardExit(); return; }
-    if (key.name === 'escape' && this.busy) { this.interrupt(); return; }
+    if (key.name === 'escape' && this.isTurnRunning()) { this.interrupt(); return; }
     this.exitArmed = 0;
     this.editor.handleKey(str, key);
     this.screen.schedule();
@@ -1396,7 +1400,7 @@ export class App {
       this.interrupt();
       return;
     }
-    if (this.busy) { this.interrupt(); return; }
+    if (this.isTurnRunning()) { this.interrupt(); return; }
     if (this.editor.text) { this.editor.discard(); this.screen.schedule(); return; }
     if (Date.now() - this.exitArmed < 1500) { this.keyboardExit(); return; }
     this.exitArmed = Date.now();
@@ -1474,7 +1478,7 @@ export class App {
     if (this.screen.scrolledUp) this.screen.scrollBy('bottom'); // what was sent, and what comes of it, is in view
     appendHistory(this.cwd, raw);
     if (this.sendTypedToPeer(text)) return;
-    if (this.busy) {
+    if (this.isTurnRunning()) {
       if (text.startsWith('/')) { this.notice('Wait for the current task to finish (or press Esc) before running commands.', 'warn'); return; }
       this.queue.push({ text: value, images });
       this.screen.schedule();
@@ -1691,6 +1695,16 @@ export class App {
   // `topic`: what to name the conversation's topic after (default: the message as shown).
   // `peers`: tasks of other sessions that this turn answers.
   async startTurn(prompt, { echo = true, display, images = [], topic, peers = [] } = {}) {
+    // Claim the turn synchronously. attachments() below awaits filesystem work, and a second
+    // submit can otherwise enter here before runAgent() has a chance to set busy=true.
+    if (this.isTurnRunning()) {
+      this.queue.push({ text: prompt, images, display: display ?? prompt, peer: peers.length === 1 ? peers[0] : null });
+      this.screen.schedule();
+      return;
+    }
+    this.turnStarting = true;
+    this.turnStart = Date.now();
+    this.verb = VERBS[Math.floor(Math.random() * VERBS.length)];
     if (echo) this.echoUser(display ?? prompt, images.length);
     this.refreshTopic(topic ?? display ?? prompt);
     let content;
@@ -1705,7 +1719,10 @@ export class App {
       ];
       await fitImagesIn(content); // a dropped or attached image file at full size would be refused later
     } catch (e) {
+      this.turnStarting = false;
       this.logError(e); // nobody awaits this method: an error left to escape would end the program
+      this.screen.schedule();
+      this.sendWhatWaited();
       return;
     }
     await this.runAgent(content, { peers });
@@ -1759,6 +1776,7 @@ export class App {
   }
 
   async runAgent(content, { peers = [] } = {}) {
+    this.turnStarting = false;
     this.busy = true;
     this.turnPeers.push(...peers);
     let result = null;
@@ -1801,7 +1819,7 @@ export class App {
   // meantime as the next turn, or else tell the model about background agents that finished after the
   // last check. Everything that makes the app busy has to end with this, or what waited stays queued.
   sendWhatWaited() {
-    if (this.busy || this.exiting) return;
+    if (this.isTurnRunning() || this.exiting) return;
     // A restart that was asked for goes first; what waited is carried over and sent by the new process.
     if (this.restartRequest) { this.restartNow(); return; }
     if (this.queue.length) {
@@ -1825,7 +1843,7 @@ export class App {
     const secs = Math.round((task.ended - task.started) / 1000);
     const color = task.status === 'completed' ? c.green : c.red;
     this.screen.log(`${color(DOT)} ${c.bold('Background agent')} ${task.id} ${c.dim(`"${task.description}"`)} ${task.status} ${c.dim(`(${formatDuration(secs * 1000)})`)}`, '');
-    if (!this.busy && !this.exiting && this.agent.notifications.length) this.runAgent(this.agent.drainNotifications());
+    if (!this.isTurnRunning() && !this.exiting && this.agent.notifications.length) this.runAgent(this.agent.drainNotifications());
     else this.screen.schedule();
   }
 
@@ -2248,7 +2266,7 @@ export class App {
 
   // esc esc on an empty prompt: the rewind menu, as in Claude Code (/rewind). Not while a turn runs (esc stops it).
   openRewind() {
-    if (this.busy || this.dialogs.length || this.exiting) return;
+    if (this.isTurnRunning() || this.dialogs.length || this.exiting) return;
     if (!this.runtime.checkpoints.list().length && !this.previousSession) { this.flash('Nothing to rewind yet: every prompt you send makes a point to go back to'); return; }
     Promise.resolve(this.commands.get('rewind').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
   }
@@ -2313,7 +2331,7 @@ export class App {
     const w = width - 1;
     const lines = [];
     let cursor = null;
-    if (this.busy) {
+    if (this.isTurnRunning()) {
       // In-progress assistant text.
       if (this.md) {
         const partial = this.md.partial();
@@ -2352,7 +2370,7 @@ export class App {
       for (const q of this.queue) lines.push(c.dim('  ⎿ queued: ') + c.gray(truncate((q.display ?? q.text).replace(/\s+/g, ' '), w - 14)));
     }
     if (lines.length) lines.push('');
-    const placeholder = this.busy ? 'Type a message to queue it for the agent…' : (this.agent.messages.length ? '' : 'Try "explain this codebase" or "fix the failing test"');
+    const placeholder = this.isTurnRunning() ? 'Type a message to queue it for the agent…' : (this.agent.messages.length ? '' : 'Try "explain this codebase" or "fix the failing test"');
     const r = this.finder ? this.renderFind(width) : this.editor.render(width, { placeholder, title: this.boxTitle() });
     const top = lines.length;
     lines.push(...r.lines);
