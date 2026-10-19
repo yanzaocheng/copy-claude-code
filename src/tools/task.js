@@ -4,7 +4,6 @@
 
 import { taskResultText } from '../tasks.js';
 import { EFFORTS } from '../agents.js';
-import { priceOf } from '../pricing.js';
 
 // Wait for `promise`, at most `ms`, or until `signal` aborts. The timer is always cleared so a
 // finished wait never keeps the process alive.
@@ -21,29 +20,9 @@ function waitFor(promise, ms, signal) {
   });
 }
 
-// How to pick a sub-agent's model, where the main agent chooses it (Config.subagentModelChosen): the models the
-// aliases stand for, with their prices. Built from the configuration of the moment, so that it follows /model and
-// /login (which start a new prompt cache anyway); it holds nothing that changes otherwise.
-export function modelChoiceText(config) {
-  if (!config?.subagentModelChosen) return '';
-  const main = config.mainModel.id;
-  const option = (alias) => {
-    const id = config.resolveModel(alias).id;
-    const p = priceOf(id);
-    return `${alias} (${id}${id === main ? ', your own model' : ''}${p ? `, $${p.input}/$${p.output} per million input/output tokens` : ''})`;
-  };
-  return `
-
-Choosing the model: there is no fixed sub-agent model. Choose one for each task by how hard it is and how much you will rely on the report, and give it in \`model\`:
-- ${option('haiku')}: mechanical work with a clear target: find where something is defined or used, list files, read files and quote the relevant parts.
-- ${option('sonnet')}: searches across a codebase and well-specified subtasks whose steps are clear: gather the call sites of a function and how they use it, run tests and summarize the failures, make a change that is fully described.
-- ${option('opus')}: work whose quality your answer depends on and that you will not redo yourself: hard debugging, design and trade-offs, reviewing code for subtle bugs, analysis that spans many files.
-A shallow or wrong report that you rely on costs more than the difference in price; a strong model on a lookup only wastes money. Set \`effort\` with it (low suits lookups); without it the agent runs at your session's effort. Without \`model\` an agent runs on its definition's model, else on ${config.subagentModel.id}.`;
-}
-
-export function makeTaskTool(agents, config = null) {
+export function makeTaskTool(agents) {
   const list = [...agents.values()]
-    .map((a) => `- ${a.name}: ${a.description} (Tools: ${a.tools === '*' ? 'All tools' : a.tools.join(', ')})${a.model ? ` (model: ${a.model})` : ''}`)
+    .map((a) => `- ${a.name}: ${a.description} (Tools: ${a.tools === '*' ? 'All tools' : a.tools.join(', ')})`)
     .join('\n');
   return {
     name: 'Task',
@@ -65,9 +44,9 @@ Usage notes:
 - When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 - Each agent invocation is stateless. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message.
 - Once you have delegated a search or an investigation, do not also do it yourself: wait for the report, doing other work meanwhile. Never make up or predict the result of an agent that is still running; if the user asks before it is done, say that it is still running.
-- A sub-agent may run on a smaller model than yours. Use its report to find your way, but before you build an answer or a change on one of its findings, check that finding yourself (read the lines it cites)
+- Every agent uses the model currently selected for this session. An agent may still use its own effort level when the task needs it. Use the agent's report to find your way, but before you build an answer or a change on one of its findings, check that finding yourself (read the lines it cites).
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-- Set run_in_background: true to start the agent and continue working while it runs (e.g. a long investigation, or several independent jobs). You get a task id back immediately, and the agent's final report arrives automatically in a <task-notification> once it finishes; you do not need to poll. Use TaskOutput to check on or wait for it early, and TaskStop to cancel it. Do not start background agents that edit the same files at the same time.${modelChoiceText(config)}`,
+- Set run_in_background: true to start the agent and continue working while it runs (e.g. a long investigation, or several independent jobs). You get a task id back immediately, and the agent's final report arrives automatically in a <task-notification> once it finishes; you do not need to poll. Use TaskOutput to check on or wait for it early, and TaskStop to cancel it. Do not start background agents that edit the same files at the same time.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -75,13 +54,12 @@ Usage notes:
         prompt: { type: 'string', description: 'The task for the agent to perform' },
         subagent_type: { type: 'string', description: 'The type of specialized agent to use for this task' },
         run_in_background: { type: 'boolean', description: 'Run the agent in the background and return immediately with a task id' },
-        model: { type: 'string', description: 'Model for this agent: haiku, sonnet, opus or a full model id. Pick it by how hard the task is: a smaller model is cheaper and faster for lookups and clear subtasks, a stronger one is right when you rely on the quality of its report. Defaults to the agent definition\'s model, else the sub-agent default.' },
         effort: { type: 'string', enum: EFFORTS, description: 'Optional effort level for this agent (default: the agent definition\'s, else the session\'s). Low suits quick lookups, high or above hard reasoning.' },
       },
       required: ['description', 'prompt', 'subagent_type'],
     },
     summarize(input) {
-      const on = [input.model, input.effort].filter(Boolean).join(' · ');
+      const on = input.effort ? `effort ${input.effort}` : '';
       return `${input.description || ''}${on ? ` (${on})` : ''}${input.run_in_background ? ' (background)' : ''}`;
     },
     label(input) { return input.subagent_type && input.subagent_type !== 'general-purpose' ? input.subagent_type : 'Task'; },
@@ -92,7 +70,7 @@ Usage notes:
       }
       const effort = input.effort ? String(input.effort).toLowerCase() : undefined;
       if (effort && !EFFORTS.includes(effort)) return { isError: true, content: `Unknown effort '${input.effort}'. Use one of: ${EFFORTS.join(', ')}.` };
-      const choice = { model: input.model?.trim() || undefined, effort };
+      const choice = { effort };
       if (input.run_in_background) {
         if (!ctx.tasks) return { isError: true, content: 'Background agents are not available here; run the task in the foreground.' };
         // The task outlives this turn, so it gets its own signal and no live progress display.

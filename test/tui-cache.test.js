@@ -231,13 +231,13 @@ serialTest('/effort and /model ask first while the cache is warm; a "no" changes
   assert.match(model, /Switching the model makes the next request/);
   tui.send('\x1b');
   await tui.waitFor('The model was not changed.', { timeout: 20_000 });
-  assert.equal(cfg.mainModel.id, 'mock');
+  assert.equal(cfg.model.id, 'mock');
 
   tui.send('/model other-model\r');
   await tui.waitFor('The prompt cache is warm', { timeout: 20_000 });
   tui.send('\r');
   await tui.waitFor('Model set to other-model', { timeout: 20_000 });
-  assert.equal(cfg.mainModel.id, 'other-model');
+  assert.equal(cfg.model.id, 'other-model');
   assert.equal(tui.app.runtime.systemPromptStale, false);
 });
 
@@ -377,7 +377,7 @@ serialTest('a model chosen with /config set is a switch: the prompt names it fro
   assert.doesNotMatch(tui.app.runtime.systemPrompt(), /You are powered by the model third-model\./);
   tui.send('/config set CLAUDE_PRO_GATEWAY_MODEL third-model\r');
   await tui.waitFor('Set CLAUDE_PRO_GATEWAY_MODEL', { timeout: 20_000 });
-  assert.equal(tui.app.runtime.config.mainModel.id, 'third-model');
+  assert.equal(tui.app.runtime.config.model.id, 'third-model');
   assert.match(tui.app.runtime.systemPrompt(), /You are powered by the model third-model\./);
   assert.equal(tui.app.runtime.systemPromptStale, false);
 });

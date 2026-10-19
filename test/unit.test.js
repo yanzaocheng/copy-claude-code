@@ -31,17 +31,16 @@ test('parseDotEnv handles quotes, comments and export', () => {
   assert.deepEqual(env, { A: '1', B: 'two words', C: 'x=y', D: 'val', E: '' });
 });
 
-test('model resolution: [1m] suffix, aliases, sub-agent model, compaction window', () => {
+test('model resolution: [1m] suffix, one selected model, compaction window', () => {
   const cfg = makeConfig({
     CLAUDE_PRO_GATEWAY_MODEL: 'deepseek-flash[1m]',
     CLAUDE_CODE_EFFORT_LEVEL: 'max',
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
   });
-  assert.equal(cfg.mainModel.id, 'deepseek-flash');
-  assert.equal(cfg.mainModel.contextWindow, 1_000_000);
-  assert.equal(cfg.smallModel.id, 'claude-haiku-5-5');
-  assert.equal(cfg.subagentModel.id, 'deepseek-flash');
-  assert.equal(cfg.subagentModel.contextWindow, 1_000_000);
+  assert.equal(cfg.model.id, 'deepseek-flash');
+  assert.equal(cfg.model.contextWindow, 1_000_000);
+  assert.equal(cfg.smallModel, undefined);
+  assert.equal(cfg.subagentModel, undefined);
   assert.equal(cfg.resolveModel('opus').id, 'claude-opus-5-5');
   assert.equal(cfg.resolveModel('opus').contextWindow, 1_000_000);
   assert.equal(cfg.effort, 'max');
@@ -225,7 +224,7 @@ test('MCP stdio client lists and calls tools', async () => {
 test('agent loop runs tools and feeds results back (mock model)', async () => {
   const dir = tmp();
   const cfg = makeConfig({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, dir);
-  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;

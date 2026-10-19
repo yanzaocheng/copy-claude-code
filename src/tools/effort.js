@@ -25,7 +25,7 @@ Do not raise it for routine work, and do not switch back and forth: the prompt c
     async call(input) {
       const level = String(input.level || '').trim().toLowerCase();
       if (!EFFORT_LEVELS.includes(level)) return { isError: true, content: `Unknown effort "${input.level}". Use one of: ${EFFORT_LEVELS.join(', ')}.` };
-      const shown = () => config.effort || defaultEffort(config.mainModel.id, config) || 'the model default';
+      const shown = () => config.effort || defaultEffort(config.model.id, config) || 'the model default';
       const before = shown();
       if (level === before) return { content: `The effort is already ${level}.` };
       config.effortBoost = null;

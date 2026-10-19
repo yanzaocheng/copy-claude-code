@@ -18,25 +18,25 @@ const config = (env = {}) => new Config({ CLAUDE_PRO_MAX_RETRIES: '0', ...env },
 test('gateway is the only provider and supplies model defaults', () => {
   const gw = config({ CLAUDE_PRO_PROVIDER: 'gateway' });
   assert.equal(gw.provider, 'gateway');
-  assert.equal(gw.mainModel.id, 'claude-opus-5-5');
-  assert.equal(gw.mainModel.contextWindow, 1_000_000);
-  assert.equal(gw.subagentModel.id, 'claude-opus-5-5');
-  assert.equal(gw.subagentModelChosen, true);
-  assert.equal(gw.smallModel.id, 'claude-haiku-5-5');
+  assert.equal(gw.model.id, 'claude-opus-5-5');
+  assert.equal(gw.model.contextWindow, 1_000_000);
+  assert.equal(gw.subagentModel, undefined, 'there is no separate sub-agent model');
+  assert.equal(gw.smallModel, undefined, 'there is no separate small model');
   assert.equal(gw.maxOutputTokens, 48_000);
   assert.throws(() => config({ CLAUDE_PRO_PROVIDER: 'api' }).provider, /Only the gateway provider is supported/);
   assert.throws(() => config({ CLAUDE_PRO_PROVIDER: 'claude-code' }).provider, /Only the gateway provider is supported/);
   assert.throws(() => config({ CLAUDE_PRO_PROVIDER: 'codex' }).provider, /Only the gateway provider is supported/);
 });
 
-test('gateway Task tool still describes difficulty-based Claude sub-agent selection', () => {
+test('gateway Task tool uses the selected model and exposes effort as the only task-level choice', () => {
   const agents = new Map([['general-purpose', { name: 'general-purpose', description: 'd', tools: '*', prompt: 'p' }]]);
-  const gw = config({ CLAUDE_PRO_PROVIDER: 'gateway' });
-  const text = makeTaskTool(agents, gw).description();
-  assert.match(text, /Choosing the model: there is no fixed sub-agent model/);
-  assert.match(text, /- haiku \(claude-haiku-5-5/);
-  assert.match(text, /- sonnet \(claude-sonnet-5-5/);
-  assert.match(text, /- opus \(claude-opus-5-5/);
+  const tool = makeTaskTool(agents);
+  const text = tool.description();
+  assert.match(text, /Every agent uses the model currently selected for this session/);
+  assert.doesNotMatch(text, /smaller model|Choosing the model|haiku \(claude-/);
+  assert.equal(tool.input_schema.properties.model, undefined);
+  assert.ok(tool.input_schema.properties.effort);
+  assert.equal(tool.summarize({ description: 'probe', model: 'haiku', effort: 'high' }), 'probe (effort high)');
 });
 
 test('gateway requests use the saved gateway key and contain only the custom system block', async (t) => {
@@ -69,7 +69,7 @@ test('gateway requests use the saved gateway key and contain only the custom sys
   const url = `http://127.0.0.1:${server.address().port}`;
   saveGatewayLogin({ url, apiKey: 'gateway-test-key', account: {} });
   const cfg = config({ CLAUDE_PRO_PROVIDER: 'gateway', CLAUDE_PRO_GATEWAY_URL: url });
-  const res = await streamMessage(cfg, { model: cfg.mainModel, system: 'custom system', messages: [{ role: 'user', content: 'ping' }] });
+  const res = await streamMessage(cfg, { model: cfg.model, system: 'custom system', messages: [{ role: 'user', content: 'ping' }] });
   assert.equal(res.message.content[0].text, 'pong');
-  assert.equal(buildParams(cfg, { model: cfg.mainModel, system: 's', messages: [] }).system.length, 1);
+  assert.equal(buildParams(cfg, { model: cfg.model, system: 's', messages: [] }).system.length, 1);
 });

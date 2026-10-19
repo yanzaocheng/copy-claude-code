@@ -29,7 +29,7 @@ test('defaults are generous', () => {
   assert.equal(makeConfig({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192' }).maxOutputTokens, 8192, 'still configurable');
   // A big max_tokens must not eat the context window: the compaction reserve is capped at 64k.
   assert.equal(cfg.autoCompactThreshold(cfg.resolveModel('x[1m]')), 1_000_000 - 48_000);
-  const params = buildParams(cfg, { model: cfg.mainModel, system: 's', messages: [] });
+  const params = buildParams(cfg, { model: cfg.model, system: 's', messages: [] });
   assert.equal(params.max_tokens, 48_000);
 });
 

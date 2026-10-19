@@ -55,7 +55,7 @@ export async function modelChoices(cfg) {
 // What /effort offers for the current model: {levels, options: [{value, label, description}]} in plain text (the
 // levels, auto, default).
 export async function effortChoices(cfg) {
-  const id = cfg.mainModel.id;
+  const id = cfg.model.id;
   let info = null;
   if (cfg.usesGateway && isGpt(id)) {
     const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
@@ -93,14 +93,14 @@ export function buildCommands(app) {
   const reloadConfig = () => {
     const fresh = loadConfig({ cwd: app.cwd, flags: app.flags });
     const cfg = app.runtime.config;
-    const model = cfg.mainModel.id;
+    const model = cfg.model.id;
     cfg.env = fresh.env;
     cfg.sources = fresh.sources;
     cfg.settings = fresh.settings;
     // What the system prompt is built from may have changed (memory switched off, say). It is not rebuilt in the
     // middle of a conversation, which would lose its prompt cache; it is, at the next /clear or compaction. A
     // different model is the exception: the prompt names it, and the new model has a cache of its own anyway.
-    if (cfg.mainModel.id !== model) app.runtime.invalidateSystemPrompt();
+    if (cfg.model.id !== model) app.runtime.invalidateSystemPrompt();
     else app.runtime.deferSystemPromptRefresh();
   };
 
@@ -389,17 +389,17 @@ export function buildCommands(app) {
       let choice = args.trim();
       if (!choice) {
         const opts = (await modelChoices(cfg)).map((o) => ({ label: `${o.label}${o.description ? ` ${c.dim(o.description.startsWith('→') ? o.description : `(${o.description})`)}` : ''}`, value: o.value }));
-        choice = await app.showDialog(new SelectDialog({ title: 'Select model', question: `Current: ${c.bold(cfg.mainModel.label)}. Any name works too: /model <name>`, options: opts }));
+        choice = await app.showDialog(new SelectDialog({ title: 'Select model', question: `Current: ${c.bold(cfg.model.label)}. Any name works too: /model <name>`, options: opts }));
         if (!choice) return;
       }
       const forget = choice === '__default__' || choice === 'default';
       const next = cfg.resolveModel(forget ? cfg.configuredModelSpec : choice).id;
-      const changed = next !== cfg.mainModel.id;
+      const changed = next !== cfg.model.id;
       if (changed && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
       cfg.modelOverride = forget ? null : choice;
       if (changed) app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
-      out(`Model set to ${c.bold(cfg.mainModel.label)} ${c.dim(`(${formatTokens(cfg.mainModel.contextWindow)} context)`)}${kept}`);
+      out(`Model set to ${c.bold(cfg.model.label)} ${c.dim(`(${formatTokens(cfg.model.contextWindow)} context)`)}${kept}`);
     },
   });
 
@@ -408,12 +408,12 @@ export function buildCommands(app) {
     get argHint() {
       const cfg = app.runtime.config;
       const login = cfg.usesGateway ? gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY) : null;
-      return `[${effortLevels(cfg.mainModel.id, cachedGatewayModel(login, cfg.mainModel.id)).join('|')}|auto|default]`;
+      return `[${effortLevels(cfg.model.id, cachedGatewayModel(login, cfg.model.id)).join('|')}|auto|default]`;
     },
     description: 'Set reasoning effort (output_config.effort; kept for later sessions)',
     async run(args) {
       const cfg = app.runtime.config;
-      const id = cfg.mainModel.id;
+      const id = cfg.model.id;
       const { levels, options } = await effortChoices(cfg);
       let choice = args.trim().toLowerCase();
       if (!choice) {
@@ -451,13 +451,13 @@ export function buildCommands(app) {
     const set = (f) => updateSettingsFile(f, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_PROVIDER: provider }; });
     set(files.user); // the default for the other projects too
     if (file !== files.user) set(file);
-    const model = cfg.mainModel.id;
+    const model = cfg.model.id;
     reloadConfig();
     cfg.modelOverride = null;
     cfg.effortOverride = null;
     cfg.effortBoost = null;
     applyRememberedChoices(cfg, app.flags);
-    if (cfg.mainModel.id !== model) app.runtime.invalidateSystemPrompt();
+    if (cfg.model.id !== model) app.runtime.invalidateSystemPrompt();
     if (cfg.provider !== provider) return c.red(` · NOT switched: CLAUDE_PRO_PROVIDER=${cfg.provider} is set by ${cfg.sources.CLAUDE_PRO_PROVIDER}, which overrides the settings files; change it there`);
     return file !== files.user ? c.dim(` · also saved in ${displayPath(file, app.cwd)}, which overrides the user settings in this project`) : '';
   };
@@ -489,7 +489,7 @@ export function buildCommands(app) {
         try {
           const account = await fetchGatewayAccount(saved);
           const note = switchProvider('gateway');
-          out([`Using the gateway ${c.bold(url)}: ${cfg.mainModel.label}${note}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
+          out([`Using the gateway ${c.bold(url)}: ${cfg.model.label}${note}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
           await goOnline();
           return;
         } catch (e) {
@@ -507,7 +507,7 @@ export function buildCommands(app) {
           onUrl: (page) => out([`Opening the gateway login in your browser. If it does not open, visit:`, c.blue(page), c.dim('Waiting for the browser (10 minutes at most)…')]),
         });
         const note = switchProvider('gateway');
-        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.mainModel.label}${note}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
+        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.model.label}${note}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
         await goOnline();
       } catch (e) {
         if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
@@ -548,15 +548,13 @@ export function buildCommands(app) {
         row('Provider', cfg.provider),
         row('Endpoint', cfg.endpointLabel),
         row('Auth', gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY) ? `gateway key of ${gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)')),
-        row('Model', `${cfg.mainModel.label} ${c.dim(`(sent as "${cfg.mainModel.id}", ${formatTokens(cfg.mainModel.contextWindow)} context)`)}`),
-        row('Sub-agent model', cfg.subagentModelChosen ? `chosen per task by difficulty ${c.dim(`(haiku, sonnet or opus; not chosen: ${cfg.subagentModel.label})`)}` : cfg.subagentModel.label),
-        row('Small model', cfg.smallModel.label),
+        row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
         row('Effort', cfg.effort || 'auto'),
         row('System prompt', app.flags.systemPrompt !== undefined
           ? 'command line override'
           : savedPrompt?.text != null ? `${savedPrompt.name} (saved)` : savedPrompt?.error ? `${savedPrompt.name} (missing; using built-in)` : 'built-in default'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
-        row('Prompt cache', cfg.promptCachingDisabled(cfg.mainModel.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.mainModel.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.mainModel.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
+        row('Prompt cache', cfg.promptCachingDisabled(cfg.model.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', cfg.autoCompactEnabled ? `at ${formatTokens(cfg.autoCompactThreshold())} tokens (window ${formatTokens(cfg.compactWindow())})` : 'disabled'),
         row('Access', 'full (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
@@ -657,7 +655,7 @@ export function buildCommands(app) {
     run() {
       const cfg = app.runtime.config;
       const a = app.agent;
-      const window = cfg.mainModel.contextWindow;
+      const window = cfg.model.contextWindow;
       const threshold = cfg.autoCompactThreshold();
       const sys = estimateTokens(app.runtime.systemPrompt());
       const tools = estimateTokens(a.toolSchemas());
@@ -1009,8 +1007,8 @@ export function buildCommands(app) {
       app.controller = new AbortController();
       const started = Date.now();
       try {
-        const reply = await quickQuery(cfg, { model: cfg.mainModel, system: 'Reply with exactly: pong', prompt: 'ping', maxTokens: 200, signal: app.controller.signal, waitForRateLimit: false });
-        out(`${c.green('✔')} ${cfg.endpointLabel} · model ${cfg.mainModel.id} replied "${truncate(reply, 40)}" in ${Date.now() - started}ms`);
+        const reply = await quickQuery(cfg, { model: cfg.model, system: 'Reply with exactly: pong', prompt: 'ping', maxTokens: 200, signal: app.controller.signal, waitForRateLimit: false });
+        out(`${c.green('✔')} ${cfg.endpointLabel} · model ${cfg.model.id} replied "${truncate(reply, 40)}" in ${Date.now() - started}ms`);
       } catch (e) {
         out(`${c.red('✘')} API request failed: ${e.message}`);
       } finally {

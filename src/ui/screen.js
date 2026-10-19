@@ -154,6 +154,7 @@ export class Screen {
     this.wrapped = []; // fullscreen: history[i] wrapped to wrapCols - 1, made when first needed
     this.wrapCols = 0;
     this.lastArea = 0; // fullscreen: rows the conversation had on screen at the last draw
+    this.scrollLiveRows = null; // fullscreen: keep the live region's height fixed while the user is scrolled up
     this.viewMap = []; // fullscreen: what each row of the conversation area shows, {line, sub} (null: blank)
     this.barRow = null; // fullscreen: the row of the "Jump to bottom" bar, when it is shown
     this.finding = null; // fullscreen: a search in the conversation (ctrl+f), see openFind
@@ -572,13 +573,43 @@ export class Screen {
     return ' '.repeat(pad) + '\x1b[7m' + label + '\x1b[27m';
   }
 
+  // While the user is scrolled up, keep the live region at the height it had when scrolling started. Streaming
+  // text otherwise grows and shrinks that region, moving every visible conversation row on every token. That is
+  // especially conspicuous through PowerShell/ConPTY, where the cursor moves in the terminal before the whole
+  // frame has been painted. The new output remains available behind the jump bar; returning to the bottom releases
+  // the lock and lays out the complete live region again.
+  keepScrolledLiveHeight(layout, rows) {
+    const current = layout.rows.length;
+    if (current < rows) {
+      const gap = rows - current;
+      layout.rows.unshift(...Array(gap).fill(''));
+      if (layout.cursorRow !== null) layout.cursorRow += gap;
+      return layout;
+    }
+    if (current > rows) {
+      const dropped = current - rows;
+      layout.rows.splice(0, dropped);
+      if (layout.cursorRow !== null) {
+        layout.cursorRow -= dropped;
+        if (layout.cursorRow < 0) layout.cursorRow = null;
+      }
+    }
+    return layout;
+  }
+
   // Draw the screen: the conversation above, the live region on the last rows, the cursor in the input box.
   draw({ full = false } = {}) {
     if (this.closed || !this.full) return;
     if (this.scheduled) { clearTimeout(this.scheduled); this.scheduled = null; }
     const cols = this.width;
     const screenRows = Math.max(1, this.out.rows || this.height);
-    const layout = this.layoutLive(cols);
+    if (!this.scroll) this.scrollLiveRows = null;
+    else if (full) this.scrollLiveRows = null; // a resize changes wrapping; capture the new live layout below
+    let layout = this.layoutLive(cols);
+    if (this.scroll > 0) {
+      if (this.scrollLiveRows === null) this.scrollLiveRows = Math.max(1, layout.rows.length);
+      layout = this.keepScrolledLiveHeight(layout, this.scrollLiveRows);
+    }
     const area = Math.max(0, screenRows - layout.rows.length);
     this.lastArea = area;
     if (this.finding) this.refreshFind();

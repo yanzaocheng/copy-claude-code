@@ -67,7 +67,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
         ? flags.systemPrompt
         : savedPrompt?.text != null
           ? savedPrompt.text
-          : mainSystemPrompt({ cwd, model: config.mainModel, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
+          : mainSystemPrompt({ cwd, model: config.model, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;
@@ -90,7 +90,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     const extra = flags.appendSystemPrompt || '';
     if (extra && !saved.endsWith(`\n\n${extra}`)) return false;
     const modelIn = (text) => /^You are powered by the model (.+)\.$/m.exec(text)?.[1];
-    if (modelIn(saved) !== config.mainModel.id) return false;
+    if (modelIn(saved) !== config.model.id) return false;
     promptCache = saved;
     promptStale = false;
     const then = /^Today's date: (\d{4}-\d{2}-\d{2})$/m.exec(saved)?.[1];
@@ -113,10 +113,9 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     return true;
   };
 
-  // `model` and `effort`: what the Task call asked for, over the agent definition's own, over the session's.
-  runtime.spawnSubagent = async ({ def, prompt, description, ctx, model: modelSpec, effort }) => {
-    const spec = modelSpec || def.model;
-    const model = spec ? config.resolveModel(spec) : config.subagentModel;
+  // Every agent uses the model selected for this session; effort may still be specific to the task.
+  runtime.spawnSubagent = async ({ def, prompt, description, ctx, effort }) => {
+    const model = config.model;
     const subIo = io.subagentIo ? io.subagentIo({ def, description, parentCtx: ctx }) : {};
     // The main agent is depth 0; an agent below the nesting limit may start sub-agents itself.
     const depth = (ctx.depth ?? ctx.agent?.depth ?? 0) + 1;
@@ -159,7 +158,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     tools: runtime.tools,
     systemPrompt: runtime.systemPrompt,
     io,
-    model: () => config.mainModel,
+    model: () => config.model,
     cwd,
     spawnSubagent: runtime.spawnSubagent,
     hooks,

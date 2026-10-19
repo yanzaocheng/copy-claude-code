@@ -82,7 +82,7 @@ test('Agent records validation failures and tool timing in the shared trace', as
     input_schema: { type: 'object', required: ['value'], properties: { value: { type: 'string' } } },
     async call() { return { content: 'ok' }; },
   };
-  const agent = new Agent({ config, tools: [Required], systemPrompt: 'system', io: {}, model: config.mainModel, cwd, trace });
+  const agent = new Agent({ config, tools: [Required], systemPrompt: 'system', io: {}, model: config.model, cwd, trace });
   let calls = 0;
   agent.callModel = async () => ++calls === 1
     ? toolUse('toolu-invalid', 'Required', {})

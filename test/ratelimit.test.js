@@ -310,7 +310,7 @@ test('sleepUntil can be cancelled, before and during the sleep', async () => {
 const configWith = (env = {}) => new Config({
   CLAUDE_PRO_GATEWAY_URL: 'http://127.0.0.1:9', CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', CLAUDE_PRO_MAX_RETRIES: '3', ...env,
 }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
-const request = (config) => ({ model: config.mainModel, system: 's', messages: [{ role: 'user', content: 'hi' }] });
+const request = (config) => ({ model: config.model, system: 's', messages: [{ role: 'user', content: 'hi' }] });
 
 function mockFetch(t, handle) {
   const original = globalThis.fetch;
@@ -454,7 +454,7 @@ test('waitForRateLimit: false (diagnostics) reports the limit instead of pausing
   let calls = 0;
   mockFetch(t, async () => { calls++; return limited(unified(clock.now + 3 * HOUR)); });
   const config = configWith();
-  await assert.rejects(() => quickQuery(config, { model: config.mainModel, system: 's', prompt: 'ping', waitForRateLimit: false }), /5-hour limit reached; it resets at/);
+  await assert.rejects(() => quickQuery(config, { model: config.model, system: 's', prompt: 'ping', waitForRateLimit: false }), /5-hour limit reached; it resets at/);
   assert.equal(calls, 1);
 });
 
@@ -464,7 +464,7 @@ test('waitForRateLimit: false does not sit through a Retry-After of minutes eith
   let calls = 0;
   mockFetch(t, async () => { calls++; return limited({ 'retry-after': '240' }); });
   const config = configWith();
-  await assert.rejects(() => quickQuery(config, { model: config.mainModel, system: 's', prompt: 'ping', waitForRateLimit: false }), /resets at/);
+  await assert.rejects(() => quickQuery(config, { model: config.model, system: 's', prompt: 'ping', waitForRateLimit: false }), /resets at/);
   assert.equal(calls, 1);
   assert.equal(slept, 0);
 });
@@ -475,7 +475,7 @@ test('quickQuery reports a rate limit by default: it has no way to show a pause,
   let calls = 0;
   mockFetch(t, async () => { calls++; return limited(unified(clock.now + 3 * HOUR)); });
   const config = configWith();
-  await assert.rejects(() => quickQuery(config, { model: config.mainModel, system: 's', prompt: 'ping' }), /5-hour limit reached; it resets at/);
+  await assert.rejects(() => quickQuery(config, { model: config.model, system: 's', prompt: 'ping' }), /5-hour limit reached; it resets at/);
   assert.equal(calls, 1);
   assert.equal(slept, 0);
 });
@@ -528,7 +528,7 @@ test('an agent turn survives a pause: the conversation is intact and the prompt 
   });
   const config = configWith();
   const events = [];
-  const agent = new Agent({ config, tools: [GlobTool], systemPrompt: 's', io: { streamEvent: (ev) => events.push(ev) }, model: config.mainModel, cwd: process.cwd() });
+  const agent = new Agent({ config, tools: [GlobTool], systemPrompt: 's', io: { streamEvent: (ev) => events.push(ev) }, model: config.model, cwd: process.cwd() });
   const result = await agent.run('hello');
   assert.equal(result.text, 'All good.');
   assert.deepEqual(agent.messages.map((m) => m.role), ['user', 'assistant']);
@@ -561,7 +561,7 @@ test('Esc during an automatic compaction pause ends the turn as an interrupt, no
   // a window this small makes the long prompt below compact first
   const config = configWith({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: '20000', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '10' });
   const events = [];
-  const agent = new Agent({ config, tools: [GlobTool], systemPrompt: 's', io: { compactProgress: (ev) => events.push(ev) }, model: config.mainModel, cwd: process.cwd() });
+  const agent = new Agent({ config, tools: [GlobTool], systemPrompt: 's', io: { compactProgress: (ev) => events.push(ev) }, model: config.model, cwd: process.cwd() });
   agent.messages = [{ role: 'user', content: [{ type: 'text', text: 'earlier' }] }, { role: 'assistant', content: [{ type: 'text', text: 'an answer' }] }];
   const ctrl = new AbortController();
   const run = agent.run(`A long prompt. ${'filler '.repeat(3000)}`, { signal: ctrl.signal });

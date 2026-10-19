@@ -213,15 +213,10 @@ export class Config {
     return { id: name, contextWindow: oneM || nativeOneM ? 1_000_000 : 200_000, label: `${name}${oneM ? '[1m]' : ''}` };
   }
 
-  // The model the gateway is configured with, before any /model override.
+  // The selected model: the configured default unless /model has overridden it for this session.
   get configuredModelSpec() { return this.env.CLAUDE_PRO_GATEWAY_MODEL || 'opus'; }
-  get mainModelSpec() { return this.modelOverride || this.configuredModelSpec; }
-  get mainModel() { return this.resolveModel(this.mainModelSpec); }
-  // The gateway lets the main agent choose Claude sub-agent models by task difficulty.
-  get subagentModel() { return this.mainModel; }
-  // The main agent chooses each sub-agent's model (haiku, sonnet, opus) by the task, rather than one being set.
-  get subagentModelChosen() { return this.usesGateway && /^claude-/i.test(this.mainModel.id); }
-  get smallModel() { return this.resolveModel('haiku'); }
+  get modelSpec() { return this.modelOverride || this.configuredModelSpec; }
+  get model() { return this.resolveModel(this.modelSpec); }
 
   get effort() {
     const v = (this.effortBoost ?? this.effortOverride ?? this.env.CLAUDE_CODE_EFFORT_LEVEL ?? '').trim().toLowerCase();
@@ -276,12 +271,12 @@ export class Config {
 
   // Effective window for compaction: the configured auto-compact window capped by the model window. `own`: a
   // sub-agent's autoCompactWindow, which takes the place of the configured one.
-  compactWindow(model = this.mainModel, own = 0) {
+  compactWindow(model = this.model, own = 0) {
     const configured = own > 0 ? own : int(this.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, 0);
     return configured > 0 ? Math.min(configured, model.contextWindow) : model.contextWindow;
   }
   get autoCompactEnabled() { return !/^(1|true|yes)$/i.test(this.env.DISABLE_AUTOCOMPACT || ''); }
-  autoCompactThreshold(model = this.mainModel, own = 0) {
+  autoCompactThreshold(model = this.model, own = 0) {
     const window = this.compactWindow(model, own);
     const pct = int(this.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 0);
     if (pct > 0 && pct <= 100) return Math.floor(window * pct / 100);

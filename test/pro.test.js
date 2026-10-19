@@ -51,7 +51,7 @@ test('agent: a PreToolUse hook blocks the tool and the model sees why', async ()
   const cfg = makeConfig(dir, { PreToolUse: hookEntry('Bash', 'echo "blocked by policy" >&2; exit 2') });
   const agent = new Agent({
     config: cfg, tools: [makeBashTool(cfg)],
-    systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir, hooks: new HookRunner(cfg),
+    systemPrompt: 's', io: {}, model: cfg.model, cwd: dir, hooks: new HookRunner(cfg),
   });
   let calls = 0;
   agent.callModel = async () => {
@@ -73,7 +73,7 @@ test('agent: a Stop hook can ask the model to keep working', async () => {
     Stop: hookEntry('', `if [ -f "${marker.replace(/\\/g, '/')}" ]; then exit 0; fi; touch "${marker.replace(/\\/g, '/')}"; echo "run the tests first" >&2; exit 2`),
   });
   const agent = new Agent({
-    config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir, hooks: new HookRunner(cfg),
+    config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir, hooks: new HookRunner(cfg),
   });
   let calls = 0;
   agent.callModel = async () => {
@@ -127,7 +127,7 @@ test('NotebookEdit: replace, insert, delete, and read-first rule', async () => {
 test('Read allow_large: past the usual limits while the context has room, refused when it has not', async () => {
   const dir = tmp();
   const cfg = makeConfig(dir); // the mock model: 200K window, auto-compaction at 160K
-  const agent = new Agent({ config: cfg, tools: [ReadTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [ReadTool], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   const ctx = agent.makeCtx();
   const head = (r) => String(r.content).slice(0, 300);
   const long = path.join(dir, 'long.txt'); // 10,500 short lines (about 21K tokens): past the 10,000 line default

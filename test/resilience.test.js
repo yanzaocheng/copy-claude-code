@@ -11,7 +11,7 @@ import { GlobTool } from '../src/tools/search.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pro-resilience-'));
 const configWith = (env) => new Config({ CLAUDE_PRO_GATEWAY_URL: 'http://127.0.0.1:9', CLAUDE_PRO_GATEWAY_API_KEY: 'test-token', CLAUDE_PRO_GATEWAY_MODEL: 'mock', ...env }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
-const request = (cfg) => ({ model: cfg.mainModel, system: 's', messages: [{ role: 'user', content: 'hi' }] });
+const request = (cfg) => ({ model: cfg.model, system: 's', messages: [{ role: 'user', content: 'hi' }] });
 
 function mockFetch(t, handle) {
   const original = globalThis.fetch;
@@ -160,7 +160,7 @@ test('aborting while waiting to retry stops at once', async (t) => {
 test('Agent.assistantText keeps what a failed run had already written', async () => {
   const dir = tmp();
   const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
-  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [GlobTool], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;
@@ -179,7 +179,7 @@ test('Agent.assistantText keeps what a failed run had already written', async ()
 
 test('Agent.assistantText is empty when nothing was written', () => {
   const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, process.cwd());
-  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: process.cwd() });
+  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: {}, model: cfg.model, cwd: process.cwd() });
   agent.messages.push({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
   assert.equal(agent.assistantText(), '');
 });
@@ -212,7 +212,7 @@ test('an image the API refuses as too large is scaled in the conversation itself
       : okResponse('seen');
   });
   const cfg = configWith({ CLAUDE_PRO_MAX_RETRIES: '0' });
-  const res = await streamMessage(cfg, { model: cfg.mainModel, system: 's', messages });
+  const res = await streamMessage(cfg, { model: cfg.model, system: 's', messages });
   assert.equal(res.message.content[0].text, 'seen');
   assert.equal(sent.length, 2);
   assert.deepEqual(imageSize(Buffer.from(sent[1], 'base64')), { width: 196, height: 1568 });

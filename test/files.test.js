@@ -245,7 +245,7 @@ test('a heavy PNG goes as JPEG: from Read, and once in a conversation that alrea
   // a conversation from before: the heavy PNG in a tool result, a light one in a user message
   const cfg = new Config({ CLAUDE_PRO_GATEWAY_MODEL: 'mock' }, {}, { hooks: {}, mcpServers: {} }, dir);
   const replaced = [];
-  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: { messagesReplaced: (m) => replaced.push(m) }, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [], systemPrompt: 's', io: { messagesReplaced: (m) => replaced.push(m) }, model: cfg.model, cwd: dir });
   const light = makePng(300, 200).toString('base64');
   const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: heavy.toString('base64') } };
   agent.messages = [

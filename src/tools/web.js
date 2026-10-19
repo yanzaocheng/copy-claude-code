@@ -1,5 +1,5 @@
 // WebFetch (fetch a page, convert to markdown-ish text, answer a prompt about it with the
-// small model) and WebSearch (DuckDuckGo HTML endpoint with a Bing fallback).
+// currently selected model) and WebSearch (DuckDuckGo HTML endpoint with a Bing fallback).
 
 import { quickQuery } from '../api.js';
 
@@ -140,7 +140,7 @@ export function makeWebFetchTool(config) {
   return {
     name: 'WebFetch',
     readOnly: true,
-    description: `- Fetches content from a specified URL (any scheme the network allows, including localhost and private addresses), converts HTML to markdown, and answers a prompt about it using a small, fast model
+    description: `- Fetches content from a specified URL (any scheme the network allows, including localhost and private addresses), converts HTML to markdown, and answers a prompt about it using the model currently selected for this session
 - Takes a URL and a prompt as input
 - Set raw: true to get the converted page text itself instead of an answer: use it when you need the exact content, code, tables or the whole document (very long pages are saved to a file and previewed; read the file for the rest)
 - Use this tool when you need to retrieve and analyze web content
@@ -155,7 +155,7 @@ Usage notes:
       properties: {
         url: { type: 'string', format: 'uri', description: 'The URL to fetch content from' },
         prompt: { type: 'string', description: 'The prompt to run on the fetched content' },
-        raw: { type: 'boolean', description: 'Return the converted page text itself instead of an answer from the small model' },
+        raw: { type: 'boolean', description: 'Return the converted page text itself instead of an answer from the selected model' },
       },
       required: ['url'],
     },
@@ -182,7 +182,7 @@ Usage notes:
       const content = page.text.length > 400_000 ? page.text.slice(0, 400_000) + '\n\n[content truncated]' : page.text;
       try {
         const answer = await quickQuery(config, {
-          model: config.smallModel,
+          model: config.model,
           system: 'You extract information from web pages. Answer only from the provided content. Be complete and precise: include every relevant detail, exact quotes, numbers and code. Keep code blocks intact.',
           prompt: `Web page content from ${page.finalUrl || url.href}:\n---\n${content}\n---\n\n${input.prompt || 'Summarize this page, keeping all important details, code and numbers.'}\n\nRespond based only on the content above.`,
           maxTokens: 16_000,

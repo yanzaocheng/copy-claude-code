@@ -73,7 +73,7 @@ function replyWith({ text = 'ok', toolUse = null, preamble = null, usage = {}, s
 }
 const rejected = (message) => new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message } }), { status: 400, headers: { 'content-type': 'application/json' } });
 const bodyOf = (init) => JSON.parse(init.body);
-const request = (cfg, extra = {}) => ({ model: cfg.mainModel, system: 'SYS', messages: [{ role: 'user', content: 'hi' }], tools, ...extra });
+const request = (cfg, extra = {}) => ({ model: cfg.model, system: 'SYS', messages: [{ role: 'user', content: 'hi' }], tools, ...extra });
 
 // ---------------------------------------------------------------------------------------------- TTL and switches
 
@@ -285,7 +285,7 @@ test('an endpoint that refuses cache_control without saying where loses the mark
   assert.deepEqual(bodies.map((b) => Object.values(marks(b)).filter(Boolean).length), [3, 2, 1, 0]);
   assert.equal(marks(bodies[1]).messages, false, 'the messages go first');
   assert.equal(marks(bodies[2]).tools, false, 'then the tools');
-  assert.deepEqual(cacheRefusals(cfg, cfg.mainModel.id).sort(), ['messages', 'system', 'tools'], 'what it refused is known (and shown by /status)');
+  assert.deepEqual(cacheRefusals(cfg, cfg.model.id).sort(), ['messages', 'system', 'tools'], 'what it refused is known (and shown by /status)');
   await streamMessage(cfg, request(cfg));
   assert.equal(bodies.length, 5, 'the next request is made once');
   assert.equal(JSON.stringify(bodies[4]).includes('cache_control'), false, 'and none is sent later');
@@ -301,7 +301,7 @@ test('an error that merely mentions cache_control does not switch caching off fo
   assert.equal(calls, 4, 'three places, one at a time, then the end');
   await assert.rejects(() => streamMessage(stubborn, request(stubborn)), /cache_control/);
   assert.deepEqual(firstMarks, [3, 3], 'the second call starts with all three markers again: the first one proved nothing');
-  assert.deepEqual(cacheRefusals(stubborn, stubborn.mainModel.id), []);
+  assert.deepEqual(cacheRefusals(stubborn, stubborn.model.id), []);
   // a "maximum of 4 blocks" style error names no place: the messages marker goes, the rest stays, and that is remembered once it worked
   const bodies = [];
   mockFetch(t, async (url, init) => {
@@ -315,7 +315,7 @@ test('an error that merely mentions cache_control does not switch caching off fo
   assert.ok(bodies[1].system[0].cache_control && bodies[1].tools.at(-1).cache_control, 'the system prompt and the tools keep theirs');
   await streamMessage(cfg, request(cfg));
   assert.equal(bodies.length, 3);
-  assert.deepEqual(cacheRefusals(cfg, cfg.mainModel.id), ['messages']);
+  assert.deepEqual(cacheRefusals(cfg, cfg.model.id), ['messages']);
   assert.ok(bodies[2].system[0].cache_control, 'still cached where it can be');
   // a 400 about the ttl on a 5-minute request cannot loop either
   let ttlCalls = 0;
@@ -337,15 +337,15 @@ test('what an endpoint refused is remembered per model, and quickQuery marks nei
     return body.model === 'model-one' && body.system[0].cache_control ? rejected('system.0.cache_control: Extra inputs are not permitted') : replyWith();
   });
   const cfg = makeConfig({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' });
-  await streamMessage(cfg, request(cfg, { model: { ...cfg.mainModel, id: 'model-one' } }));
-  await streamMessage(cfg, request(cfg, { model: { ...cfg.mainModel, id: 'model-two' } }));
+  await streamMessage(cfg, request(cfg, { model: { ...cfg.model, id: 'model-one' } }));
+  await streamMessage(cfg, request(cfg, { model: { ...cfg.model, id: 'model-two' } }));
   assert.equal(bodies.at(-1).model, 'model-two');
   assert.ok(bodies.at(-1).system[0].cache_control, 'another model of the same endpoint is not affected');
   assert.deepEqual(cacheRefusals(cfg, 'model-one'), ['system']);
   assert.deepEqual(cacheRefusals(cfg, 'model-two'), []);
   // a side query: its content is never sent twice, so it is not written to the cache, and it never gets the conversation's TTL
   bodies.length = 0;
-  await quickQuery(cfg, { model: cfg.mainModel, system: 'be brief', prompt: 'a whole web page and a question' });
+  await quickQuery(cfg, { model: cfg.model, system: 'be brief', prompt: 'a whole web page and a question' });
   assert.equal(bodies.length, 1);
   assert.equal(JSON.stringify(bodies[0].messages).includes('cache_control'), false);
   assert.equal(JSON.stringify(bodies[0]).includes('"ttl"'), false);
@@ -435,7 +435,7 @@ test('fingerprint ignores the cache markers and the messages, and sees everythin
 // ---------------------------------------------------------------------------------------------- the agent
 
 function makeAgent(cfg, { systemPrompt = 'MAIN SYSTEM', io = {}, ...rest } = {}) {
-  return new Agent({ config: cfg, tools, systemPrompt, io, model: cfg.mainModel, cwd: process.cwd(), ...rest });
+  return new Agent({ config: cfg, tools, systemPrompt, io, model: cfg.model, cwd: process.cwd(), ...rest });
 }
 
 test('the summary request is the conversation\'s own request with the instruction at the end', async (t) => {
@@ -887,13 +887,13 @@ test('through createRuntime: sub-agents share the snapshot, and their usage is t
   rt.invalidateSystemPrompt(); // /clear or a compaction: the snapshot is taken again
   await run('three');
   assert.match(systems[2], /b\.txt/);
-  // the Task call's model and effort win over the definition's, and the definition's over the session's
+  // A task can override effort, but every sub-agent request stays on the session's selected model.
   const bodies = [];
   mockFetch(t, async (url, init) => { bodies.push(bodyOf(init)); return replyWith({ usage: usageOf(700, 0) }); });
   const def = { name: 'probe', prompt: 'You probe.', tools: [], effort: 'high', model: 'opus' };
   await rt.spawnSubagent({ def, prompt: 'p', description: 'p', ctx: { cwd: dir, depth: 0 }, model: 'claude-haiku-5-5', effort: 'low' });
   await rt.spawnSubagent({ def, prompt: 'p', description: 'p', ctx: { cwd: dir, depth: 0 } });
-  assert.deepEqual(bodies.map((b) => [b.model, b.output_config?.effort]), [['claude-haiku-5-5', 'low'], [rt.config.resolveModel('opus').id, 'high']]);
+  assert.deepEqual(bodies.map((b) => [b.model, b.output_config?.effort]), [[rt.config.model.id, 'low'], [rt.config.model.id, 'high']]);
   // a sub-agent that fails is billed too
   mockFetch(t, async () => rejected('boom'));
   await assert.rejects(() => run('four'), /boom/);

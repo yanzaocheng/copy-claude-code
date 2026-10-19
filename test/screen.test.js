@@ -296,6 +296,38 @@ test('fullscreen: the box on the last rows of the alternate screen, the conversa
   assert.ok((await t.rows({ all: true })).includes('$ the shell'));
 });
 
+test('fullscreen: streaming while scrolled up keeps the conversation viewport stable', async () => {
+  const t = setup({ cols: 60, rows: 14 });
+  t.screen.setFull(true);
+  t.log(40, 'history');
+  await t.settle();
+  t.screen.scrollBy(12);
+  const before = await t.rows();
+  const area = t.screen.lastArea;
+  const visible = before.slice(0, area);
+  let stream = 'streaming';
+  t.screen.setLive((width) => {
+    const w = width - 1;
+    return {
+      lines: [stream, '╭' + '─'.repeat(w - 2) + '╮', '│ > ' + ' '.repeat(w - 6) + '│', '╰' + '─'.repeat(w - 2) + '╯', '  ? for shortcuts'],
+      cursor: { row: 2, col: 4 },
+    };
+  });
+  await t.settle();
+  assert.equal(t.screen.lastArea, area, 'the locked conversation area does not shrink when streaming starts');
+  assert.deepEqual((await t.rows()).slice(0, area), visible);
+
+  for (const n of [10, 100, 500, 5]) {
+    stream = 'streaming ' + 'x'.repeat(n);
+    t.screen.schedule();
+    await t.settle();
+    assert.equal(t.screen.lastArea, area, `streaming update ${n} keeps the conversation area`);
+    assert.deepEqual((await t.rows()).slice(0, area), visible, `streaming update ${n} keeps the scrolled view`);
+  }
+  t.screen.scrollBy('bottom');
+  assert.ok(t.screen.lastArea < area, 'returning to the bottom releases the fixed live-region height');
+});
+
 test('fullscreen: mouse reports are taken out of the keys, also when a report comes in two pieces', async () => {
   const stdin = new PassThrough();
   const mouse = [];

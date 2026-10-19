@@ -92,7 +92,6 @@ export function loadAgents(cwd) {
           name: parsed.meta.name,
           description: parsed.meta.description,
           tools: parsed.meta.tools ? toolList(parsed.meta.tools) : '*',
-          model: parsed.meta.model && parsed.meta.model !== 'inherit' ? parsed.meta.model : null,
           effort: EFFORTS.includes(parsed.meta.effort?.toLowerCase()) ? parsed.meta.effort.toLowerCase() : null,
           autoCompactWindow: window > 0 ? window : 0,
           prompt: parsed.body,

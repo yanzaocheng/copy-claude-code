@@ -172,7 +172,7 @@ test('configuredModelSpec follows the gateway setting and a /model override wins
   assert.equal(cfg.provider, 'gateway');
   assert.equal(cfg.configuredModelSpec, 'deepseek-pro');
   cfg.modelOverride = 'haiku';
-  assert.equal(cfg.mainModelSpec, 'haiku');
+  assert.equal(cfg.modelSpec, 'haiku');
   assert.equal(cfg.configuredModelSpec, 'deepseek-pro');
   const fresh = new Config({}, {}, {}, process.cwd());
   assert.deepEqual([fresh.provider, fresh.configuredModelSpec], ['gateway', 'opus']);

@@ -146,7 +146,7 @@ test('agent: Write/Edit calls are checkpointed per prompt and /rewind undoes the
   fs.writeFileSync(f, 'old');
   const cfg = makeConfig(dir);
   const store = new CheckpointStore(path.join(dir, '.snaps'));
-  const agent = new Agent({ config: cfg, checkpoints: store, tools: [ReadTool, WriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, checkpoints: store, tools: [ReadTool, WriteTool], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   let calls = 0;
   agent.callModel = async () => {
     calls++;
@@ -171,7 +171,7 @@ test('rewind menu: summarize up to here or from here keeps the rest word for wor
   const dir = tmp();
   const cfg = makeConfig(dir);
   const store = new CheckpointStore(path.join(dir, '.snaps'));
-  const agent = new Agent({ config: cfg, checkpoints: store, tools: [], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, checkpoints: store, tools: [], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   const long = `third prompt ${'x'.repeat(300)}`;
   let n = 0;
   agent.callModel = async () => reply([{ type: 'text', text: `answer ${++n}` }]);
@@ -210,7 +210,7 @@ test('rewind menu: summarize up to here or from here keeps the rest word for wor
 test('full access: an edit through the agent runs at once, nothing is asked and nothing is added to the prompt', async () => {
   const dir = tmp();
   const cfg = makeConfig(dir);
-  const agent = new Agent({ config: cfg, tools: [WriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [WriteTool], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   const target = path.join(dir, 'out.txt');
   let calls = 0;
   agent.callModel = async () => {
@@ -277,7 +277,7 @@ test('the todo list: kept while the next turn goes on with it, put away once a w
   const { TodoWriteTool } = await import('../src/tools/interaction.js');
   const dir = tmp();
   const cfg = makeConfig(dir);
-  const agent = new Agent({ config: cfg, tools: [TodoWriteTool], systemPrompt: 's', io: {}, model: cfg.mainModel, cwd: dir });
+  const agent = new Agent({ config: cfg, tools: [TodoWriteTool], systemPrompt: 's', io: {}, model: cfg.model, cwd: dir });
   const list = [{ content: 'Build it', status: 'completed', activeForm: 'Building it' }, { content: 'Wait for the user', status: 'in_progress', activeForm: 'Waiting' }];
   let writes = true;
   let calls = 0;

@@ -61,7 +61,7 @@ test('loadAgents: files with a BOM, block scalar descriptions and list-style too
   assert.equal(agents.get('bom-agent').prompt, 'Do things.');
   assert.equal(agents.get('block-agent').description, 'Use this agent to review code.\nIt reads carefully.');
   assert.deepEqual(agents.get('block-agent').tools, ['Read', 'Grep']);
-  assert.equal(agents.get('block-agent').model, null);
+  assert.equal(agents.get('block-agent').model, undefined, 'agent model frontmatter is ignored; the session model is used');
   assert.equal(agents.has('no-description'), false);
   assert.ok(agents.has('Explore') && agents.has('general-purpose'), 'the built-in agents are still there');
 });

@@ -439,7 +439,7 @@ test('the status says what the page needs (asking, cost, context, background wor
 
   const status = tui.app.remoteStatus();
   assert.deepEqual([status.asking, status.kind, status.conversationId, status.cost], [false, 'terminal', tui.app.store.id, 0]);
-  assert.equal(status.context.window, tui.app.config.mainModel.contextWindow);
+  assert.equal(status.context.window, tui.app.config.model.contextWindow);
   assert.ok(status.context.used > 0, 'an estimate before any request');
   assert.deepEqual(status.background, []);
 

@@ -41,7 +41,7 @@ export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '
 // The model and effort level that requests use now, for the footer and the terminal title. The effort
 // is left out when none is sent (auto) and for a model that does not take one.
 export function modelInfo(config) {
-  const model = config.mainModel;
+  const model = config.model;
   // What the requests carry: the nearest level the model takes (none goes out as low on gpt-6.1-sol, ultra as max on Claude).
   const sent = effortToSend(config, model.id, config.effort);
   const effort = sent && effortSupported(model.id) ? sent : null;
@@ -341,7 +341,7 @@ export class App {
     return new Promise((resolve) => { this.resolveExit = resolve; });
   }
 
-  // What the session is about now: the topic the small model named last, or else the first thing asked
+  // What the session is about now: the current model named the topic last, or else the first thing asked
   // (kept when the conversation is compacted afterwards). Cleared by /clear, replaced by /resume.
   sessionLabel() {
     if (this.customTitle) return this.customTitle;
@@ -374,7 +374,7 @@ export class App {
     const seq = ++this.topicSeq;
     const current = this.topic;
     quickQuery(this.config, {
-      model: this.config.mainModel, system: TOPIC_TITLE_SYSTEM, prompt: topicTitlePrompt(current, text.slice(0, 2000)), maxTokens: 2048,
+      model: this.config.model, system: TOPIC_TITLE_SYSTEM, prompt: topicTitlePrompt(current, text.slice(0, 2000)), maxTokens: 2048,
     }).then((answer) => {
       // another session meanwhile, or an answer about a newer message already in use
       if (store !== this.store || this.exiting || seq < this.topicApplied) return;
@@ -825,7 +825,7 @@ export class App {
       queue: this.queue.map((q) => q.display ?? q.text),
       dialog: this.remoteDialog(),
       model,
-      effort: effort || defaultEffort(cfg.mainModel.id, cfg),
+      effort: effort || defaultEffort(cfg.model.id, cfg),
       title: this.sessionLabel() || path.basename(this.cwd),
       cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'),
       name: this.peerLabel(),
@@ -834,7 +834,7 @@ export class App {
       asking: this.dialogs.length > 0, // a question waits for an answer (the page reminds the user of it)
       conversationId: this.store.id,
       cost: Number(this.cost.toFixed(6)),
-      context: { used: this.contextUsed(), window: cfg.mainModel.contextWindow },
+      context: { used: this.contextUsed(), window: cfg.model.contextWindow },
       background: this.backgroundWork(),
       kind: this.headless ? 'background' : 'terminal',
     };
@@ -924,7 +924,7 @@ export class App {
     const cfg = this.config;
     const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
     const { effort } = modelInfo(cfg);
-    return { model: cfg.mainModel.id, models, effort: effort || defaultEffort(cfg.mainModel.id, cfg), efforts: efforts.options };
+    return { model: cfg.model.id, models, effort: effort || defaultEffort(cfg.model.id, cfg), efforts: efforts.options };
   }
 
   // For the page's input box: what the input box here would suggest (/commands, @files, &sessions), in plain text,
@@ -1248,7 +1248,7 @@ export class App {
     const w = Math.min(this.width - 1, 76);
     const inner = w - 4;
     const row = (s) => c.claude('│') + ' ' + padEnd(truncate(s, inner), inner) + ' ' + c.claude('│');
-    const model = cfg.mainModel;
+    const model = cfg.model;
     const lines = [
       c.claude('╭' + '─'.repeat(w - 2) + '╮'),
       row(`${c.claude('✻')} Welcome to ${c.bold(APP_NAME)}! ${c.dim(`v${VERSION} · a command line coding agent`)}`),
@@ -2403,7 +2403,7 @@ export class App {
       else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when &${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
     }
     const cfg = this.config;
-    const threshold = cfg.autoCompactThreshold(cfg.mainModel);
+    const threshold = cfg.autoCompactThreshold(cfg.model);
     const used = this.agent.contextEstimate;
     let notice = '';
     const pctLeft = Math.max(0, Math.round((1 - used / threshold) * 100));
@@ -2414,7 +2414,7 @@ export class App {
     // and the notice alone when they do not (a context warning matters more than the model's name).
     const { model, effort } = modelInfo(cfg);
     // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
-    const level = effort || defaultEffort(cfg.mainModel.id, cfg);
+    const level = effort || defaultEffort(cfg.model.id, cfg);
     const info = c.dim(level ? `${model} · effort ${level}` : model);
     // Before the model: the prompt cache clock, then what the conversation has cost so far; when room is short
     // the cost goes first, then the clock.

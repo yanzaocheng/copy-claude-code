@@ -10,7 +10,7 @@ import { App } from '../src/ui/repl.js';
 
 const { Terminal } = xterm;
 
-// After each message the app asks the small model for the conversation's topic (the tab title): one more
+// After each message the app asks the current model for the conversation's topic (the tab title): one more
 // request to every fake server, which tests that count requests do not expect. A test can turn it back on.
 process.env.CLAUDE_PRO_DISABLE_TOPIC_TITLE ??= '1';
 
