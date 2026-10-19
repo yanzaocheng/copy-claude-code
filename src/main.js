@@ -47,6 +47,11 @@ Commands:
                                           code; the computer service then starts, and starts at logon
   claude-pro attach [name]                Use a background session of this computer here, in this terminal
                                           (ctrl+] detaches; it goes on in the background)
+
+Interactive prompt commands:
+  /prompt <file|text>                     Save and use a system prompt for later sessions
+  /prompts                                Choose a saved prompt (or select default)
+  /promt, /promits                        Accepted spelling-compatible aliases
 `;
 
 const REMOTE_ID = /^[A-Za-z0-9_-]{8,64}$/;

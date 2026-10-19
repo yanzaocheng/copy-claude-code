@@ -93,6 +93,19 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 会话中用 `/config`、`/model`、`/effort` 修改。`--provider` 仅接受 `gateway`，其他 provider 已移除。
 
+## 持久化系统提示词
+
+可以把整个系统提示词保存到用户配置中，之后关闭并重新启动仍然使用：
+
+```text
+/prompt path/to/prompt.md       # 读取文件，并复制到 ~/.claude-pro/prompts/
+/prompt "回答要简洁，先给结论"     # 也可以直接保存一段文字
+/prompts                         # 选择已保存的提示词
+/prompts default                 # 切回内置默认提示词
+```
+
+`/promt` 和 `/promits` 也作为常见拼写兼容。当前选择保存在 `~/.claude-pro/settings.json` 的 `prompts.active` 中，提示词内容保存在 `~/.claude-pro/prompts/`，不会依赖原始文件；`/status` 会显示当前选择。切换提示词会立即用于下一次请求，提示词缓存仍然有效时会先询问，因为下一次请求需要重新写入对话。命令行的 `--system-prompt` 和 `--system-prompt-file` 优先级更高，只覆盖本次启动。
+
 ## 提示词缓存：自动的，尽量少花钱
 
 每次请求都要把整个对话发给模型，用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
