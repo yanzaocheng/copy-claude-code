@@ -48,7 +48,7 @@ export function modelInfo(config) {
   return { model: modelTag(model), effort };
 }
 
-// The small model's answer about the topic (see topicTitlePrompt) as a clean title, or null when it is not
+// The title model's answer about the topic (see topicTitlePrompt) as a clean title, or null when it is not
 // a new topic or the answer cannot be used. `required`: there is no title yet, so any title will do.
 export function parseTopicTitle(answer, { required = false } = {}) {
   const json = /\{[\s\S]*\}/.exec(String(answer ?? ''))?.[0];
@@ -200,7 +200,7 @@ export class App {
     this.rateWait = null; // {resumeAt, label, polling} while paused for a rate limit
     this.exitArmed = 0;
     this.notices = [];
-    this.topic = null; // what the conversation is about now, named by the small model (see refreshTopic)
+    this.topic = null; // what the conversation is about now, named by the title model (see refreshTopic)
     this.firstPrompt = null; // the session's first message: the title until there is a topic
     this.topicSeq = 0; // topic requests sent ...
     this.topicApplied = 0; // ... and the newest one whose answer was used
@@ -364,7 +364,7 @@ export class App {
     return null;
   }
 
-  // Keep the title on the topic of the conversation: ask the small model, in the background, whether
+  // Keep the title on the topic of the conversation: ask the current model, in the background, whether
   // `message` starts a new topic and what to call it (as the official client does). Nothing waits for the
   // answer, and when there is none (a rate limit, no network) the title just stays as it is.
   refreshTopic(message) {
@@ -374,7 +374,7 @@ export class App {
     const seq = ++this.topicSeq;
     const current = this.topic;
     quickQuery(this.config, {
-      model: this.config.smallModel, system: TOPIC_TITLE_SYSTEM, prompt: topicTitlePrompt(current, text.slice(0, 2000)), maxTokens: 2048,
+      model: this.config.mainModel, system: TOPIC_TITLE_SYSTEM, prompt: topicTitlePrompt(current, text.slice(0, 2000)), maxTokens: 2048,
     }).then((answer) => {
       // another session meanwhile, or an answer about a newer message already in use
       if (store !== this.store || this.exiting || seq < this.topicApplied) return;

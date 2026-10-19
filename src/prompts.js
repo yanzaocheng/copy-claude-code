@@ -120,7 +120,7 @@ ${environmentBlock(cwd, { model, shellName, snapshot })}${files ? `\n\n# Project
 }
 
 // The terminal tab's title follows the topic of the conversation: after each message the user sends, the
-// small model says whether it starts a new topic and names it (as the official client does).
+// current model says whether it starts a new topic and names it (as the official client does).
 export const TOPIC_TITLE_SYSTEM = 'You name the topic of a conversation between a user and a coding assistant, for the title of a terminal tab. Reply with JSON only.';
 
 export function topicTitlePrompt(current, message) {

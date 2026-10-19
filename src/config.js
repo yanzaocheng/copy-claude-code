@@ -67,7 +67,7 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_RIPGREP_PATH: 'Path to ripgrep (rg) for Grep and @-file suggestions; "off" forces the built-in JS scanner (default: rg from PATH, else the JS scanner)',
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
-  CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the small model for the current topic after each message (the tab title then shows the first message of the session)',
+  CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the current model for the current topic after each message (the tab title then shows the first message of the session)',
   CLAUDE_PRO_TRACE: 'Set to 0 to disable the privacy-preserving runtime JSONL trace (enabled by default)',
   CLAUDE_PRO_TRACE_DIR: 'Directory for runtime trace files (default: the project session directory)',
   CLAUDE_PRO_TRACE_MAX_SIZE: 'Maximum size of one runtime trace file in bytes before rotating it (default 20 MB)',
