@@ -24,10 +24,6 @@ Options:
   --verbose                        Show thinking and full tool output
   --no-mcp                         Do not start MCP servers
   --name <name>                    Name this session, as /rename does (other sessions reach it with &name)
-  --remote-id <id>                 Go online at the gateway at once with this id (the gateway's web page opens
-                                   sessions this way, through claude-pro host)
-  --headless                       A background session: no window, used from the web page (with --remote-id)
-                                   and from claude-pro attach; what it prints goes to stdout as a log
   -v, --version                    Print version
   -h, --help                       Show help
 
@@ -41,20 +37,11 @@ Commands:
   claude-pro config list                  Show effective configuration and where each value comes from
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
-  claude-pro host [start|stop|status|install|uninstall]   The computer service: lets the gateway's web page
-                                          open sessions on this computer (claude-pro host --help)
-  claude-pro connect <code> [--url U]    Join this computer to your gateway account with the web page's pairing
-                                          code; the computer service then starts, and starts at logon
-  claude-pro attach [name]                Use a background session of this computer here, in this terminal
-                                          (ctrl+] detaches; it goes on in the background)
-
 Interactive prompt commands:
   /prompt <file|text>                     Save and use a system prompt for later sessions
   /prompts                                Choose a saved prompt (or select default)
   /promt, /promits                        Accepted spelling-compatible aliases
 `;
-
-const REMOTE_ID = /^[A-Za-z0-9_-]{8,64}$/;
 
 function parseArgs(argv) {
   const flags = {};
@@ -89,14 +76,7 @@ function parseArgs(argv) {
       case '--verbose': flags.verbose = true; break;
       case '--no-mcp': flags.noMcp = true; break;
       case '--remote-control': case '--rc': break; // online by default now
-      case '--headless': flags.headless = true; break;
       case '--name': flags.name = next(); break;
-      case '--remote-id': {
-        const id = next();
-        if (!REMOTE_ID.test(id || '')) { process.stderr.write(`--remote-id takes 8 to 64 letters, digits, _ or -, not "${id ?? ''}"\n`); process.exit(2); }
-        flags.remoteId = id;
-        break;
-      }
       case '-v': case '--version': flags.version = true; break;
       case '-h': case '--help': flags.help = true; break;
       default:
@@ -174,9 +154,6 @@ function readStdin({ optional }) {
 export async function main(argv) {
   let cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
-  if (argv[0] === 'host') return (await import('./host.js')).hostCommand(argv.slice(1));
-  if (argv[0] === 'attach') return (await import('./attach.js')).attachCommand(argv.slice(1));
-  if (argv[0] === 'connect') return (await import('./connect.js')).connectCommand(argv.slice(1));
   if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }
@@ -199,9 +176,8 @@ export async function main(argv) {
   let prompt = positional.join(' ');
 
   // Started by a restart of a running session: that session is picked up again, whatever the command line
-  // that started the first one said (-c, --resume, a first prompt). A background session (--headless) has no
-  // terminal and is interactive all the same.
-  const interactive = flags.headless || !(flags.print || !process.stdout.isTTY || !process.stdin.isTTY);
+  // that started the first one said (-c, --resume, a first prompt).
+  const interactive = !(flags.print || !process.stdout.isTTY || !process.stdin.isTTY);
   const restart = interactive ? takeRestartState() : null;
   if (restart) {
     flags.restart = restart;
@@ -221,13 +197,7 @@ export async function main(argv) {
   if (flags.continue || (flags.resume && flags.resumeId)) {
     const sessions = SessionStore.list(cwd);
     const found = flags.resumeId ? sessions.find((s) => s.id.startsWith(flags.resumeId)) : sessions[0];
-    if (!found && flags.headless) {
-      // a background session opened again (after a crash, a reboot) that never had a conversation: a new one
-      process.stdout.write(`No conversation ${flags.resumeId || ''} here: starting a new one.\n`);
-      flags.continue = false;
-      flags.resume = false;
-      flags.resumeId = undefined;
-    } else if (!found) {
+    if (!found) {
       process.stderr.write(flags.resumeId ? `No conversation found with id ${flags.resumeId}\n` : 'No conversation found to continue\n');
       return 1;
     } else {
@@ -236,11 +206,6 @@ export async function main(argv) {
     }
   }
 
-  if (flags.headless) {
-    if (!fs.existsSync(cwd)) return 1;
-    const { runRepl } = await import('./ui/repl.js');
-    return await runRepl({ flags, cwd, initialPrompt: prompt });
-  }
   // mintty (Git Bash's default window) connects programs through pipes, not a console.
   if (!flags.print && !process.stdin.isTTY && process.env.TERM_PROGRAM === 'mintty') {
     process.stderr.write('Interactive mode needs a real console. In mintty/Git Bash run `winpty claude-pro` (or `winpty node bin/claude-pro.js`), or use Windows Terminal. For scripts use `claude-pro -p`.\n');

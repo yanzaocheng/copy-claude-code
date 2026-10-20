@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { c, ESC, stringWidth, truncate, padEnd, wordWrap, stripAnsi } from './ansi.js';
+import { c, ESC, stringWidth, truncate, padEnd, wordWrap } from './ansi.js';
 import { Screen, queryCursorRow, mouseFilter } from './screen.js';
 import { Editor, topBorder } from './editor.js';
 import { SelectDialog } from './dialogs.js';
@@ -20,7 +20,7 @@ import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { gatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
-import { buildCommands, modelChoices, effortChoices } from '../commands.js';
+import { buildCommands } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { ripgrepPath } from '../utils/shell.js';
@@ -32,8 +32,6 @@ import { fitImagesIn, imageSize } from '../utils/images.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
-import { ensureHost as startHostIfNeeded, ensureAutostart, hostEnabled, listDirectory, recentDirectories, computerId, markBackgroundEnded } from '../host.js';
-import { VirtualTerminal } from './vterm.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -90,9 +88,6 @@ export function remoteImages(images) {
 
 const FOCUS_EVENTS_ON = '\x1b[?1004h';
 const FOCUS_EVENTS_OFF = '\x1b[?1004l';
-// What a terminal that attaches to a background session is put in first (see attachClient): the fullscreen
-// renderer's alternate screen and mouse reports (screen.js), cleared.
-const ATTACH_MODES = '\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[2J';
 
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '✳', '✢', '·'];
 const VERBS = ['Thinking', 'Pondering', 'Crafting', 'Brewing', 'Computing', 'Conjuring', 'Cooking', 'Musing', 'Noodling', 'Percolating', 'Ruminating', 'Synthesizing', 'Working', 'Tinkering', 'Mulling', 'Deliberating', 'Churning', 'Forging', 'Hatching', 'Simmering'];
@@ -170,14 +165,9 @@ export class App {
   // `noProcessExit`: the tests, which drive the App themselves; it never ends the process, and it has no peers, no
   // gateway connection, no update checks and the default renderer. `selfCheck` (see selfcheck.js): it never ends the
   // process either, but otherwise starts as a session does, so that code only a real start runs is checked too.
-  // `vterm` (see vterm.js): a background session (claude-pro --headless): no window, it is used from the web page
-  // and from `claude-pro attach`; what it prints goes to its log (process.stdout, a file the computer service gave it).
-  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false, vterm = null }) {
+  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false }) {
     this.flags = flags;
     this.cwd = cwd;
-    this.vterm = vterm;
-    this.headless = Boolean(vterm);
-    if (vterm) { stdin = vterm.input; stdout = vterm.output; }
     this.stdin = stdin;
     this.stdout = stdout;
     this.noProcessExit = noProcessExit || selfCheck;
@@ -234,11 +224,6 @@ export class App {
     // What the terminal prints goes to the remote page too, except what it is told about as events.
     this.screen.onLog = (items) => {
       const lines = () => items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/));
-      // a background session's log: what it printed, as plain text
-      if (this.headless) {
-        const stamp = new Date().toISOString().slice(11, 19);
-        try { process.stdout.write(`${lines().map((l) => `${stamp} ${stripAnsi(l)}`.trimEnd()).join('\n')}\n`); } catch { /* no log */ }
-      }
       if (!this.remote || this.remoteMuted) return;
       this.remote.output(lines());
     };
@@ -269,7 +254,7 @@ export class App {
     stdin.setRawMode(true);
     // Where the cursor is, before anything is drawn: the input box is kept on the last rows of the window from
     // there (see screen.js).
-    if (stdin.isTTY && this.stdout.isTTY && !this.headless) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
+    if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
     this.watchCopies();
@@ -326,7 +311,7 @@ export class App {
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
     // Nothing configured yet: the gateway is the default, and its browser login starts first. (Not in a
     // background session: nobody sits at this computer to log in in its browser.)
-    else if (this.config.usesGateway && !gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY) && !this.headless) {
+    else if (this.config.usesGateway && !gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY)) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
     this.fileIndex.refresh();
@@ -337,8 +322,6 @@ export class App {
       // online or offline as this computer's gateway login changes (/login or /logout in another window)
       this.loginTimer = setInterval(() => this.syncRemote(), 10_000);
       this.loginTimer.unref?.();
-      // the computer service (a process of its own, see host.js), once the session is up
-      setTimeout(() => this.ensureHost(), 3000).unref?.();
     }
     return new Promise((resolve) => { this.resolveExit = resolve; });
   }
@@ -436,11 +419,6 @@ export class App {
     if (!restart && this.agent?.messages.length) this.screen.log(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
     this.restoreTerminal({ handOver: restart });
     this.stdin.pause();
-    if (this.headless) {
-      // ended for good (/exit, the computer service's stop): the service does not open it again
-      if (code === 0 && !restart && this.remote?.id) markBackgroundEnded(this.remote.id);
-      setTimeout(() => this.vterm.closeAll(), 20).unref?.(); // the last screen first
-    }
     this.resolveExit?.(code);
     if (!this.noProcessExit) {
       // with remote control on, the gateway is told first (at most a second and a half; see RemoteControl.close)
@@ -462,71 +440,12 @@ export class App {
         id: this.flags.restart?.peerId,
         onMessage: (msg) => this.onPeerMessage(msg),
         getStatus: () => ({ busy: this.working() }),
-        info: () => ({ kind: this.headless ? 'background' : 'terminal', remoteId: this.remote?.id || this.flags.remoteId || this.flags.restart?.remote?.id || null, conversationId: this.store.id, attached: this.vterm ? this.vterm.clients.size : 0 }),
-        onControl: (body) => this.onControl(body),
-        onAttach: this.headless ? (socket, size) => this.attachClient(socket, size) : null,
+        info: () => ({ kind: 'terminal', remoteId: this.remote?.id || null, conversationId: this.store.id }),
       }).start();
     } catch (e) {
       this.peers = null;
       this.notice(`Other sessions cannot reach this one: ${e.message}`, 'warn');
     }
-  }
-
-  // The computer service (see host.js) about a background session: {action: 'exit'} ends it as /exit does (a turn
-  // that runs, or a question that waits, is stopped first), 'restart' restarts it as /restart does, 'interrupt' is
-  // Esc.
-  onControl({ action } = {}) {
-    if (action === 'interrupt') return this.remoteInterrupt();
-    if (action === 'exit') {
-      for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
-      this.interrupt();
-      setTimeout(() => this.exit(0), 50); // once the answer is out
-      return {};
-    }
-    if (action === 'restart') {
-      for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
-      this.interrupt();
-      const res = this.requestRestart({ reason: 'restarted from the web page', force: true });
-      if (!res.ok) throw new Error(res.message);
-      return {};
-    }
-    throw new Error(`Unknown action: ${action}`);
-  }
-
-  // `claude-pro attach` (see attach.js) on this background session: the screen, drawn whole for it, and its keys.
-  // From the client: one JSON object a line, {keys: base64} or {resize: [columns, rows]}. A turn that runs goes on:
-  // the client gets the conversation as it is (scrolled back with the wheel, PgUp), the live part and what follows.
-  // The registry says how many are attached (the web page shows it, see background.js); one that goes away
-  // (detached, its window closed, its process killed) changes nothing else.
-  attachClient(socket, { cols, rows } = {}) {
-    const client = { write: (d) => { if (!socket.destroyed) socket.write(d); }, close: () => socket.end() };
-    socket.on('error', () => { /* its close follows */ });
-    // An HTTP server's sockets stay half open when the other side closes (allowHalfOpen): without this, a client that
-    // went away (its window closed, its process killed) would count as attached until a write failed, a minute later.
-    socket.on('end', () => socket.destroy());
-    socket.on('close', () => {
-      this.vterm.detach(client);
-      this.peers?.update();
-    });
-    this.vterm.attach(client, { cols, rows });
-    this.peers?.update();
-    client.write(`${ATTACH_MODES}${ESC.bracketedPasteOn}`);
-    this.screen.title = ''; // its window gets the title too (sent again with the next draw)
-    if (this.screen.full) this.screen.repaint();
-    let buf = '';
-    // (no setEncoding: an HTTP server's socket refuses it; the lines are ASCII anyway, JSON with base64)
-    socket.on('data', (d) => {
-      buf += d.toString('latin1');
-      for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
-        const line = buf.slice(0, i);
-        buf = buf.slice(i + 1);
-        let m;
-        try { m = JSON.parse(line); } catch { continue; }
-        if (Array.isArray(m?.resize)) this.vterm.resize(m.resize[0], m.resize[1]);
-        else if (typeof m?.keys === 'string') this.vterm.type(Buffer.from(m.keys, 'base64'));
-      }
-    });
-    socket.resume(); // the HTTP server leaves an upgraded socket paused
   }
 
   // This session's name for the others.
@@ -677,15 +596,13 @@ export class App {
     return Boolean(gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY));
   }
 
-  // Online at the gateway from the start, without holding the start up: when this computer is logged in to it; with
-  // --remote-id (a session the gateway's web page opened through claude-pro host: online at once, with the id the
-  // page waits for); and after a restart as before (with the same id, so that open pages and messages on their way
-  // find it again).
+  // Online at the gateway from the start when this computer is logged in, and after a restart with the same
+  // session id so that an already-open page keeps following it.
   autoStartRemote(restart) {
-    const id = restart?.remote?.id || this.flags.remoteId || null;
+    const id = restart?.remote?.id || null;
     if (!id && !this.onlineWanted()) return;
     this.startRemote({ id }).catch((e) => {
-      if (e.code === 'NO_GATEWAY_LOGIN' && !this.flags.remoteId) return;
+      if (e.code === 'NO_GATEWAY_LOGIN') return;
       this.notice(`This session could not go online at the gateway: ${e.message}`, 'warn');
     });
   }
@@ -710,25 +627,11 @@ export class App {
     // logged out, or another account: not this account's session any more
     if (r && (!login || login.apiKey !== r.apiKey || normalizeGatewayUrl(login.url || this.config.gatewayUrl) !== normalizeGatewayUrl(r.base))) this.stopRemote();
     if (this.remote) return Promise.resolve(this.remote);
-    if (!login || login.apiKey === this.remoteRefused || !(this.flags.remoteId || this.onlineWanted())) return Promise.resolve(null);
+    if (!login || login.apiKey === this.remoteRefused || !this.onlineWanted()) return Promise.resolve(null);
     return this.startRemote().catch((e) => {
       this.notice(`This session could not go online at the gateway: ${e.message}`, 'warn');
       return null;
     });
-  }
-
-  // The computer service (see host.js): started in the background when none runs, so that the gateway's web page can
-  // open sessions on this computer even when no session is open, and set up to start at logon (once; after /login,
-  // `login`, again unless `claude-pro host uninstall` said no). Not in the tests nor in the self-check.
-  ensureHost({ login = false } = {}) {
-    const env = this.config.env;
-    if (this.driven || this.selfCheck || process.env.NODE_TEST_CONTEXT || this.exiting) return;
-    if (!onlineEnabled(env) || !hostEnabled(env) || !gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY)) return;
-    try { startHostIfNeeded(); } catch { /* the next session tries again */ }
-    try {
-      const auto = ensureAutostart({ force: login, env });
-      if (auto?.file && login) this.notice(`The computer service starts at logon from now on (${auto.file}; claude-pro host uninstall stops that).`);
-    } catch { /* not this time */ }
   }
 
   async connectRemote({ id }) {
@@ -741,20 +644,13 @@ export class App {
         info: () => ({
           name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '',
           cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION,
-          computerId: computerId(), kind: this.headless ? 'background' : 'terminal', conversationId: this.store.id,
+          kind: 'terminal',
         }),
         seed: () => [
           ...transcriptItems(this.agent.messages, { tools: this.runtime.tools, ctx: this.agent.makeCtx(), cwd: this.cwd }),
           ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
         ],
         status: () => this.remoteStatus(),
-        send: (text, images) => this.remoteSend(text, images),
-        interrupt: () => this.remoteInterrupt(),
-        answer: (body) => this.answerDialog(body),
-        options: () => this.remoteOptions(),
-        suggest: (body) => this.remoteSuggest(body),
-        list: (body) => this.remoteList(body),
-        output: (body) => this.remoteOutput(body),
         peerMessage: (msg) => this.onPeerMessage(msg),
         changed: () => {
           this.screen.schedule();
@@ -838,7 +734,7 @@ export class App {
       cost: Number(this.cost.toFixed(6)),
       context: { used: this.contextUsed(), window: cfg.model.contextWindow },
       background: this.backgroundWork(),
-      kind: this.headless ? 'background' : 'terminal',
+      kind: 'terminal',
     };
   }
 
@@ -873,125 +769,6 @@ export class App {
     if (d.input) return { ...base, input: { placeholder: d.input.placeholder || '', value: d.value || '', multiline: Boolean(d.input.multiline) } };
     if (!Array.isArray(d.options)) return base;
     return { ...base, multi: Boolean(d.multi), options: d.options.map((o) => ({ label: String(o.label ?? ''), description: o.description || '', other: o.value === '__other__' })) };
-  }
-
-  answerDialog({ id, index, indices, text, cancel } = {}) {
-    const d = this.dialogs[0];
-    if (!d || d.remoteId !== id) throw new Error('That question is no longer open.');
-    if (cancel) { d.resolve(d.cancelValue); return {}; }
-    if (d.input) {
-      if (typeof text !== 'string') throw new Error('Type an answer first.');
-      d.resolve(text);
-      this.screen.schedule();
-      return {};
-    }
-    if (!Array.isArray(d.options)) throw new Error('This dialog cannot be answered from the page.');
-    const valueAt = (i) => {
-      const o = d.options[i];
-      if (!Number.isInteger(i) || !o || o.value === '__other__') throw new Error('No such option.');
-      return o.value;
-    };
-    if (typeof text === 'string') {
-      if (!text.trim()) throw new Error('Type an answer first.');
-      d.resolve(d.multi ? [...(indices || []).map(valueAt), text.trim()] : text.trim());
-    } else if (d.multi) {
-      if (!indices?.length) throw new Error('Choose at least one option.');
-      d.resolve(indices.map(valueAt));
-    } else {
-      d.resolve(valueAt(index));
-    }
-    this.screen.schedule();
-    return {};
-  }
-
-  // A message from the page: as if typed in the input box, its images as if pasted there (alt+v). Images alone go
-  // as their placeholders, which is what the input box sends for them.
-  remoteSend(text, images) {
-    const pictures = remoteImages(images);
-    let value = String(text ?? '').replace(/\r\n/g, '\n');
-    if (!value.trim() && pictures.length) value = pictures.map((_, i) => `[Image #${i + 1}]`).join(' ');
-    if (!value.trim()) throw new Error('The message is empty.');
-    if (this.exiting) throw new Error('The session is ending.');
-    if (this.isTurnRunning() && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
-    if (this.dialogs.length && !this.isTurnRunning()) throw new Error('A question is open: answer it first.');
-    const queued = this.isTurnRunning();
-    this.onSubmit(value, value, pictures);
-    this.screen.schedule();
-    return { queued };
-  }
-
-  // For the page's model, effort and mode menus: what /model and /effort offer, in plain text, and what is chosen
-  // now (as the status says it).
-  async remoteOptions() {
-    const cfg = this.config;
-    const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
-    const { effort } = modelInfo(cfg);
-    return { model: cfg.model.id, models, effort: effort || defaultEffort(cfg.model.id, cfg), efforts: efforts.options };
-  }
-
-  // For the page's input box: what the input box here would suggest (/commands, @files, &sessions), in plain text,
-  // without anything happening here. Sessions on the other computers are asked for first when the list is old.
-  async remoteSuggest(body = {}) {
-    const text = String(body.text ?? '');
-    const cursor = Number.isInteger(body.cursor) ? Math.max(0, Math.min(text.length, body.cursor)) : text.length;
-    if (/(^|\s)[&＆][^\s&＆]*$/u.test(text.slice(0, cursor)) && this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
-      await Promise.race([this.refreshRemotePeers(), new Promise((r) => setTimeout(r, 3000))]);
-    }
-    const found = this.suggest(text, cursor, { quiet: true });
-    if (!found?.items?.length) return { items: [] };
-    const plain = (s) => (s == null ? '' : stripAnsi(String(s)));
-    return {
-      items: found.items.slice(0, 50).map((it) => ({ value: it.value, label: plain(it.label ?? it.value), description: plain(it.description), submitOnEnter: Boolean(it.submitOnEnter), noSpace: Boolean(it.noSpace) })),
-      from: found.from,
-      to: found.to,
-    };
-  }
-
-  // For the page's directory browser (/cd): the computer service's listing (see host.js), "" being this session's
-  // working directory.
-  remoteList(body = {}) {
-    const wanted = typeof body.path === 'string' && body.path.trim() ? body.path : this.cwd;
-    return listDirectory(wanted, {
-      recent: () => {
-        if (!this.recentDirs || Date.now() - this.recentDirs.at > 30_000) this.recentDirs = { at: Date.now(), list: recentDirectories() };
-        return this.recentDirs.list;
-      },
-    });
-  }
-
-  // For the page's "the whole output": the full result of the tool call `id` ({text, truncated}, at most a MB): the
-  // file it was saved to when it was too long for the conversation, or cleared from it later; what it printed so
-  // far while it runs.
-  remoteOutput({ id } = {}) {
-    if (typeof id !== 'string' || !id) throw new Error('Which tool call?');
-    const MAX = 1024 * 1024;
-    const cut = (text, running = false) => ({ text: text.length > MAX ? text.slice(0, MAX) : text, truncated: text.length > MAX, ...(running ? { running } : {}) });
-    let result = null;
-    for (const m of this.agent.messages) {
-      if (m.role !== 'user' || !Array.isArray(m.content)) continue;
-      for (const b of m.content) if (b.type === 'tool_result' && b.tool_use_id === id) result = b;
-    }
-    if (!result) {
-      const live = this.active.find((e) => e.tu?.id === id);
-      if (live) return cut(String(live.progress || ''), true);
-      throw new Error('There is no such tool call in this conversation.');
-    }
-    let text = typeof result.content === 'string' ? result.content
-      : (Array.isArray(result.content) ? result.content : []).map((b) => (b.type === 'text' ? b.text : b.type === 'image' ? '[image]' : '')).join('\n');
-    // saved whole in the projects' tool-results (see persistLargeOutput and the Bash tool): read from there
-    const saved = /(?:saved to:?|saved at)\s+(\S+?\.txt)\b/.exec(text)?.[1];
-    const results = path.join(CONFIG_DIR, 'projects');
-    if (saved && path.resolve(saved).startsWith(results + path.sep) && path.resolve(saved).includes(`${path.sep}tool-results${path.sep}`)) {
-      try { text = fs.readFileSync(saved, 'utf8'); } catch { /* the reference is what there is */ }
-    }
-    return cut(text);
-  }
-
-  remoteInterrupt() {
-    for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
-    this.interrupt();
-    this.screen.schedule();
-    return {};
   }
 
   // ---------------------------------------------------------------- restarting (see restart.js)
@@ -1292,7 +1069,6 @@ export class App {
   // Fullscreen (see screen.js) unless CLAUDE_PRO_TUI=default, as Claude Code's /tui: the input box fixed at the
   // bottom of the window, the conversation scrolled inside the program. Not in the tests that drive the App.
   fullscreenWanted() {
-    if (this.headless) return true; // `claude-pro attach` gets the whole screen, drawn again when it comes
     const mode = String(this.config.env.CLAUDE_PRO_TUI || (this.driven ? 'default' : 'fullscreen')).toLowerCase();
     return mode === 'fullscreen' && this.stdout.isTTY !== false;
   }
@@ -1385,12 +1161,9 @@ export class App {
     this.screen.schedule();
   }
 
-  // ctrl+c twice, ctrl+d: the end of the session, except in a background one, where the keys come from
-  // `claude-pro attach` and leaving it is detaching (/exit ends the session there).
+  // ctrl+c twice, ctrl+d: the end of the session.
   keyboardExit() {
-    if (!this.headless) { this.exit(0); return; }
-    this.exitArmed = 0;
-    this.flash('This session runs in the background: ctrl+] detaches from it, /exit ends it');
+    this.exit(0);
   }
 
   onCtrlC() {
@@ -1414,7 +1187,7 @@ export class App {
     this.screen.schedule();
   }
 
-  // `quiet`: for the page (remoteSuggest), nothing shows here.
+  // `quiet`: do not print the transcript (a restart: it is still on screen).
   suggest(text, cursor, { quiet = false } = {}) {
     if (text.startsWith('/') && !/\s/.test(text) && cursor === text.length) {
       const q = text.slice(1).toLowerCase();
@@ -1948,9 +1721,17 @@ export class App {
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
     this.remote?.resync();
     if (quiet) return;
-    this.logLocal(c.dim(`Resumed session ${id} (${loaded.messages.length} messages)`), '');
+    const restoredCount = loaded.messages.length;
+    const shown = loaded.messages.slice(-30);
+    const hasSummary = loaded.messages.some((message) => {
+      const blocks = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : (message.content || []);
+      return message.role === 'user' && blocks.some((block) => block?.type === 'text' && String(block.text || '').startsWith('This session is being continued'));
+    });
+    const contextNote = hasSummary ? 'including the saved compaction summary' : 'including the saved conversation history';
+    const omitted = restoredCount - shown.length;
+    this.logLocal(c.dim(`Resumed session ${id}: restored ${restoredCount} messages to model context, ${contextNote}; showing the ${shown.length} most recent${omitted ? ` (${omitted} older messages not printed)` : ''}.`), '');
     this.remoteMuted++;
-    try { this.printTranscript(loaded.messages.slice(-30)); } finally { this.remoteMuted--; }
+    try { this.printTranscript(shown); } finally { this.remoteMuted--; }
   }
 
   printTranscript(messages) {
@@ -2455,10 +2236,7 @@ export class App {
 }
 
 export async function runRepl({ flags, cwd, initialPrompt }) {
-  // --headless: a background session (see vterm.js), its log on stdout
-  const vterm = flags.headless ? new VirtualTerminal() : null;
-  if (vterm) process.stdout.write(`${new Date().toISOString()} claude-pro ${VERSION} background session in ${cwd} (pid ${process.pid})\n`);
-  const app = new App({ flags, cwd, vterm });
+  const app = new App({ flags, cwd });
   process.on('uncaughtException', (e) => {
     app.restoreTerminal();
     process.stderr.write(`\nUnexpected error: ${e?.stack || e}\n`);

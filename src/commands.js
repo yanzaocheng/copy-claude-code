@@ -112,7 +112,7 @@ export function buildCommands(app) {
     if (!app.agent.messages.length || !cache.isWarm() || (model && model === cache.model)) return true;
     const choice = await app.showDialog(new SelectDialog({
       title: what,
-      question: `The prompt cache is warm (about ${formatTokens(cache.expected)} tokens, ${formatDuration(cache.expiresAt - Date.now())} left). ${what} makes the next request read the whole conversation again without it, which costs more and takes longer. Go on?`,
+      question: `The prompt cache is warm (about ${formatTokens(cache.expected)} tokens, ${formatDuration(cache.expiresAt - Date.now())} left). ${what} makes the next request read the whole conversation again without it, which costs more and takes longer. The restored conversation stays in context; only the model changes. Go on?`,
       color: c.blue,
       options: [{ label: 'Yes, go on', value: 'yes' }, { label: 'No, leave it as it is', value: 'no' }],
       cancelValue: 'no',
@@ -399,7 +399,7 @@ export function buildCommands(app) {
       cfg.modelOverride = forget ? null : choice;
       if (changed) app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
-      out(`Model set to ${c.bold(cfg.model.label)} ${c.dim(`(${formatTokens(cfg.model.contextWindow)} context)`)}${kept}`);
+      out(`Model set to ${c.bold(cfg.model.label)} ${c.dim(`(${formatTokens(cfg.model.contextWindow)} context)`)}${kept}${changed ? c.dim(' · restored conversation remains in context for the next request') : ''}`);
     },
   });
 
