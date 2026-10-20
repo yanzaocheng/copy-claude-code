@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="claude-pro 当前 Agent 执行逻辑说明">
+  <title>claude-pro Agent 执行逻辑</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: rgba(18, 27, 49, .86);
+      --panel-strong: #151f39;
+      --line: #2a3a60;
+      --text: #edf3ff;
+      --muted: #9eacc8;
+      --blue: #70a7ff;
+      --cyan: #60e1d0;
+      --yellow: #ffd166;
+      --red: #ff7b8b;
+      --green: #76e3a4;
+      --shadow: 0 18px 60px rgba(0, 0, 0, .28);
+      --code: #0a0f1c;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 0%, rgba(72, 117, 214, .24), transparent 34rem),
+        radial-gradient(circle at 90% 12%, rgba(46, 187, 171, .13), transparent 30rem),
+        var(--bg);
+      font: 15px/1.72 ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+    .hero { padding: 72px 0 44px; }
+    .eyebrow { color: var(--cyan); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: 12px; }
+    h1 { margin: 10px 0 12px; font-size: clamp(34px, 6vw, 64px); line-height: 1.04; letter-spacing: -.045em; }
+    .lead { max-width: 820px; color: var(--muted); font-size: 18px; margin: 0; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+    .badge, .tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+      color: var(--muted); background: rgba(255,255,255,.035); font-size: 12px;
+    }
+    .badge strong { color: var(--text); }
+    .layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: start; }
+    .toc { position: sticky; top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: rgba(13, 20, 38, .72); box-shadow: var(--shadow); }
+    .toc strong { display: block; margin-bottom: 10px; }
+    .toc a { display: block; padding: 5px 0; color: var(--muted); font-size: 13px; }
+    .toc a:hover, .toc a.active { color: var(--text); }
+    main { min-width: 0; }
+    section { scroll-margin-top: 22px; margin-bottom: 30px; }
+    .panel { padding: 25px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); }
+    h2 { margin: 0 0 14px; font-size: 28px; letter-spacing: -.025em; }
+    h3 { margin: 24px 0 9px; font-size: 19px; }
+    h4 { margin: 18px 0 6px; color: var(--cyan); font-size: 15px; }
+    p { margin: 9px 0; }
+    .muted { color: var(--muted); }
+    .small { color: var(--muted); font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.025); }
+    .card h3, .card h4 { margin-top: 0; }
+    .metric { padding: 16px; border-left: 3px solid var(--blue); background: rgba(112,167,255,.07); border-radius: 10px; }
+    .metric b { display: block; color: var(--blue); font-size: 22px; line-height: 1.2; }
+    .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 18px 0 8px; }
+    .flow .node { flex: 1 1 130px; min-width: 110px; padding: 13px 10px; text-align: center; border: 1px solid #38558d; border-radius: 12px; background: linear-gradient(145deg, rgba(70,111,194,.25), rgba(35,57,99,.2)); }
+    .flow .node b { display: block; font-size: 13px; }
+    .flow .node span { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .flow .arrow { align-self: center; color: var(--cyan); font-size: 20px; }
+    ol.steps { counter-reset: step; list-style: none; padding: 0; margin: 14px 0 0; }
+    ol.steps li { position: relative; counter-increment: step; padding: 12px 14px 12px 52px; margin: 9px 0; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.025); }
+    ol.steps li::before { content: counter(step); position: absolute; left: 15px; top: 12px; width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; color: #08111f; background: var(--cyan); font-weight: 800; }
+    .state-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 15px; }
+    .state { min-height: 88px; padding: 13px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-strong); }
+    .state b { display: block; color: var(--yellow); margin-bottom: 4px; }
+    .state small { color: var(--muted); }
+    pre, code { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    code { padding: 2px 5px; border-radius: 5px; color: #c7e2ff; background: rgba(0,0,0,.28); font-size: .92em; }
+    pre { overflow: auto; margin: 14px 0; padding: 16px; border: 1px solid #223354; border-radius: 12px; color: #cfe1ff; background: var(--code); font-size: 12px; line-height: 1.65; }
+    .callout { padding: 14px 16px; margin: 14px 0; border-left: 4px solid var(--cyan); border-radius: 8px; background: rgba(96,225,208,.08); }
+    .callout.warn { border-left-color: var(--yellow); background: rgba(255,209,102,.08); }
+    .callout.danger { border-left-color: var(--red); background: rgba(255,123,139,.08); }
+    .callout b { color: var(--text); }
+    .file { color: var(--cyan); white-space: nowrap; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+    th, td { padding: 10px 9px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { color: var(--cyan); font-weight: 700; }
+    details { margin: 12px 0; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+    summary { cursor: pointer; padding: 12px 14px; color: var(--text); font-weight: 700; }
+    details > div { padding: 0 14px 14px; }
+    .footer { padding: 30px 0 70px; color: var(--muted); font-size: 13px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+    .dot { width: 9px; height: 9px; display: inline-block; border-radius: 50%; background: var(--blue); }
+    .dot.green { background: var(--green); }
+    .dot.yellow { background: var(--yellow); }
+    .dot.red { background: var(--red); }
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
+      .toc strong { grid-column: 1 / -1; }
+      .grid.three, .state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 560px) {
+      .wrap { width: min(100% - 20px, 1180px); }
+      .hero { padding-top: 42px; }
+      .panel { padding: 18px; border-radius: 15px; }
+      .grid, .grid.three, .state-grid { grid-template-columns: 1fr; }
+      .flow { display: grid; grid-template-columns: 1fr; }
+      .flow .arrow { transform: rotate(90deg); justify-self: center; }
+      .toc { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero wrap">
+    <div class="eyebrow">claude-pro · agent runtime</div>
+    <h1>当前 Agent 执行逻辑</h1>
+    <p class="lead">这份文档按当前源码整理一次完整请求从启动、构建上下文、调用模型、执行工具，到持久化、压缩、恢复和远程只读发布的路径。它描述的是代码实际行为，不是旧版架构草图。</p>
+    <div class="badges">
+      <span class="badge"><strong>版本</strong> 0.7.8</span>
+      <span class="badge"><strong>运行时</strong> Node.js ESM</span>
+      <span class="badge"><strong>模型入口</strong> codex-gateway</span>
+      <span class="badge"><strong>远程通道</strong> outbound + read-only viewer</span>
+    </div>
+  </header>
+
+  <div class="wrap layout">
+    <nav class="toc" aria-label="目录">
+      <strong>目录</strong>
+      <a href="#overview">1. 总体链路</a>
+      <a href="#startup">2. 启动与模式</a>
+      <a href="#runtime">3. Runtime 构建</a>
+      <a href="#turn">4. 一轮执行</a>
+      <a href="#model">5. 模型与 SSE</a>
+      <a href="#tools">6. 工具调度</a>
+      <a href="#context">7. 上下文与压缩</a>
+      <a href="#persist">8. 持久化与恢复</a>
+      <a href="#background">9. 子 Agent 与后台任务</a>
+      <a href="#remote">10. UI 与远程发布</a>
+      <a href="#errors">11. 错误、重试与中断</a>
+      <a href="#files">12. 文件地图与边界</a>
+    </nav>
+
+    <main>
+      <section id="overview">
+        <div class="panel">
+          <h2>1. 总体链路</h2>
+          <p>主 Agent 不直接处理终端输入，也不直接实现每个工具。它位于 Runtime、UI、模型 API、工具系统和 SessionStore 的交界处：UI 负责一轮的生命周期，Agent 负责消息和模型/工具循环，Runtime 负责把依赖注入进去。</p>
+          <div class="grid three">
+            <div class="metric"><b>1 个主 Agent</b><span class="small">维护当前会话的 messages、todos、usage、checkpoint 和上下文估计。</span></div>
+            <div class="metric"><b>1 个 turn checkpoint</b><span class="small">每条用户请求开始时创建，文件编辑可回滚；Bash 外部改动不在代码 checkpoint 内。</span></div>
+            <div class="metric"><b>同一套核心循环</b><span class="small">交互式 REPL 和 print/non-interactive 使用同一个 Runtime 与 Agent。</span></div>
+          </div>
+          <div class="flow" aria-label="执行链路">
+            <div class="node"><b>main()</b><span>解析参数、选择模式</span></div><div class="arrow">→</div>
+            <div class="node"><b>createRuntime()</b><span>配置、prompt、tools、hooks</span></div><div class="arrow">→</div>
+            <div class="node"><b>App.onSubmit()</b><span>分类输入、建立 turn</span></div><div class="arrow">→</div>
+            <div class="node"><b>Agent.run()</b><span>消息与模型/工具循环</span></div><div class="arrow">→</div>
+            <div class="node"><b>callModel()</b><span>构建请求、消费 SSE</span></div><div class="arrow">→</div>
+            <div class="node"><b>runTools()</b><span>校验、hook、执行、tool_result</span></div>
+          </div>
+          <div class="callout"><b>核心不变量：</b>一次 turn 内不会并发启动两个 <code>Agent.run()</code>；模型没有 tool call 时才可能结束，有 tool call 就把工具结果写回消息并再次调用模型。</div>
+        </div>
+      </section>
+
+      <section id="startup">
+        <div class="panel">
+          <h2>2. 启动与模式选择</h2>
+          <div class="grid">
+            <div class="card">
+              <h3>入口</h3>
+              <p><span class="file">bin/claude-pro.js</span> 负责启动进程或 supervisor，真正的参数解析和模式选择在 <span class="file">src/main.js</span>。</p>
+              <ol class="steps">
+                <li>处理配置命令与 <code>--self-check</code>。</li>
+                <li>读取 system-prompt 文件、解析 <code>--continue</code>/<code>--resume</code>。</li>
+                <li>读取 restart state，判断 stdin/stdout 是否是 TTY。</li>
+                <li>TTY 进入 <code>runRepl()</code>；非 TTY 或 <code>--print</code> 进入 <code>runPrint()</code>。</li>
+              </ol>
+            </div>
+            <div class="card">
+              <h3>当前实际模式</h3>
+              <pre>main()
+  ├─ interactive TTY  → runRepl()
+  └─ non-TTY/--print  → runPrint()</pre>
+              <div class="callout warn"><b>边界：</b>当前 <code>main.js</code> 不再解析 <code>--headless</code> 或 <code>--remote-id</code>，因此旧文档里通过 VirtualTerminal 启动后台 host session 的入口并不是当前可达路径。</div>
+              <p class="small">兼容参数 <code>--remote-control</code>/<code>--rc</code> 可以被接受，但不会重新打开旧的网页控制通道。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="runtime">
+        <div class="panel">
+          <h2>3. Runtime 构建</h2>
+          <p><span class="file">src/runtime.js:createRuntime()</span> 把 Agent 需要的依赖一次性组装完成。Agent 本身只消费抽象回调和工具，不负责寻找配置文件或创建终端界面。</p>
+          <div class="grid three">
+            <div class="card"><h4>输入与配置</h4><p>加载配置、trace、当前模型和 effort，寻找 shell，确定工作目录、平台、日期以及 gateway provider。</p></div>
+            <div class="card"><h4>上下文</h4><p>组合主 system prompt、<code>CLAUDE.md</code>、<code>AGENTS.md</code>、项目/用户指令、memory、MCP、模型和 Git 初始快照。</p></div>
+            <div class="card"><h4>执行能力</h4><p>创建 CheckpointStore、hooks、MCP、BackgroundTasks、工具 registry 和主 Agent。</p></div>
+          </div>
+          <h3>System prompt 的来源</h3>
+          <pre>prompt override / saved prompt
+  + mainSystemPrompt()
+  + 环境、平台、shell、cwd、日期、Git snapshot
+  + 项目/用户/本地指令文件
+  + auto-memory index
+  + MCP instructions
+  + 当前 model / effort 相关信息</pre>
+          <p>prompt provider 是惰性的并带缓存。恢复会话时只有 prompt fingerprint、append suffix 和 model 都兼容，才复用保存的 system prompt；日期变化会把提醒放进下一条用户消息，而不是强制重建整个 prompt。</p>
+        </div>
+      </section>
+
+      <section id="turn">
+        <div class="panel">
+          <h2>4. 一轮请求如何执行</h2>
+          <p>交互式路径的 UI 生命周期在 <span class="file">src/ui/repl.js</span> 中，Agent 的消息和模型循环在 <span class="file">src/agent.js:Agent.run()</span> 中。</p>
+          <ol class="steps">
+            <li><b>输入分流：</b><code>App.onSubmit()</code> 先识别 peer 消息、队列文本、slash command、图片、<code>?</code>、<code>!</code>、<code>#</code> 和普通 prompt。</li>
+            <li><b>领取 turn：</b><code>startTurn()</code> 同步设置 busy，防止两个 <code>Agent.run()</code> 并发；随后回显用户消息、异步生成标题、处理图片和 <code>@file</code> 附件。</li>
+            <li><b>准备 Agent：</b><code>Agent.run()</code> 执行日期提醒、effort boost、idle cleanup、<code>UserPromptSubmit</code> hooks、后台任务通知和 pending reminders。</li>
+            <li><b>建立 checkpoint：</b><code>CheckpointStore.beginTurn()</code> 为这一轮创建文件快照边界。</li>
+            <li><b>写入用户消息：</b><code>pushMessage()</code> 更新 messages、activity、context accounting，并通过 IO 回调持久化和发布 UI/远程事件。</li>
+            <li><b>进入模型/工具循环：</b>自动压缩（如果需要）→ 调模型 → 保存 assistant message → 有 tool call 就执行工具并回写结果 → 再调模型。</li>
+            <li><b>结束 turn：</b>没有工具调用且没有待验证/待续写/待 hook 轮次时结束；最后清 busy、完成 peer 任务并排空队列和后台通知。</li>
+          </ol>
+          <h3>Agent 主状态机</h3>
+          <div class="state-grid">
+            <div class="state"><b>Idle</b><small>等待用户输入或后台通知。</small></div>
+            <div class="state"><b>Preparing</b><small>hooks、reminder、checkpoint、prompt。</small></div>
+            <div class="state"><b>Streaming</b><small>消费模型 SSE，积累 text/thinking/tool input。</small></div>
+            <div class="state"><b>ToolRunning</b><small>执行工具、发布 progress、形成 tool_result。</small></div>
+            <div class="state"><b>Compacting</b><small>摘要旧上下文并替换 transcript。</small></div>
+            <div class="state"><b>Verifying</b><small>编辑后运行验证；失败可反馈模型。</small></div>
+            <div class="state"><b>Waiting</b><small>等待本地问题、队列或后台任务。</small></div>
+            <div class="state"><b>Done/Error</b><small>写入 session、清理 busy、显示结果。</small></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="model">
+        <div class="panel">
+          <h2>5. 模型请求与 SSE</h2>
+          <div class="grid">
+            <div class="card">
+              <h3>callModel()</h3>
+              <ol class="steps">
+                <li>降低历史图片体积。</li>
+                <li>取得当前 system prompt 并通过 <code>io.systemPrompt()</code> 持久化一次。</li>
+                <li>规范化 transcript，修复未完成/孤立/重复 tool result。</li>
+                <li>构建 model、messages、tools、cache bucket、effort 请求参数。</li>
+                <li>调用 <code>streamAgentRequest()</code>，更新 context token 估计。</li>
+              </ol>
+            </div>
+            <div class="card">
+              <h3>gateway 请求</h3>
+              <p><span class="file">src/api.js:buildParams()</span> 使用 Anthropic Messages 格式、<code>stream:true</code>、工具 schema、可选 thinking/effort 和 cache-control。</p>
+              <p>请求带 <code>X-Claude-Code-Session-Id</code>。GPT 模型由 gateway 的 Codex 路径处理；不兼容的 Codex 签名 thinking block 会在发送给 Claude 模型前清掉。</p>
+            </div>
+          </div>
+          <h3>SSE 事件归约</h3>
+          <pre>message_start
+  → content_block_start
+  → text_delta / thinking_delta / input_json_delta
+  → content_block_stop
+  → message_delta
+  → message_stop
+  → assistant message + usage + cost + stop_reason</pre>
+          <p>流式事件同时被 Agent、终端 renderer 和远程 transcript 发布器消费。没有最终 stop event 或 stop reason 会视为错误；中断时保留已有文字并估算已产生的输出。</p>
+        </div>
+      </section>
+
+      <section id="tools">
+        <div class="panel">
+          <h2>6. 工具调度、验证和副作用</h2>
+          <p><span class="file">src/agent.js:runTools()</span> 先按工具类型调度，再由 <span class="file">runOne()</span> 完成单个调用的完整生命周期。</p>
+          <div class="grid">
+            <div class="card">
+              <h3>并发规则</h3>
+              <ul>
+                <li>连续的只读工具可并行，例如 <code>Read</code>、<code>Glob</code>、<code>Grep</code>。</li>
+                <li><code>AskUserQuestion</code> 不参与并行。</li>
+                <li>写文件、Bash 和其他有副作用的工具顺序执行。</li>
+                <li>中断后未执行的调用会得到解释性错误结果。</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>runOne() 顺序</h3>
+              <ol>
+                <li>解析工具名和 JSON 输入。</li>
+                <li>校验必填字段、primitive 类型和工具专属约束。</li>
+                <li>执行 <code>PreToolUse</code> hooks。</li>
+                <li>编辑前记录文件 snapshot，发布 tool-start。</li>
+                <li>执行工具、处理图片结果和 progress。</li>
+                <li>执行 <code>PostToolUse</code>，保存过大的输出，统计成功编辑。</li>
+                <li>返回 Anthropic <code>tool_result</code>。</li>
+              </ol>
+            </div>
+          </div>
+          <div class="callout"><b>当前没有独立 permission prompt 层。</b>工具是否执行由 schema 校验、工具自身校验、hooks、abort 和 checkpoint 共同决定。</div>
+          <table>
+            <thead><tr><th>工具类别</th><th>当前行为</th><th>边界</th></tr></thead>
+            <tbody>
+              <tr><td>文件</td><td><code>Read</code> 记录 freshness；<code>Write</code>/<code>Edit</code> 会在执行前进入 checkpoint。</td><td>需要先读过文件或处于有效 freshness 状态。</td></tr>
+              <tr><td>Bash</td><td>非交互子进程，支持 timeout、abort、cwd、截断和 full-output 文件。</td><td>shell 直接改文件不进入代码 checkpoint。</td></tr>
+              <tr><td>Search</td><td>Glob/Grep 优先使用 ripgrep，失败时回退 JavaScript scanner。</td><td>输出仍受工具结果和上下文清理规则影响。</td></tr>
+              <tr><td>Web</td><td>可产生额外 gateway 请求，WebFetch 可能调用独立摘要请求。</td><td>side request 默认不静默等待长限流窗口。</td></tr>
+              <tr><td>Task</td><td>前台任务嵌套 Agent；后台任务立即返回 task id。</td><td>后台任务有独立 abort signal 和 completion notification。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="context">
+        <div class="panel">
+          <h2>7. 上下文维护与压缩</h2>
+          <div class="grid">
+            <div class="card">
+              <h3>自动 compact 条件</h3>
+              <p><code>shouldAutoCompact()</code> 要求：自动压缩开启、消息数超过 2、连续失败少于 3 次、context estimate 超过阈值，并且确实有新的上下文增长。</p>
+              <p><code>compactOnTheWay()</code> 在请求前执行；如果请求仍能放下而 compact 失败，可以继续；连续三次失败后关闭自动 compact；如果请求已经过长则重新抛错。</p>
+            </div>
+            <div class="card">
+              <h3>摘要与替换</h3>
+              <p><code>requestSummary()</code> 先使用当前模型、system prompt、tools、effort 和独立 cache bucket 生成摘要；响应调用工具或格式不对时回退到 <code>SUMMARY_SYSTEM</code>。</p>
+              <p><code>compact()</code> 用 continuation message 替换旧 transcript，刷新 system prompt、清 file-read state、重置 context/compaction counters，并发布完成事件。</p>
+            </div>
+          </div>
+          <h3>长时间空闲后的清理</h3>
+          <p>大约 65 分钟无活动后，Agent 可以清理旧 tool result：保留最后五个可清理结果；大型非 Read 结果写入 <code>tool-results</code> 文件；被清掉的 Read 结果之后必须重新读取。必要时还会移除旧 thinking block，保证 API transcript 合法。</p>
+          <div class="callout warn"><b>恢复会话的两层语义：</b>完整 <code>loaded.messages</code> 会进入 Agent/model context；终端只显示最近一段消息以避免刷屏。compact 后，旧 raw transcript 由 continuation summary 替代，这是设计行为。</div>
+        </div>
+      </section>
+
+      <section id="persist">
+        <div class="panel">
+          <h2>8. 持久化、恢复、重启和 rewind</h2>
+          <div class="grid">
+            <div class="card">
+              <h3>SessionStore</h3>
+              <p>会话保存为：</p>
+              <pre>&lt;CONFIG_DIR&gt;/projects/&lt;sanitized-cwd&gt;/&lt;session-id&gt;.jsonl</pre>
+              <p>JSONL 记录包含 <code>meta</code>、<code>message</code>、<code>reset</code>、topic/name、cost/cache metadata 和 saved system prompt metadata。</p>
+            </div>
+            <div class="card">
+              <h3>loadSession()</h3>
+              <ol>
+                <li>加载 JSONL 并替换当前 SessionStore。</li>
+                <li>恢复 topic、name、cost、cache timing、messages。</li>
+                <li>重建 file state、activity 和 context estimate。</li>
+                <li>兼容时复用 saved system prompt。</li>
+                <li>恢复远程状态并打印最近 transcript。</li>
+              </ol>
+            </div>
+          </div>
+          <h3>Checkpoint 与 rewind</h3>
+          <p>每个用户 turn 一个 checkpoint。每个文件在本 checkpoint 内只保存一次原始内容，支持代码和会话、仅会话、仅代码三种 rewind。会话 rewind 会截断 Agent.messages 并重置 todo/context；代码 rewind 保留对话，但插入重新读取受影响文件的提醒。</p>
+          <h3>进程重启</h3>
+          <p>restart state 会保存 session、model/effort、todos、draft/cursor、队列、checkpoint snapshot、restart loop 时间、peer identity 和 remote id。新进程恢复后可自动提交 continuation note 和排队消息。</p>
+        </div>
+      </section>
+
+      <section id="background">
+        <div class="panel">
+          <h2>9. 子 Agent 与后台任务</h2>
+          <div class="grid">
+            <div class="card">
+              <h3>Sub-agent</h3>
+              <p><code>runtime.spawnSubagent()</code> 创建独立 Agent 和独立 message history，共享配置、model、hooks、checkpoint 基础设施，但接收过滤后的工具集，并受最大深度限制。</p>
+              <p>子 Agent 的 usage 合并回 parent；失败会连同部分 assistant text 返回。</p>
+            </div>
+            <div class="card">
+              <h3>BackgroundTasks</h3>
+              <p><code>run_in_background</code> 的 Task 拿到独立 abort signal，立即返回 task id；完成后标记 completed/failed/killed，并转成主 Agent 可消费的 notification。</p>
+              <p>主 Agent 可以等待、读取输出，或用 TaskStop 终止后台任务。</p>
+            </div>
+          </div>
+          <div class="callout danger"><b>不要混淆两类 background：</b>后台 sub-agent/task 当前可达；旧版持久化 host session（<code>--headless --remote-id</code>、VirtualTerminal、网页启动后台会话）仍有 legacy 文件，但当前入口解析器不会把它们接入执行路径。</div>
+        </div>
+      </section>
+
+      <section id="remote">
+        <div class="panel">
+          <h2>10. UI、transcript 与远程发布</h2>
+          <p>本地 UI 事件和远程 viewer 使用同一条执行事件链，但远程通道只向 gateway 发出站请求。浏览器端当前只读，不再驱动 Agent。</p>
+          <div class="flow">
+            <div class="node"><b>API SSE</b><span>text/thinking/tool deltas</span></div><div class="arrow">→</div>
+            <div class="node"><b>streamEvent()</b><span>更新终端 renderer</span></div><div class="arrow">→</div>
+            <div class="node"><b>remote.js</b><span>batch/snapshot/status</span></div><div class="arrow">→</div>
+            <div class="node"><b>Gateway SSE</b><span>网页只读 viewer</span></div>
+          </div>
+          <h3>远程 transcript 事件</h3>
+          <p>当前 reducer 支持 <code>user</code>、<code>output</code>、流式 <code>text</code>/<code>thinking</code>、<code>tool</code>、<code>progress</code>、<code>sub</code> 和 <code>done</code>。长文本和工具输出会在 snapshot 中裁剪，snapshot 受条目数和大小限制。</p>
+          <h3>RemoteControl 的职责</h3>
+          <ol class="steps">
+            <li><code>POST /v1/remote/sessions</code> 注册会话。</li>
+            <li>打开 commands SSE；断线指数退避，404 时重新注册。</li>
+            <li>按顺序发送 event batch，必要时发送完整 snapshot。</li>
+            <li>发布状态、viewer count、bye 和 peer 消息。</li>
+            <li>关闭时发送 final bye。</li>
+          </ol>
+          <div class="callout"><b>当前命令边界：</b>RemoteControl 只处理 viewer 更新、snapshot 请求和 terminal-to-terminal peer。浏览器发来的 send、interrupt、dialog、options、suggest、list、output 等旧控制帧会被忽略；网页不回答本地 dialog。</div>
+        </div>
+      </section>
+
+      <section id="errors">
+        <div class="panel">
+          <h2>11. 错误、重试、限流和中断</h2>
+          <div class="grid three">
+            <div class="card"><h4>APIError</h4><p>统一保存 HTTP status、retryable、prompt-too-long、overload、retry-after 和 rate-limit 信息。</p></div>
+            <div class="card"><h4>可重试</h4><p>无 status、408、409、429 和 5xx。401/402 会转成 gateway-specific message。</p></div>
+            <div class="card"><h4>可中断</h4><p>模型请求、rate-limit wait、Bash、后台任务都绑定 abort signal。</p></div>
+          </div>
+          <h3>重试策略</h3>
+          <p><span class="file">src/ratelimit.js</span> 区分快速 429、已知 reset window、未知 reset、529 overloaded 和 exhausted retry budget。等待期间保持可 abort，并发布 <code>retry</code>、<code>rate_limit_wait</code>、<code>rate_limit_resume</code>、<code>reset</code> 等事件。</p>
+          <h3>Agent 层的错误分流</h3>
+          <ul>
+            <li>abort：保留部分 assistant text，返回 interrupted turn。</li>
+            <li>promptTooLong：进入一次必需 compact。</li>
+            <li>工具失败：通常变成模型可见的 <code>tool_result</code>，不直接终止整轮。</li>
+            <li>不可恢复错误：交给 REPL 或 print 层显示并结束当前 turn。</li>
+            <li>REPL 的 <code>finally</code>：完成 peer task、清 busy/rate-limit、发送排队内容。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="files">
+        <div class="panel">
+          <h2>12. 文件地图与当前边界</h2>
+          <table>
+            <thead><tr><th>文件</th><th>职责</th></tr></thead>
+            <tbody>
+              <tr><td class="file">src/main.js</td><td>参数解析、interactive/print 模式选择、启动入口。</td></tr>
+              <tr><td class="file">src/runtime.js</td><td>配置、system prompt、hooks、MCP、tools、background tasks、主 Agent 的依赖注入。</td></tr>
+              <tr><td class="file">src/agent.js</td><td>消息状态、Agent.run、model/tool loop、tool dispatch、compact、usage 和 context accounting。</td></tr>
+              <tr><td class="file">src/api.js</td><td>gateway 参数、Anthropic SDK、SSE 事件解析、usage/cost、APIError。</td></tr>
+              <tr><td class="file">src/ui/repl.js</td><td>终端输入、turn 生命周期、renderer、hooks 回调、session restore、UI/remote event wiring。</td></tr>
+              <tr><td class="file">src/tools/</td><td>文件、Bash、搜索、Web、Task、交互和 MCP 工具实现。</td></tr>
+              <tr><td class="file">src/session.js</td><td>JSONL 会话保存、加载、列表和 metadata。</td></tr>
+              <tr><td class="file">src/checkpoints.js</td><td>文件快照、代码/对话 rewind。</td></tr>
+              <tr><td class="file">src/remote.js</td><td>只读远程 transcript/status/snapshot、peer mailbox 客户端。</td></tr>
+              <tr><td class="file">src/print.js</td><td>非交互文本、JSON、stream-JSON 输出；复用同一 Runtime/Agent。</td></tr>
+            </tbody>
+          </table>
+          <details open>
+            <summary>与旧 ARCHITECTURE.md 的主要差异</summary>
+            <div>
+              <ul>
+                <li>旧文档描述的网页 send/interrupt/dialog/options/suggest/list/output 控制通道已从当前远程实现移除。</li>
+                <li>旧文档描述的 headless host session 入口与当前 <code>main.js</code> 参数解析不一致。</li>
+                <li>当前网页只读查看本地终端发布的 session state、transcript、todos、工具活动和连接状态。</li>
+              </ul>
+            </div>
+          </details>
+          <div class="callout warn"><b>阅读原则：</b>如本页面与旧架构文档冲突，以 <code>src/agent.js</code>、<code>src/runtime.js</code>、<code>src/ui/repl.js</code>、<code>src/api.js</code> 和 <code>src/remote.js</code> 的当前实现为准。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer wrap">
+    文档随当前源码整理，生成于 2026-10-21。文件：<code>agent-execution.html</code>。无外部 CSS、JS 或 CDN 依赖，直接用浏览器打开即可。
+  </footer>
+  <script>
+    const links = [...document.querySelectorAll('.toc a')];
+    const sections = links.map((link) => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+    const markActive = () => {
+      let current = sections[0];
+      for (const section of sections) if (section.getBoundingClientRect().top <= 120) current = section;
+      links.forEach((link) => link.classList.toggle('active', link.getAttribute('href') === '#' + current.id));
+    };
+    addEventListener('scroll', markActive, { passive: true });
+    markActive();
+  </script>
+</body>
+</html>
