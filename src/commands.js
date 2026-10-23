@@ -15,12 +15,11 @@ import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
 import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
-import { displayPath, resolvePath } from './utils/paths.js';
+import { displayPath, normalizeDir, resolvePath } from './utils/paths.js';
 import { activePromptName, listPromptProfiles, loadActivePrompt, promptDirectory, promptNameForText, savePrompt, setActivePrompt } from './prompt-profiles.js';
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
-import { describeHost, normalizeDir } from './host.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);

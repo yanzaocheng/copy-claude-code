@@ -33,6 +33,7 @@ import { BackgroundSessions, markEnded, tailFile } from './background.js';
 import { listConversations, deleteConversation, CONVERSATION_ID } from './history.js';
 import { checkForUpdate, installUpdate } from './updater.js';
 import { ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED } from './supervisor.js';
+import { normalizeDir } from './utils/paths.js';
 
 export const ENTRY = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -212,23 +213,8 @@ export function describeHost(env = process.env) {
 
 // ---------------------------------------------------------------- directories (the list command)
 
-// `input` as an absolute directory of this computer: "" (or ~) is the home directory, "D:" is the root of D:, and
-// forward slashes do on Windows too. null when it is not absolute.
-export function normalizeDir(input, { platform = process.platform, home = os.homedir() } = {}) {
-  const p = platform === 'win32' ? path.win32 : path.posix;
-  let s = String(input ?? '').trim();
-  if (!s || s === '~') return home;
-  if (s.startsWith('~/') || s.startsWith('~\\')) s = p.join(home, s.slice(2));
-  if (platform === 'win32') {
-    s = s.replace(/\//g, '\\');
-    if (/^[A-Za-z]:$/.test(s)) s += '\\';
-    if (!/^([A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(s)) return null;
-    s = s.replace(/^[a-z]:/, (d) => d.toUpperCase());
-  } else if (!s.startsWith('/')) {
-    return null;
-  }
-  return p.resolve(s);
-}
+// normalizeDir (an absolute directory of this computer, or null) lives in utils/paths.js: the terminal needs it
+// for /cd without loading this service.
 
 const describeFsError = (e, dir) => (e.code === 'ENOENT' || e.code === 'ENOTDIR' ? `目录不存在：${dir}`
   : e.code === 'EACCES' || e.code === 'EPERM' ? `没有权限读取：${dir}`
@@ -631,7 +617,7 @@ export class HostService {
     }
     // the background sessions are the account's: gone with the login, back with a login
     if (!this.login) this.sessions?.suspendAll();
-    else this.sessions?.resumeAll();
+    else this.sessions?.resumeAll().catch((e) => this.log(`could not open the background sessions again: ${e.message}`));
     this.streamAbort?.abort();
     this.wakeUp();
   }
@@ -941,7 +927,7 @@ export class HostService {
     }
     const label = typeof name === 'string' && name.trim() ? cleanName(name) : '';
     if (window === false) {
-      const r = this.needSessions().open({ sessionId, cwd: dir, name: label, resume, model });
+      const r = await this.needSessions().open({ sessionId, cwd: dir, name: label, resume, model });
       this.log(`opened a background session in ${dir} for ${sessionId}${label ? ` (${label})` : ''}${resume ? `, resuming ${resume}` : ''}`);
       return { pid: r.pid };
     }
@@ -1058,11 +1044,26 @@ export async function checkCommand() {
 }
 
 // Whether the code now on disk starts: `host check` in a process of its own. null, or what went wrong.
+// Asynchronous: the check takes seconds, and meanwhile the background sessions' tick and a stop signal still run.
 function newVersionFails() {
-  const r = spawnSync(process.execPath, [ENTRY, 'host', 'check'], { cwd: os.homedir(), env: serviceEnv(), windowsHide: true, encoding: 'utf8', timeout: 60_000 });
-  if (r.status === 0) return null;
-  const said = `${r.stderr || ''}${r.stdout || ''}`.trim().split(/\r?\n/).filter(Boolean).slice(-6).join(' | ');
-  return said || r.error?.message || `exit code ${r.status}`;
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(process.execPath, [ENTRY, 'host', 'check'], { cwd: os.homedir(), env: serviceEnv(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) { resolve(e.message); return; }
+    let out = '';
+    const take = (d) => { out = (out + d).slice(-16_000); };
+    child.stdout.setEncoding('utf8').on('data', take);
+    child.stderr.setEncoding('utf8').on('data', take);
+    const timer = setTimeout(() => { take('\ntimed out after 60 s'); child.kill(); }, 60_000);
+    child.on('error', (e) => { clearTimeout(timer); resolve(e.message); });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) { resolve(null); return; }
+      const said = out.trim().split(/\r?\n/).filter(Boolean).slice(-6).join(' | ');
+      resolve(said || `exit code ${code ?? signal}`);
+    });
+  });
 }
 
 // `claude-pro host run [--background]`: the service, until it is stopped. Returns the exit code.
@@ -1086,7 +1087,7 @@ export async function runHost({ background = false } = {}) {
   let service = null;
   const stop = () => service?.stop();
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, stop);
-  sessions.start();
+  await sessions.start();
   for (;;) {
     service = new HostService({ id: hostId(), log, background, sessions });
     sessions.onChange = () => service.reportState();
@@ -1097,7 +1098,7 @@ export async function runHost({ background = false } = {}) {
       log(`the service stopped on an error: ${e.stack || e.message}`);
     }
     if (!service.reloading) break;
-    const failure = newVersionFails();
+    const failure = await newVersionFails();
     if (failure) {
       log(`the new version does not start, this one goes on: ${failure}`);
       continue;
@@ -1116,7 +1117,7 @@ export async function runHost({ background = false } = {}) {
     if (handedOver) { log(`the new version runs (pid ${pid}): this one leaves`); return 0; }
     if (!takeLock()) { log('the new version has the lock but did not report yet: this one leaves'); return 0; }
     log(`the new version did not come up (pid ${pid}), this one goes on; see the lines above`);
-    sessions.start();
+    await sessions.start();
   }
   sessions.close();
   releaseLock();

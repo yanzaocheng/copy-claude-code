@@ -35,3 +35,21 @@ export function isInside(child, parent) {
 export function samePath(a, b) {
   return isWin ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
 }
+
+// `input` as an absolute directory: "" (or ~) is the home directory, "D:" is the root of D:, and forward slashes do
+// on Windows too. null when it is not absolute.
+export function normalizeDir(input, { platform = process.platform, home = os.homedir() } = {}) {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  let s = String(input ?? '').trim();
+  if (!s || s === '~') return home;
+  if (s.startsWith('~/') || s.startsWith('~\\')) s = p.join(home, s.slice(2));
+  if (platform === 'win32') {
+    s = s.replace(/\//g, '\\');
+    if (/^[A-Za-z]:$/.test(s)) s += '\\';
+    if (!/^([A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(s)) return null;
+    s = s.replace(/^[a-z]:/, (d) => d.toUpperCase());
+  } else if (!s.startsWith('/')) {
+    return null;
+  }
+  return p.resolve(s);
+}
