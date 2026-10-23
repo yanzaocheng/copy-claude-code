@@ -23,7 +23,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import fsp from 'node:fs/promises';
+import { spawn, spawnSync, execFile } from 'node:child_process';
 import { listPeers, controlPeer } from './peers.js';
 
 export const CRASH_WINDOW_MS = 10 * 60_000;
@@ -35,6 +36,13 @@ const STARTING_MS = 30_000; // a session that has not shown up in the registry b
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A failed/partial process table is not evidence that no sessions run: never launch from one.
+const run = (cmd, args) => new Promise((resolve, reject) => {
+  execFile(cmd, args, { windowsHide: true, encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+    if (error) reject(error);
+    else resolve(String(stdout || ''));
+  });
+});
 
 export function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -45,7 +53,7 @@ export function pidAlive(pid) {
 // ([{pid, ppid}] each): the processes started with --headless --remote-id <id> (bin/claude-pro.js runs the
 // supervisor, which runs the session with the same arguments). A supervisor is one whose parent is not one of them;
 // a session without its supervisor (killed) is in `sessions` alone. Read from the system's list of processes.
-export function liveSessionProcesses() {
+export async function liveSessionProcesses() {
   let rows = [];
   try {
     if (process.platform === 'win32') {
@@ -54,23 +62,23 @@ export function liveSessionProcesses() {
         // a tab between the fields: "`t" in a string of double quotes
         "Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%--headless%'\" | ForEach-Object { \"{0}`t{1}`t{2}\" -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }",
       ].join('\n');
-      const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, encoding: 'utf8', timeout: 30_000 });
-      rows = String(r.stdout || '').split(/\r?\n/).filter(Boolean).map((l) => { const [pid, ppid, ...rest] = l.split('\t'); return { pid: Number(pid), ppid: Number(ppid), args: rest.join('\t') }; });
+      const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]);
+      rows = out.split(/\r?\n/).filter(Boolean).map((l) => { const [pid, ppid, ...rest] = l.split('\t'); return { pid: Number(pid), ppid: Number(ppid), args: rest.join('\t') }; });
     } else if (process.platform === 'linux') {
-      for (const d of fs.readdirSync('/proc')) {
+      for (const d of await fsp.readdir('/proc')) {
         if (!/^\d+$/.test(d)) continue;
         try {
-          const args = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8').split('\0').join(' ');
+          const args = (await fsp.readFile(`/proc/${d}/cmdline`, 'utf8')).split('\0').join(' ');
           if (!args.includes('--headless')) continue;
-          const stat = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+          const stat = await fsp.readFile(`/proc/${d}/stat`, 'utf8');
           rows.push({ pid: Number(d), ppid: Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]), args });
         } catch { /* gone meanwhile */ }
       }
     } else {
-      const r = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 30_000 });
-      rows = String(r.stdout || '').split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), args: m[3] }));
+      const out = await run('ps', ['-axo', 'pid=,ppid=,command=']);
+      rows = out.split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), args: m[3] }));
     }
-  } catch { /* nothing known: nothing taken for running */ }
+  } catch (e) { throw new Error(`Cannot inspect background session processes: ${e.message}`, { cause: e }); }
   const byId = new Map();
   for (const row of rows) {
     const id = /--remote-id\s+"?([A-Za-z0-9_-]{8,64})/.exec(row.args)?.[1];
@@ -119,13 +127,15 @@ export function killTree(pid) {
 
 export class BackgroundSessions {
   // dir: CONFIG_DIR. entry: bin/claude-pro.js. env: what the sessions get. onChange(): something to report.
-  constructor({ dir, entry, env = process.env, log = () => {}, onChange = () => {}, execPath = process.execPath }) {
+  constructor({ dir, entry, env = process.env, log = () => {}, onChange = () => {}, execPath = process.execPath, scanProcesses = liveSessionProcesses }) {
     this.dir = dir;
     this.entry = entry;
     this.env = env;
     this.log = log;
     this.onChange = onChange;
     this.execPath = execPath;
+    this.scanProcesses = scanProcesses;
+    this.generation = 0; // invalidate pending scans on close/logout, even if a login follows immediately
     this.sessions = new Map(); // sessionId -> record (running, starting, restarting, failed, or suspended)
     this.ended = []; // the public records of the sessions that ended, newest first
     this.timer = null;
@@ -137,9 +147,14 @@ export class BackgroundSessions {
   logFile(id) { return path.join(this.dir, 'logs', 'sessions', `${id}.log`); }
 
   // The sessions saved by the service before: taken over when they still run, opened again when not.
-  start() {
+  async start() {
+    this.closed = false;
+    const generation = ++this.generation;
+    clearInterval(this.timer);
+    clearInterval(this.rotateTimer);
     let saved = [];
     let live = null; // the processes of the sessions running now, read once
+    let scanError = null; // a scan that failed is not evidence that nothing runs: no session is opened from one
     try { saved = JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { /* none */ }
     for (const s of Array.isArray(saved) ? saved : []) {
       if (!s || !ID.test(String(s.sessionId || '')) || typeof s.cwd !== 'string') continue;
@@ -147,12 +162,17 @@ export class BackgroundSessions {
       this.sessions.set(rec.sessionId, rec);
       if (s.state === 'failed') { rec.state = 'failed'; rec.error = s.error || null; continue; }
       if (s.suspended) { rec.suspended = true; rec.state = 'exited'; continue; }
-      live ??= liveSessionProcesses();
+      if (!live && !scanError) {
+        try { live = await this.scanProcesses(); }
+        catch (e) { scanError = e; }
+      }
+      if (this.closed || this.generation !== generation) return;
+      if (scanError) { this.fail(rec, scanError.message); continue; }
       if (this.adopt(rec, live.get(rec.sessionId), s.pid)) {
         rec.startedAt = s.startedAt || null;
       } else {
         this.log(`opening the background session ${rec.sessionId} again in ${rec.cwd}`);
-        this.launch(rec, { resume: true });
+        this.spawnSession(rec, { resume: true }); // the processes were just looked at
       }
     }
     this.closed = false;
@@ -195,12 +215,12 @@ export class BackgroundSessions {
   }
 
   // A new background session for the web page: {sessionId, cwd, name, conversationId (to resume), model}.
-  open({ sessionId, cwd, name = '', resume = null, model = null }) {
+  async open({ sessionId, cwd, name = '', resume = null, model = null }) {
     if (this.sessions.get(sessionId) && this.alive(this.sessions.get(sessionId))) throw new Error('这个会话已经在运行');
     const rec = this.record({ sessionId, cwd, name, conversationId: resume, model });
     this.sessions.set(sessionId, rec);
     this.ended = this.ended.filter((e) => e.sessionId !== sessionId);
-    this.launch(rec, { resume: Boolean(resume), first: true });
+    await this.launch(rec, { resume: Boolean(resume), first: true });
     this.persist();
     this.onChange();
     return { pid: rec.pid };
@@ -230,11 +250,36 @@ export class BackgroundSessions {
   // Start the session's processes; with `resume` (opened again: after a crash, a restart of the service, a login)
   // only when none of them runs (see adopt): opening it again then would make two copies of one session.
   launch(rec, { resume = false, first = false } = {}) {
-    if (resume && this.adopt(rec, liveSessionProcesses().get(rec.sessionId))) {
-      this.persist();
-      this.onChange();
-      return;
-    }
+    if (rec.launching) return rec.launching;
+    const generation = this.generation;
+    const cancelled = () => this.closed || this.suspended || rec.suspended || rec.stopping ||
+      this.generation !== generation || this.sessions.get(rec.sessionId) !== rec;
+    const task = (async () => {
+      if (cancelled() || rec.child) return;
+      if (resume) {
+        let live;
+        try { live = await this.scanProcesses(); }
+        catch (e) {
+          if (cancelled()) return;
+          this.fail(rec, e.message);
+          throw e;
+        }
+        if (cancelled() || rec.child) return;
+        if (this.adopt(rec, live.get(rec.sessionId))) {
+          this.persist();
+          this.onChange();
+          return;
+        }
+      }
+      this.spawnSession(rec, { resume, first });
+    })();
+    // by identity: a scan overtaken by suspend/resume leaves the newer launch's promise in place
+    const tracked = task.finally(() => { if (rec.launching === tracked) rec.launching = null; });
+    rec.launching = tracked;
+    return tracked;
+  }
+
+  spawnSession(rec, { resume = false, first = false } = {}) {
     const args = [this.entry, '--headless', '--remote-id', rec.sessionId];
     if (resume && rec.conversationId) args.push('--resume', rec.conversationId);
     if (first && rec.name) args.push('--name', rec.name);
@@ -299,7 +344,7 @@ export class BackgroundSessions {
     rec.exitCode = code;
     this.log(`the background session ${rec.sessionId} stopped (${code ?? 'no exit code'}): opening it again (${rec.crashes.length}/${MAX_CRASHES} in ${CRASH_WINDOW_MS / 60_000} minutes)`);
     this.onChange();
-    setTimeout(() => { if (!this.closed && this.sessions.get(rec.sessionId) === rec && rec.state === 'restarting' && !this.alive(rec)) this.launch(rec, { resume: true }); }, 1000).unref?.();
+    setTimeout(() => { if (!this.closed && this.sessions.get(rec.sessionId) === rec && rec.state === 'restarting' && !this.alive(rec)) this.launch(rec, { resume: true }).catch((e) => this.fail(rec, e.message)); }, 1000).unref?.();
   }
 
   fail(rec, error, code = null) {
@@ -332,7 +377,7 @@ export class BackgroundSessions {
     let changed = false;
     const peers = listPeers();
     for (const rec of this.sessions.values()) {
-      if (rec.state === 'failed' || rec.suspended) continue;
+      if (rec.state === 'failed' || rec.suspended || rec.launching) continue;
       const p = peers.find((x) => x.remoteId === rec.sessionId);
       if (p) {
         for (const [k, v] of [['cwd', p.cwd], ['name', p.name], ['conversationId', p.conversationId], ['childPid', p.pid]]) {
@@ -403,7 +448,7 @@ export class BackgroundSessions {
     rec.crashes = [];
     rec.restarts = 0;
     rec.state = 'starting';
-    this.launch(rec, { resume: true });
+    await this.launch(rec, { resume: true });
     this.persist();
     this.onChange();
     return {};
@@ -414,8 +459,13 @@ export class BackgroundSessions {
   async suspendAll() {
     if (this.suspended) return;
     this.suspended = true;
-    const running = [...this.sessions.values()].filter((r) => this.alive(r));
-    for (const rec of running) rec.suspended = true;
+    this.generation++; // a process scan in flight starts nothing any more
+    // everything that has a process of it, or is about to start one: kept for resumeAll
+    const running = [];
+    for (const rec of this.sessions.values()) {
+      if (this.alive(rec)) running.push(rec);
+      if (this.alive(rec) || rec.launching || rec.state === 'starting' || rec.state === 'restarting') rec.suspended = true;
+    }
     await Promise.all(running.map(async (rec) => {
       const peer = this.peerOf(rec);
       if (peer) await controlPeer(peer, { action: 'exit' }).catch(() => {});
@@ -426,15 +476,16 @@ export class BackgroundSessions {
     this.onChange();
   }
 
-  resumeAll() {
+  async resumeAll() {
     if (!this.suspended && ![...this.sessions.values()].some((r) => r.suspended)) return;
     this.suspended = false;
-    for (const rec of this.sessions.values()) {
-      if (!rec.suspended) continue;
+    const waking = [...this.sessions.values()].filter((r) => r.suspended);
+    for (const rec of waking) {
       rec.suspended = false;
       rec.crashes = [];
-      this.launch(rec, { resume: true });
+      rec.launching = null; // a scan cancelled by suspendAll must not hold this one back
     }
+    await Promise.all(waking.map((rec) => this.launch(rec, { resume: true }).catch((e) => this.fail(rec, e.message))));
     this.persist();
     this.onChange();
   }
