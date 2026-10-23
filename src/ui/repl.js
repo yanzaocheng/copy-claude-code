@@ -177,9 +177,9 @@ export class App {
     this.controller = null;
     this.queue = [];
     this.dialogs = [];
-    // Windows Terminal may turn Ctrl+V into a bracketed-paste sequence instead of a Ctrl+V key.
-    // The clipboard reader handles the actual text/image, so suppress the sequence's raw contents.
-    this.bracketedPaste = false;
+    // Some terminals turn Ctrl+V into a bracketed-paste sequence. Keep its raw text as a fallback
+    // when the platform clipboard helper is unavailable, while still preferring clipboard images.
+    this.bracketedPaste = null;
     this.active = []; // running tool entries, in call order
     this.pendingToolBlocks = new Map(); // streaming tool_use blocks, by index
     this.md = null;
@@ -1098,14 +1098,14 @@ export class App {
     this.screen.setFind(f.text);
   }
 
-  pasteClipboard(target = this.clipboardEditor()) {
+  pasteClipboard(target = this.clipboardEditor(), fallbackText = '') {
     if (this.readingClipboard || this.exiting) return;
     if (!target && !this.finder) return; // selection dialogs have no text field to paste into
     this.readingClipboard = true;
     this.flash('Reading clipboard…');
     const allowImage = Boolean(target?.insertImage);
     const image = allowImage
-      ? readClipboardImage().catch(() => ({ image: null }))
+      ? readClipboardImage().catch((e) => ({ image: null, error: e.message }))
       : Promise.resolve({ image: null });
     image.then((r) => {
       if (r.image && target) {
@@ -1115,10 +1115,14 @@ export class App {
         return;
       }
       return readClipboardText().then((text) => {
-        if (!text || this.exiting) return;
-        const clean = text.replace(/\x1b\[20[01]~/g, '');
-        if (target) target.insertPaste(clean);
-        else this.insertFindText(clean);
+        if (this.exiting) return;
+        const clean = String(text || '').replace(/\x1b\[20[01]~/g, '') || String(fallbackText || '').replace(/\x1b\[20[01]~/g, '');
+        if (clean) {
+          if (target) target.insertPaste(clean);
+          else this.insertFindText(clean);
+        } else if (r.error) {
+          this.flash(`Could not read the clipboard: ${r.error}`, 'warn');
+        }
       });
     }).catch((e) => {
       if (!this.exiting) this.flash(`Could not read the clipboard: ${e.message}`, 'warn');
@@ -1131,10 +1135,19 @@ export class App {
   onKey(str, key) {
     if (this.exiting) return;
     // Some terminals implement Ctrl+V as bracketed paste: readline reports paste-start/end and
-    // emits the clipboard contents as ordinary keys between them. Read the system clipboard once
-    // (which preserves images) and do not feed those raw keys into the editor as well.
+    // emits the clipboard contents as ordinary keys between them. Prefer the system clipboard
+    // (which preserves images), but retain the terminal payload as a text fallback.
     if (this.bracketedPaste) {
-      if (key.name === 'paste-end' || key.sequence === '\x1b[201~') this.bracketedPaste = false;
+      if (key.name === 'paste-end' || key.sequence === '\x1b[201~') {
+        const fallback = this.bracketedPaste.raw;
+        this.bracketedPaste = null;
+        this.pasteClipboard(undefined, fallback);
+      } else if (key.name === 'return' || key.name === 'enter') {
+        // Keep CRLF intact; Editor.insertPaste normalizes line endings once after the clipboard read.
+        this.bracketedPaste.raw += str || '\n';
+      } else if (str) {
+        this.bracketedPaste.raw += str;
+      }
       return;
     }
     if (this.screen.full) {
@@ -1159,8 +1172,7 @@ export class App {
       }
     }
     if (key.name === 'paste-start' || key.sequence === '\x1b[200~') {
-      this.bracketedPaste = true;
-      this.pasteClipboard();
+      this.bracketedPaste = { raw: '' };
       return;
     }
     if (key.ctrl && key.name === 'c' && this.finder && !this.dialogs.length) { this.closeFind(); return; } // not the hidden input's text
