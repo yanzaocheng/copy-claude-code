@@ -108,13 +108,13 @@ sequenceDiagram
 本机的会话经 [`src/peers.js`](src/peers.js) 的 `PeerNode` 互发（`CONFIG_DIR/peers/<id>.json` 登记、127.0.0.1 上的小 HTTP 服务）；同一网关账户下其他电脑上的会话经网关，复用远程控制那条连接（`RemoteControl`）：
 
 - **在线**：登录了网关的电脑上，交互会话启动时连上网关（见 3.1.2 的"上线与下线"）。注册时带 `machine`（`machineName()`：`CLAUDE_PRO_MACHINE_NAME` 或主机名；电脑服务注册时用同一个值，网页据此把会话归到电脑下）和 `peerId`（本机 PeerNode 的 id，列表里据此去掉本机已经能直接联系的会话）。
-- **列表**：`GET /v1/remote/sessions` → 同账户的会话（在线的在前）。`App.refreshRemotePeers()` 只留在线、未结束、不是自己、不在本机的，变成 `{id, name, machine, cwd, remote: true, label: 'machine/name'}` 存在 `remotePeers`；连上时、每 60 秒、输入 `&` 时（超过 10 秒没刷新）、发送时找不到名字时刷新。
-- **寻址**：`resolvePeer(local, remote, ref)`：本机名字优先；然后 `machine/name`、只有一个远端会话叫这个名字、只有一个会话的电脑名、（模型发的才有）id 前缀；多个匹配时报歧义。用户输入的前缀是 `&`（`@` 只用于文件）：`suggest()` 在输入开头是 `&` 时给出本机和远端的会话（`peerSuggestions`），`sendTypedToPeer` 发送。
+- **列表**：`GET /v1/remote/sessions` → 同账户的会话（在线的在前）。`App.refreshRemotePeers()` 只留在线、未结束、不是自己、不在本机的，变成 `{id, name, machine, cwd, remote: true, label: 'machine/name'}` 存在 `remotePeers`；连上时、每 60 秒、输入 `@` 时（超过 10 秒没刷新）、发送时找不到名字时刷新。
+- **寻址**：`resolvePeer(local, remote, ref)`：本机名字优先；然后 `machine/name`、只有一个远端会话叫这个名字、只有一个会话的电脑名、（模型发的才有）id 前缀；多个匹配时报歧义。用户与模型使用的会话前缀统一为 `@`：`suggest()` 在同一个 `@` 入口中合并文件和本机/远端会话补全，`sendTypedToPeer` 发送。
 - **发送**：`POST /v1/remote/sessions/:目标/messages {from: 自己的 id, kind, text, inReplyTo}` → `{id, delivered}`（不重试：任务发两次会做两次）。网关按发送方的注册信息填 `from`，推到目标命令流：`{type:'peer', cid, kind, text, inReplyTo, from:{id, name, machine, host, cwd}}`。task 发给不在线的会话返回 409；reply 进目标的信箱（内存，24 小时，100 条 / 4 MB），目标重连时（viewers 之后）按顺序重推。
 - **接收**：`RemoteControl.peerMessage` 按 `cid` 去重（重推的消息只确认），交给 `App.onPeerMessage`（`from.name` 是 `machine/name`，`from.remote = true`），然后用 `POST …/results {cid, ok: true}` 确认，确认后网关从信箱删除。之后的流程和本机消息相同：任务排队成一轮，`answerPeers` 在这一轮结束后把最终文本作为 reply 发回，远端的经网关（`remote.sendPeer`），本机的经 PeerNode。
-- **`&` 补全**：`suggest()` 在光标前是 `(行首|空白)&词` 时都给出会话（`peerSuggestions`，替换范围是这个词），所以句中的 `&公` 也能补全；全角 `＆` 同样处理。行首的 `&名字 任务` 直接发送；其他位置的 `&名字` 由 `peerMentions` 解析后作为 system-reminder 告诉模型是哪个会话、可以用 MessagePeer 联系它。附带的图片如果来自文件（`source`），把路径也告诉模型。
+- **`@` 补全**：`suggest()` 在光标前是 `(行首|空白)@词` 时把文件和会话放进同一列表（文件保留目录与带空格路径的引号逻辑，会话项显示本机/电脑和目录），所以句中的 `@公` 也能补全。行首命中会话的 `@名字 任务` 直接发送；文件和会话同名时用 `@./名字` 强制文件；其他位置的 `@名字` 由 `peerMentions` 解析后作为 system-reminder 告诉模型是哪个会话、可以用 MessagePeer 联系它。附带的图片如果来自文件（`source`），把路径也告诉模型。
 - **名字**：`/rename`（`App.renameSession`）改本机 PeerNode 的名字（`setName` 在本机重名时加 -2），没有 PeerNode 时记在 `sessionName`；同时作为对话标题 `customTitle`（`sessionLabel()` 优先用它，`refreshTopic` 不再改标题），写进会话文件的 meta `name`（`/resume` 时恢复名字和标题）；再向网关注册一次（网关用注册时的 name 填 `from`），并推一次状态（网关列表用状态里的 name）。名字允许任何文字的字母（`cleanName` 用 `\p{L}\p{M}\p{N}`）。
-- 测试：[`test/remote.test.js`](test/remote.test.js) 里假网关列出另一台电脑的会话：输入 `&` 弹出它、`&公司 …` 发任务、回答显示并被确认、那边发来的任务跑完后经网关回答、重推的任务只确认不再跑、`&` 在行中补全、`/rename` 重新注册新名字。
+- 测试：[`test/remote.test.js`](test/remote.test.js) 里假网关列出另一台电脑的会话：输入 `@` 弹出它（与文件补全混合）、`@公司 …` 发任务、回答显示并被确认、那边发来的任务跑完后经网关回答、重推的任务只确认不再跑、`@` 在行中补全、`/rename` 重新注册新名字。
 
 ### 3.1.4 输入框的光标与回退菜单
 

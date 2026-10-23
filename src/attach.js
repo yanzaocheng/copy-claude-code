@@ -30,7 +30,7 @@ export function findBackground(ref, sessions = backgroundSessions()) {
 
 function choose(sessions, io) {
   io.stdout.write('Background sessions on this computer:\n');
-  sessions.forEach((p, i) => io.stdout.write(`  ${i + 1}. &${p.name}  ${p.cwd}${p.remoteId ? `  (${p.remoteId})` : ''}\n`));
+  sessions.forEach((p, i) => io.stdout.write(`  ${i + 1}. @${p.name}  ${p.cwd}${p.remoteId ? `  (${p.remoteId})` : ''}\n`));
   const rl = readline.createInterface({ input: io.stdin, output: io.stdout });
   return new Promise((resolve) => {
     rl.question(`Which one? [1-${sessions.length}, Enter for 1] `, (answer) => {
@@ -108,11 +108,11 @@ export async function attachCommand(args = [], io = { stdin: process.stdin, stdo
   const ref = args.find((a) => !a.startsWith('-'));
   let peer = ref ? findBackground(ref, sessions) : sessions.length === 1 ? sessions[0] : await choose(sessions, io);
   if (!peer) {
-    io.stderr.write(`No background session called "${ref}". These run here: ${sessions.map((p) => `&${p.name}`).join(', ')}\n`);
+    io.stderr.write(`No background session called "${ref}". These run here: ${sessions.map((p) => `@${p.name}`).join(', ')}\n`);
     await keepOpen(args, io);
     return 1;
   }
-  const label = `&${peer.name}`;
+  const label = `@${peer.name}`;
   io.stdin.setRawMode(true);
   io.stdin.resume();
   let how;

@@ -99,7 +99,7 @@ export function hydrate(items) {
 function shownUserText(text) {
   return String(text)
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .replace(/<peer-message from="([^"]*)" kind="(task|reply)">\n?/g, (_, from, kind) => `✉ ${kind === 'reply' ? 'answer from' : 'task from'} &${from}: `)
+    .replace(/<peer-message from="([^"]*)" kind="(task|reply)">\n?/g, (_, from, kind) => `✉ ${kind === 'reply' ? 'answer from' : 'task from'} @${from}: `)
     .replace(/\n?<\/peer-message>/g, '')
     .trim();
 }

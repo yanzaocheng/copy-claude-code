@@ -503,9 +503,9 @@ export class Screen {
     return { anchor: { ...p, col: from }, focus: { ...p, col: to } };
   }
 
-  // A mouse report (fullscreen). Returns {copy: text} when a selection was made, for the caller to put on the
-  // clipboard. Drag to select (the view scrolls at its edges), double-click a word, triple-click a line; a click
-  // clears the selection; a click on the "Jump to bottom" bar goes there.
+  // A mouse report (fullscreen). Mouse selection only highlights text; Ctrl+C copies it. Drag to select (the view
+  // scrolls at its edges), double-click a word, triple-click a line; a click clears the selection; a click on the
+  // "Jump to bottom" bar goes there.
   mouse({ button, x, y, release }) {
     if (!this.full || this.closed) return null;
     if (button & 64) return null; // the wheel: the caller scrolls
@@ -526,8 +526,7 @@ export class Screen {
         this.selection = sel;
         this.dragging = false;
         this.draw();
-        const text = sel ? this.selectedText() : '';
-        return text ? { copy: text } : null;
+        return null;
       }
       this.selection = { anchor: p, focus: { ...p }, moved: false };
       this.dragging = true;
@@ -547,8 +546,7 @@ export class Screen {
     this.dragging = false;
     if (!this.selection.moved) { this.clearSelection(); return null; } // a plain click
     this.lastClick.count = 0; // a drag: the next click starts a count of its own
-    const text = this.selectedText();
-    return text ? { copy: text } : null;
+    return null;
   }
 
   // Scroll the conversation up (`rows` > 0) or down. 'top' and 'bottom' go to its ends.

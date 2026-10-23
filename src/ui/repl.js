@@ -27,7 +27,7 @@ import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { estimateTokens } from '../agent.js';
-import { readClipboardImage, imageFromFile, watchClipboard, writeClipboard, readClipboardText } from '../utils/clipboard.js';
+import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn, imageSize } from '../utils/images.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
@@ -85,9 +85,6 @@ export function remoteImages(images) {
     return { media_type: type, data };
   });
 }
-
-const FOCUS_EVENTS_ON = '\x1b[?1004h';
-const FOCUS_EVENTS_OFF = '\x1b[?1004l';
 
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '✳', '✢', '·'];
 const VERBS = ['Thinking', 'Pondering', 'Crafting', 'Brewing', 'Computing', 'Conjuring', 'Cooking', 'Musing', 'Noodling', 'Percolating', 'Ruminating', 'Synthesizing', 'Working', 'Tinkering', 'Mulling', 'Deliberating', 'Churning', 'Forging', 'Hatching', 'Simmering'];
@@ -180,6 +177,9 @@ export class App {
     this.controller = null;
     this.queue = [];
     this.dialogs = [];
+    // Windows Terminal may turn Ctrl+V into a bracketed-paste sequence instead of a Ctrl+V key.
+    // The clipboard reader handles the actual text/image, so suppress the sequence's raw contents.
+    this.bracketedPaste = false;
     this.active = []; // running tool entries, in call order
     this.pendingToolBlocks = new Map(); // streaming tool_use blocks, by index
     this.md = null;
@@ -257,7 +257,6 @@ export class App {
     if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
-    this.watchCopies();
     const cleanup = () => this.restoreTerminal();
     process.on('exit', cleanup);
     process.on('SIGTERM', () => this.exit(143));
@@ -392,8 +391,6 @@ export class App {
     this.restored = true;
     try {
       this.screen.close({ keepTitle: handOver });
-      this.clipboardWatch?.close();
-      if (this.clipboardWatch) this.stdout.write(FOCUS_EVENTS_OFF);
       this.stdout.write(handOver ? ESC.showCursor : ESC.bracketedPasteOff + ESC.showCursor);
       if (!handOver && this.stdin.isTTY) this.stdin.setRawMode(false);
     } catch { /* ignore */ }
@@ -451,7 +448,7 @@ export class App {
   // This session's name for the others.
   peerLabel() { return this.peers?.name || this.sessionName || cleanName(path.basename(this.cwd)) || 'claude-pro'; }
 
-  // /rename: the session's name, for the other sessions (&name, here and at the gateway) and as the conversation's
+  // /rename: the session's name, for the other sessions (@name, here and at the gateway) and as the conversation's
   // title (the tab, /resume, the web page), instead of the topic. Returns the name it got: name-2... when another
   // session on this computer has it.
   renameSession(name) {
@@ -476,11 +473,11 @@ export class App {
       if (!found.peer && !found.error && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), target);
       if (!found.peer) {
         const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/login).';
-        throw new Error(found.error || `No running session called "${String(target).replace(/^[@&]/, '')}". /peers lists them.${offline}`);
+        throw new Error(found.error || `No running session called "${String(target).replace(/^[@&＆]/, '')}". /peers lists them.${offline}`);
       }
       peer = found.peer;
     }
-    if (peer.remote && !this.remote) throw new Error(`&${peer.label} is on another computer, and this session is not online at the gateway (/status says why).`);
+    if (peer.remote && !this.remote) throw new Error(`@${peer.label} is on another computer, and this session is not online at the gateway (/status says why).`);
     if (!peer.remote && !this.peers) throw new Error('Talking to other sessions on this computer is off (CLAUDE_PRO_PEERS=0).');
     const r = peer.remote
       ? { ...(await this.remote.sendPeer(peer.id, { text })), peer }
@@ -527,7 +524,7 @@ export class App {
 
   onPeerMessage(msg) {
     if (this.exiting) return;
-    const from = c.bold(`&${msg.from.name}`);
+    const from = c.bold(`@${msg.from.name}`);
     const width = this.width - 1;
     if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
       // the answer to something the user sent: shown, and noted for the model, without a turn of its own
@@ -535,7 +532,7 @@ export class App {
       this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} (${msg.from.cwd}), which answered:\n${msg.text}`);
       return;
     }
-    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} &${msg.from.name}: ${msg.text}`;
+    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${msg.text}`;
     const item = { text: peerMessagePrompt(msg), images: [], display, peer: msg.kind === 'task' ? msg : null };
     if (this.isTurnRunning()) { this.queue.push(item); this.screen.schedule(); return; }
     this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });
@@ -543,10 +540,10 @@ export class App {
 
   // Send `text` as the answer to `msg`, a message of another session: here, or through the gateway.
   replyToPeer(msg, text) {
-    const done = () => this.screen.log(c.dim(`  ⎿  Answer sent to &${msg.from.name}`));
-    const failed = (e) => this.notice(`Could not send the answer to &${msg.from.name}: ${e.message}`, 'warn');
+    const done = () => this.screen.log(c.dim(`  ⎿  Answer sent to @${msg.from.name}`));
+    const failed = (e) => this.notice(`Could not send the answer to @${msg.from.name}: ${e.message}`, 'warn');
     if (msg.from.remote) { // from another computer: back through the gateway
-      if (!this.remote) { this.notice(`This session is no longer online at the gateway: the answer to &${msg.from.name} was not sent.`, 'warn'); return; }
+      if (!this.remote) { this.notice(`This session is no longer online at the gateway: the answer to @${msg.from.name} was not sent.`, 'warn'); return; }
       this.remote.sendPeer(msg.from.id, { kind: 'reply', text, inReplyTo: msg.id }).then(done, failed);
       return;
     }
@@ -554,7 +551,7 @@ export class App {
     // by id, or by name: a session that was restarted by older code comes back with a new id
     const running = this.peers.peers();
     const peer = findPeer(running, msg.from.id) || running.find((p) => p.name === msg.from.name && p.cwd === msg.from.cwd);
-    if (!peer) { this.notice(`&${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); return; }
+    if (!peer) { this.notice(`@${msg.from.name} is no longer running: its answer was not sent.`, 'warn'); return; }
     this.peers.send(peer, { text, kind: 'reply', inReplyTo: msg.id }).then(done, failed);
   }
 
@@ -985,7 +982,7 @@ export class App {
       if (this.updateWaitingFor !== busy.join(',')) {
         this.updateWaitingFor = busy.join(',');
         this.screen.schedule();
-        if (force) this.notice(`${APP_NAME} ${version} is installed once &${busy.join(', &')} ${busy.length === 1 ? 'is' : 'are'} done working.`);
+        if (force) this.notice(`${APP_NAME} ${version} is installed once @${busy.join(', @')} ${busy.length === 1 ? 'is' : 'are'} done working.`);
       }
       clearTimeout(this.updateRetry);
       this.updateRetry = setTimeout(() => this.maybeInstallUpdate(), 30_000);
@@ -1052,20 +1049,6 @@ export class App {
 
   // ---------------------------------------------------------------- input
 
-  // Say "copied" when the user copies text selected in this terminal, as Claude Code does. The terminal does the
-  // selecting and copying and tells nobody, so the clipboard is watched; focus events (which the terminal sends
-  // once asked to) keep copies made in other windows from being announced. Off with CLAUDE_PRO_COPY_NOTICE=0,
-  // and when not writing to the real terminal (the tests).
-  watchCopies() {
-    if (this.stdout !== process.stdout || !this.stdout.isTTY || /^(0|false|no)$/i.test(process.env.CLAUDE_PRO_COPY_NOTICE || '')) return;
-    this.focused = true;
-    this.clipboardWatch = watchClipboard((chars) => {
-      if (!this.focused || this.exiting) return;
-      this.flash(chars ? `Copied ${chars.toLocaleString()} characters to the clipboard` : 'Copied to the clipboard');
-    });
-    this.stdout.write(FOCUS_EVENTS_ON);
-  }
-
   // Fullscreen (see screen.js) unless CLAUDE_PRO_TUI=default, as Claude Code's /tui: the input box fixed at the
   // bottom of the window, the conversation scrolled inside the program. Not in the tests that drive the App.
   fullscreenWanted() {
@@ -1074,7 +1057,7 @@ export class App {
   }
 
   // Fullscreen: the wheel scrolls the conversation (3 rows a notch); a drag,
-  // a double or a triple click selects, and what is selected goes to the clipboard (see Screen.mouse).
+  // a double or a triple click selects text. Selection is copied only with Ctrl+C.
   onMouse(m) {
     if (!this.screen.full || this.exiting) return;
     if (m.button & 64) {
@@ -1083,37 +1066,77 @@ export class App {
       this.screen.scrollBy(m.button & 1 ? -speed : speed);
       return;
     }
-    // A right click, which the terminal no longer gets: what it did there. With a selection it copies it;
-    // without one it pastes the clipboard's text, as the terminal's own paste (ctrl+v) arrives, so that it is
-    // handled the same way (long text folded, an image path attached, into a dialog's answer box).
-    if ((m.button & 3) === 2 && !(m.button & 32) && !m.release) {
-      if (this.screen.selection) {
-        this.copyText(this.screen.selectedText());
-        this.screen.clearSelection();
-        return;
-      }
-      readClipboardText().then((text) => {
-        if (!text || this.exiting) return;
-        const clean = text.replace(/\x1b\[20[01]~/g, '').replace(/\r\n|\n/g, '\r');
-        this.keys.write(`\x1b[200~${clean}\x1b[201~`);
-      });
-      return;
-    }
-    const r = this.screen.mouse(m);
-    if (r?.copy) this.copyText(r.copy);
+    // Right-click is intentionally inert. Clipboard operations use Ctrl+C and Ctrl+V only.
+    this.screen.mouse(m);
   }
 
   copyText(text) {
     writeClipboard(text).then((ok) => {
       if (ok) this.flash(`Copied ${text.length.toLocaleString()} characters to the clipboard`);
-      else this.flash('Could not copy: no clipboard tool found (hold Shift and drag to select with the terminal)', 'warn');
+      else this.flash('Could not copy: no clipboard tool found', 'warn');
+    });
+  }
+
+  clipboardEditor() {
+    const dialog = this.dialogs[0];
+    if (dialog) return dialog.editor || dialog.other || null;
+    return this.finder ? null : this.editor;
+  }
+
+  insertFindText(text) {
+    const f = this.finder;
+    const clean = String(text ?? '').replace(/[\r\n\t]+/g, ' ');
+    if (!f || !clean) return;
+    if (f.selected) {
+      f.text = clean;
+      f.cursor = clean.length;
+      f.selected = false;
+    } else {
+      f.text = f.text.slice(0, f.cursor) + clean + f.text.slice(f.cursor);
+      f.cursor += clean.length;
+    }
+    this.screen.setFind(f.text);
+  }
+
+  pasteClipboard(target = this.clipboardEditor()) {
+    if (this.readingClipboard || this.exiting) return;
+    if (!target && !this.finder) return; // selection dialogs have no text field to paste into
+    this.readingClipboard = true;
+    this.flash('Reading clipboard…');
+    const allowImage = Boolean(target?.insertImage);
+    const image = allowImage
+      ? readClipboardImage().catch(() => ({ image: null }))
+      : Promise.resolve({ image: null });
+    image.then((r) => {
+      if (r.image && target) {
+        const label = target.insertImage(r.image);
+        const size = r.image.width ? `${r.image.width}×${r.image.height}, ` : '';
+        this.flash(`${label} attached (${size}${formatTokens(r.image.bytes).replace(/k$/, 'KB')})`);
+        return;
+      }
+      return readClipboardText().then((text) => {
+        if (!text || this.exiting) return;
+        const clean = text.replace(/\x1b\[20[01]~/g, '');
+        if (target) target.insertPaste(clean);
+        else this.insertFindText(clean);
+      });
+    }).catch((e) => {
+      if (!this.exiting) this.flash(`Could not read the clipboard: ${e.message}`, 'warn');
+    }).finally(() => {
+      this.readingClipboard = false;
+      this.screen.schedule();
     });
   }
 
   onKey(str, key) {
     if (this.exiting) return;
-    if (key.sequence === '\x1b[I') { this.focused = true; return; }
-    if (key.sequence === '\x1b[O') { this.focused = false; return; }
+    // Some terminals implement Ctrl+V as bracketed paste: readline reports paste-start/end and
+    // emits the clipboard contents as ordinary keys between them. Read the system clipboard once
+    // (which preserves images) and do not feed those raw keys into the editor as well.
+    if (this.bracketedPaste) {
+      if (key.name === 'paste-end' || key.sequence === '\x1b[201~') this.bracketedPaste = false;
+      return;
+    }
     if (this.screen.full) {
       const half = Math.max(1, Math.floor((this.screen.lastArea || this.screen.height) / 2));
       if (key.name === 'pageup') { this.screen.scrollBy(half); return; }
@@ -1135,8 +1158,14 @@ export class App {
         if (key.name === 'escape') return;
       }
     }
+    if (key.name === 'paste-start' || key.sequence === '\x1b[200~') {
+      this.bracketedPaste = true;
+      this.pasteClipboard();
+      return;
+    }
     if (key.ctrl && key.name === 'c' && this.finder && !this.dialogs.length) { this.closeFind(); return; } // not the hidden input's text
     if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
+    if (key.ctrl && key.name === 'v') { this.pasteClipboard(); return; }
     const dialog = this.dialogs[0];
     if (dialog) {
       dialog.handleKey(str, key);
@@ -1145,8 +1174,6 @@ export class App {
     }
     if (key.ctrl && key.name === 'f') { this.openFind(); return; }
     if (this.finder) { this.findKey(str, key); this.screen.schedule(); return; }
-    // alt+v like Claude Code on Windows (ctrl+v is the terminal's own text paste there).
-    if ((key.meta || key.ctrl) && key.name === 'v') { this.pasteImage(); return; }
     if (key.ctrl && key.name === 'o') {
       this.verbose = !this.verbose;
       this.notice(this.verbose ? 'Verbose mode on: showing thinking and full tool output' : 'Verbose mode off', 'info');
@@ -1203,46 +1230,65 @@ export class App {
       if (items.length === 1 && items[0].value === text && !items[0].submitOnEnter) return null;
       return { items, from: 0, to: text.length };
     }
-    // The mention being typed: `@name`, or `@"name with spaces` once a quote has been opened.
+    // One `@` namespace serves both files and sessions. A quoted token is a file path; session names are
+    // never quoted because cleanName() removes spaces from them.
     const before = text.slice(0, cursor);
     const m = /(^|\s)@(?:"([^"@]*)|([^\s@"]*))$/.exec(before);
-    if (m) {
-      const quoted = m[2] !== undefined;
-      const q = quoted ? m[2] : m[3];
-      const files = this.fileIndex.search(q);
-      if (!files.length) return null;
-      // A name with spaces has to be quoted for the mention to be read back as one file. A directory
-      // leaves the quote open, so that completion goes on inside it; a file closes it.
-      const value = (f) => (quoted || /\s/.test(f) ? (f.endsWith('/') ? `@"${f}` : `@"${f}"`) : '@' + f);
-      return { items: files.map((f) => ({ value: value(f), label: f, noSpace: f.endsWith('/') })), from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
+    if (!m) return null;
+    const quoted = m[2] !== undefined;
+    const q = quoted ? m[2] : m[3];
+    const fileQuery = q.replace(/^\.\/+/, '');
+    const filePrefix = q.startsWith('./') ? './' : '';
+    const files = this.fileIndex.search(fileQuery);
+    const peerResult = quoted ? null : this.peerSuggestions(q, cursor, m.index === 0 && !m[1], { quiet: true });
+    const peers = peerResult?.items || [];
+    const peerRefs = new Set(peers.map((item) => item.value.slice(1)));
+    // A name with spaces has to be quoted for the mention to be read back as one file. A directory
+    // leaves the quote open, so that completion goes on inside it. When a file and session have the
+    // same name, the file completion uses ./ so the session-priority submit rule cannot misroute it.
+    const fileItems = files.map((f) => {
+      const conflict = !quoted && !filePrefix && peerRefs.has(f);
+      const ref = conflict ? `./${f}` : `${filePrefix}${f}`;
+      const value = quoted || /\s/.test(f) ? (f.endsWith('/') ? `@"${ref}` : `@"${ref}"`) : '@' + ref;
+      return {
+        value,
+        label: conflict ? `@./${f}` : f,
+        description: f.endsWith('/') ? 'directory' : 'file',
+        noSpace: f.endsWith('/'),
+      };
+    });
+    const items = [...peers, ...fileItems];
+    if (!items.length) {
+      if (!q && m.index === 0 && !m[1] && !quiet) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer (/login to the gateway reaches your other computers)');
+      return null;
     }
-    // `&name`: the other sessions, on this computer and (through the gateway) on the account's others. At the start
-    // it sends them the message; elsewhere it names them or identifies them for the model.
-    const amp = /(^|\s)[&＆]([^\s&＆]*)$/u.exec(before);
-    if (amp) return this.peerSuggestions(amp[2], cursor, amp.index === 0 && !amp[1], { quiet });
-    return null;
+    return { items, from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
   }
 
   peerSuggestions(q, cursor, atStart = true, { quiet = false } = {}) {
-    if (!quiet && this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
+    if (this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
       this.refreshRemotePeers().then(() => {
-        if (!/[&＆][^\s&＆]*$/u.test(this.editor.text.slice(0, this.editor.cursor))) return;
+        if (!/(^|\s)@(?:"[^"@]*|[^\s@"]*)$/u.test(this.editor.text.slice(0, this.editor.cursor))) return;
         this.editor.refreshSuggestions();
         this.screen.schedule();
       });
     }
-    const lq = q.toLowerCase();
-    const items = [
-      ...(this.peers?.peers() || []).filter((p) => p.name.toLowerCase().startsWith(lq))
-        .map((p) => ({ value: '&' + p.name, label: `&${p.name}`, description: `this computer · ${displayPath(p.cwd, this.cwd)}` })),
-      ...this.remotePeers.filter((p) => [p.label, p.name, p.machine].some((v) => v.toLowerCase().startsWith(lq)))
-        .map((p) => ({ value: '&' + p.label, label: `&${p.label}`, description: `${p.machine} · ${p.cwd}${p.busy ? ' · busy' : ''}` })),
-    ];
+    const items = this.peerSuggestionItems(q);
     if (!items.length) {
       if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/login to the gateway reaches your other computers)');
       return null;
     }
     return { items, from: cursor - q.length - 1, to: cursor };
+  }
+
+  peerSuggestionItems(q) {
+    const lq = q.toLowerCase();
+    return [
+      ...(this.peers?.peers() || []).filter((p) => p.name.toLowerCase().startsWith(lq))
+        .map((p) => ({ value: '@' + p.name, label: `@${p.name}`, description: `session · this computer · ${displayPath(p.cwd, this.cwd)}` })),
+      ...this.remotePeers.filter((p) => [p.label, p.name, p.machine].some((v) => v.toLowerCase().startsWith(lq)))
+        .map((p) => ({ value: '@' + p.label, label: `@${p.label}`, description: `session · ${p.machine} · ${p.cwd}${p.busy ? ' · busy' : ''}` })),
+    ];
   }
 
   onSubmit(value, raw, images = []) {
@@ -1277,20 +1323,30 @@ export class App {
     this.startTurn(value);
   }
 
-  // `&name message`: the message goes to that session, as a task for it. A session on another computer of the
-  // gateway account: `&machine/name message`, or `&machine message` when that computer runs one session.
+  // `@name message`: the message goes to that session, as a task for it. A session on another computer of the
+  // gateway account: `@machine/name message`, or `@machine message` when that computer runs one session. A known
+  // file wins only when no session matches; use `@./name` to force a file when the names collide.
   sendTypedToPeer(text) {
-    if (!/^[&＆]/u.test(text)) return false;
-    const m = /^[&＆](\S+)(?:\s+([\s\S]*))?$/u.exec(text);
-    const task = m?.[2]?.trim();
-    if (!m || !task) { this.notice('Type the task after the name: &name task (/peers lists the sessions).', 'warn'); return true; }
-    this.echoUser(text);
+    // Quoted @ tokens are file syntax; session names are clean and never contain spaces.
+    if (/^@"[^"]*"(?:\s+[\s\S]*)?$/u.test(text)) return false;
+    const m = /^@(\S+)(?:\s+([\s\S]*))?$/u.exec(text);
+    if (!m) return false;
+    const task = m[2]?.trim();
     const found = resolvePeer(this.peers?.peers() || [], this.remotePeers, m[1], { ids: false });
+    const file = this.mentionedFile(m[1]);
+    const pathLike = /^(?:\.\.?[\\/]|[\\/]|~[\\/]|[A-Za-z]:[\\/])/.test(m[1]);
+    // A plain @file (including a file followed by ordinary prose) remains a normal prompt. A matching
+    // session has priority at the beginning of a line, and an unknown name with a task is allowed to
+    // fall through to sendToPeer(), which refreshes the remote list before reporting an error.
+    if (!found.peer && !found.ambiguous && (file || pathLike)) return false;
+    if (!found.peer && !found.ambiguous && !task) return false;
+    if (!task) { this.notice('Type the task after the name: @name task (/peers lists the sessions).', 'warn'); return true; }
+    this.echoUser(text);
     if (found.ambiguous) { this.notice(found.error, 'warn'); return true; }
     this.sendToPeer(found.peer || m[1], task).then(
       ({ peer }) => {
         const where = peer.remote ? `on ${peer.machine}: ${peer.cwd}` : displayPath(peer.cwd, this.cwd);
-        this.screen.log(c.dim(`  ⎿  Sent to &${peer.label || peer.name} (${where}); its answer will be shown here`), '');
+        this.screen.log(c.dim(`  ⎿  Sent to @${peer.label || peer.name} (${where}); its answer will be shown here`), '');
       },
       (e) => this.notice(e.message, 'warn'),
     );
@@ -1301,11 +1357,11 @@ export class App {
     const rows = [
       ['! for bash mode', 'double tap esc to clear input'],
       ['/ for commands', 'ctrl + o to toggle verbose output'],
-      ['@ for file paths, & for other sessions', 'ctrl + f to find in the conversation'],
+      ['@ for files and sessions', 'ctrl + f to find in the conversation'],
       ['PgUp/PgDn, wheel to scroll', 'ctrl + home/end to the top/bottom'],
       ['# to memorize', 'ctrl + t to toggle todos'],
       ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
-      ['alt + v to paste an image', ''],
+      ['ctrl + c to copy selection', 'ctrl + v to paste text or an image'],
     ];
     return rows.map(([a, b]) => c.dim('  ' + padEnd(a, 30) + b));
   }
@@ -1432,8 +1488,13 @@ export class App {
     const seen = new Set();
     const read = this.runtime.tools.find((t) => t.name === 'Read');
     const skipped = (file, why) => this.screen.log(c.dim(`  ⎿  Skipped ${displayPath(file, this.cwd)}: ${why}`));
+    const localPeers = this.peers?.peers() || [];
     for (const m of text.matchAll(/(?:^|\s)@("[^"]+"|[^\s"]+)/g)) {
-      const file = this.mentionedFile(m[1]);
+      const token = m[1];
+      const peerRef = token.startsWith('"') ? null : token.replace(/[,.;:!?)]+$/, '');
+      const peer = peerRef ? resolvePeer(localPeers, this.remotePeers, peerRef, { ids: false }) : null;
+      if (peer?.peer || peer?.ambiguous) continue; // a peer wins over a same-named file; use @./name for the file
+      const file = this.mentionedFile(token);
       if (!file || seen.has(file)) continue; // @someone, @..., a file that is not there: not a mention
       seen.add(file);
       let st;
@@ -1501,9 +1562,9 @@ export class App {
     await this.runAgent(content, { peers });
   }
 
-  // What `&name` in a message the user wrote stands for, told to the model: which session, and how to reach it.
+  // What `@name` in a message the user wrote stands for, told to the model: which session, and how to reach it.
   async peerMentions(prompt) {
-    const refs = [...new Set([...String(prompt).matchAll(/(?:^|\s)[&＆]([^\s&＆,，。;；:：!！?？、)）]+)/gu)].map((m) => m[1]))];
+    const refs = [...new Set([...String(prompt).matchAll(/(?:^|\s)@([^\s@"&，。;；:：!！?？、)）]+)/gu)].map((m) => m[1]))];
     if (!refs.length) return [];
     const local = this.peers?.peers() || [];
     const notes = [];
@@ -1511,33 +1572,11 @@ export class App {
       let found = resolvePeer(local, this.remotePeers, ref, { ids: false });
       if (!found.peer && !found.ambiguous && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), ref, { ids: false });
       const p = found.peer;
-      if (p) notes.push(`&${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
+      if (p) notes.push(`@${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
       else if (found.ambiguous) notes.push(found.error);
     }
     if (!notes.length) return [];
     return [{ type: 'text', text: `<system-reminder>The user refers to other sessions: ${notes.join('; ')}. MessagePeer (to: the name in quotes) sends a session a task.</system-reminder>` }];
-  }
-
-  // alt+v (ctrl+v where the terminal passes it through): attach an image from the clipboard.
-  async pasteImage() {
-    if (this.readingClipboard) return;
-    this.readingClipboard = true;
-    this.flash('Reading image from clipboard…');
-    try {
-      const r = await readClipboardImage();
-      if (r.image) {
-        const label = this.editor.insertImage(r.image);
-        const size = r.image.width ? `${r.image.width}×${r.image.height}, ` : '';
-        this.flash(`${label} attached (${size}${formatTokens(r.image.bytes).replace(/k$/, 'KB')})`);
-      } else {
-        this.flash(r.error || 'No image found in clipboard. Copy an image (e.g. Win+Shift+S) and press alt+v again.', 'warn');
-      }
-    } catch (e) {
-      this.flash(`Could not read the clipboard: ${e.message}`, 'warn');
-    } finally {
-      this.readingClipboard = false;
-      this.screen.schedule();
-    }
   }
 
   // A short-lived message in the footer (not written to the transcript).
@@ -2169,7 +2208,7 @@ export class App {
     const dir = this.agent?.cwd || this.cwd;
     const home = os.homedir();
     const shown = dir.toLowerCase().startsWith(home.toLowerCase()) ? '~' + dir.slice(home.length) : dir;
-    const name = this.peers || this.remote ? `&${this.peerLabel()}` : '';
+    const name = this.peers || this.remote ? `@${this.peerLabel()}` : '';
     return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online ? `⇄ ${name}` : name };
   }
 
@@ -2197,7 +2236,7 @@ export class App {
     if (!flash) {
       if (this.updating) left += c.dim(' · ') + c.blue(`⇣ updating ${APP_NAME} to ${this.updating}…`);
       else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`↻ ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
-      else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when &${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
+      else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when @${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
     }
     const cfg = this.config;
     const threshold = cfg.autoCompactThreshold(cfg.model);

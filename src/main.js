@@ -23,7 +23,7 @@ Options:
   --system-prompt-file <file>      Replace the system prompt with the contents of a file
   --verbose                        Show thinking and full tool output
   --no-mcp                         Do not start MCP servers
-  --name <name>                    Name this session, as /rename does (other sessions reach it with &name)
+  --name <name>                    Name this session, as /rename does (other sessions reach it with @name)
   -v, --version                    Print version
   -h, --help                       Show help
 

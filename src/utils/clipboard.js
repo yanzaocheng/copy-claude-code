@@ -1,6 +1,5 @@
-// Read an image from the system clipboard (alt+v / ctrl+v in the prompt), like Claude Code.
-// Windows: PowerShell + System.Windows.Forms; macOS: osascript; Linux: wl-paste / xclip.
-// Large images are scaled so the long edge is at most 1568px (the API's recommended size).
+// Clipboard helpers for explicit Ctrl+C copy and Ctrl+V text/image paste.
+// Image files can also be attached by path through imageFromFile.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,9 +27,7 @@ function run(cmd, args, { env, timeout = 15_000 } = {}) {
   });
 }
 
-// Prints "IMG <format> <w>x<h>" after writing $env:CLAUDE_PRO_IMG_OUT, or "FILE <path>" when the
-// clipboard holds a copied image file. Exit code 2 = no image. CLAUDE_PRO_IMG_SOURCE (a file) replaces
-// the clipboard as input, which the tests use so they don't clobber the real clipboard.
+// Read an image from the system clipboard for Ctrl+V in the prompt dialog.
 const PS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -120,8 +117,8 @@ async function readLinux() {
   for (const [cmd, args] of [['wl-paste', ['--type', 'image/png']], ['xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o']]]) {
     const r = await new Promise((resolve) => {
       const chunks = [];
-      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
-      // A clipboard owner that never answers must not leave the reader hanging.
+      let child;
+      try { child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] }); } catch { resolve(null); return; }
       const timer = setTimeout(() => child.kill(), 5000);
       child.stdout.on('data', (d) => chunks.push(d));
       child.on('error', () => { clearTimeout(timer); resolve(null); });
@@ -135,9 +132,15 @@ async function readLinux() {
   return { error: null };
 }
 
-// Put `text` on the system clipboard (the fullscreen renderer's selection): Windows PowerShell (read as UTF-8 from
-// stdin, so any text and any length), pbcopy on macOS, wl-copy / xclip / xsel elsewhere. Resolves with whether
-// one of them took it.
+export async function readClipboardImage({ source } = {}) {
+  if (process.platform === 'win32') return readWindows(source);
+  if (process.platform === 'darwin') return readMac();
+  return readLinux();
+}
+
+// Put `text` on the system clipboard for an explicit Ctrl+C copy: Windows PowerShell (read as UTF-8 from stdin,
+// so any text and any length), pbcopy on macOS, wl-copy / xclip / xsel elsewhere. Resolves with whether one of them
+// took it.
 export async function writeClipboard(text) {
   const tries = process.platform === 'win32'
     ? [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$s=[IO.StreamReader]::new([Console]::OpenStandardInput(),[Text.Encoding]::UTF8).ReadToEnd(); Set-Clipboard -Value $s']]]
@@ -164,9 +167,8 @@ export async function writeClipboard(text) {
   return false;
 }
 
-// The text on the system clipboard ('' when there is none), for a right click in the fullscreen renderer, which
-// gets the mouse instead of the terminal: Windows PowerShell (written out as UTF-8), pbpaste on macOS,
-// wl-paste / xclip / xsel elsewhere.
+// Read the text on the system clipboard for an explicit Ctrl+V paste: Windows PowerShell (written out as UTF-8),
+// pbpaste on macOS, wl-paste / xclip / xsel elsewhere. Returns '' when there is no readable clipboard.
 export async function readClipboardText() {
   const tries = process.platform === 'win32'
     ? [['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$t = Get-Clipboard -Raw; if ($t) { $b = [Text.Encoding]::UTF8.GetBytes($t); $o = [Console]::OpenStandardOutput(); $o.Write($b, 0, $b.Length) }']]]
@@ -191,65 +193,4 @@ export async function readClipboardText() {
     if (text !== null) return text;
   }
   return '';
-}
-
-// Returns {image} on success, {error: string} on failure, or {error: null} when the clipboard has no image.
-export async function readClipboardImage({ source } = {}) {
-  if (process.platform === 'win32') return readWindows(source);
-  if (process.platform === 'darwin') return readMac();
-  return readLinux();
-}
-
-// Watch the clipboard and call `onCopy(chars)` when something new is put on it, so that the program can say
-// "copied" after the user copies text selected in the terminal (the terminal itself does not tell the program).
-// Windows only: one long-lived PowerShell that polls the clipboard's sequence number, which is cheap, and leaves
-// when this process is gone. Returns {close()}; elsewhere it never calls back.
-const WATCH_SCRIPT = `
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -Namespace ClaudePro -Name Clip -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();'
-$parent = [int]$env:CLAUDE_PRO_PARENT_PID
-$last = [ClaudePro.Clip]::GetClipboardSequenceNumber()
-$n = 0
-while ($true) {
-  Start-Sleep -Milliseconds 250
-  $seq = [ClaudePro.Clip]::GetClipboardSequenceNumber()
-  if ($seq -ne $last) {
-    $last = $seq
-    Start-Sleep -Milliseconds 50
-    $text = Get-Clipboard -Raw
-    $len = if ($text) { $text.Length } else { 0 }
-    [Console]::Out.WriteLine("COPY $len")
-    [Console]::Out.Flush()
-  }
-  $n++
-  if ($n % 8 -eq 0) { try { [void][System.Diagnostics.Process]::GetProcessById($parent) } catch { exit } }
-}
-`;
-
-export function watchClipboard(onCopy) {
-  if (process.platform !== 'win32') return { close() {} };
-  let child;
-  try {
-    const encoded = Buffer.from(WATCH_SCRIPT, 'utf16le').toString('base64'); // "-Command -" runs a loop line by line, which breaks it
-    child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
-      env: { ...process.env, CLAUDE_PRO_PARENT_PID: String(process.pid) }, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    return { close() {} };
-  }
-  child.on('error', () => {});
-  let buf = '';
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (d) => {
-    buf += d;
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const m = /^COPY (\d+)/.exec(buf.slice(0, i).trim());
-      buf = buf.slice(i + 1);
-      if (m) { try { onCopy(Number(m[1])); } catch { /* the callback's problem */ } }
-    }
-  });
-  child.unref();
-  child.stdout.unref?.();
-  return { close() { try { child.kill(); } catch { /* gone already */ } } };
 }

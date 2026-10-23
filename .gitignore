@@ -3,3 +3,5 @@ node_modules/
 .claude-pro/settings.local.json
 *.tgz
 dist/
+.github/
+.codebuddy/

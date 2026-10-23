@@ -834,15 +834,15 @@ export class HostService {
     const open = listPeers().filter((p) => p.conversationId === id);
     const ours = (p) => p.kind === 'background' && this.sessions?.sessions.has(p.remoteId);
     const terminal = open.find((p) => !ours(p) && p.kind !== 'background');
-    if (terminal) throw new Error(`这段对话正开在终端里的会话 &${terminal.name} 里：请先在那台电脑上结束它（/exit）`);
+    if (terminal) throw new Error(`这段对话正开在终端里的会话 @${terminal.name} 里：请先在那台电脑上结束它（/exit）`);
     const other = open.find((p) => !ours(p));
-    if (other) throw new Error(`这段对话正开在会话 &${other.name} 里：先结束它`);
+    if (other) throw new Error(`这段对话正开在会话 @${other.name} 里：先结束它`);
     // the service's own sessions with it: those in the registry, and those starting or restarting
     const running = [...(this.sessions?.sessions.values() || [])].filter((r) => (r.conversationId === id || open.some((p) => p.remoteId === r.sessionId)) && this.sessions.alive(r));
     if (running.length && stop !== true) {
       // the name it has in the registry: its record learns it only at the next tick (see BackgroundSessions.tick)
       const name = open.find((p) => p.remoteId === running[0].sessionId)?.name || running[0].name || running[0].sessionId;
-      throw new Error(`这段对话正开在会话 &${name} 里：先结束它`);
+      throw new Error(`这段对话正开在会话 @${name} 里：先结束它`);
     }
     // what the registry says it has open, before its record learns it at the next tick: ended with it, the session's
     // log goes with the conversation
@@ -911,7 +911,7 @@ export class HostService {
     if (resume) {
       const open = listPeers().find((p) => p.conversationId === resume);
       if (open?.remoteId) return { existing: open.remoteId };
-      if (open) throw new Error(`这段对话已经在这台电脑的会话 &${open.name} 里打开了（它没有连上网关）`);
+      if (open) throw new Error(`这段对话已经在这台电脑的会话 @${open.name} 里打开了（它没有连上网关）`);
     }
     const dir = typeof cwd === 'string' ? normalizeDir(cwd, { home: this.home }) : null;
     if (!dir || !String(cwd).trim()) throw new Error(`请选择一个绝对路径的目录：${cwd ?? ''}`);

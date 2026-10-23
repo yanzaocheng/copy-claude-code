@@ -1,6 +1,6 @@
 // Peers: the other interactive claude-pro sessions on this machine. Each session registers itself in
 // CONFIG_DIR/peers/<id>.json (name, directory, pid, and a port and token of a small HTTP server on 127.0.0.1)
-// so that sessions can send each other tasks: the user with `&name task` in the input box, the model with the
+// so that sessions can send each other tasks: the user with `@name task` in the input box, the model with the
 // MessagePeer tool. A task is answered automatically with the final text of the turn that handled it.
 // Sessions on the user's other computers are reached through the gateway instead (see remote.js): they are
 // listed as {id, name, machine, cwd, remote: true, label: 'machine/name'} and addressed by that label.
@@ -49,7 +49,7 @@ export function machineName(env = process.env) {
 
 // Find the session `ref` (with or without @) names among the local ones and those on other computers: a local
 // name (or id prefix); else machine/name, a name only one remote session has, a computer with only one session
-// (`&公司`), or an id prefix. `ids: false` leaves the id prefixes out (for what the user types).
+// (`@公司`), or an id prefix. `ids: false` leaves the id prefixes out (for what the user types).
 // Returns {peer}, {error, ambiguous: true} when several match, or {error: null} when none does.
 export function resolvePeer(local, remote, ref, { ids = true } = {}) {
   const q = String(ref || '').replace(/^[@&＆]/, '').toLowerCase();
@@ -62,7 +62,7 @@ export function resolvePeer(local, remote, ref, { ids = true } = {}) {
   if (!hits.length) hits = remote.filter((p) => same(p.machine));
   if (!hits.length && ids && q.length >= 4) hits = remote.filter((p) => p.id.toLowerCase().startsWith(q));
   if (hits.length === 1) return { peer: hits[0] };
-  if (hits.length > 1) return { error: `"&${String(ref).replace(/^[@&＆]/, '')}" could be ${hits.map((p) => '&' + p.label).join(', ')}: say which.`, ambiguous: true };
+  if (hits.length > 1) return { error: `"@${String(ref).replace(/^[@&＆]/, '')}" could be ${hits.map((p) => '@' + p.label).join(', ')}: say which.`, ambiguous: true };
   return { error: null };
 }
 

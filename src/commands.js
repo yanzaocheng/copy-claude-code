@@ -462,14 +462,12 @@ export function buildCommands(app) {
   };
   const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
   let pendingLogin = null;
-  // Logged in to the gateway: this session goes online there at once (remote control, the other computers'
-  // sessions), and the computer service starts (the web page opens new sessions through it).
+  // Logged in to the gateway: this session goes online there at once for read-only viewing and peer messaging.
   const goOnline = async () => {
     const remote = await app.syncRemote();
-    app.ensureHost({ login: true });
     if (!remote) return;
     out(remote.registered
-      ? `${c.green('⇄')} This session is online at the gateway: the web page (远程控制) shows it.`
+      ? `${c.green('⇄')} This session is online at the gateway: the read-only web page shows it.`
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
   };
 
@@ -567,18 +565,16 @@ export function buildCommands(app) {
     },
   });
 
-  // /status about the gateway: whether this session is online there, its name for the
-  // sessions on the other computers, and the computer service.
+  // /status about the gateway: whether this session is publishing a read-only view there and its
+  // name for sessions on the other computers.
   function remoteLines(row) {
     const cfg = app.runtime.config;
     const remote = app.remoteState();
     const me = app.peerLabel();
-    const lines = [
-      row('Remote control', remote.text),
-      row('Name', `&${me} ${c.dim(`(on your other computers: &${machineName(cfg.env)}/${me}; /rename changes it)`)}`),
-      row('Computer service', describeHost(cfg.env)),
+    return [
+      row('Remote session', remote.text),
+      row('Name', `@${me} ${c.dim(`(on your other computers: @${machineName(cfg.env)}/${me}; /rename changes it)`)}`),
     ];
-    return lines;
   }
 
   add({
@@ -744,19 +740,19 @@ export function buildCommands(app) {
     name: 'peers',
     aliases: ['sessions'],
     argHint: '[name NEW-NAME]',
-    description: 'List the other sessions, on this computer and (through the gateway) on your other computers; send one a task with &name ...',
+    description: 'List the other sessions, on this computer and (through the gateway) on your other computers; send one a task with @name ...',
     async run(args) {
       const [action, ...rest] = args.split(/\s+/).filter(Boolean);
-      if (action === 'name' && rest.length) { out(`This session is now ${c.bold('&' + app.renameSession(rest.join('-')))}`); return; }
+      if (action === 'name' && rest.length) { out(`This session is now ${c.bold('@' + app.renameSession(rest.join('-')))}`); return; }
       const { me, local, remote, online } = await app.listAllPeers();
       out([
-        `This session: ${c.bold('&' + me.name)} ${c.dim(displayPath(me.cwd, app.cwd))}${online ? c.dim(` · from other computers: &${me.label}`) : ''}`,
-        ...local.map((p) => `${c.bold('&' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`),
-        ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('&' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
+        `This session: ${c.bold('@' + me.name)} ${c.dim(displayPath(me.cwd, app.cwd))}${online ? c.dim(` · from other computers: @${me.label}`) : ''}`,
+        ...local.map((p) => `${c.bold('@' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`),
+        ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('@' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
         ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
-          ? 'Type "&" for the list, "&name task" to send a task; its answer is shown here. On another computer: "&computer/name task", or "&computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
-          : 'Type "&" for the list, "&name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login; /status says why it is not).'),
+          ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
+          : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login; /status says why it is not).'),
       ]);
     },
   });
@@ -777,7 +773,7 @@ export function buildCommands(app) {
       reloadConfig();
       app.screen.setFull(want === 'fullscreen');
       out(want === 'fullscreen'
-        ? `Fullscreen: the input box stays at the bottom; scroll with the wheel, PgUp/PgDn, ctrl+Home/End; drag to select and copy; ctrl+f to find in the conversation. (Saved in ${file})`
+        ? `Fullscreen: the input box stays at the bottom; scroll with the wheel, PgUp/PgDn, ctrl+Home/End; drag to select, then use ctrl+c to copy; ctrl+f to find in the conversation. (Saved in ${file})`
         : `Default renderer: the conversation scrolls in the terminal. (Saved in ${file})`);
     },
   });
@@ -786,13 +782,13 @@ export function buildCommands(app) {
     name: 'rename',
     argHint: '<name>',
     argRequired: true,
-    description: 'Name this session: the other sessions send it tasks with &name, and it is the title (tab, /resume, the web page)',
+    description: 'Name this session: the other sessions send it tasks with @name, and it is the title (tab, /resume, the web page)',
     run(args) {
       const name = args.trim();
-      if (!name) { out(`This session is ${c.bold('&' + app.peerLabel())}. /rename NAME gives it another name.`); return; }
+      if (!name) { out(`This session is ${c.bold('@' + app.peerLabel())}. /rename NAME gives it another name.`); return; }
       const got = app.renameSession(name);
       const note = got !== cleanName(name) ? c.dim(' (another session on this computer has that name)') : '';
-      out(`This session is now ${c.bold('&' + got)}${note}${app.remote ? c.dim(` · from your other computers: &${machineName(app.config.env)}/${got}`) : ''}`);
+      out(`This session is now ${c.bold('@' + got)}${note}${app.remote ? c.dim(` · from your other computers: @${machineName(app.config.env)}/${got}`) : ''}`);
     },
   });
 
