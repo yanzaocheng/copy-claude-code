@@ -114,6 +114,7 @@ class FileIndex {
     if (rg) {
       const child = spawn(rg, ['--files', '--hidden', '--glob', '!.git'], { cwd: this.cwd, windowsHide: true });
       let out = '';
+      child.stdout.setEncoding('utf8'); // a Chinese file name can be split between two chunks
       child.stdout.on('data', (d) => { if (out.length < 10_000_000) out += d; });
       child.on('close', () => done(out.split(/\r?\n/).filter(Boolean).map((f) => f.replace(/\\/g, '/'))));
       child.on('error', () => done([]));
@@ -130,9 +131,10 @@ class FileIndex {
       })();
     }
   }
-  search(q) {
-    this.refresh();
-    const query = q.toLowerCase();
+  // The files and their directories with what search() compares, made once per listing (it runs on every keypress
+  // after an @, and building it from up to 50,000 paths each time made typing lag in a big project).
+  entries() {
+    if (this.cache && this.cacheAt === this.at) return this.cache;
     const dirs = new Set();
     for (const f of this.files) {
       const parts = f.split('/');
@@ -141,12 +143,20 @@ class FileIndex {
     }
     // Without ripgrep the listing comes from a glob that also returns directories (as plain names): they are already in `dirs`, with their slash.
     const all = [...dirs, ...this.files.filter((f) => !dirs.has(f + '/'))];
-    const scored = [];
-    for (const f of all) {
+    this.cache = all.map((f) => {
       const lower = f.toLowerCase();
-      const base = lower.replace(/\/$/, '').split('/').pop();
+      return { f, lower, base: lower.replace(/\/$/, '').split('/').pop(), depth: f.split('/').length };
+    });
+    this.cacheAt = this.at;
+    return this.cache;
+  }
+  search(q) {
+    this.refresh();
+    const query = q.toLowerCase();
+    const scored = [];
+    for (const { f, lower, base, depth } of this.entries()) {
       let score = -1;
-      if (!query) score = f.split('/').length;
+      if (!query) score = depth;
       else if (base.startsWith(query)) score = 0;
       else if (lower.startsWith(query)) score = 1;
       else if (base.includes(query)) score = 2;
