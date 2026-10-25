@@ -646,12 +646,23 @@ export class Screen {
   // Append lines (strings, may contain \n) to the static log. `onLog(items)` is told about each call (the remote
   // control mirrors what the terminal prints).
   log(...items) {
+    this.queueLog(items);
+    this.flush();
+  }
+
+  // As log(), drawn with the next frame (within 16 ms) instead of at once: for streamed text, where a line comes
+  // with nearly every delta and drawing each at once rewrote the whole screen (fullscreen) for every line.
+  logSoon(...items) {
+    this.queueLog(items);
+    this.schedule();
+  }
+
+  queueLog(items) {
     if (this.onLog) { try { this.onLog(items); } catch { /* the listener's problem */ } }
     for (const item of items) {
       if (Array.isArray(item)) this.staticQueue.push(...item);
       else this.staticQueue.push(String(item));
     }
-    this.flush();
   }
 
   schedule() {

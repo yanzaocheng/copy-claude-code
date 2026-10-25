@@ -769,7 +769,7 @@ export class Agent {
     const input = { command, timeout: this.config.bashMaxTimeout };
     const handle = this.io.toolStart?.({ id: `verify_${Date.now()}`, name: 'Verify', input }, tool, input, this) || {};
     const ctx = { ...this.makeCtx(signal), cwd: this.projectRoot, setCwd() {} };
-    ctx.onProgress = (p) => handle.progress?.(p);
+    ctx.onProgress = (p, meta) => handle.progress?.(p, meta);
     let result;
     try {
       result = await bash.call(input, ctx);
@@ -939,7 +939,7 @@ export class Agent {
 
       this.toolUseCount++;
       const handle = this.io.toolStart?.(tu, tool, input, this) || {};
-      ctx.onProgress = (p) => handle.progress?.(p);
+      ctx.onProgress = (p, meta) => handle.progress?.(p, meta);
       let result;
       try {
         result = await tool.call(input, ctx);

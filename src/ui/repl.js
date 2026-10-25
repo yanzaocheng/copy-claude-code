@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { c, ESC, stringWidth, truncate, padEnd, wordWrap } from './ansi.js';
+import { c, ESC, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
 import { Screen, queryCursorRow, mouseFilter } from './screen.js';
 import { Editor, topBorder } from './editor.js';
 import { SelectDialog } from './dialogs.js';
@@ -570,9 +570,11 @@ export class App {
   // ---------------------------------------------------------------- remote control (see remote.js)
 
   // Print to the terminal only: the remote page is told about this as an event of its own.
+  // `{soon: true}` first: drawn with the next frame (streamed text, see Screen.logSoon).
   logLocal(...items) {
+    const soon = items[0]?.soon === true && items.shift();
     this.remoteMuted++;
-    try { this.screen.log(...items); } finally { this.remoteMuted--; }
+    try { if (soon) this.screen.logSoon(...items); else this.screen.log(...items); } finally { this.remoteMuted--; }
   }
 
   // A message of the user in the transcript (typed here, on the remote page, or sent by another session).
@@ -1695,10 +1697,10 @@ export class App {
     this.active.push(entry);
     let result;
     try {
-      ctx.onProgress = (p) => { entry.progress = p; };
+      ctx.onProgress = (p, meta) => { entry.progress = p; entry.progressLines = meta?.lines; };
       result = await tool.call({ command }, ctx);
-    } catch {
-      const partial = (entry.progress || '').replace(/\r\n/g, '\n').trimEnd();
+    } catch (err) {
+      const partial = stripAnsi(err?.partialOutput ?? entry.progress ?? '').replace(/\r\n/g, '\n').trimEnd(); // all of it, not just the end the progress shows
       result = { isError: true, content: `${partial ? partial + '\n' : ''}Interrupted by user`, interrupted: true };
     }
     this.active = this.active.filter((e) => e !== entry);
@@ -1878,7 +1880,7 @@ export class App {
         this.turnTokens += estimateTokens(ev.text);
         if (this.md) {
           const lines = this.md.write(ev.text);
-          if (lines.length) this.logLocal(lines);
+          if (lines.length) this.logLocal({ soon: true }, lines);
           this.remote?.emit({ t: 'delta', kind: 'text', text: ev.text });
         }
         break;
@@ -1889,7 +1891,7 @@ export class App {
           this.remote?.emit({ t: 'delta', kind: 'thinking', text: ev.text });
           if (this.thinking.md) {
             const lines = this.thinking.md.write(ev.text);
-            if (lines.length) this.logLocal(lines);
+            if (lines.length) this.logLocal({ soon: true }, lines);
           }
         }
         break;
@@ -1982,8 +1984,8 @@ export class App {
     this.remote?.emit({ t: 'tool', id: tu.id, head: toolHeader(tool, input, entry.ctx, { width: REMOTE_WIDTH, dot: false }) });
     this.screen.schedule();
     return {
-      progress: (p) => {
-        if (typeof p === 'string') { entry.progress = p; this.remote?.toolProgress(tu.id, entry); }
+      progress: (p, meta) => {
+        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; this.remote?.toolProgress(tu.id, entry); }
         else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; this.remote?.emit({ t: 'sub', id: tu.id, head: p.header }); }
         this.screen.schedule();
       },
@@ -2156,9 +2158,11 @@ export class App {
       if (!sub.length) sub.push(c.dim('Initializing…'));
       lines.push(...resultLines(sub));
     } else if (e.progress) {
+      // `progress` is the end of the output (see Bash); `progressLines` how many lines all of it has.
       const out = e.progress.replace(/\r\n/g, '\n').trimEnd().split('\n');
+      const total = Math.max(out.length, e.progressLines || 0);
       const tail = out.slice(-5).map((l) => c.dim(truncate(l.replace(/\r/g, ''), w - 8)));
-      if (out.length > 5) tail.unshift(c.dim(`… +${out.length - 5} lines`));
+      if (total > 5) tail.unshift(c.dim(`… +${total - 5} lines`));
       lines.push(...resultLines(tail));
     } else {
       const secs = Math.floor((Date.now() - e.started) / 1000);
@@ -2179,11 +2183,13 @@ export class App {
       }
       if (this.thinking?.md) lines.push(...this.thinking.md.partial().slice(-3));
       else if (this.thinking && this.thinking.text) {
-        const last = this.thinking.text.trimEnd().split('\n').pop() || '';
+        const text = this.thinking.text.trimEnd();
+        const last = text.slice(text.lastIndexOf('\n') + 1); // not split(): this runs every frame on all of it
         lines.push(c.dim(c.italic(truncate(`✻ ${last}`, w))));
       }
       for (const [, p] of this.pendingToolBlocks) {
-        const m = /"(?:file_path|command|pattern|url|description|query)"\s*:\s*"((?:\\.|[^"\\])*)/.exec(p.partial);
+        // The start of the input is enough for a one-line preview (a streaming Bash heredoc can be very long).
+        const m = /"(?:file_path|command|pattern|url|description|query)"\s*:\s*"((?:\\.|[^"\\])*)/.exec(p.partial.slice(0, 4000));
         const tool = this.runtime.tools.find((t) => t.name === p.name) || { name: p.name };
         const arg = m ? m[1].replace(/\\n/g, ' ').replace(/\\(.)/g, '$1') : '';
         lines.push(`${c.gray(DOT)} ${c.bold(toolLabel(tool, {}))}${arg ? `(${truncate(arg, w - 20)})` : ''} ${c.dim(p.partial.length > 200 ? `(${formatTokens(Math.round(p.partial.length / 4))} tokens…)` : '…')}`);
@@ -2207,7 +2213,7 @@ export class App {
       return { lines, cursor };
     }
     if (this.queue.length) {
-      for (const q of this.queue) lines.push(c.dim('  ⎿ queued: ') + c.gray(truncate((q.display ?? q.text).replace(/\s+/g, ' '), w - 14)));
+      for (const q of this.queue) lines.push(c.dim('  ⎿ queued: ') + c.gray(truncate(String(q.display ?? q.text).slice(0, w * 4).replace(/\s+/g, ' '), w - 14)));
     }
     if (lines.length) lines.push('');
     const placeholder = this.isTurnRunning() ? 'Type a message to queue it for the agent…' : (this.agent.messages.length ? '' : 'Try "explain this codebase" or "fix the failing test"');

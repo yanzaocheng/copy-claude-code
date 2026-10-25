@@ -10,6 +10,7 @@ import { toolResultsDir } from '../session.js';
 
 const background = new Map(); // id -> {child, command, output, readPos, status, exitCode, startedAt}
 let bgCounter = 0;
+const PROGRESS_CHARS = 8192; // the end of the output the live view gets while a command runs
 
 function truncateOutput(text, max) {
   if (text.length <= max) return text;
@@ -158,11 +159,15 @@ When you commit (the system prompt says when): run git status, git diff and git 
           if (code && code !== 0 && !timedOut) text += `${text ? '\n' : ''}Exit code ${code}`;
           resolve({ isError, content: text || '(no output)', display: { output: text, exitCode: code } });
         };
+        // The live view shows the last lines: it gets the end of the output and the line count, not all of it
+        // stripped again on every chunk (quadratic on a noisy build, with up to 10 MB re-split every frame).
+        let lines = 0;
         watchShell(child, {
           onOutput: (text) => {
             output += text;
+            for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) lines++;
             if (output.length > 10_000_000) output = output.slice(-5_000_000);
-            ctx.onProgress?.(stripAnsi(output));
+            ctx.onProgress?.(stripAnsi(output.slice(-PROGRESS_CHARS)), { lines });
           },
           done: finish,
         });

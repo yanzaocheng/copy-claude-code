@@ -192,17 +192,32 @@ export function wordWrap(line, width) {
   return lines;
 }
 
+// Cut a (possibly ANSI colored) string to `width` columns, ending in `ellipsis` when it was longer. It reads only as
+// far as the width reaches: the live region calls it every frame on queued messages, tool input and commands of any
+// length, and measuring all of a 200 KB paste first took some 50 ms a frame.
 export function truncate(s, width, ellipsis = '…') {
-  if (stringWidth(s) <= width) return s;
-  let res = '', w = 0;
-  const ew = stringWidth(ellipsis);
-  for (const tok of tokenize(s)) {
-    if (tok.ansi) { res += tok.t; continue; }
-    if (w + tok.w > width - ew) break;
-    res += tok.t;
-    w += tok.w;
+  const room = width - stringWidth(ellipsis);
+  let out = '', w = 0;
+  let cut = null; // what fits before the ellipsis, once the string has gone past `room`
+  const take = (text) => { // true: the string is wider than `width`
+    for (const { segment: g } of segmenter.segment(text)) {
+      const gw = graphemeWidth(g);
+      if (cut === null && w + gw > room) cut = out;
+      if (w + gw > width) return true;
+      out += g;
+      w += gw;
+    }
+    return false;
+  };
+  const re = new RegExp(ANSI_RE.source, 'g');
+  let last = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > last && take(s.slice(last, m.index))) return cut + ellipsis + (colorEnabled ? '\x1b[0m' : '');
+    out += m[0];
+    last = m.index + m[0].length;
   }
-  return res + ellipsis + (colorEnabled ? '\x1b[0m' : '');
+  if (last < s.length && take(s.slice(last))) return cut + ellipsis + (colorEnabled ? '\x1b[0m' : '');
+  return s;
 }
 
 export function padEnd(s, width) {
