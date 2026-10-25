@@ -3,6 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { diffLines, makeHunks, countChanges, splitLines } from '../utils/diff.js';
 import { fitImage } from '../utils/images.js';
@@ -150,23 +151,26 @@ Usage:
     }
     if (ext === '.ipynb') {
       try {
-        const nb = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const raw = fs.readFileSync(file);
+        const nb = JSON.parse(raw.toString('utf8'));
         const rendered = renderNotebook(nb);
         if (rendered.length > MAX_OUTPUT_CHARS || tooManyTokens(rendered)) {
           return { isError: true, content: `Notebook content (${Math.round(rendered.length / 1024)}KB, about ${tokensOf(rendered).toLocaleString('en-US')} tokens) exceeds the maximum allowed size. Look at parts of it with the Bash tool (python or jq on its JSON), or use Grep to search it.` };
         }
-        ctx.fileState.set(file, { mtimeMs: stat.mtimeMs });
+        ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, hash: hashOf(raw) });
         return { content: rendered, display: { summary: `Read ${(nb.cells || []).length} cells` } };
       } catch (e) {
         return { isError: true, content: `Could not parse notebook: ${e.message}` };
       }
     }
-    const decoded = readText(file, fs.readFileSync(file));
+    const buf = fs.readFileSync(file);
+    const decoded = readText(file, buf);
     if (!decoded) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
     const note = encodingNote(decoded);
     const lines = splitLines(decoded.text);
-    // `partial` records that part of the file was not shown, so Write can refuse to overwrite it.
-    const seen = (partial) => ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial });
+    // `partial` records that part of the file was not shown, so Write can refuse to overwrite it; `hash` tells a
+    // later change of its time without a change of its bytes from a real one (see fileStanding).
+    const seen = (partial) => ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial, hash: hashOf(buf) });
     if (lines.length === 0) {
       seen(false);
       return { content: '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>', display: { summary: 'Read 0 lines (empty file)' } };
@@ -208,28 +212,47 @@ Usage:
   },
 };
 
+const hashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
+
+// How a file stands against what the model has seen of it: null (read or written by it, unchanged since),
+// 'unread', or 'modified' (changed on disk since). A time that moved while the bytes stayed the same (git, a
+// formatter that changed nothing, an antivirus scan or a cloud sync on Windows) is no change: the content is
+// compared as well, as Claude Code does.
+export function fileStanding(file, ctx) {
+  const state = ctx.fileState.get(file);
+  if (!state) return 'unread';
+  const now = mtime(file);
+  if (now === null || state.mtimeMs === undefined || Math.abs(now - state.mtimeMs) <= 1) return null;
+  let same = false;
+  try { same = Boolean(state.hash) && hashOf(fs.readFileSync(file)) === state.hash; } catch { /* gone: changed */ }
+  if (!same) return 'modified';
+  state.mtimeMs = now;
+  return null;
+}
+
 // Validate that a file may be written: it must have been read and be unchanged since. With
 // `full`, which Write needs because it replaces the whole file, the read must also have covered
-// all of it; Edit only replaces text it matched exactly, so a partial read is enough there.
+// all of it. (Edit has its own rule, see EditTool.plan.)
 export function checkFreshness(file, ctx, { full = false } = {}) {
-  const state = ctx.fileState.get(file);
-  if (!state) return 'File has not been read yet. Read it first before writing to it.';
-  if (full && state.partial) {
-    return 'File was only partly read (offset/limit), so Write would overwrite content you have not seen. Read the whole file first, or use Edit for targeted changes.';
+  const standing = fileStanding(file, ctx);
+  if (standing === 'unread') return 'File has not been read yet. Read it first before writing to it.';
+  if (full && ctx.fileState.get(file).partial) {
+    return 'Only part of this file has been seen (a Read with offset/limit, or edits without a whole Read), so Write would overwrite content you have not seen. Read the whole file first, or use Edit for targeted changes.';
   }
-  const now = mtime(file);
-  if (now !== null && state.mtimeMs !== undefined && Math.abs(now - state.mtimeMs) > 1) {
+  if (standing === 'modified') {
     return 'File has been modified since it was last read, either by the user or by a linter. Read it again before attempting to write it.';
   }
   return null;
 }
 
 // In the encoding, BOM and line endings the file had (`meta`, from readText); checked with unwritable() first.
+// Returns the hash of what was written, for the file state.
 function writeText(file, text, { crlf, bom, encoding = 'utf8' }) {
   const { buffer, error } = encodeText(crlf ? text.replace(/\r?\n/g, '\r\n') : text, { encoding, bom });
   if (error) throw new Error(`${file}: ${error}`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, buffer);
+  return hashOf(buffer);
 }
 
 // Where the new text of an edit is, for its result: "lines 12-18", "line 12", or "text removed at line 12".
@@ -290,8 +313,8 @@ Usage:
     // The encoding, BOM and line endings of what was there stay (a binary file it replaces: plain UTF-8).
     const prev = (exists && readText(file)) || { text: '', crlf: false, bom: false, encoding: 'utf8' };
     const preview = this.preview(input, ctx);
-    writeText(file, input.content, prev);
-    ctx.fileState.set(file, { mtimeMs: mtime(file) });
+    const hash = writeText(file, input.content, prev);
+    ctx.fileState.set(file, { mtimeMs: mtime(file), hash });
     const n = splitLines(input.content).length;
     if (!exists) {
       return {
@@ -352,7 +375,7 @@ export const EditTool = {
   description: `Performs exact string replacements in files.
 
 Usage:
-- You must use your \`Read\` tool at least once in the conversation before editing (a Grep result does not count). This tool will error if you attempt an edit without reading the file.
+- old_string must be the file's exact current text, so Read the file first unless that text is already in this conversation (a Read, Bash or Grep output, an edit of yours). An edit whose old_string occurs exactly once is made even when the file was not read or has changed since (the result says so); replace_all needs a Read of the file as it is now.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
 - The edit will FAIL if \`old_string\` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use \`replace_all\` to change every instance of \`old_string\`.
 - Use \`replace_all\` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
@@ -379,19 +402,27 @@ Usage:
       return { file, created: true, before: '', after: newStr, meta: { crlf: false, bom: false } };
     }
     if (fs.statSync(file).isDirectory()) return { error: `${file} is a directory` };
-    const fresh = checkFreshness(file, ctx);
-    if (fresh) return { error: fresh };
+    // A Read is what shows the model the text it replaces, but an old_string that occurs exactly once in the file
+    // as it is now shows it too: text from a Bash or Grep output, its own earlier edit, a Read whose result was
+    // cleared, a file one of its commands changed. Such an edit is made, with a note; refusing it cost a Read and a
+    // retry (in 70 sessions to 2026-10-26, 117 of 2,781 edits). replace_all has no such proof: it needs the read.
+    const unseen = fileStanding(file, ctx);
+    if (unseen && input.replace_all) {
+      return { error: unseen === 'unread'
+        ? 'File has not been read yet. Read it first before replacing every occurrence in it.'
+        : 'File has been modified since it was last read, either by the user or by a command. Read it again before replacing every occurrence in it.' };
+    }
     const current = readText(file);
     if (!current) return { error: notText(file) };
     if (current.lossy) return { error: notRewritable(file, current) };
     const { text, crlf, bom, encoding } = current;
     const before = text.replace(/\r\n/g, '\n');
     const r = applyEdit(before, oldStr, newStr, !!input.replace_all);
-    if (r.error) return { error: r.error };
+    if (r.error) return { error: unseen ? `${r.error} ${UNSEEN_HINT[unseen]}` : r.error };
     const meta = { crlf, bom, encoding };
     const cannot = unwritable(file, r.result, meta);
     if (cannot) return { error: cannot };
-    return { file, before, after: r.result, index: r.index, count: r.count, meta, newStr };
+    return { file, before, after: r.result, index: r.index, count: r.count, meta, newStr, unseen };
   },
   validate(input, ctx) { return this.plan(input, ctx).error || null; },
   // `p` is an already computed plan, so call() does not read the file and redo the edit a second time.
@@ -406,9 +437,10 @@ Usage:
     if (p.error) return { isError: true, content: p.error };
     const preview = this.preview(input, ctx, p);
     const prior = ctx.fileState.get(p.file);
-    writeText(p.file, p.after, p.meta);
-    // An edit does not show the rest of the file, so a partial read stays partial (a created file is all ours).
-    ctx.fileState.set(p.file, { mtimeMs: mtime(p.file), partial: !p.created && !!prior?.partial });
+    const hash = writeText(p.file, p.after, p.meta);
+    // An edit does not show the rest of the file, so a partial read stays partial (a created file is all ours), and
+    // a file edited unread, or changed since it was read, counts as partly seen: Write wants a whole Read of it.
+    ctx.fileState.set(p.file, { mtimeMs: mtime(p.file), partial: !p.created && (!prior || Boolean(prior.partial) || p.unseen === 'modified'), hash });
     if (p.created) {
       return { content: `File created successfully at: ${p.file}`, display: { summary: `Created ${displayPath(p.file, ctx.cwd)}`, preview } };
     }
@@ -416,6 +448,16 @@ Usage:
     const text = input.replace_all
       ? `The file ${p.file} has been updated successfully. All ${p.count} occurrences were replaced.`
       : `The file ${p.file} has been updated successfully (${changedLines(line, p.newStr)}).`;
-    return { content: text, display: { summary: changeSummary(preview), preview } };
+    return { content: p.unseen ? `${text} ${UNSEEN_NOTE[p.unseen]}` : text, display: { summary: changeSummary(preview), preview } };
   },
+};
+
+// What an edit of a file the model had not read, or that changed since it read it, adds to its result or error.
+const UNSEEN_NOTE = {
+  unread: '(The file had not been read in this conversation; old_string matched its current text once.)',
+  modified: '(The file had changed since you last read it, by a command or someone else; the edit was made on its current text. Read it again if those changes matter.)',
+};
+const UNSEEN_HINT = {
+  unread: 'The file has not been read in this conversation: Read it to get its exact text.',
+  modified: 'The file has changed since you last read it: Read it again.',
 };
