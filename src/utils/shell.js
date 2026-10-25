@@ -142,16 +142,44 @@ export function run(cmd, args, { cwd, timeout = 5000 } = {}) {
 }
 
 const rgWorks = new Map();
-// The ripgrep binary to use: CLAUDE_PRO_RIPGREP_PATH if it runs, else `rg` on PATH, else null
-// (Grep then uses its JS scanner). CLAUDE_PRO_RIPGREP_PATH=off skips ripgrep altogether.
+// The ripgrep binary to use: CLAUDE_PRO_RIPGREP_PATH if it runs, else `rg` on PATH, else the copy VS Code ships
+// (Windows), else null (Grep then uses its JS scanner, about 4x slower). CLAUDE_PRO_RIPGREP_PATH=off skips
+// ripgrep altogether.
 export function ripgrepPath(config) {
   const configured = String(config?.env?.CLAUDE_PRO_RIPGREP_PATH ?? process.env.CLAUDE_PRO_RIPGREP_PATH ?? '').trim();
   if (/^(off|none|false|0)$/i.test(configured)) return null;
-  for (const c of [configured, 'rg'].filter(Boolean)) {
+  for (const c of [configured, 'rg', ...vscodeRipgreps()].filter(Boolean)) {
     if (!rgWorks.has(c)) rgWorks.set(c, run(c, ['--version']) !== null);
     if (rgWorks.get(c)) return c;
   }
   return null;
+}
+
+// rg.exe inside VS Code installs, newest version first. Recent versions keep it under a folder named by a hash
+// that changes with every update, so a path set by hand stops working after one.
+let vscodeRg;
+function vscodeRipgreps() {
+  if (vscodeRg) return vscodeRg;
+  vscodeRg = [];
+  if (!isWin) return vscodeRg;
+  const inside = [
+    'resources/app/node_modules.asar.unpacked/@vscode/ripgrep-universal/bin/win32-x64/rg.exe',
+    'resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe',
+    'resources/app/node_modules/@vscode/ripgrep/bin/rg.exe',
+  ];
+  const bases = [process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Microsoft VS Code'), process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Microsoft VS Code')].filter(Boolean);
+  for (const base of bases) {
+    let dirs = [];
+    try {
+      dirs = fs.readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => path.join(base, d.name))
+        .map((dir) => ({ dir, t: fs.statSync(dir).mtimeMs })).sort((a, b) => b.t - a.t).map((d) => d.dir);
+    } catch { continue; }
+    for (const dir of [...dirs, base]) for (const rel of inside) {
+      const file = path.join(dir, rel);
+      if (fs.existsSync(file)) vscodeRg.push(file);
+    }
+  }
+  return vscodeRg;
 }
 export function hasRipgrep(config) { return ripgrepPath(config) !== null; }
 

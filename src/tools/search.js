@@ -251,8 +251,16 @@ function runRg(bin, args, cwd, signal) {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
-    child.stdout.on('data', (d) => { if (out.length < 20_000_000) out += d; });
-    child.stderr.on('data', (d) => { err += d; });
+    // Decoded as a stream (a Chinese path or line can be split between two chunks), and rg is stopped once
+    // there is more than will ever be shown instead of scanning on.
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d) => {
+      if (out.length >= 20_000_000) return;
+      out += d;
+      if (out.length >= 20_000_000) { out = out.slice(0, out.lastIndexOf('\n') + 1); child.kill(); }
+    });
+    child.stderr.on('data', (d) => { if (err.length < 100_000) err += d; });
     const onAbort = () => child.kill();
     signal?.addEventListener('abort', onAbort, { once: true });
     child.on('close', (code) => { signal?.removeEventListener('abort', onAbort); resolve({ code, out, err }); });
