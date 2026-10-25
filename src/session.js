@@ -105,11 +105,16 @@ export class SessionStore {
   // What the conversation's requests have cost so far (USD, see pricing.js), written after each one; the newest wins.
   setCost(usd) { this.append({ type: 'meta', cost: usd, at: Date.now() }); }
   // Until when the conversation's prompt cache lasts (ms since epoch; 0: cold), for the footer's clock of a
-  // resumed conversation (see CacheStats.clock). Written after each of its requests and compactions.
-  setCacheUntil(until) {
-    if (until == null || until === this.cacheUntil) return;
-    this.cacheUntil = until;
-    this.append({ type: 'meta', cacheUntil: until, at: Date.now() });
+  // resumed conversation (see CacheStats.clock), and what the cache holds (Agent.cacheState; null: nothing warm),
+  // so that a restarted conversation goes on refreshing it (keepalive.js). Written after each of its requests and
+  // compactions.
+  setCacheUntil(until, state = null) {
+    const json = JSON.stringify(state);
+    const clock = until != null && until !== this.cacheUntil;
+    if (!clock && json === (this.cacheStateJson ?? 'null')) return;
+    if (clock) this.cacheUntil = until;
+    this.cacheStateJson = json;
+    this.append({ type: 'meta', ...(clock ? { cacheUntil: until } : {}), cacheState: state, at: Date.now() });
   }
   // The system prompt this conversation runs behind, kept so that a resumed one continues behind the same prompt
   // and so with the prompt cache it already has (see runtime.resumeSystemPrompt). Written when it first appears
@@ -132,6 +137,7 @@ export class SessionStore {
       let e;
       try { e = JSON.parse(line); } catch { continue; }
       if (e.type === 'message' || e.type === 'reset') lastAt = Math.max(lastAt, e.at || 0);
+      if (e.type === 'reset') meta = { ...meta, cacheState: null }; // what was cached is not the new messages' prefix
       if (e.type === 'meta') meta = { ...meta, ...e };
       else if (e.type === 'message') {
         messages.push(e.message);
@@ -152,6 +158,7 @@ export class SessionStore {
       promptCode: typeof meta.promptCode === 'string' ? meta.promptCode : null,
       cost: Number(meta.cost) > 0 ? Number(meta.cost) : 0,
       cacheUntil: Number.isFinite(meta.cacheUntil) && meta.cacheUntil >= 0 ? meta.cacheUntil : null,
+      cacheState: meta.cacheState && typeof meta.cacheState === 'object' ? meta.cacheState : null,
     };
   }
 

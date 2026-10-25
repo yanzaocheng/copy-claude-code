@@ -8,6 +8,7 @@ import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuatio
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
 import { CacheStats, TTL_MS } from './cache.js';
+import { CacheKeepAlive } from './keepalive.js';
 import { resolvePath } from './utils/paths.js';
 import { fitImagesIn, lightenImagesIn } from './utils/images.js';
 import { latestWorkState, workStateFromText } from './work-state.js';
@@ -308,7 +309,7 @@ export class Agent {
     this.heldTokens = 0; // room taken by tool results not yet in the conversation (see takeContext)
     // What this agent's own requests used. `requests` counts the turns' requests; the summary requests of
     // compactions are counted apart (`compactions`) and their tokens are in the totals like any others.
-    this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0 };
+    this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0, keepalives: 0 };
     // What the sub-agents this agent started used (they bill like everything else); only the main agent has any.
     this.subUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0, runs: 0 };
     this.cache = new CacheStats(); // how much of the input came from the prompt cache, and why a request missed
@@ -320,6 +321,8 @@ export class Agent {
     this.postCompactTokens = undefined; // undefined: never compacted; null: compacted, awaiting measurement
     this.compactFailures = 0; // automatic compactions that failed in a row
     this.lastActivityAt = 0; // when the last message was added (ms since epoch; 0: unknown), see clearAfterIdle
+    this.busy = 0; // turns and summaries in progress: while there are any, the cache needs no refresh
+    this.keepAlive = isSubagent ? null : new CacheKeepAlive(this); // the prompt cache kept warm while idle
   }
 
   get model() { return this.modelFn(); }
@@ -356,6 +359,7 @@ export class Agent {
   }
 
   replaceMessages(messages) {
+    this.keepAlive?.stop(); // what is cached is no longer the conversation's prefix
     this.messages = messages;
     this.cache.noteRewrite(); // the old conversation is no longer a prefix of the next request: not a cache miss
     this.io.messagesReplaced?.(messages, this);
@@ -397,7 +401,7 @@ export class Agent {
     });
   }
 
-  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {} } = {}) {
+  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {}, waitForRateLimit = true } = {}) {
     const handle = this.traceRequestStart({ kind, messages: request.messages, cacheBucket, cacheMessages, compactionId });
     // A bug in what shows or traces the stream must not fail the request: it had no HTTP status, so it was taken
     // for a network error and the request was sent (and billed) again, up to the retry limit, failing the same way
@@ -412,10 +416,10 @@ export class Agent {
       }
     };
     try {
-      const res = await streamMessage(this.config, request, { signal, onEvent: forward });
+      const res = await streamMessage(this.config, request, { signal, onEvent: forward, waitForRateLimit });
       if (handlerError) this.io.notice?.(`Showing the reply failed (${handlerError.message}); the reply itself is complete.`, 'warn');
       const observed = cacheOverride ? { ...res, cache: { ...res.cache, ...cacheOverride } } : res;
-      const recorded = this.recordUsage(observed, kind === 'summary' ? 'summary' : 'turn');
+      const recorded = this.recordUsage(observed, kind === 'summary' || kind === 'keepalive' ? kind : 'turn');
       this.trace?.requestEnd(handle, {
         usage: res.usage,
         cache: observed.cache,
@@ -444,7 +448,7 @@ export class Agent {
     const sum = (k) => a[k] + b[k];
     return {
       input: sum('input'), output: sum('output'), cacheRead: sum('cacheRead'), cacheWrite: sum('cacheWrite'), cacheWrite1h: sum('cacheWrite1h'),
-      requests: sum('requests'), compactions: sum('compactions'),
+      requests: sum('requests'), compactions: sum('compactions'), keepalives: a.keepalives,
     };
   }
 
@@ -455,8 +459,9 @@ export class Agent {
     b.runs++;
   }
 
-  // Count one finished request. `kind` is "turn" for the conversation's own requests and "summary" for the
-  // request that compacts it; both go into the prompt cache statistics.
+  // Count one finished request. `kind` is "turn" for the conversation's own requests, "summary" for the
+  // request that compacts it and "keepalive" for a refresh of its cache while idle (keepalive.js); all go into
+  // the prompt cache statistics.
   recordUsage(res, kind = 'turn') {
     const u = res.usage || {};
     this.usage.input += u.input_tokens || 0;
@@ -465,7 +470,11 @@ export class Agent {
     this.usage.cacheWrite += u.cache_creation_input_tokens || 0;
     this.usage.cacheWrite1h += u.cache_creation?.ephemeral_1h_input_tokens || 0;
     if (kind === 'summary') this.usage.compactions++;
-    else this.usage.requests++;
+    else if (kind === 'keepalive') this.usage.keepalives++;
+    else {
+      this.usage.requests++;
+      this.keepAlive?.noteRequest(res.cache?.at);
+    }
     const misses = this.cache.misses;
     this.cache.record({ usage: u, ...res.cache });
     const cacheMiss = this.cache.misses > misses ? this.cache.lastMiss : null;
@@ -501,6 +510,8 @@ export class Agent {
   // appended to it would make it load as empty, and it would vanish from the list of conversations
   // that can be resumed.
   resetConversation() {
+    this.keepAlive?.stop();
+    if (this.keepAlive) this.keepAlive.pauseStart = 0;
     this.messages = [];
     this.todos = [];
     this.workState = null;
@@ -527,6 +538,8 @@ export class Agent {
     if (this.isSubagent || !this.config.clearAfterIdle || !this.lastActivityAt) return null;
     const idle = now - this.lastActivityAt;
     if (idle <= IDLE_CLEARING.idleMs) return null;
+    // Kept warm through the pause (keepalive.js): clearing now would throw that cache away.
+    if (!this.cacheExpired(now)) return null;
     const last = this.messages.findLast((m) => m.role === 'assistant');
     const unfinished = Array.isArray(last?.content) && last.content.some((b) => b.type === 'tool_use');
     if (unfinished && this.config.thinkingBudget > 0) return null;
@@ -545,6 +558,31 @@ export class Agent {
   cacheExpired(now = Date.now()) {
     if (this.cache.expected != null) return now >= this.cache.expiresAt;
     return this.lastActivityAt > 0 && now - this.lastActivityAt >= TTL_MS[this.config.cacheTtl('main')];
+  }
+
+  // The conversation's last request again, for a refresh of its cache entry (keepalive.js): the messages before
+  // the last reply, the way callModel sent them then (normalizing and repairing give the same result for the same
+  // messages), and max_tokens 1. null when there is no reply yet.
+  keepAliveRequest() {
+    const last = this.messages.findLastIndex((m) => m.role === 'assistant');
+    if (last < 1) return null;
+    const { messages } = repairToolResults(normalizeMessages(this.messages.slice(0, last)));
+    if (messages[messages.length - 1]?.role !== 'user') return null;
+    return { model: this.model, system: this.currentSystem(), messages, tools: this.toolSchemas(), cacheBucket: 'main', maxTokens: 1 };
+  }
+
+  // What the session file keeps of the cache for a restarted conversation (see CacheStats.snapshot); null: cold.
+  cacheState() {
+    const s = this.cache.snapshot();
+    return s && { ...s, since: this.keepAlive?.pauseStart || 0 };
+  }
+
+  // A loaded conversation whose cache the session file says is still warm: refreshed from here on as well.
+  restoreCacheState(state) {
+    if (!this.cache.restore(state)) return false;
+    this.keepAlive?.noteRequest(state.since || 0);
+    this.keepAlive?.plan();
+    return true;
   }
 
   // A new request from the user goes back to the effort the user chose, after the Effort tool changed it for
@@ -571,12 +609,14 @@ export class Agent {
   }
 
   async run(userContent, { signal } = {}) {
+    this.keepAlive?.stop(); // the user is back: this turn's requests read the cache themselves
     const previousTraceTurn = this.traceTurnId;
     const traceTurnId = this.trace?.turnStart({ agent: this.name, depth: this.depth, content: userContent });
     this.traceTurnId = traceTurnId;
     let traceResult = null;
     let traceError = null;
     const tracedReturn = (result) => { traceResult = result; return result; };
+    this.busy++; // undone in the finally below
     try {
       if (!this.isSubagent) {
       this.beforeTurn?.();
@@ -719,6 +759,8 @@ export class Agent {
         error: traceError,
       });
       this.traceTurnId = previousTraceTurn;
+      this.busy--;
+      if (!this.busy) this.keepAlive?.plan(); // idle from here: keep what this turn cached warm
     }
   }
 
@@ -1023,7 +1065,19 @@ export class Agent {
   // The messages are marked for the cache only where that can be read: no request after the summary starts with
   // this history, so writing it (25% over the plain input price) pays only for reading what is already there.
   // When the cache is known to have run out, and in the plain request, only the tools and system prompt are marked.
-  async requestSummary(messages, { signal, onEvent, compactionId = null }) {
+  // While a summary is being written (compaction, /rewind's summaries) the cache needs no refresh either.
+  async requestSummary(messages, options) {
+    this.keepAlive?.stop();
+    this.busy++;
+    try {
+      return await this.summaryRequest(messages, options);
+    } finally {
+      this.busy--;
+      if (!this.busy) this.keepAlive?.plan(); // a compaction that failed left the cache as it was
+    }
+  }
+
+  async summaryRequest(messages, { signal, onEvent, compactionId = null }) {
     const cacheMessages = !this.cacheExpired();
     const call = (request, options = {}) => {
       const useMessages = request.cacheMessages === undefined ? cacheMessages : request.cacheMessages;

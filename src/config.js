@@ -48,6 +48,7 @@ export const KNOWN_KEYS = {
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
   ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
   FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
+  CLAUDE_PRO_CACHE_KEEPALIVE_HOURS: 'Claude models with the 1-hour TTL: while you are away, refresh the conversation\'s prompt cache shortly before it runs out (a read costs 1/40 of a rewrite), for a pause of up to this many hours (default 8; 0 turns it off)',
   DISABLE_PROMPT_CACHING: 'Set to 1 to send no cache_control markers at all (prompt caching off for every model)',
   DISABLE_PROMPT_CACHING_HAIKU: 'Set to 1 to turn prompt caching off for the model the haiku alias resolves to',
   DISABLE_PROMPT_CACHING_SONNET: 'Set to 1 to turn prompt caching off for the model the sonnet alias resolves to',
@@ -292,6 +293,11 @@ export class Config {
   // Clearing old tool results after a long pause (see Agent.clearAfterIdle): the gateway prompt cache has
   // expired by then, so retaining old tool payloads would only make the next request larger.
   get clearAfterIdle() { return true; }
+  // How long a pause the conversation's prompt cache is kept warm for (hours; 0: not at all), see keepalive.js.
+  get cacheKeepAliveHours() {
+    const v = Number(String(this.env.CLAUDE_PRO_CACHE_KEEPALIVE_HOURS ?? '').trim() || NaN);
+    return Number.isFinite(v) && v >= 0 ? v : 8;
+  }
   // How deep sub-agents may nest: the main agent is depth 0; an agent below this depth gets the Task tool.
   get maxSubagentDepth() { return 2; }
 

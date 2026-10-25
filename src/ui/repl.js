@@ -1791,6 +1791,8 @@ export class App {
     // Continue behind the system prompt the conversation had (and its cache), not a freshly built one.
     this.store.systemPrompt = loaded.systemPrompt;
     this.runtime.resumeSystemPrompt(loaded.systemPrompt, loaded.promptCode);
+    // Its cache still warm (a restart, a quick resume): it goes on being refreshed while idle (keepalive.js).
+    this.agent.restoreCacheState(loaded.cacheState);
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
     this.remote?.resync();
     if (quiet) return;
@@ -2089,7 +2091,7 @@ export class App {
   systemPrompt(text, agent) { if (this.isMain(agent)) this.store.setSystemPrompt(text); }
   messagesReplaced(msgs, agent) { if (this.isMain(agent)) this.store.reset(msgs); }
   usage(_u, agent) {
-    if (this.isMain(agent)) this.store.setCacheUntil(agent.cache.clockUntil); // the clock of a resumed conversation
+    if (this.isMain(agent)) this.store.setCacheUntil(agent.cache.clockUntil, agent.cacheState()); // for a resumed or restarted conversation
     this.screen.schedule();
   }
 
@@ -2112,7 +2114,7 @@ export class App {
     this.status = null;
     if (err) return;
     this.lastSummary = summary;
-    this.store.setCacheUntil(agent.cache.clockUntil);
+    this.store.setCacheUntil(agent.cache.clockUntil, agent.cacheState());
     const what = part === 'before' ? 'The earlier part of the conversation was summarized' : part === 'after' ? 'The conversation from that message on was summarized' : 'Conversation compacted';
     this.screen.log(c.dim(`✻ ${what} (the summary is in context; /context to see usage)`), '');
   }

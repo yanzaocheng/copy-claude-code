@@ -149,6 +149,24 @@ export class CacheStats {
     return this.expected != null && this.expected >= MIN_CACHED && now < this.expiresAt;
   }
 
+  // What the session file keeps of the cache, so that a restarted (or quickly resumed) conversation knows what the
+  // cache holds and until when (the refresh of keepalive.js needs it); null when nothing is warm.
+  snapshot(now = Date.now()) {
+    return this.isWarm(now) ? { expected: this.expected, expiresAt: this.expiresAt, ttl: this.ttl, prev: this.prev } : null;
+  }
+
+  // The other way round, for a conversation loaded while its cache was still warm.
+  restore(state, now = Date.now()) {
+    if (!state || !(state.expiresAt > now) || !(state.expected >= MIN_CACHED) || !TTL_MS[state.ttl]) return false;
+    this.expected = state.expected;
+    this.expiresAt = state.expiresAt;
+    this.ttl = state.ttl;
+    this.prev = state.prev && typeof state.prev === 'object' ? state.prev : null;
+    this.model = this.prev?.model ?? null;
+    this.effort = this.prev?.effort ?? null;
+    return true;
+  }
+
   get hitRatio() {
     const total = this.input + this.read + this.write;
     return total > 0 ? this.read / total : null;
