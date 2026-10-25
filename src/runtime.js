@@ -147,6 +147,9 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
       throw err;
     } finally {
       runtime.agent.addSubUsage(sub.usage); // whatever became of it, it was billed
+      // Its edits count for the agent that sent it: the main agent verifies after edits (see verifyCommand), and
+      // an implementation handed to a sub-agent used to go unverified.
+      if (sub.editsThisRun > 0 && ctx.agent) ctx.agent.editsThisRun += sub.editsThisRun;
     }
     if (result.interrupted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     return { text: result.text, toolUses: sub.toolUseCount, tokens: sub.usage.output + sub.lastContextTokens };
