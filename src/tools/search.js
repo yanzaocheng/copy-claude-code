@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { ripgrepPath } from '../utils/shell.js';
+import { decodeText as decodeFile } from '../utils/encoding.js';
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'dist-newstyle']);
 
@@ -240,14 +241,9 @@ async function collectFiles(base, globs, exts, signal) {
   return files;
 }
 
-// Text of a file, or null for binary files. UTF-16 with a BOM is decoded like ripgrep does.
-function decodeText(buf) {
-  if (buf[0] === 0xFF && buf[1] === 0xFE) return buf.toString('utf16le', 2);
-  if (buf[0] === 0xFE && buf[1] === 0xFF) return new TextDecoder('utf-16be').decode(buf.subarray(2));
-  if (buf.subarray(0, 8000).includes(0)) return null;
-  const text = buf.toString('utf8');
-  return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
-}
+// Text of a file, or null for binary files: UTF-16 with a BOM as ripgrep does it, and GBK files as Read shows them
+// (so that a Chinese word is found in them too).
+const decodeText = (buf) => decodeFile(buf, { writable: false })?.text ?? null;
 
 const clip = (line) => (line.length > MAX_COLUMNS ? `${line.slice(0, MAX_COLUMNS)} [... omitted end of long line]` : line);
 

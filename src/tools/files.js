@@ -6,6 +6,7 @@ import path from 'node:path';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { diffLines, makeHunks, countChanges, splitLines } from '../utils/diff.js';
 import { fitImage } from '../utils/images.js';
+import { decodeText, encodeText, encodingName } from '../utils/encoding.js';
 
 const MAX_LINES = 10_000;
 const MAX_LINE_CHARS = 20_000;
@@ -17,20 +18,36 @@ export function mtime(file) {
   try { return fs.statSync(file).mtimeMs; } catch { return null; }
 }
 
-function isBinary(buf) {
-  const len = Math.min(buf.length, 8000);
-  for (let i = 0; i < len; i++) if (buf[i] === 0) return true;
-  return false;
-}
-
+// The file as text: {text, crlf, bom, encoding, lossy} (see utils/encoding.js), or null for binary data.
 // `crlf` is true when CRLF is the file's main line ending. Editing rewrites every line ending, so a
 // mostly-LF file with one stray CRLF must stay LF instead of being converted wholesale.
 function readText(file, buf = fs.readFileSync(file)) {
-  const raw = buf.toString('utf8');
-  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-  const crlfCount = (text.match(/\r\n/g) || []).length;
-  const bareLfCount = (text.match(/\n/g) || []).length - crlfCount;
-  return { text, bom: text !== raw, crlf: crlfCount > 0 && crlfCount >= bareLfCount };
+  const decoded = decodeText(buf);
+  if (!decoded) return null;
+  const crlfCount = (decoded.text.match(/\r\n/g) || []).length;
+  const bareLfCount = (decoded.text.match(/\n/g) || []).length - crlfCount;
+  return { ...decoded, crlf: crlfCount > 0 && crlfCount >= bareLfCount };
+}
+
+const notText = (file) => `${file} appears to be a binary file, not text.`;
+const notRewritable = (file, { encoding }) => (encoding === 'gbk'
+  ? `${file} is GB18030 text with characters GBK cannot write, so rewriting it here could change bytes you did not edit. Change it with a tool that knows its encoding (Bash: iconv, python).`
+  : `${file} is not valid UTF-8 or GBK as a whole (another encoding, or mixed), so rewriting it here would corrupt the bytes that could not be decoded. Change it with a tool that knows its encoding (Bash: iconv, python).`);
+
+// What a Read says about a file that is not plain UTF-8.
+function encodingNote(t) {
+  if (t.lossy) return t.encoding === 'gbk'
+    ? '\n\n(This file is GB18030 with characters GBK cannot write: Edit and Write refuse to rewrite it.)'
+    : '\n\n(This file is not valid UTF-8 or GBK as a whole: bytes that could not be decoded show as \ufffd, and Edit and Write refuse to rewrite it.)';
+  if (t.encoding !== 'utf8') return `\n\n(This file is ${encodingName(t.encoding)}${t.bom ? ' with a BOM' : ''}; Edit and Write keep that encoding.)`;
+  return '';
+}
+
+// Why `text` cannot be written into a file in the encoding `meta` says, or null when it can.
+function unwritable(file, text, meta) {
+  if (!meta?.encoding || meta.encoding === 'utf8') return null;
+  const { error } = encodeText(text, meta);
+  return error ? `${file} is ${encodingName(meta.encoding)}-encoded (kept so when it is edited), and the new text has ${error}. Use other characters, or convert the file to UTF-8 first if the user wants that.` : null;
 }
 
 export function numberLines(lines, start, maxLineChars = MAX_LINE_CHARS) {
@@ -120,11 +137,10 @@ Usage:
         return { isError: true, content: `Could not parse notebook: ${e.message}` };
       }
     }
-    const buf = fs.readFileSync(file);
-    if (isBinary(buf)) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
-
-    const { text } = readText(file, buf);
-    const lines = splitLines(text);
+    const decoded = readText(file, fs.readFileSync(file));
+    if (!decoded) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
+    const note = encodingNote(decoded);
+    const lines = splitLines(decoded.text);
     // `partial` records that part of the file was not shown, so Write can refuse to overwrite it.
     const seen = (partial) => ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial });
     if (lines.length === 0) {
@@ -161,6 +177,7 @@ Usage:
     }
     seen(cut || start > 1 || end < lines.length);
     if (end < lines.length) content += `\n\n(File has ${lines.length} lines total; showing lines ${start}-${end}. Use offset/limit to read more.)`;
+    content += note;
     return { content, display: { summary: `Read ${slice.length} line${slice.length === 1 ? '' : 's'}` } };
   },
 };
@@ -181,12 +198,12 @@ export function checkFreshness(file, ctx, { full = false } = {}) {
   return null;
 }
 
-function writeText(file, text, { crlf, bom }) {
-  let out = text;
-  if (crlf) out = out.replace(/\r?\n/g, '\r\n');
-  if (bom) out = String.fromCharCode(0xfeff) + out;
+// In the encoding, BOM and line endings the file had (`meta`, from readText); checked with unwritable() first.
+function writeText(file, text, { crlf, bom, encoding = 'utf8' }) {
+  const { buffer, error } = encodeText(crlf ? text.replace(/\r?\n/g, '\r\n') : text, { encoding, bom });
+  if (error) throw new Error(`${file}: ${error}`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, out, 'utf8');
+  fs.writeFileSync(file, buffer);
 }
 
 // Where the new text of an edit is, for its result: "lines 12-18", "line 12", or "text removed at line 12".
@@ -223,7 +240,11 @@ Usage:
     const file = resolvePath(input.file_path, ctx.cwd);
     if (fs.existsSync(file)) {
       if (fs.statSync(file).isDirectory()) return `${file} is a directory`;
-      return checkFreshness(file, ctx, { full: true });
+      const fresh = checkFreshness(file, ctx, { full: true });
+      if (fresh) return fresh;
+      const prev = readText(file);
+      if (prev?.lossy) return notRewritable(file, prev);
+      return unwritable(file, input.content, prev);
     }
     return null;
   },
@@ -232,7 +253,7 @@ Usage:
     const exists = fs.existsSync(file);
     const newLines = splitLines(input.content);
     if (!exists) return { kind: 'create', path: file, lines: newLines };
-    const ops = diffLines(splitLines(readText(file).text), newLines);
+    const ops = diffLines(splitLines(readText(file)?.text ?? ''), newLines);
     return { kind: 'diff', path: file, hunks: makeHunks(ops), ...countChanges(ops) };
   },
   async call(input, ctx) {
@@ -240,7 +261,8 @@ Usage:
     if (err) return { isError: true, content: err };
     const file = resolvePath(input.file_path, ctx.cwd);
     const exists = fs.existsSync(file);
-    const prev = exists ? readText(file) : { text: '', crlf: false, bom: false };
+    // The encoding, BOM and line endings of what was there stay (a binary file it replaces: plain UTF-8).
+    const prev = (exists && readText(file)) || { text: '', crlf: false, bom: false, encoding: 'utf8' };
     const preview = this.preview(input, ctx);
     writeText(file, input.content, prev);
     ctx.fileState.set(file, { mtimeMs: mtime(file) });
@@ -333,11 +355,17 @@ Usage:
     if (fs.statSync(file).isDirectory()) return { error: `${file} is a directory` };
     const fresh = checkFreshness(file, ctx);
     if (fresh) return { error: fresh };
-    const { text, crlf, bom } = readText(file);
+    const current = readText(file);
+    if (!current) return { error: notText(file) };
+    if (current.lossy) return { error: notRewritable(file, current) };
+    const { text, crlf, bom, encoding } = current;
     const before = text.replace(/\r\n/g, '\n');
     const r = applyEdit(before, oldStr, newStr, !!input.replace_all);
     if (r.error) return { error: r.error };
-    return { file, before, after: r.result, index: r.index, count: r.count, meta: { crlf, bom }, newStr };
+    const meta = { crlf, bom, encoding };
+    const cannot = unwritable(file, r.result, meta);
+    if (cannot) return { error: cannot };
+    return { file, before, after: r.result, index: r.index, count: r.count, meta, newStr };
   },
   validate(input, ctx) { return this.plan(input, ctx).error || null; },
   // `p` is an already computed plan, so call() does not read the file and redo the edit a second time.
