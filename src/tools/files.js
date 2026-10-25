@@ -12,6 +12,26 @@ const MAX_LINES = 10_000;
 const MAX_LINE_CHARS = 20_000;
 const MAX_OUTPUT_CHARS = 400_000; // a read without offset/limit bigger than this is refused
 const HARD_MAX_CHARS = 400_000; // never return more than this in one read (about 100k tokens), even with an explicit limit
+// ... and never more than about this many tokens: 400k characters of Chinese text are some 320k tokens, more than a
+// whole context window (Read is not cut down to a preview like other large tool results).
+const MAX_OUTPUT_TOKENS = 100_000;
+
+// Tokens of text as the program estimates them (agent.js estimateTokens): 4 ASCII characters or 1.25 others each.
+// `limit`: the index where that many tokens are reached (text.length when they are not).
+function tokensOf(text) {
+  let ascii = 0;
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) < 128) ascii++;
+  return Math.ceil(ascii / 4 + (text.length - ascii) * 0.8);
+}
+function tokenLimitIndex(text, limit) {
+  let t = 0;
+  for (let i = 0; i < text.length; i++) {
+    t += text.charCodeAt(i) < 128 ? 0.25 : 0.8;
+    if (t > limit) return i;
+  }
+  return text.length;
+}
+const tooManyTokens = (text) => text.length > MAX_OUTPUT_TOKENS * 1.25 && tokensOf(text) > MAX_OUTPUT_TOKENS;
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 
 export function mtime(file) {
@@ -81,7 +101,7 @@ Usage:
 - By default, it reads up to ${MAX_LINES} lines starting from the beginning of the file
 - Read a file whole when you need to understand it; when only a part of a long file matters, give offset and limit (find the place with Grep first if needed)
 - Any lines longer than ${MAX_LINE_CHARS} characters will be truncated
-- A file whose numbered text is longer than ${MAX_OUTPUT_CHARS} characters is refused (or cut there with offset/limit). When you need a large file whole, in one call, pass allow_large: true: then there is no line, character or line length limit, only the room left in the context, and a read that does not fit is refused.
+- A file whose numbered text is longer than ${MAX_OUTPUT_CHARS} characters or about ${MAX_OUTPUT_TOKENS / 1000}k tokens (Chinese text gets there sooner) is refused (or cut there with offset/limit). When you need a large file whole, in one call, pass allow_large: true: then there is no line, character or line length limit, only the room left in the context, and a read that does not fit is refused.
 - Results are returned using cat -n format, with line numbers starting at 1
 - This tool can read images (PNG, JPG, GIF, WEBP) and Jupyter notebooks (.ipynb)
 - This tool can only read files, not directories. To list a directory, use ls via the Bash tool.
@@ -131,8 +151,12 @@ Usage:
     if (ext === '.ipynb') {
       try {
         const nb = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const rendered = renderNotebook(nb);
+        if (rendered.length > MAX_OUTPUT_CHARS || tooManyTokens(rendered)) {
+          return { isError: true, content: `Notebook content (${Math.round(rendered.length / 1024)}KB, about ${tokensOf(rendered).toLocaleString('en-US')} tokens) exceeds the maximum allowed size. Look at parts of it with the Bash tool (python or jq on its JSON), or use Grep to search it.` };
+        }
         ctx.fileState.set(file, { mtimeMs: stat.mtimeMs });
-        return { content: renderNotebook(nb), display: { summary: `Read ${(nb.cells || []).length} cells` } };
+        return { content: rendered, display: { summary: `Read ${(nb.cells || []).length} cells` } };
       } catch (e) {
         return { isError: true, content: `Could not parse notebook: ${e.message}` };
       }
@@ -163,16 +187,18 @@ Usage:
         const n = (t) => t.toLocaleString('en-US');
         return { isError: true, content: `File content (about ${n(fit.tokens)} tokens) does not fit in the context left (about ${n(Math.max(0, fit.room))} tokens before auto-compaction). Read the parts you need with offset and limit, or use the Grep tool to search for specific content.` };
       }
-    } else if (content.length > MAX_OUTPUT_CHARS && !input.limit) {
-      return { isError: true, content: `File content (${Math.round(content.length / 1024)}KB) exceeds the maximum allowed size. Use the offset and limit parameters to read specific portions of the file, or use the Grep tool to search for specific content. If you need the whole file at once, pass allow_large: true.` };
+    } else if (!input.limit && (content.length > MAX_OUTPUT_CHARS || tooManyTokens(content))) {
+      return { isError: true, content: `File content (${Math.round(content.length / 1024)}KB, about ${tokensOf(content).toLocaleString('en-US')} tokens) exceeds the maximum allowed size. Use the offset and limit parameters to read specific portions of the file, or use the Grep tool to search for specific content. If you need the whole file at once, pass allow_large: true.` };
     }
     let cut = false;
     let end = start + slice.length - 1;
-    if (!large && content.length > HARD_MAX_CHARS) {
-      const kept = content.slice(0, HARD_MAX_CHARS);
+    const cutAt = large ? content.length : Math.min(HARD_MAX_CHARS, tokenLimitIndex(content, MAX_OUTPUT_TOKENS));
+    if (cutAt < content.length) {
+      const kept = content.slice(0, cutAt);
       const whole = kept.endsWith('\n'); // the cut fell between two lines
       end = start + (kept.match(/\n/g) || []).length - (whole ? 1 : 0); // the last line shown
-      content = `${kept}${whole ? '' : '\n'}… [output cut at ${HARD_MAX_CHARS} characters: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit, or pass allow_large: true to read it all at once]`;
+      const why = cutAt === HARD_MAX_CHARS ? `${HARD_MAX_CHARS} characters` : `about ${MAX_OUTPUT_TOKENS / 1000}k tokens`;
+      content = `${kept}${whole ? '' : '\n'}… [output cut at ${why}: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit, or pass allow_large: true to read it all at once]`;
       cut = true;
     }
     seen(cut || start > 1 || end < lines.length);
