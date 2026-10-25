@@ -1095,7 +1095,18 @@ export class App {
     this.screen.setFind(f.text);
   }
 
-  pasteClipboard(target = this.clipboardEditor(), fallbackText = '') {
+  // Pasted text into the input box, the open dialog's text field or the find box.
+  insertPastedText(text, target = this.clipboardEditor()) {
+    const clean = String(text || '').replace(/\x1b\[20[01]~/g, '');
+    if (!clean) return;
+    if (target) target.insertPaste(clean);
+    else if (this.finder) this.insertFindText(clean);
+    this.screen.schedule();
+  }
+
+  // Read the system clipboard: an image first, else its text. Each read starts PowerShell (about a second), so it
+  // is only done when the terminal had nothing to paste (alt+v, ctrl+v as a key, an empty bracketed paste).
+  pasteClipboard(target = this.clipboardEditor()) {
     if (this.readingClipboard || this.exiting) return;
     if (!target && !this.finder) return; // selection dialogs have no text field to paste into
     this.readingClipboard = true;
@@ -1113,13 +1124,8 @@ export class App {
       }
       return readClipboardText().then((text) => {
         if (this.exiting) return;
-        const clean = String(text || '').replace(/\x1b\[20[01]~/g, '') || String(fallbackText || '').replace(/\x1b\[20[01]~/g, '');
-        if (clean) {
-          if (target) target.insertPaste(clean);
-          else this.insertFindText(clean);
-        } else if (r.error) {
-          this.flash(`Could not read the clipboard: ${r.error}`, 'warn');
-        }
+        if (text) this.insertPastedText(text, target);
+        else if (r.error) this.flash(`Could not read the clipboard: ${r.error}`, 'warn');
       });
     }).catch((e) => {
       if (!this.exiting) this.flash(`Could not read the clipboard: ${e.message}`, 'warn');
@@ -1131,16 +1137,17 @@ export class App {
 
   onKey(str, key) {
     if (this.exiting) return;
-    // Some terminals implement Ctrl+V as bracketed paste: readline reports paste-start/end and
-    // emits the clipboard contents as ordinary keys between them. Prefer the system clipboard
-    // (which preserves images), but retain the terminal payload as a text fallback.
+    // Terminals paste (ctrl+v in Windows Terminal and VS Code) as bracketed paste: readline reports paste-start/end
+    // and emits the text as ordinary keys between them. That text goes in at once. A paste with no text is what a
+    // terminal sends for an image on the clipboard, which only the system clipboard has (alt+v reads it on demand).
     if (this.bracketedPaste) {
       if (key.name === 'paste-end' || key.sequence === '\x1b[201~') {
-        const fallback = this.bracketedPaste.raw;
+        const raw = this.bracketedPaste.raw;
         this.bracketedPaste = null;
-        this.pasteClipboard(undefined, fallback);
+        if (raw) this.insertPastedText(raw);
+        else this.pasteClipboard();
       } else if (key.name === 'return' || key.name === 'enter') {
-        // Keep CRLF intact; Editor.insertPaste normalizes line endings once after the clipboard read.
+        // Keep CRLF intact; Editor.insertPaste normalizes line endings once.
         this.bracketedPaste.raw += str || '\n';
       } else if (str) {
         this.bracketedPaste.raw += str;
@@ -1174,7 +1181,7 @@ export class App {
     }
     if (key.ctrl && key.name === 'c' && this.finder && !this.dialogs.length) { this.closeFind(); return; } // not the hidden input's text
     if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
-    if (key.ctrl && key.name === 'v') { this.pasteClipboard(); return; }
+    if ((key.ctrl || key.meta) && key.name === 'v') { this.pasteClipboard(); return; } // alt+v: the clipboard's image
     const dialog = this.dialogs[0];
     if (dialog) {
       dialog.handleKey(str, key);
