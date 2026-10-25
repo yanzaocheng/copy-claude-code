@@ -151,7 +151,8 @@ When you commit (the system prompt says when): run git status, git diff and git 
             const saved = saveFullOutput(ctx.projectRoot, text);
             const size = text.length;
             text = truncateOutput(text, config.bashMaxOutput);
-            if (saved) text += `\n\n(Output was ${size} characters and has been truncated. The full output is saved at ${saved}; use Read with offset/limit or Grep on that file to see the rest.)`;
+            const what = droppedHead ? `The last ${size} characters are saved at ${saved} (the start of the output, past 10 MB, was not kept)` : `The full output is saved at ${saved}`;
+            if (saved) text += `\n\n(Output was ${droppedHead ? 'over 10,000,000' : size} characters and has been truncated. ${what}; use Read with offset/limit or Grep on that file to see the rest.)`;
           }
           if (err) text += `${text ? '\n' : ''}${err.message}`;
           if (timedOut) text += `${text ? '\n' : ''}Command timed out after ${timeout}ms`;
@@ -162,11 +163,12 @@ When you commit (the system prompt says when): run git status, git diff and git 
         // The live view shows the last lines: it gets the end of the output and the line count, not all of it
         // stripped again on every chunk (quadratic on a noisy build, with up to 10 MB re-split every frame).
         let lines = 0;
+        let droppedHead = false;
         watchShell(child, {
           onOutput: (text) => {
             output += text;
             for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) lines++;
-            if (output.length > 10_000_000) output = output.slice(-5_000_000);
+            if (output.length > 10_000_000) { output = output.slice(-5_000_000); droppedHead = true; }
             ctx.onProgress?.(stripAnsi(output.slice(-PROGRESS_CHARS)), { lines });
           },
           done: finish,
@@ -192,7 +194,7 @@ export const BashOutputTool = {
     required: ['bash_id'],
   },
   summarize(input) { return input.bash_id; },
-  async call(input) {
+  async call(input, ctx = {}) {
     const bg = background.get(input.bash_id);
     if (!bg) return { isError: true, content: `No background shell with id ${input.bash_id}. Known: ${[...background.keys()].join(', ') || 'none'}` };
     let fresh = bg.output.slice(bg.readPos);
@@ -203,7 +205,14 @@ export const BashOutputTool = {
         fresh = fresh.split('\n').filter((l) => re.test(l)).join('\n');
       } catch (e) { return { isError: true, content: `Invalid filter regex: ${e.message}` }; }
     }
-    fresh = truncateOutput(fresh.replace(/\r\n/g, '\n'), 30_000);
+    fresh = fresh.replace(/\r\n/g, '\n');
+    if (fresh.length > 30_000) {
+      // The read position has moved past all of it: the middle that is cut here would be gone for good.
+      const saved = ctx.projectRoot ? saveFullOutput(ctx.projectRoot, fresh) : null;
+      const size = fresh.length;
+      fresh = truncateOutput(fresh, 30_000);
+      if (saved) fresh += `\n\n(The new output was ${size} characters and has been truncated. All of it is saved at ${saved}; use Read with offset/limit or Grep on that file to see the rest.)`;
+    }
     const status = `<status>${bg.status}</status>${bg.exitCode !== null ? `\n<exit_code>${bg.exitCode}</exit_code>` : ''}`;
     return { content: `${status}\n<output>\n${fresh || '(no new output)'}\n</output>`, display: { summary: `${bg.status}${fresh ? `, ${fresh.split('\n').length} new lines` : ', no new output'}` } };
   },
