@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { OutputDecoder } from './encoding.js';
 
 const isWin = process.platform === 'win32';
 let shellCache;
@@ -194,8 +195,8 @@ export function spawnShell(shell, command, { cwd, env, cwdFile, stdin }) {
 }
 
 // Collect the output of a shell started with spawnShell and report when it is finished:
-// onOutput(text, 'stdout' | 'stderr') for each piece (decoded as a stream, so a multi-byte character
-// split between two chunks survives) and done(code, error) exactly once.
+// onOutput(text, 'stdout' | 'stderr') for each piece (decoded line by line, UTF-8 or the console code page,
+// see OutputDecoder) and done(code, error) exactly once.
 //
 // A command that leaves a process running (`server &`) keeps the shell's output pipes open after the
 // shell itself has exited, and 'close' would not fire until that process ends. Waiting for it would hold
@@ -217,12 +218,14 @@ export function watchShell(child, { onOutput, done, idleMs = 500, graceMs = 3000
   const settleAfterExit = () => finish(child.exitCode);
   const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(settleAfterExit, idleMs); };
   for (const stream of ['stdout', 'stderr']) {
-    child[stream].setEncoding('utf8');
-    child[stream].on('data', (text) => {
+    const decoder = new OutputDecoder();
+    const take = (text) => { if (text) onOutput(text, stream); };
+    child[stream].on('data', (chunk) => {
       if (finished) return; // late output of a process the command left running is drained, not kept
-      onOutput(text, stream);
+      take(decoder.write(chunk));
       if (exited) armIdle();
     });
+    child[stream].on('end', () => { if (!finished) take(decoder.end()); });
   }
   child.on('error', (e) => finish(null, e));
   child.on('exit', () => {

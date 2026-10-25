@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findShell, killTree, spawnShell, watchShell } from '../utils/shell.js';
 import { stripAnsi } from '../ui/ansi.js';
+import { OutputDecoder } from '../utils/encoding.js';
 import { toolResultsDir } from '../session.js';
 
 const background = new Map(); // id -> {child, command, output, readPos, status, exitCode, startedAt}
@@ -106,12 +107,13 @@ When you commit (the system prompt says when): run git status, git diff and git 
         const id = `bash_${++bgCounter}`;
         const bg = { child, command, description: String(input.description || ''), output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
         background.set(id, bg);
-        // Decode as a stream: a multi-byte character (CJK text) can be split between two chunks.
-        child.stdout.setEncoding('utf8');
-        child.stderr.setEncoding('utf8');
-        const onData = (d) => appendOutput(bg, stripAnsi(d));
-        child.stdout.on('data', onData);
-        child.stderr.on('data', onData);
+        // Line by line, UTF-8 or the console code page (GBK here), never cutting a character (see OutputDecoder).
+        for (const stream of [child.stdout, child.stderr]) {
+          const decoder = new OutputDecoder();
+          const take = (text) => { if (text) appendOutput(bg, stripAnsi(text)); };
+          stream.on('data', (chunk) => take(decoder.write(chunk)));
+          stream.on('end', () => take(decoder.end()));
+        }
         child.on('close', (code) => { bg.status = bg.status === 'killed' ? 'killed' : 'completed'; bg.exitCode = code; });
         child.on('error', (e) => { bg.status = 'failed'; bg.output += `\n${e.message}`; });
         return { content: `Command running in background with ID: ${id}`, display: { summary: `Running in background (${id})` } };

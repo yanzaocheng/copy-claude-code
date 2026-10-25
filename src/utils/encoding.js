@@ -4,6 +4,8 @@
 // byte it did not change as it was. Decoding everything as UTF-8 used to turn each Chinese character of a GBK file
 // into U+FFFD on its first edit. A file that is none of these is marked `lossy`: it can be read, not rewritten.
 
+import { spawnSync } from 'node:child_process';
+
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
 const lenientUtf8 = new TextDecoder('utf-8');
 const strictGbk = new TextDecoder('gbk', { fatal: true }); // the WHATWG gbk decoder, which is the gb18030 one
@@ -82,4 +84,83 @@ function encodeGbk(text) {
     return { error: `characters GBK cannot represent: ${chars.join(', ')}${missing.size > 10 ? ', …' : ''}`, chars: [...missing] };
   }
   return { buffer: out.subarray(0, n) };
+}
+
+// ---- Output of commands
+//
+// MSYS tools, git and node write UTF-8, but native Windows programs writing to a pipe use the console code page:
+// 936 (GBK) on Chinese Windows, so the output of ipconfig, tasklist, schtasks, cmd, javac or MSBuild used to reach
+// the model as mojibake. OutputDecoder decodes it line by line: UTF-8 where a line is UTF-8, else in the console
+// code page. A line is decoded once it is complete, so a character is never cut between two chunks.
+
+const CODE_PAGES = { 936: 'gbk', 54936: 'gb18030', 950: 'big5', 932: 'shift_jis', 949: 'euc-kr', 866: 'ibm866', 874: 'windows-874' };
+let legacyDecoder; // undefined: not looked up yet; null: none (UTF-8 console, not Windows, unknown code page)
+
+// A strict TextDecoder for this machine's console code page (`chcp`, looked up once), or null.
+export function consoleDecoder() {
+  if (legacyDecoder !== undefined) return legacyDecoder;
+  legacyDecoder = null;
+  if (process.platform !== 'win32') return null;
+  try {
+    const r = spawnSync('chcp', [], { windowsHide: true, timeout: 3000 });
+    const cp = Number(/(\d+)\s*$/.exec(String(r.stdout || '').trim())?.[1]);
+    const label = CODE_PAGES[cp] || (cp >= 1250 && cp <= 1258 ? `windows-${cp}` : null);
+    if (label) legacyDecoder = new TextDecoder(label, { fatal: true });
+  } catch { /* none: such lines stay lenient UTF-8 */ }
+  return legacyDecoder;
+}
+
+const isAscii = (buf) => { for (let i = 0; i < buf.length; i++) if (buf[i] > 0x7f) return false; return true; };
+
+// Complete lines (or a whole stream) of command output as text.
+export function decodeOutput(buf) {
+  if (!buf.length) return '';
+  try { return strictUtf8.decode(buf); } catch { /* some line is not UTF-8 */ }
+  let out = '';
+  let start = 0;
+  while (start < buf.length) {
+    const nl = buf.indexOf(0x0a, start);
+    const end = nl < 0 ? buf.length : nl + 1;
+    const line = buf.subarray(start, end);
+    let text = null;
+    try { text = strictUtf8.decode(line); } catch {
+      const legacy = consoleDecoder();
+      if (legacy) { try { text = legacy.decode(line); } catch { /* neither */ } }
+    }
+    out += text ?? lenientUtf8.decode(line);
+    start = end;
+  }
+  return out;
+}
+
+export class OutputDecoder {
+  constructor() { this.pending = null; }
+
+  // The text of `chunk` that can be decoded now. An unfinished last line waits for the next chunk when it has
+  // non-ASCII bytes (it could end inside a character); a long one is let through at a UTF-8 character boundary.
+  write(chunk) {
+    let buf = this.pending ? Buffer.concat([this.pending, chunk]) : chunk;
+    this.pending = null;
+    const cut = buf.lastIndexOf(0x0a) + 1;
+    const tail = buf.subarray(cut);
+    if (!tail.length || isAscii(tail)) return decodeOutput(buf);
+    if (tail.length > 65_536) {
+      let keep = tail.length;
+      for (let i = tail.length - 1; i >= tail.length - 3 && i >= 0; i--) {
+        if (tail[i] < 0x80) break;
+        if (tail[i] >= 0xc0) { if (tail.length - i < (tail[i] >= 0xf0 ? 4 : tail[i] >= 0xe0 ? 3 : 2)) keep = i; break; }
+      }
+      this.pending = keep < tail.length ? Buffer.from(tail.subarray(keep)) : null;
+      return decodeOutput(buf.subarray(0, cut + keep));
+    }
+    this.pending = Buffer.from(tail);
+    return decodeOutput(buf.subarray(0, cut));
+  }
+
+  // What is still held back, at the end of the stream.
+  end() {
+    const rest = this.pending;
+    this.pending = null;
+    return rest ? decodeOutput(rest) : '';
+  }
 }
