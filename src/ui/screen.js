@@ -865,7 +865,9 @@ export class Screen {
 
   // Print any pending output, then remove the live region (input box etc.) for good.
   // `keepTitle`: another process takes the terminal over at once (a restart), so the tab keeps its title.
-  close({ keepTitle = false } = {}) {
+  // `after`: lines to leave on the terminal (the exit's usage and resume hint). In fullscreen they are written after
+  // the alternate screen is gone: logged before, they were drawn on it and vanished with it.
+  close({ keepTitle = false, after = [] } = {}) {
     if (this.closed) return;
     if (this.resizing) this.repaint(); // the cursor is not where the last draw left it: put things in order first
     this.renderLive = () => ({ lines: [] });
@@ -874,7 +876,9 @@ export class Screen {
       this.takeStatic();
       this.full = false;
       this.out.write(ALT_OFF); // the shell's screen comes back as it was
+      if (after.length) this.out.write(`${after.map((l) => `${l}\x1b[0m`).join('\r\n')}\r\n`);
     } else {
+      this.staticQueue.push(...after);
       this.flush();
     }
     this.closed = true;

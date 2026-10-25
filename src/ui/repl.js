@@ -385,11 +385,11 @@ export class App {
 
   // `handOver`: another process takes the terminal over at once (a restart). It is left the way the program
   // had it (raw mode, bracketed paste, the tab's title), so that keys typed in between are not echoed or lost.
-  restoreTerminal({ handOver = false } = {}) {
+  restoreTerminal({ handOver = false, farewell = [] } = {}) {
     if (this.restored) return;
     this.restored = true;
     try {
-      this.screen.close({ keepTitle: handOver });
+      this.screen.close({ keepTitle: handOver, after: farewell });
       this.stdout.write(handOver ? ESC.showCursor : ESC.bracketedPasteOff + ESC.showCursor);
       if (!handOver && this.stdin.isTTY) this.stdin.setRawMode(false);
     } catch { /* ignore */ }
@@ -409,11 +409,12 @@ export class App {
     clearInterval(this.loginTimer);
     const remoteClosed = this.remote?.close({ restarting: restart });
     const u = this.agent?.totalUsage();
+    const farewell = []; // left on the terminal once the program's screen is gone (see Screen.close)
     if (!restart && u && u.requests) {
-      this.screen.log(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
+      farewell.push(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
     }
-    if (!restart && this.agent?.messages.length) this.screen.log(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
-    this.restoreTerminal({ handOver: restart });
+    if (!restart && this.agent?.messages.length) farewell.push(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
+    this.restoreTerminal({ handOver: restart, farewell });
     this.stdin.pause();
     this.resolveExit?.(code);
     if (!this.noProcessExit) {
