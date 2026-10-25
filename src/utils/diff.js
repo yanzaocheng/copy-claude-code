@@ -1,6 +1,20 @@
 // Line diff (Myers O(ND)) and hunk construction for displaying edits.
 
+// The lines both versions start and end with are left out of the Myers run: an edit of a big file differs in a few
+// lines, and the search's memory grows with lines × differences (a one-line edit of a 6,000-line file used to hit
+// the size guard and show as the whole file removed and added again).
 export function diffLines(a, b) {
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let post = 0;
+  while (post < a.length - pre && post < b.length - pre && a[a.length - 1 - post] === b[b.length - 1 - post]) post++;
+  const same = (lines) => lines.map((line) => ({ op: ' ', line }));
+  return [...same(a.slice(0, pre)), ...myers(a.slice(pre, a.length - post), b.slice(pre, b.length - post)), ...same(a.slice(a.length - post))];
+}
+
+const MAX_D = 2000; // differences searched for (about 16 MB of trace)
+
+function myers(a, b) {
   const n = a.length, m = b.length;
   const max = n + m;
   if (max === 0) return [];
@@ -9,11 +23,14 @@ export function diffLines(a, b) {
     return [...a.map((line) => ({ op: '-', line })), ...b.map((line) => ({ op: '+', line }))];
   }
   const v = new Int32Array(2 * max + 2);
+  // For each d only the diagonals the backtrack reads (-d-1 .. d+1), not the whole of v. The trace still grows
+  // with d², so past MAX_D differences (a rewrite rather than an edit) the middle shows as removed and added.
   const trace = [];
   const off = max + 1;
   let found = false;
   for (let d = 0; d <= max && !found; d++) {
-    trace.push(v.slice());
+    if (d > MAX_D) return [...a.map((line) => ({ op: '-', line })), ...b.map((line) => ({ op: '+', line }))];
+    trace.push(v.slice(off - d - 1, off + d + 2));
     for (let k = -d; k <= d; k += 2) {
       let x;
       if (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) x = v[off + k + 1];
@@ -29,11 +46,12 @@ export function diffLines(a, b) {
   let x = n, y = m;
   for (let d = trace.length - 1; d >= 0; d--) {
     const vv = trace[d];
+    const at = (k) => vv[k + d + 1]; // v[off + k] as it was before step d
     const k = x - y;
     let prevK;
-    if (k === -d || (k !== d && vv[off + k - 1] < vv[off + k + 1])) prevK = k + 1;
+    if (k === -d || (k !== d && at(k - 1) < at(k + 1))) prevK = k + 1;
     else prevK = k - 1;
-    const prevX = vv[off + prevK];
+    const prevX = at(prevK);
     const prevY = prevX - prevK;
     while (x > prevX && y > prevY) { ops.push({ op: ' ', line: a[x - 1] }); x--; y--; }
     if (d > 0) {
