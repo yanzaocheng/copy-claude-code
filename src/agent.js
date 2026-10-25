@@ -123,6 +123,16 @@ export function clearOldToolResults(messages, { keep = IDLE_CLEARING.keep, atLea
   return { messages: out, results: clear.size, tokens, forget: [...gone].filter((f) => !shown.has(f)) };
 }
 
+// A summary request's messages with the older half of the turns left out: the first message (the task, or the
+// summary of an earlier compaction) and the newer half stay, with a note in between. null when nothing is left
+// to leave out.
+function withoutOldestHalf(messages) {
+  if (messages.length <= 4) return null;
+  const cut = Math.floor((messages.length - 1) / 2);
+  const note = { role: 'user', content: [{ type: 'text', text: '[Part of the conversation is left out here: with it the summary request did not fit in the context window.]' }] };
+  return repairToolResults(normalizeMessages([messages[0], note, ...messages.slice(1 + cut)])).messages;
+}
+
 const notificationBlocks = (notes) => notes.map((n) => ({ type: 'text', text: n.text }));
 
 // Queued input may arrive as plain strings or as ready-made content blocks (text + images).
@@ -1033,7 +1043,27 @@ export class Agent {
     } catch (err) {
       if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
     }
-    return call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false }, { cacheOverride: { caching: false } });
+    const plain = (msgs) => call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false, messages: msgs }, { cacheOverride: { caching: false } });
+    let tooLong;
+    try {
+      return await plain(messages);
+    } catch (err) {
+      if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
+      tooLong = err;
+    }
+    // The history alone is over the window (one turn of very large results can do it): the summary is made from
+    // less, old tool results first (as idle clearing does), then the oldest turns. Without this every later
+    // request failed too, and only /clear or /rewind got the conversation going again.
+    let smaller = clearOldToolResults(messages, { keep: 3, atLeast: 0, cwd: this.cwd })?.messages || messages;
+    for (let i = 0; i < 4 && smaller; i++) {
+      try {
+        return await plain(smaller);
+      } catch (err) {
+        if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
+      }
+      smaller = withoutOldestHalf(smaller);
+    }
+    throw tooLong;
   }
 
   // Summarise part of the conversation, as /rewind's "Summarize from here" ('after': the messages from `index` on)
