@@ -38,6 +38,20 @@ const RESIZE_QUIET_MS = 80; // repaint once the size has not changed for this lo
 const RESIZE_MAX_WAIT_MS = 300; // ... or at the latest this long after it started changing
 const HISTORY_KEEP = 600; // static lines remembered for repainting (a screen shows far fewer)
 const HISTORY_LINE_CHARS = 20_000;
+
+// A line as the terminal would show it, so that what is drawn is what was measured: a tab becomes the 4 spaces
+// stringWidth counts it as (the terminal moved to its next 8-column stop instead, past what was measured, and a
+// fullscreen row's erase left old glyphs in the cells it skipped), only what follows the last carriage return
+// stays (a progress bar's "40%\r80%" shows 80%, and no longer overwrites the prefix drawn before it), and other
+// control characters (BEL, backspace...) go. ANSI escapes stay.
+const CONTROLS = /[\x00-\x08\x09\x0b-\x1a\x1c-\x1f\x7f\r]/;
+export function cleanLine(line) {
+  if (!CONTROLS.test(line)) return line;
+  let s = line.replace(/\r+$/, '');
+  const cr = s.lastIndexOf('\r');
+  if (cr >= 0) s = s.slice(cr + 1);
+  return s.replace(/\t/g, '    ').replace(/[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g, '');
+}
 const FULL_KEEP = 20_000; // fullscreen: lines of the conversation kept to scroll back through
 // The alternate screen, and the mouse reported (SGR): buttons, the wheel, and moves while a button is held (a drag).
 const ALT_ON = '\x1b[?1049h\x1b[?1002h\x1b[?1006h';
@@ -673,7 +687,7 @@ export class Screen {
   // Take the queued static output as lines, remembering them for a later repaint.
   takeStatic() {
     if (!this.staticQueue.length) return [];
-    const lines = this.staticQueue.join('\n').split(/\r?\n/);
+    const lines = this.staticQueue.join('\n').split(/\r?\n/).map(cleanLine);
     this.staticQueue = [];
     const first = this.history.length;
     for (const line of lines) this.history.push(line.length > HISTORY_LINE_CHARS ? line.slice(0, HISTORY_LINE_CHARS) : line);
@@ -710,7 +724,7 @@ export class Screen {
     const rows = [];
     let cursorRow = null, cursorCol = 0;
     lines.forEach((line, i) => {
-      const wrapped = wrapLine(line, cols - 1);
+      const wrapped = wrapLine(cleanLine(line), cols - 1);
       if (cursor && cursor.row === i) {
         const col = cursor.col;
         const extra = Math.floor(col / (cols - 1));
