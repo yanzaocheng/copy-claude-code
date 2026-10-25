@@ -5,7 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import { VERSION } from './config.js';
-import { killTree } from './utils/shell.js';
+import { killTreeSync } from './utils/shell.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const isWin = process.platform === 'win32';
@@ -114,7 +114,7 @@ class StdioTransport {
   }
 
   notify(method, params) { this.send({ jsonrpc: '2.0', method, params }); }
-  close() { this.closed = true; killTree(this.child); }
+  close() { this.closed = true; killTreeSync(this.child); } // also at exit: done before it returns
 }
 
 class HttpTransport {

@@ -99,25 +99,65 @@ function findPs() {
 }
 
 // Windows ids of the processes MSYS says are under the shell started by spawnShell (empty when unknown).
-function msysDescendants(child) {
+// `sync`: with spawnSync (the exit path, which must not leave anything running); else without blocking.
+function msysDescendants(child, { sync }) {
+  let root, ps;
   try {
-    const root = parseInt(fs.readFileSync(child.claudeProPidFile, 'utf8'), 10);
-    const ps = findPs();
-    if (!Number.isFinite(root) || !ps) return [];
-    const r = spawnSync(ps, ['-W'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
-    return r.status === 0 ? msysTree(parsePsRows(r.stdout), root) : [];
-  } catch {
-    return [];
+    root = parseInt(fs.readFileSync(child.claudeProPidFile, 'utf8'), 10);
+    ps = findPs();
+  } catch { /* no pid file (yet) */ }
+  if (!Number.isFinite(root) || !ps) return sync ? [] : Promise.resolve([]);
+  if (sync) {
+    try {
+      const r = spawnSync(ps, ['-W'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      return r.status === 0 ? msysTree(parsePsRows(r.stdout), root) : [];
+    } catch {
+      return [];
+    }
   }
+  return runAsync(ps, ['-W'], { timeout: 5000 }).then((r) => (r.code === 0 ? msysTree(parsePsRows(r.out), root) : []));
 }
 
-// Kill a process and all its children.
-export function killTree(child) {
+// A command's exit code and output, without blocking the event loop. Never rejects.
+function runAsync(cmd, args, { timeout = 5000 } = {}) {
+  return new Promise((resolve) => {
+    let out = '';
+    let child;
+    try { child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { resolve({ code: null, out }); return; }
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } }, timeout);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => { clearTimeout(timer); resolve({ code: null, out }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out }); });
+  });
+}
+
+// Kill a process and all its children, without blocking the event loop (`ps -W` and taskkill take up to seconds,
+// and Ctrl+C, a timeout or KillShell used to freeze the interface for that long). Resolves when done; never
+// rejects. The tree has to be looked up before anything is killed: once its parents are gone the links are too.
+export async function killTree(child) {
   if (!child || child.exitCode !== null || child.killed) return;
   try {
     if (isWin) {
-      // The tree has to be looked up before anything is killed: once its parents are gone the links are too.
-      const pids = new Set([child.pid, ...(child.claudeProPidFile ? msysDescendants(child) : [])]);
+      const pids = new Set([child.pid, ...(child.claudeProPidFile ? await msysDescendants(child, { sync: false }) : [])]);
+      const args = ['/F', '/T'];
+      for (const pid of pids) args.push('/PID', String(pid));
+      await runAsync('taskkill', args);
+      if (child.claudeProPidFile) fs.rmSync(child.claudeProPidFile, { force: true });
+    } else {
+      process.kill(-child.pid, 'SIGKILL');
+    }
+  } catch {
+    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+  }
+}
+
+// The same, done before it returns: for the exit, after which nothing would be left to finish the kill.
+export function killTreeSync(child) {
+  if (!child || child.exitCode !== null || child.killed) return;
+  try {
+    if (isWin) {
+      const pids = new Set([child.pid, ...(child.claudeProPidFile ? msysDescendants(child, { sync: true }) : [])]);
       const args = ['/F', '/T'];
       for (const pid of pids) args.push('/PID', String(pid));
       spawnSync('taskkill', args, { windowsHide: true, stdio: 'ignore' });

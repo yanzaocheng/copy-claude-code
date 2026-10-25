@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findShell, killTree, spawnShell, watchShell } from '../utils/shell.js';
+import { findShell, killTree, killTreeSync, spawnShell, watchShell } from '../utils/shell.js';
 import { stripAnsi } from '../ui/ansi.js';
 import { OutputDecoder } from '../utils/encoding.js';
 import { toolResultsDir } from '../session.js';
@@ -55,7 +55,7 @@ function childEnv() {
 }
 
 export function shutdownBackgroundShells() {
-  for (const bg of background.values()) if (bg.status === 'running') killTree(bg.child);
+  for (const bg of background.values()) if (bg.status === 'running') killTreeSync(bg.child); // the program is exiting
 }
 
 export function listBackgroundShells() {
@@ -223,7 +223,7 @@ export const KillShellTool = {
     if (!bg) return { isError: true, content: `No background shell with id ${input.shell_id}` };
     if (bg.status !== 'running') return { content: `Shell ${input.shell_id} is not running (status: ${bg.status})` };
     bg.status = 'killed';
-    killTree(bg.child);
+    await killTree(bg.child);
     return { content: `Successfully killed shell: ${input.shell_id} (${bg.command})` };
   },
 };
