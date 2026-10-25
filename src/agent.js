@@ -383,12 +383,21 @@ export class Agent {
 
   async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {} } = {}) {
     const handle = this.traceRequestStart({ kind, messages: request.messages, cacheBucket, cacheMessages, compactionId });
+    // A bug in what shows or traces the stream must not fail the request: it had no HTTP status, so it was taken
+    // for a network error and the request was sent (and billed) again, up to the retry limit, failing the same way
+    // each time. The reply is assembled without the display; the error is said once.
+    let handlerError = null;
     const forward = (ev) => {
-      this.trace?.requestEvent(handle, ev);
-      onEvent(ev);
+      try {
+        this.trace?.requestEvent(handle, ev);
+        onEvent(ev);
+      } catch (e) {
+        handlerError ??= e;
+      }
     };
     try {
       const res = await streamMessage(this.config, request, { signal, onEvent: forward });
+      if (handlerError) this.io.notice?.(`Showing the reply failed (${handlerError.message}); the reply itself is complete.`, 'warn');
       const observed = cacheOverride ? { ...res, cache: { ...res.cache, ...cacheOverride } } : res;
       const recorded = this.recordUsage(observed, kind === 'summary' ? 'summary' : 'turn');
       this.trace?.requestEnd(handle, {
