@@ -163,11 +163,14 @@ const recoveredToolResult = (id) => ({
 // tool_use was persisted but before the user tool_result was appended; gateway adapters reject
 // that sequence as "No tool output found for function call". The repair is deterministic and
 // only adds an explicit interrupted result (or drops an orphan result), never a successful one.
+// `recovered`: the ids of the tool calls that got an interrupted result. Blocks are copied only where they
+// change, so the others (images, which a 400 makes the request scale in place) are the conversation's own.
 export function repairToolResults(messages) {
   const out = [];
   let pending = null;
   let changed = false;
   let recoveryIndex = 0;
+  const recovered = [];
   const usedIds = new Set();
   const freshId = () => {
     let id;
@@ -175,16 +178,17 @@ export function repairToolResults(messages) {
     usedIds.add(id);
     return id;
   };
+  const interrupted = (id) => { recovered.push(id); return recoveredToolResult(id); };
   const flushPending = () => {
     if (!pending?.length) return;
-    out.push({ role: 'user', content: pending.map(recoveredToolResult) });
+    out.push({ role: 'user', content: pending.map(interrupted) });
     pending = null;
     changed = true;
   };
 
   for (const original of messages) {
     const source = Array.isArray(original.content) ? original.content : toBlocks(original.content);
-    const m = { ...original, content: source.map((b) => ({ ...b })) };
+    const m = { ...original, content: source.slice() };
     const uses = m.role === 'assistant' ? m.content.filter((b) => b.type === 'tool_use') : [];
 
     if (uses.length) {
@@ -194,7 +198,7 @@ export function repairToolResults(messages) {
         let id = typeof block.id === 'string' && block.id ? block.id : null;
         if (!id || usedIds.has(id)) {
           id = freshId();
-          block.id = id;
+          m.content[m.content.indexOf(block)] = { ...block, id };
           changed = true;
         } else usedIds.add(id);
         ids.push(id);
@@ -215,12 +219,13 @@ export function repairToolResults(messages) {
         if (!expected.has(id) || seen.has(id)) { changed = true; continue; }
         seen.add(id);
         if (block.content === undefined || block.content === null) {
-          block.content = '(no output)';
+          results.push({ ...block, content: '(no output)' });
           changed = true;
+          continue;
         }
         results.push(block);
       }
-      for (const id of pending) if (!seen.has(id)) { results.push(recoveredToolResult(id)); changed = true; }
+      for (const id of pending) if (!seen.has(id)) { results.push(interrupted(id)); changed = true; }
       const content = [...results, ...rest];
       if (content.length !== m.content.length || content.some((b, i) => b !== m.content[i])) changed = true;
       out.push({ ...m, content });
@@ -239,7 +244,7 @@ export function repairToolResults(messages) {
     }
   }
   flushPending();
-  return { messages: out, changed };
+  return { messages: out, changed, recovered };
 }
 
 // Minimal JSON-schema check for required fields and primitive types.
@@ -280,6 +285,7 @@ export class Agent {
     this.trace = trace;
     this.traceTurnId = null;
     this.messages = [];
+    this.recoveredToolIds = new Set(); // tool calls already said to be recovered (see callModel)
     this.todos = [];
     this.workState = null; // last validated state emitted by compaction; the transcript remains the source on resume
     this.userTurns = 0; // turns the user started (see noteUserTurn)
@@ -780,10 +786,13 @@ export class Agent {
       this.recordedSystem = system;
       this.io.systemPrompt?.(system, this);
     }
-    const normalized = normalizeMessages(this.messages);
-    const repaired = repairToolResults(normalized);
-    if (repaired.changed) {
-      this.replaceMessages(repaired.messages);
+    // The repair goes into the request only, done again (the same way) for every request: storing it in place of
+    // the conversation merged and inserted messages, which moved the messages the checkpoints point at, so a
+    // /rewind after a restart cut the conversation in the wrong place.
+    const repaired = repairToolResults(normalizeMessages(this.messages));
+    const fresh = repaired.recovered.filter((id) => !this.recoveredToolIds.has(id));
+    if (fresh.length) {
+      for (const id of fresh) this.recoveredToolIds.add(id);
       this.io.notice?.('Recovered an unfinished tool call in the conversation; continuing with an interrupted result.', 'warn');
     }
     const request = {
