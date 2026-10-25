@@ -39,18 +39,17 @@ export function sessionEntry(entry, platform = process.platform) {
 }
 
 // Whether this invocation is an interactive session that should run under the supervisor.
-// A background session (--headless, started by the computer service) has no terminal and is one all the same.
 export function shouldSupervise(argv, env = process.env, isTty = (fd) => tty.isatty(fd)) {
   if (env[ENV_SUPERVISED] || /^(1|true|yes)$/i.test(env.CLAUDE_PRO_NO_SUPERVISOR || '')) return false;
-  if (['config', 'host', 'attach', 'connect'].includes(argv[0])) return false;
-  if ((!isTty(0) || !isTty(1)) && !argv.includes('--headless')) return false;
+  if (['config', 'host', 'attach', 'connect'].includes(argv[0])) return false; // a command, or a removed one (see main.js)
+  if (!isTty(0) || !isTty(1)) return false;
   return !argv.some((a) => NOT_INTERACTIVE.has(a));
 }
 
 function putTerminalRight() {
   // The child may have died with the terminal in the mode it had set for itself.
   // (the fullscreen renderer's alternate screen and mouse reporting included)
-  if (!tty.isatty(1)) return; // a background session's log
+  if (!tty.isatty(1)) return;
   try { process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1049l\x1b[?2004l\x1b[?25h'); } catch { /* nothing to do */ }
   try { if (tty.isatty(0)) process.stdin.setRawMode(false); } catch { /* nothing to do */ }
 }
@@ -86,8 +85,7 @@ export function supervise(argv, { entry, env = process.env, execPath = process.e
       const childEnv = { ...env, [ENV_SUPERVISED]: '1', [ENV_RESTART_FILE]: stateFile };
       if (restarted) childEnv[ENV_RESTARTED] = '1'; else delete childEnv[ENV_RESTARTED];
       const startedAt = Date.now();
-      // a background session has no console: without windowsHide Windows would give its child a window of its own
-      child = spawn(execPath, [sessionEntry(entry), ...argv], { stdio: 'inherit', env: childEnv, windowsHide: argv.includes('--headless') });
+      child = spawn(execPath, [sessionEntry(entry), ...argv], { stdio: 'inherit', env: childEnv });
       child.on('error', (e) => {
         child = null;
         err.write(`claude-pro: could not start (${e.message})\n`);

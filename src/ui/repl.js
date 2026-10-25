@@ -308,8 +308,7 @@ export class App {
     }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
-    // Nothing configured yet: the gateway is the default, and its browser login starts first. (Not in a
-    // background session: nobody sits at this computer to log in in its browser.)
+    // Nothing configured yet: the gateway is the default, and its browser login starts first.
     else if (this.config.usesGateway && !gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY)) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
@@ -437,7 +436,6 @@ export class App {
         id: this.flags.restart?.peerId,
         onMessage: (msg) => this.onPeerMessage(msg),
         getStatus: () => ({ busy: this.working() }),
-        info: () => ({ kind: 'terminal', remoteId: this.remote?.id || null, conversationId: this.store.id }),
       }).start();
     } catch (e) {
       this.peers = null;
@@ -665,7 +663,6 @@ export class App {
     if (this.exiting) { remote.close(); return remote; }
     this.remote = remote;
     this.remoteRefused = null;
-    this.peers?.update(); // its id at the gateway, in the registry
     this.remotePeersTimer ??= setInterval(() => { if (this.remote?.online) this.refreshRemotePeers(); }, 60_000);
     this.remotePeersTimer.unref?.();
     this.screen.schedule();
@@ -1750,7 +1747,6 @@ export class App {
     this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
     this.runtime.trace?.setSessionId(id);
-    this.peers?.update(); // the conversation, in the registry
     this.topic = loaded.topic;
     this.customTitle = loaded.name;
     // a conversation that was given a name brings it back: the other sessions reach this one by it again
@@ -1807,7 +1803,6 @@ export class App {
   newSession() {
     this.store = new SessionStore(this.cwd);
     this.runtime.trace?.setSessionId(this.store.id);
-    this.peers?.update();
     this.seedOutput = [];
     this.topic = null;
     this.customTitle = null;

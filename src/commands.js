@@ -521,7 +521,7 @@ export function buildCommands(app) {
       const cfg = app.runtime.config;
       const had = clearGatewayLogin();
       const wasOnline = Boolean(app.remote);
-      app.stopRemote(); // the other sessions of this computer and its computer service follow within seconds
+      app.stopRemote(); // the other sessions of this computer follow within seconds
       out(had
         ? `Logged out of the gateway ${cfg.gatewayUrl}.${wasOnline ? ' This session is offline there now.' : ''} Run /login to log in again.`
         : c.dim('There was no gateway login. Run /login to log in.'));

@@ -188,7 +188,7 @@
               <pre>main()
   ├─ interactive TTY  → runRepl()
   └─ non-TTY/--print  → runPrint()</pre>
-              <div class="callout warn"><b>边界：</b>当前 <code>main.js</code> 不再解析 <code>--headless</code> 或 <code>--remote-id</code>，因此旧文档里通过 VirtualTerminal 启动后台 host session 的入口并不是当前可达路径。</div>
+              <div class="callout warn"><b>边界：</b>后台 host session（<code>--headless</code>、<code>--remote-id</code>、VirtualTerminal）和 <code>claude-pro host/attach/connect</code> 已于 2026-10-25 删除；<code>main.js</code> 对这三个命令只报“已移除”，不会把它们当作提示词。</div>
               <p class="small">兼容参数 <code>--remote-control</code>/<code>--rc</code> 可以被接受，但不会重新打开旧的网页控制通道。</p>
             </div>
           </div>
@@ -380,7 +380,7 @@
               <p>主 Agent 可以等待、读取输出，或用 TaskStop 终止后台任务。</p>
             </div>
           </div>
-          <div class="callout danger"><b>不要混淆两类 background：</b>后台 sub-agent/task 当前可达；旧版持久化 host session（<code>--headless --remote-id</code>、VirtualTerminal、网页启动后台会话）仍有 legacy 文件，但当前入口解析器不会把它们接入执行路径。</div>
+          <div class="callout danger"><b>background 只有一类：</b>后台 sub-agent/task 和后台 shell。旧版持久化 host session（<code>--headless --remote-id</code>、VirtualTerminal、网页启动后台会话）的代码已删除。</div>
         </div>
       </section>
 

@@ -76,18 +76,11 @@ export class PeerNode {
   // onMessage(msg): msg = {id, kind: 'task'|'reply', text, inReplyTo, from: {id, name, cwd}}
   // `id`: the id this session had before a restart, so that answers on their way still find it.
   // getStatus(): {busy}, what GET /status answers (an update waits until no session of the machine is busy).
-  // info(): more of the session for the registry: {kind: 'terminal'|'background', remoteId, conversationId} (the
-  // computer service finds its background sessions by them, `claude-pro attach` lists them).
-  // onControl(body): POST /control, the computer service ending or restarting a background session ({action}).
-  // onAttach(socket, {cols, rows}): GET /attach upgraded, `claude-pro attach` taking over its screen (see attach.js).
-  constructor({ cwd, name, id, onMessage, getStatus, info, onControl, onAttach }) {
+  constructor({ cwd, name, id, onMessage, getStatus }) {
     this.cwd = cwd;
     this.wantedName = name || null;
     this.onMessage = onMessage;
     this.getStatus = getStatus;
-    this.info = info;
-    this.onControl = onControl;
-    this.onAttach = onAttach;
     this.id = /^[0-9a-f]{12}$/.test(id || '') ? id : crypto.randomBytes(6).toString('hex');
     this.token = crypto.randomBytes(16).toString('hex');
     this.name = null;
@@ -99,7 +92,6 @@ export class PeerNode {
 
   async start() {
     this.server = http.createServer((req, res) => this.handle(req, res));
-    this.server.on('upgrade', (req, socket) => this.upgrade(req, socket));
     await new Promise((resolve, reject) => {
       this.server.once('error', reject);
       this.server.listen(0, '127.0.0.1', resolve);
@@ -130,35 +122,14 @@ export class PeerNode {
   write() {
     if (!this.port) return;
     fs.mkdirSync(PEERS_DIR, { recursive: true });
-    let more = {};
-    try { more = this.info?.() || {}; } catch { /* the basics only */ }
-    const data = { ...more, id: this.id, name: this.name, cwd: this.cwd, pid: process.pid, port: this.port, token: this.token, startedAt: this.startedAt ??= Date.now() };
+    const data = { id: this.id, name: this.name, cwd: this.cwd, pid: process.pid, port: this.port, token: this.token, startedAt: this.startedAt ??= Date.now() };
     const json = JSON.stringify(data);
     if (json === this.written) return;
-    // whole or not at all: the computer service reads these files every few seconds
+    // whole or not at all: the other sessions read these files at any time (listPeers)
     const tmp = `${this.file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, json);
     fs.renameSync(tmp, this.file);
     this.written = json;
-  }
-
-  // The registry entry again, when what info() says has changed.
-  update() { try { this.write(); } catch { /* the next change writes it */ } }
-
-  // GET /attach, upgraded to a connection of its own (see attach.js): with the token, and a session that takes it.
-  upgrade(req, socket) {
-    const url = new URL(req.url, 'http://x');
-    if (url.pathname !== '/attach' || req.headers.authorization !== `Bearer ${this.token}` || !this.onAttach) {
-      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
-      return;
-    }
-    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: claude-pro-attach\r\nConnection: Upgrade\r\n\r\n');
-    socket.setNoDelay(true);
-    try {
-      this.onAttach(socket, { cols: Number(url.searchParams.get('cols')) || 0, rows: Number(url.searchParams.get('rows')) || 0 });
-    } catch {
-      socket.destroy();
-    }
   }
 
   peers() { return listPeers({ excludeId: this.id }); }
@@ -176,21 +147,6 @@ export class PeerNode {
       let status = {};
       try { status = this.getStatus?.() || {}; } catch { /* nothing to say */ }
       return reply(200, { busy: Boolean(status.busy) });
-    }
-    if (req.method === 'POST' && req.url === '/control') {
-      if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
-      let body = '';
-      req.setEncoding('utf8');
-      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
-      req.on('end', async () => {
-        try {
-          if (!this.onControl) throw new Error('not here');
-          reply(200, { ok: true, ...((await this.onControl(JSON.parse(body || '{}'))) || {}) });
-        } catch (e) {
-          reply(400, { error: e.message });
-        }
-      });
-      return;
     }
     if (req.method !== 'POST' || req.url !== '/message') return reply(404, { error: 'not found' });
     if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
@@ -249,31 +205,6 @@ export class PeerNode {
       req.end(body);
     });
   }
-}
-
-// POST /control to a session of this computer (an entry of listPeers()): resolves with its answer, rejects with
-// what went wrong.
-export function controlPeer(peer, body, { timeout = 5000 } = {}) {
-  const data = JSON.stringify(body);
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      host: '127.0.0.1', port: peer.port, path: '/control', method: 'POST', timeout,
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), authorization: `Bearer ${peer.token}` },
-    }, (res) => {
-      let out = '';
-      res.setEncoding('utf8');
-      res.on('data', (d) => { out += d; });
-      res.on('end', () => {
-        let answer = {};
-        try { answer = JSON.parse(out); } catch { /* none */ }
-        if (res.statusCode === 200) resolve(answer);
-        else reject(new Error(answer.error || `HTTP ${res.statusCode}`));
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('the session did not answer')));
-    req.on('error', reject);
-    req.end(data);
-  });
 }
 
 // What the model is given for a message from another session.

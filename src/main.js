@@ -151,9 +151,17 @@ function readStdin({ optional }) {
   });
 }
 
+// Commands that are gone. Said so instead of taking them as a prompt: an autostart entry or a script that still
+// runs `claude-pro host start` must not turn into an agent run with full access.
+const REMOVED_COMMANDS = new Set(['host', 'attach', 'connect']);
+
 export async function main(argv) {
   let cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
+  if (REMOVED_COMMANDS.has(argv[0])) {
+    process.stderr.write(`claude-pro ${argv[0]} was removed (the computer service, attach and connect are no longer part of claude-pro). To send this as a prompt, quote it: claude-pro "${argv.join(' ')}"\n`);
+    return 2;
+  }
   if (argv[0] === '--self-check') return (await import('./selfcheck.js')).selfCheck(); // see restart.js
   const { flags, positional } = parseArgs(argv);
   if (flags.version) { console.log(`${VERSION} (claude-pro)`); return 0; }
