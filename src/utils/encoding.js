@@ -10,6 +10,27 @@ const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
 const lenientUtf8 = new TextDecoder('utf-8');
 const strictGbk = new TextDecoder('gbk', { fatal: true }); // the WHATWG gbk decoder, which is the gb18030 one
 
+// Whether bytes that are not valid UTF-8 as a whole are still UTF-8 text with a few bad bytes (a character cut at
+// the end of a line by `cut -c` or `head -c`, a stray Latin-1 byte), rather than text in another encoding. Chinese
+// UTF-8 is often valid GBK by chance (E4 B8 AD E6 96 87, "中文", reads as "涓枃"), so trying GBK first turned such
+// a line or file into mojibake; GBK text read as UTF-8, the other way round, is mostly invalid sequences, with a
+// valid two-byte character here and there by chance. An incomplete sequence counts once, however long.
+export function mostlyUtf8(buf) {
+  let good = 0;
+  let bad = 0;
+  for (let i = 0; i < buf.length;) {
+    const b = buf[i];
+    if (b < 0x80) { i++; continue; }
+    const n = b >= 0xc2 && b <= 0xdf ? 2 : b >= 0xe0 && b <= 0xef ? 3 : b >= 0xf0 && b <= 0xf4 ? 4 : 0;
+    let k = 1;
+    while (n && k < n && i + k < buf.length && (buf[i + k] & 0xc0) === 0x80) k++;
+    if (n && k === n) good++;
+    else bad++;
+    i += n ? k : 1;
+  }
+  return bad === 0 || good >= 4 * bad;
+}
+
 // {text, encoding: 'utf8'|'utf16le'|'utf16be'|'gbk', bom, lossy}, or null for binary data. `lossy`: writing the
 // text back would not give these bytes (undecodable bytes became U+FFFD, or GB18030 forms GBK cannot write).
 // `writable: false` skips that check for a GBK file, for a caller that only reads (Grep).
@@ -20,7 +41,7 @@ export function decodeText(buf, { writable = true } = {}) {
   const body = bom ? buf.subarray(3) : buf;
   if (body.subarray(0, 8000).includes(0)) return null;
   try { return { text: strictUtf8.decode(body), encoding: 'utf8', bom, lossy: false }; } catch { /* not UTF-8 */ }
-  if (!bom) {
+  if (!bom && !mostlyUtf8(body)) {
     let text = null;
     try { text = strictGbk.decode(body); } catch { /* not GBK either */ }
     // Writable only when the text turns back into exactly these bytes (GB18030's four-byte forms do not).
@@ -124,7 +145,7 @@ export function decodeOutput(buf) {
     const line = buf.subarray(start, end);
     let text = null;
     try { text = strictUtf8.decode(line); } catch {
-      const legacy = consoleDecoder();
+      const legacy = mostlyUtf8(line) ? null : consoleDecoder();
       if (legacy) { try { text = legacy.decode(line); } catch { /* neither */ } }
     }
     out += text ?? lenientUtf8.decode(line);
