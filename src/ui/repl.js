@@ -20,9 +20,10 @@ import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { gatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
-import { buildCommands } from '../commands.js';
+import { buildCommands, modelChoices, effortChoices } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
+import { listDirectory, recentDirectories } from '../utils/dirs.js';
 import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
@@ -31,7 +32,7 @@ import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } 
 import { fitImagesIn, imageSize } from '../utils/images.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
-import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
+import { RemoteControl, transcriptItems, onlineEnabled, remoteCommandsEnabled, REMOTE_WIDTH } from '../remote.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
@@ -645,6 +646,16 @@ export class App {
   async connectRemote({ id }) {
     const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
     if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login logs in)`), { code: 'NO_GATEWAY_LOGIN' });
+    // What the page may do here, besides watching (see remote.js): nothing with CLAUDE_PRO_REMOTE_COMMANDS=0.
+    const commands = remoteCommandsEnabled(this.config.env) ? {
+      send: (body) => this.remoteSend(body.text, body.images),
+      interrupt: () => this.remoteInterrupt(),
+      answer: (body) => this.answerDialog(body),
+      options: () => this.remoteOptions(),
+      suggest: (body) => this.remoteSuggest(body),
+      list: (body) => this.remoteList(body),
+      output: (body) => this.remoteOutput(body),
+    } : {};
     const remote = new RemoteControl({
       gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
       id,
@@ -659,6 +670,7 @@ export class App {
           ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
         ],
         status: () => this.remoteStatus(),
+        ...commands,
         peerMessage: (msg) => this.onPeerMessage(msg),
         changed: () => {
           this.screen.schedule();
@@ -701,7 +713,8 @@ export class App {
     if (r) {
       const who = r.account ? ` as ${r.account}` : '';
       const pages = r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
-      const text = r.online ? `${c.green('online')}${who}${pages}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
+      const readOnly = r.commands.length ? '' : c.dim(' · read-only on the page (CLAUDE_PRO_REMOTE_COMMANDS=0)');
+      const text = r.online ? `${c.green('online')}${who}${pages}${readOnly}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
       return { text };
     }
     if (this.remoteStarting) return { text: 'connecting…' };
@@ -782,6 +795,145 @@ export class App {
     if (d.input) return { ...base, input: { placeholder: d.input.placeholder || '', value: d.value || '', multiline: Boolean(d.input.multiline) } };
     if (!Array.isArray(d.options)) return base;
     return { ...base, multi: Boolean(d.multi), options: d.options.map((o) => ({ label: String(o.label ?? ''), description: o.description || '', other: o.value === '__other__' })) };
+  }
+
+  // ---------------------------------------------------------------- the page's commands (see remote.js)
+
+  // The answer to the dialog the status showed the page (remoteDialog): {id, index}, {id, indices}, {id, text,
+  // indices?} (its "other" option), {id, text} (a text box) or {id, cancel: true}.
+  answerDialog({ id, index, indices, text, cancel } = {}) {
+    const d = this.dialogs[0];
+    if (!d || d.remoteId !== id) throw new Error('That question is no longer open.');
+    if (cancel) { d.resolve(d.cancelValue); return {}; }
+    if (d.input) {
+      if (typeof text !== 'string') throw new Error('Type an answer first.');
+      d.resolve(text);
+      this.screen.schedule();
+      return {};
+    }
+    if (!Array.isArray(d.options)) throw new Error('This dialog cannot be answered from the page.');
+    const valueAt = (i) => {
+      const o = d.options[i];
+      if (!Number.isInteger(i) || !o || o.value === '__other__') throw new Error('No such option.');
+      return o.value;
+    };
+    if (typeof text === 'string') {
+      if (!text.trim()) throw new Error('Type an answer first.');
+      d.resolve(d.multi ? [...(indices || []).map(valueAt), text.trim()] : text.trim());
+    } else if (d.multi) {
+      if (!indices?.length) throw new Error('Choose at least one option.');
+      d.resolve(indices.map(valueAt));
+    } else {
+      d.resolve(valueAt(index));
+    }
+    this.screen.schedule();
+    return {};
+  }
+
+  // A message from the page: as if typed in the input box and sent (a turn, queued while one runs; /commands, !,
+  // #, @session), its images as if pasted there. Images alone go as their placeholders, which is what the input box
+  // sends for them.
+  remoteSend(text, images) {
+    const pictures = remoteImages(images);
+    let value = String(text ?? '').replace(/\r\n/g, '\n');
+    if (!value.trim() && pictures.length) value = pictures.map((_, i) => `[Image #${i + 1}]`).join(' ');
+    if (!value.trim()) throw new Error('The message is empty.');
+    if (this.exiting) throw new Error('The session is ending.');
+    if (this.isTurnRunning() && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
+    if (this.dialogs.length && !this.isTurnRunning()) throw new Error('A question is open: answer it first.');
+    const queued = this.isTurnRunning();
+    this.onSubmit(value, value, pictures);
+    this.screen.schedule();
+    return { queued };
+  }
+
+  // Esc: the turn stops, and the questions waiting for an answer are cancelled.
+  remoteInterrupt() {
+    for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
+    this.interrupt();
+    this.screen.schedule();
+    return {};
+  }
+
+  // For the page's model and effort menus: what /model and /effort offer (in plain text; the page sends /model
+  // <value> or /effort <value>), what is chosen (`current`), and the model and effort in use, as the status says.
+  async remoteOptions() {
+    const cfg = this.config;
+    const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
+    const chosen = cfg.modelOverride || 'default';
+    const current = models.find((o) => o.value === chosen) || models.find((o) => o.value !== 'default' && cfg.resolveModel(o.value).id === cfg.model.id);
+    const effortChosen = cfg.effortOverride || 'default';
+    const { effort } = modelInfo(cfg);
+    return {
+      model: cfg.model.id,
+      models: models.map((o) => ({ ...o, ...(o === current ? { current: true } : {}) })),
+      effort: effort || defaultEffort(cfg.model.id, cfg),
+      efforts: efforts.options.map((o) => ({ ...o, ...(o.value === effortChosen ? { current: true } : {}) })),
+    };
+  }
+
+  // For the page's input box: what the input box here would suggest (/commands, @files and @sessions), in plain
+  // text, without anything happening here. Sessions on the other computers are asked for first when the list is old.
+  async remoteSuggest(body = {}) {
+    const text = String(body.text ?? '');
+    const cursor = Number.isInteger(body.cursor) ? Math.max(0, Math.min(text.length, body.cursor)) : text.length;
+    if (/(^|\s)@[^\s@"]*$/u.test(text.slice(0, cursor)) && this.remote?.online && Date.now() - this.remotePeersAt > 10_000) {
+      await Promise.race([this.refreshRemotePeers(), new Promise((r) => setTimeout(r, 3000))]);
+    }
+    const found = this.suggest(text, cursor, { quiet: true });
+    if (!found?.items?.length) return { items: [] };
+    const plain = (s) => (s == null ? '' : stripAnsi(String(s)));
+    return {
+      items: found.items.slice(0, 50).map((it) => ({ value: it.value, label: plain(it.label ?? it.value), description: plain(it.description), submitOnEnter: Boolean(it.submitOnEnter), noSpace: Boolean(it.noSpace) })),
+      from: found.from,
+      to: found.to,
+    };
+  }
+
+  // For the page's directory browser (/cd): the directories in `path` ("": this session's working directory), with
+  // the drives, the home directory and where sessions ran lately.
+  remoteList(body = {}) {
+    const wanted = typeof body.path === 'string' && body.path.trim() ? body.path : (this.agent.cwd || this.cwd);
+    return listDirectory(wanted, {
+      recent: () => {
+        if (!this.recentDirs || Date.now() - this.recentDirs.at > 30_000) this.recentDirs = { at: Date.now(), list: recentDirectories({ projects: path.join(CONFIG_DIR, 'projects') }) };
+        return this.recentDirs.list;
+      },
+    });
+  }
+
+  // For the page's "the whole output": the full result of the tool call `id` ({text, truncated, running?}, at most
+  // 1 MB of UTF-8): the file it was saved to when it was too long for the conversation or cleared from it later,
+  // and what it printed so far while it runs.
+  remoteOutput({ id } = {}) {
+    if (typeof id !== 'string' || !id) throw new Error('Which tool call?');
+    const MAX = 1024 * 1024;
+    const cut = (text, running = false) => {
+      const buf = Buffer.from(text, 'utf8');
+      const truncated = buf.length > MAX;
+      // (a character cut at the end decodes as U+FFFD, which is then dropped)
+      const shown = truncated ? buf.subarray(0, MAX).toString('utf8').replace(/\ufffd$/, '') : text;
+      return { text: shown, truncated, ...(running ? { running } : {}) };
+    };
+    let result = null;
+    for (const m of this.agent.messages) {
+      if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+      for (const b of m.content) if (b.type === 'tool_result' && b.tool_use_id === id) result = b;
+    }
+    if (!result) {
+      const live = this.active.find((e) => e.tu?.id === id);
+      if (live) return cut(live.progressAll?.() ?? String(live.progress || ''), true);
+      throw new Error('There is no such tool call in this conversation.');
+    }
+    let text = typeof result.content === 'string' ? result.content
+      : (Array.isArray(result.content) ? result.content : []).map((b) => (b.type === 'text' ? b.text : b.type === 'image' ? '[image]' : '')).join('\n');
+    // saved whole in the project's tool-results (a large result, a Bash output, a result cleared after a pause)
+    const saved = /(?:saved to:?|saved at)\s+(\S+?\.txt)\b/.exec(text)?.[1];
+    const results = path.join(CONFIG_DIR, 'projects');
+    if (saved && path.resolve(saved).startsWith(results + path.sep) && path.resolve(saved).includes(`${path.sep}tool-results${path.sep}`)) {
+      try { text = fs.readFileSync(saved, 'utf8'); } catch { /* the reference is what there is */ }
+    }
+    return cut(text);
   }
 
   // ---------------------------------------------------------------- restarting (see restart.js)
@@ -1998,7 +2150,8 @@ export class App {
     this.screen.schedule();
     return {
       progress: (p, meta) => {
-        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; this.remote?.toolProgress(tu.id, entry); }
+        // `all`: the whole output so far (the progress is its end), for the page's "the whole output"
+        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; entry.progressAll = meta?.all; this.remote?.toolProgress(tu.id, entry); }
         else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; this.remote?.emit({ t: 'sub', id: tu.id, head: p.header }); }
         this.screen.schedule();
       },

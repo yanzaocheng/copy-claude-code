@@ -169,7 +169,7 @@ When you commit (the system prompt says when): run git status, git diff and git 
             output += text;
             for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) lines++;
             if (output.length > 10_000_000) { output = output.slice(-5_000_000); droppedHead = true; }
-            ctx.onProgress?.(stripAnsi(output.slice(-PROGRESS_CHARS)), { lines });
+            ctx.onProgress?.(stripAnsi(output.slice(-PROGRESS_CHARS)), { lines, all: () => stripAnsi(output) });
           },
           done: finish,
         });

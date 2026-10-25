@@ -146,16 +146,18 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 - 需要真正退出再启动的只有两种情况：改了 `bin/claude-pro.js` 或 `src/supervisor.js`（运行中的监督进程是旧代码）；以及新代码启动不起来而你想强行重启。`-p`、管道、`config` 子命令不经过监督进程；`CLAUDE_PRO_NO_SUPERVISOR=1` 也可以关掉它（环境变量，不是配置项）。
 - `claude-pro --self-check` 可以单独运行那个启动检查。
 
-## 远程会话：浏览器只读查看
+## 远程会话：在浏览器里查看和操作
 
-本地手动启动的交互式 claude-pro 会话登录网关后自动注册。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页只通过网关查看本地终端会话。
+本地手动启动的交互式 claude-pro 会话登录网关后自动注册。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页经网关查看并操作已经在运行的本地终端会话（不能新建会话）。
 
 - **自动上线**：`/login` 成功后当前会话立即注册；之后每个交互会话启动时自动注册，断线自动重连；`/logout` 后停止远程连接。`CLAUDE_PRO_ONLINE=0` 可以关闭远程发布。
 - **网页能看到**：会话列表、在线/离线/结束状态、模型、目录、机器名、viewer 数、transcript、流式文本和 thinking、工具调用与输出、todos、后台任务、排队消息、问题文本和连接状态。
-- **网页不能做**：网页没有输入框和控制写请求，不能发送消息、停止任务、回答问题、切换 model/effort、浏览目录、恢复/删除历史、打开终端、更新程序或管理电脑；这些操作只能在本地终端完成。
-- **页面请求**：远程入口是 `/user#remote`；页面只使用 `GET /user/remote/sessions` 和 `GET /user/remote/sessions/:id/events`（SSE）。终端使用 `POST /v1/remote/sessions` 注册，`GET .../commands` 接收 viewer/snapshot/peer 帧，`POST .../events` 发布 snapshot/batch/status/bye。
+- **网页能做**：发消息（等同在终端输入框回车：`/命令`、`!shell`、`#记忆`、`@会话`，最多 6 张图片；忙时排队）、回答对话框（选项、多选、“其他”文字、文本框、取消）、停止（等同 Esc，同时取消等待中的问题）、切换 model/effort（发 `/model`、`/effort`）、浏览目录并 `/cd`（会话在新目录重启，网页接着看）、输入补全（`/命令`、`@文件`、`@会话`）、查看某次工具调用的完整输出（最多 1 MB，运行中的也行）。
+- **只读开关**：`CLAUDE_PRO_REMOTE_COMMANDS=0`（环境变量，或 `claude-pro config set CLAUDE_PRO_REMOTE_COMMANDS 0`）让这台电脑的会话在网页上只能看、不能操作；会话上线时读取，`/status` 会显示 read-only。
+- **网页不能做**：新建会话、恢复/删除历史、打开终端、更新程序或管理电脑；这些只能在本地终端完成。
+- **协议**：远程入口是 `/user#remote`。终端用 `POST /v1/remote/sessions` 注册，并在 `commands` 里声明它接受的指令（`send`、`interrupt`、`dialog`、`options`、`suggest`、`list`、`output`；只读时不带这个字段，网关只转发声明过的类型）；`GET .../commands`（SSE）接收 viewer/snapshot/peer 帧和网页的指令 `{cid, type, body}`，用 `POST .../results` 回复 `{cid, ok, …}`；`POST .../events` 发布 snapshot/batch/status/bye。
 - **快照与保留**：网关状态在内存中保存；网关重启后终端重新注册并补发 snapshot。每个账户最多 60 个会话，优先淘汰最久未活动的离线会话；事件缓冲最多 3000 个事件或 8 MB；结束会话保留 6 小时，未结束但离线保留 24 小时。
-- **权限边界**：网页只能看到同一网关账户的会话；会话内容会经网关中转并暂存在内存。撤销建立终端流的 API key 后，终端连接会被断开。
+- **权限边界**：网页只能看到和操作同一网关账户的会话（能操作就等于能在这台电脑上运行命令：不需要时用只读开关）；会话内容会经网关中转并暂存在内存。撤销建立终端流的 API key 后，终端连接会被断开。
 
 ## 会话之间互发任务（本机和其他电脑）
 
@@ -303,7 +305,7 @@ src/prompts.js        系统提示词、压缩提示词、自动记忆提示
 src/tools/*           各工具实现（含 Skill、NotebookEdit）
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
-src/remote.js         只读远程会话发布、对话事件模型和终端 peer messaging（applyEvent，网关页面里有同一份）
+src/remote.js         远程会话：发布、网页指令、对话事件模型和终端 peer messaging（applyEvent，网关页面里有同一份）
 src/commands.js       斜杠命令
 ```
 

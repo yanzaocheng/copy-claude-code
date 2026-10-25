@@ -1,6 +1,9 @@
-// Publish a local interactive session to the gateway so the account's browser can watch it. The session never
-// listens on the network: it connects out to the codex-gateway with the gateway API key from /login. The browser
-// side is intentionally read-only; the same connection may still carry messages between terminal sessions.
+// Publish a local interactive session to the gateway, so that the account's browser can watch it and steer it: send
+// it messages (as if typed in its input box: /commands, !shell, #memory, pasted images), answer its questions, stop
+// it, switch model and effort, complete input, browse directories for /cd and read a tool call's whole output. The
+// session never listens on the network: it connects out to the codex-gateway with the gateway API key from /login,
+// declares the commands it takes when it registers, and gets them on its command stream. With
+// CLAUDE_PRO_REMOTE_COMMANDS=0 it declares none and is read-only on the page.
 // The same connection carries the messages of the account's sessions on other computers (`@公司 ...`, see peers.js).
 //
 // The page is told what happens as a list of transcript items (user messages, assistant text, thinking, tool
@@ -188,9 +191,19 @@ export const newRemoteId = () => crypto.randomBytes(9).toString('base64url');
 // which only the self-check and the tests set).
 export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(env.CLAUDE_PRO_ONLINE || '');
 
+// Whether the page may steer the session, not only watch it (CLAUDE_PRO_REMOTE_COMMANDS=0: read-only).
+export const remoteCommandsEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(String(env.CLAUDE_PRO_REMOTE_COMMANDS ?? '').trim());
+
+// The commands of the page, and the handler of each (see App.connectRemote; each gets the command's body and
+// returns the result's fields, or a promise of them, or throws what to tell the page). A session declares the ones
+// it has handlers for when it registers (`commands`); the gateway forwards only those and answers the others itself.
+// A session that declares none (0.8.x, CLAUDE_PRO_REMOTE_COMMANDS=0) is read-only on the page.
+const COMMANDS = { send: 'send', interrupt: 'interrupt', dialog: 'answer', options: 'options', suggest: 'suggest', list: 'list', output: 'output' };
+
 export class RemoteControl {
   // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model}, seed() -> items, status() -> object,
-  // peerMessage(message), changed() (online or viewers changed), refused(status) (the key was refused: closed).
+  // peerMessage(message), changed() (online or viewers changed), refused(status) (the key was refused: closed), and
+  // the page's commands: send, interrupt, answer (dialog), options, suggest, list, output (see COMMANDS).
   constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
@@ -216,7 +229,11 @@ export class RemoteControl {
     this.registered = false;
     this.refused = null; // the status (401/403) of the gateway refusing the key after the start: the connection ended
     this.seenPeer = new Set(); // ids of the messages from other sessions already handled (the gateway sends again what was not acknowledged)
+    this.replying = new Set(); // answers to the page's commands on their way (close() waits for them)
   }
+
+  // The commands this session takes, as declared to the gateway.
+  get commands() { return Object.keys(COMMANDS).filter((type) => typeof this.handlers[COMMANDS[type]] === 'function'); }
 
   get viewing() { return this.viewers !== 0; } // nobody watching: events are not uploaded (a snapshot follows when someone comes)
 
@@ -257,7 +274,8 @@ export class RemoteControl {
 
   async register() {
     const info = this.handlers.info?.() || {};
-    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), version: info.version, ...info });
+    const commands = this.commands;
+    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), version: info.version, ...info, ...(commands.length ? { commands } : {}) });
     if (data.id) this.id = data.id;
     this.url = data.url || this.url || `${this.base}/user`;
     this.registered = true;
@@ -360,8 +378,32 @@ export class RemoteControl {
     if (cmd.type === 'snapshot') { this.needSnapshot = true; this.scheduleFlush(0); return; }
     if (!cmd.cid) return;
     if (cmd.type === 'peer') { this.peerMessage(cmd); return; }
-    // Browser-originated control commands are not part of the read-only portal. Ignore any stale command
-    // frames from an older gateway instead of executing them locally.
+    // A command of the page, answered with POST …/results {cid, ok: true, …fields} or {cid, ok: false, error} (the
+    // gateway waits 15 s for it, and takes it until 3 s after the stream closed). close() waits for the answers on
+    // their way: a /cd or /exit from the page ends the session from inside its command.
+    const reply = (result) => {
+      const sent = this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, result).catch(() => { /* the page times out */ });
+      this.replying.add(sent);
+      sent.finally(() => this.replying.delete(sent));
+      this.scheduleFlush(30); // what the command changed, on the page soon
+    };
+    const failed = (e) => reply({ cid: cmd.cid, ok: false, error: e?.message || String(e) });
+    const handler = Object.hasOwn(COMMANDS, cmd.type) ? this.handlers[COMMANDS[cmd.type]] : null;
+    if (typeof handler !== 'function') {
+      // an older gateway forwards every command, declared or not
+      failed(new Error(this.commands.length ? `Unknown command: ${cmd.type}` : 'This session is read-only on the web page (CLAUDE_PRO_REMOTE_COMMANDS=0 on its computer).'));
+      return;
+    }
+    let r;
+    try {
+      r = handler(cmd.body && typeof cmd.body === 'object' && !Array.isArray(cmd.body) ? cmd.body : {});
+    } catch (e) {
+      failed(e);
+      return;
+    }
+    // an answer that takes a while (the gateway's list of models, a directory) is sent when it is there
+    if (typeof r?.then === 'function') r.then((v) => reply({ ...(v || {}), cid: cmd.cid, ok: true }), failed);
+    else reply({ ...(r || {}), cid: cmd.cid, ok: true });
   }
 
   // ------------------------------------------------------------ messages of the account's other sessions
@@ -526,8 +568,12 @@ export class RemoteControl {
   }
 
   async shutdown(restarting) {
-    // Flush the final read-only transcript/status update while the command stream is still open.
+    // First the answers on their way, while the command stream is still open (the gateway takes them until 3 s
+    // after it closes). Among them the answer to the command that ends the session: a /cd, /restart or /exit from
+    // the page closes it from inside that command, and its answer is sent when the command returns, hence the
+    // wait for the current call to finish first.
     await null;
+    if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
     this.closing = true; // what flush() collects now goes out with the last message, not on its own
     this.flush();
     this.closed = true;
