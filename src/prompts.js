@@ -148,7 +148,7 @@ First write exactly one <work-state> block containing one valid JSON object. Do 
 </work-state>
 All array items must be strings. Keep paths, commands, error messages and next actions precise. The state is machine-validated, so do not add prose before or after the JSON inside <work-state>.
 
-Then wrap your analysis in <analysis> tags to organize your thoughts, and write a detailed narrative in <summary> tags. The narrative should retain technical details, code patterns and architectural decisions that would be useful if the structured state is incomplete.
+Then write a detailed narrative in <summary> tags. Do your reasoning in your thinking, not in the reply: only the work-state and the summary are kept, so text outside them is thrown away (and writing it makes the compaction take minutes longer). The narrative should retain technical details, code patterns and architectural decisions that would be useful if the structured state is incomplete.
 
 Use these summary sections:
 1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
