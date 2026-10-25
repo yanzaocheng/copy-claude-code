@@ -1,4 +1,4 @@
-import { ReadTool, WriteTool, EditTool } from './files.js';
+import { ReadTool, WriteTool, EditTool, MultiEditTool } from './files.js';
 import { makeBashTool, BashOutputTool, KillShellTool } from './bash.js';
 import { GlobTool, GrepTool } from './search.js';
 import { makeWebFetchTool, WebSearchTool } from './web.js';
@@ -24,6 +24,7 @@ export function buildTools(config, { agents, skills, mcpTools = [], restart = fa
     GrepTool,
     ReadTool,
     EditTool,
+    MultiEditTool,
     WriteTool,
     NotebookEditTool,
     makeWebFetchTool(config),
@@ -47,5 +48,6 @@ export function toolsForSubagent(allTools, def, { allowTask = false } = {}) {
   const base = allTools.filter((t) => !NEVER_FOR_SUBAGENTS.has(t.name) && (allowTask || t.name !== 'Task'));
   if (def.tools === '*' || !def.tools) return base;
   const wanted = new Set(def.tools);
+  if (wanted.has('Edit')) wanted.add('MultiEdit'); // the same permission, several changes in one call
   return base.filter((t) => wanted.has(t.name) || [...wanted].some((w) => w.startsWith('mcp__') && t.name.startsWith(w)));
 }

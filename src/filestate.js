@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import { resolvePath } from './utils/paths.js';
 
-const TRACKED = new Set(['Read', 'Write', 'Edit', 'NotebookEdit']);
+const TRACKED = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const SLACK_MS = 2000; // file timestamps can be coarser than the clock that stamped the message
 
 const resultText = (content) => (typeof content === 'string' ? content : '');

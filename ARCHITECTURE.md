@@ -311,7 +311,7 @@ flowchart TD
 
 - 连续只读工具（例如 `Read`、`Glob`、`Grep`）可以并行；编辑、Bash 等有副作用的工具按顺序执行。
 - 每个工具调用都会经过输入 JSON/schema 校验和 hooks。
-- `Write`、`Edit`、`NotebookEdit` 在执行前写入检查点；Bash 造成的文件变化不在检查点覆盖范围内。
+- `Write`、`Edit`、`MultiEdit`、`NotebookEdit` 在执行前写入检查点；Bash 造成的文件变化不在检查点覆盖范围内。
 - 超大的工具结果保存到 `tool-results` 文件，只把预览和路径发回模型，避免挤占上下文。
 - 配置 `CLAUDE_PRO_VERIFY_COMMAND`、`--verify` 或 `/verify` 后，完成文件修改的回合会执行验证命令；失败输出会再次交给模型修复，最多执行 3 轮（`verifyMaxRounds`）。
 - 到达上下文阈值或收到 prompt-too-long 错误时，使用 `compact()` 生成摘要，并通过 reset 记录替换旧消息；摘要请求复用对话自己的提示词缓存（6.5）。自动压缩失败时（`compactOnTheWay`），只要请求还放得下，这一轮照常继续；连续失败 `MAX_COMPACT_FAILURES`（3）次后本对话不再自动压缩，直到 `/compact` 成功或 `/clear`。prompt-too-long 时的压缩失败仍然报错结束这一轮。
@@ -323,7 +323,7 @@ flowchart TD
 
 | 类别 | 工具/实现 |
 |---|---|
-| 文件 | `Read`、`Write`、`Edit`、`NotebookEdit`；包含 read-before-write、外部修改检测、CRLF/BOM 保留 |
+| 文件 | `Read`、`Write`、`Edit`、`MultiEdit`、`NotebookEdit`；Read 的行号不补空格（`12\t`，GPT 上每行省 2 个 token）；Edit/MultiEdit 的 old_string 在当前文件里唯一匹配就能改（没读过也行），没找到时报错里给出最相似的几行；MultiEdit 一次调用改一个文件的多处，按顺序、要么全改要么全不改（GPT 几乎从不在一次回复里发多个 Edit）；Write 要先完整读过；只有时间戳变而内容没变不算外部修改；保留 CRLF/BOM 和编码 |
 | 搜索 | `Glob`、`Grep`；优先使用 ripgrep，缺失时使用 JS fallback |
 | Shell | `Bash`、`BashOutput`、`KillShell`；支持 cwd、超时、后台进程和输出落盘 |
 | Web | `WebFetch`、`WebSearch`；包含 HTML 转 Markdown、缓存和摘要查询 |

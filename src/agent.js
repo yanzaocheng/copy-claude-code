@@ -65,7 +65,7 @@ export function persistLargeOutput(root, id, text) {
 // user's answers and the like stay whatever their age.
 export const IDLE_CLEARING = { idleMs: 65 * 60_000, keep: 5, atLeast: 20_000 };
 export const CLEARED = '[Old tool result content cleared]';
-const CLEARABLE_TOOLS = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'Write']);
+const CLEARABLE_TOOLS = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'MultiEdit', 'Write']);
 const MIN_CLEAR_TOKENS = 100; // a smaller result is left as it is: clearing it gains next to nothing
 
 const isThinking = (b) => b.type === 'thinking' || b.type === 'redacted_thinking';

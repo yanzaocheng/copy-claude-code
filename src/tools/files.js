@@ -71,10 +71,13 @@ function unwritable(file, text, meta) {
   return error ? `${file} is ${encodingName(meta.encoding)}-encoded (kept so when it is edited), and the new text has ${error}. Use other characters, or convert the file to UTF-8 first if the user wants that.` : null;
 }
 
+// Each line as its number, a tab and the line. Not padded as cat -n pads it: the padding cost 2 tokens a line on
+// GPT and 1 on Claude (measured 2026-10-26: 12% of a code Read on gpt-6.1-sol, 4% on Opus 5.5), in every Read
+// result, which stays in the conversation and is sent again with every later request.
 export function numberLines(lines, start, maxLineChars = MAX_LINE_CHARS) {
   return lines.map((l, i) => {
     const line = l.length > maxLineChars ? l.slice(0, maxLineChars) + '… [line truncated]' : l;
-    return `${String(start + i).padStart(6)}\t${line}`;
+    return `${start + i}\t${line}`;
   }).join('\n');
 }
 
@@ -103,10 +106,10 @@ Usage:
 - Read a file whole when you need to understand it; when only a part of a long file matters, give offset and limit (find the place with Grep first if needed)
 - Any lines longer than ${MAX_LINE_CHARS} characters will be truncated
 - A file whose numbered text is longer than ${MAX_OUTPUT_CHARS} characters or about ${MAX_OUTPUT_TOKENS / 1000}k tokens (Chinese text gets there sooner) is refused (or cut there with offset/limit). When you need a large file whole, in one call, pass allow_large: true: then there is no line, character or line length limit, only the room left in the context, and a read that does not fit is refused.
-- Results are returned using cat -n format, with line numbers starting at 1
+- Results are returned as each line's number, a tab, then the line (numbers start at 1)
 - This tool can read images (PNG, JPG, GIF, WEBP) and Jupyter notebooks (.ipynb)
 - This tool can only read files, not directories. To list a directory, use ls via the Bash tool.
-- Do not read a file again just to check an edit you made to it: Edit and Write report an error when they fail.
+- Do not read a file again just to check an edit you made to it: Edit, MultiEdit and Write report an error when they fail.
 - If you read a file that exists but has empty contents you will receive a warning in place of file contents.`,
   input_schema: {
     type: 'object',
@@ -336,7 +339,8 @@ function changeSummary({ added, removed }) {
   return parts.length ? `Updated with ${parts.join(' and ')}` : 'No changes';
 }
 
-// Apply old->new replacement to text. Returns {result, count, index} or {error}.
+// Apply old->new replacement to text. Returns {result, count, index} or {error, notFound}. The errors do not repeat
+// old_string (the model has it in its own call): a miss shows where the most similar text is instead (see missed).
 export function applyEdit(text, oldStr, newStr, replaceAll) {
   if (oldStr === newStr) return { error: 'No changes to make: old_string and new_string are exactly the same.' };
   if (oldStr === '') {
@@ -349,7 +353,7 @@ export function applyEdit(text, oldStr, newStr, replaceAll) {
     // Tolerate trailing whitespace differences at line ends.
     const norm = (s) => s.replace(/[ \t]+\n/g, '\n');
     if (norm(text).includes(norm(oldStr)) && norm(text) !== text) {
-      return { error: 'String to replace not found exactly (whitespace differs at line ends). Read the file again and copy the text exactly, including whitespace.' };
+      return { error: 'String to replace not found exactly (whitespace differs at line ends): copy the text exactly, including the whitespace at the ends of its lines.', notFound: true };
     }
     // Curly quote normalisation.
     const straight = (s) => s.replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
@@ -360,13 +364,117 @@ export function applyEdit(text, oldStr, newStr, replaceAll) {
       count = text.split(actualOld).length - 1;
     }
   }
-  if (count === 0) return { error: `String to replace not found in file.\nString: ${oldStr}` };
+  if (count === 0) return { error: 'String to replace not found in file.', notFound: true };
   if (count > 1 && !replaceAll) {
-    return { error: `Found ${count} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: ${oldStr}` };
+    return { error: `Found ${count} matches of the string to replace (${matchLines(text, actualOld)}), but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one, add the lines around it to old_string so that it matches that one only.` };
   }
   const index = text.indexOf(actualOld);
   const result = replaceAll ? text.split(actualOld).join(newStr) : text.slice(0, index) + newStr + text.slice(index + actualOld.length);
   return { result, count, index };
+}
+
+// "at lines 12, 40 and 77": where `needle` starts in `text` (the first 10).
+function matchLines(text, needle) {
+  const lines = [];
+  for (let i = text.indexOf(needle); i >= 0 && lines.length < 11; i = text.indexOf(needle, i + needle.length)) {
+    lines.push(text.slice(0, i).split('\n').length);
+  }
+  const shown = lines.slice(0, 10);
+  const list = shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}` : String(shown[0]);
+  return `at line${shown.length > 1 ? 's' : ''} ${list}${lines.length > 10 ? ' and more' : ''}`;
+}
+
+// Character bigrams of a string, for a similarity of two lines (Dice coefficient).
+function bigrams(s) {
+  const m = new Map();
+  for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); }
+  return m;
+}
+function dice(a, b) {
+  let n = 0, total = 0;
+  for (const [g, c] of a) { total += c; n += Math.min(c, b.get(g) || 0); }
+  for (const c of b.values()) total += c;
+  return total ? (2 * n) / total : 0;
+}
+
+// The part of `text` most like `oldStr`, for an edit that missed: {from, to, text} (1-based lines, numbered as Read
+// numbers them) or null when nothing is alike. Lines of old_string found whole (whitespace aside) vote for where
+// it would start; without any, its longest line is looked for by similarity. Most misses are an old_string from
+// memory or with other indentation: the right text in the error saves a Read and gets the retry right.
+function similarRegion(text, oldStr, maxLines = 14) {
+  const lines = text.split('\n');
+  const want = oldStr.replace(/\n+$/, '').split('\n');
+  if (lines.length > 50_000 || lines.length * want.length > 5_000_000) return null;
+  const key = (s) => s.trim();
+  const at = new Map();
+  lines.forEach((l, i) => { const k = key(l); if (k.length >= 3) { const list = at.get(k); if (list) list.push(i); else at.set(k, [i]); } });
+  const votes = new Map();
+  want.forEach((l, k) => {
+    const hits = at.get(key(l));
+    if (hits && hits.length <= 20) for (const i of hits) votes.set(i - k, (votes.get(i - k) || 0) + 1);
+  });
+  let start = null;
+  let best = 0;
+  for (const [s, v] of votes) if (v > best || (v === best && s < start)) { best = v; start = s; }
+  const meaningful = want.filter((l) => key(l).length >= 3).length;
+  if (start === null || best < Math.max(1, Math.ceil(meaningful * 0.3))) {
+    const probe = want.map(key).reduce((a, b) => (b.length > a.length ? b : a), '');
+    if (probe.length < 6) return null;
+    const k = want.findIndex((l) => key(l) === probe);
+    const pb = bigrams(probe);
+    let score = 0;
+    start = null;
+    lines.forEach((l, i) => {
+      const t = key(l);
+      if (!t || t.length > probe.length * 3 || probe.length > t.length * 3) return;
+      const s = dice(pb, bigrams(t));
+      if (s > score) { score = s; start = i - k; }
+    });
+    if (start === null || score < 0.5) return null;
+  }
+  const from = Math.max(0, start - 1);
+  const to = Math.min(lines.length - 1, Math.max(from, start + want.length), from + maxLines - 1);
+  return { from: from + 1, to: to + 1, text: numberLines(lines.slice(from, to + 1), from + 1, 300) };
+}
+
+// The error of an edit whose old_string was not used: where the most similar text is, when it missed, and what to
+// do about a file it had not read or that changed since. `step`: "Edit 2 of 3: " in MultiEdit.
+function missed(r, text, oldStr, unseen, step = '') {
+  let msg = step + r.error;
+  if (r.notFound) {
+    const near = similarRegion(text, oldStr);
+    if (near) {
+      msg += ` The most similar text${step && !step.startsWith('Edit 1 ') ? ', in the file as the edits before this one left it,' : ''} is at lines ${near.from}-${near.to}:\n${near.text}\nIf that is the place, copy old_string from these lines exactly (without the line numbers); if not, Read the file.`;
+      if (unseen === 'modified') msg += ' (The file has changed since you last read it.)';
+      return msg;
+    }
+    return `${msg} ${unseen ? UNSEEN_HINT[unseen] : 'Read the file to get its exact text.'}`;
+  }
+  return unseen ? `${msg} ${UNSEEN_HINT[unseen]}` : msg;
+}
+
+// The lines an edit left changed in the new text, for its result: "lines 12-18, 40 and 77-80" (from the diff).
+function changedRanges(ops, max = 8) {
+  const ranges = [];
+  let line = 0;
+  let removedAt = null;
+  for (const op of ops) {
+    if (op.op === '-') { removedAt ??= line + 1; continue; }
+    line++;
+    if (op.op === '+') {
+      const last = ranges.at(-1);
+      if (last && !last.removed && last.to === line - 1) last.to = line;
+      else ranges.push({ from: line, to: line });
+      removedAt = null;
+    } else if (removedAt !== null) {
+      ranges.push({ from: removedAt, to: removedAt, removed: true });
+      removedAt = null;
+    }
+  }
+  if (removedAt !== null) ranges.push({ from: removedAt, to: removedAt, removed: true });
+  const text = ranges.slice(0, max).map((r) => (r.removed ? `text removed at line ${r.from}` : r.from === r.to ? `line ${r.from}` : `lines ${r.from}-${r.to}`));
+  if (ranges.length > max) text.push(`${ranges.length - max} more places`);
+  return text.length > 1 ? `${text.slice(0, -1).join(', ')} and ${text.at(-1)}` : text[0] || 'no lines changed';
 }
 
 export const EditTool = {
@@ -376,9 +484,10 @@ export const EditTool = {
 
 Usage:
 - old_string must be the file's exact current text, so Read the file first unless that text is already in this conversation (a Read, Bash or Grep output, an edit of yours). An edit whose old_string occurs exactly once is made even when the file was not read or has changed since (the result says so); replace_all needs a Read of the file as it is now.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- The edit will FAIL if \`old_string\` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use \`replace_all\` to change every instance of \`old_string\`.
+- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
+- The edit will FAIL if \`old_string\` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use \`replace_all\` to change every instance of \`old_string\`. When it is not found, the error shows the most similar lines of the file.
 - Use \`replace_all\` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+- More than one change to a file: make them all in one MultiEdit call, not one Edit per response. Changes to several files: put their Edit or MultiEdit calls in the same response (they are made in the order given). Every response is a round trip that sends the whole conversation again and takes tens of seconds.
 - To create a new file, pass an empty old_string with the full content as new_string (the file must not exist).`,
   input_schema: {
     type: 'object',
@@ -418,7 +527,7 @@ Usage:
     const { text, crlf, bom, encoding } = current;
     const before = text.replace(/\r\n/g, '\n');
     const r = applyEdit(before, oldStr, newStr, !!input.replace_all);
-    if (r.error) return { error: unseen ? `${r.error} ${UNSEEN_HINT[unseen]}` : r.error };
+    if (r.error) return { error: missed(r, before, oldStr, unseen) };
     const meta = { crlf, bom, encoding };
     const cannot = unwritable(file, r.result, meta);
     if (cannot) return { error: cannot };
@@ -448,6 +557,105 @@ Usage:
     const text = input.replace_all
       ? `The file ${p.file} has been updated successfully. All ${p.count} occurrences were replaced.`
       : `The file ${p.file} has been updated successfully (${changedLines(line, p.newStr)}).`;
+    return { content: p.unseen ? `${text} ${UNSEEN_NOTE[p.unseen]}` : text, display: { summary: changeSummary(preview), preview } };
+  },
+};
+
+// Several replacements in one file in one call. GPT models make one Edit per response even when they know several
+// changes (2026-10-12..26: 2% of gpt-6.1-sol's responses with an edit had more than one, against 54% of Opus 5.5's;
+// 561 times an edit response was followed by another one on the same file), and every response is a round trip of
+// some 18 s on GPT that sends the whole conversation again. With all the changes in one call they are one response.
+// The edits are applied in order to the text as the previous one left it, and all or none are made.
+export const MultiEditTool = {
+  name: 'MultiEdit',
+  editsFiles: true,
+  description: `Makes several exact string replacements in one file in one call. The edits are applied in the order given, each to the text as the previous one left it, and either all of them are made or none (the error says which one failed and why).
+
+Usage:
+- Use it whenever you know more than one change to a file, instead of an Edit per change: every response is a round trip that sends the whole conversation again and takes tens of seconds.
+- Each edit has old_string, new_string and optionally replace_all, with the rules of Edit: old_string is the exact text to replace (as the edits before it leave the file) and must occur once unless replace_all is set; never include the line number prefix of Read output.
+- Order the edits so that an earlier one does not change the text a later one looks for.
+- To create a file, use Write (or a first edit with an empty old_string, for a file that does not exist).
+- Changes to several files: one MultiEdit or Edit call per file, all in the same response.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      file_path: { type: 'string', description: 'The absolute path to the file to modify' },
+      edits: {
+        type: 'array',
+        minItems: 1,
+        description: 'The replacements, made in this order',
+        items: {
+          type: 'object',
+          properties: {
+            old_string: { type: 'string', description: 'The text to replace' },
+            new_string: { type: 'string', description: 'The text to replace it with' },
+            replace_all: { type: 'boolean', default: false, description: 'Replace all occurrences of old_string (default false)' },
+          },
+          required: ['old_string', 'new_string'],
+        },
+      },
+    },
+    required: ['file_path', 'edits'],
+  },
+  summarize(input, ctx) {
+    const n = Array.isArray(input.edits) ? input.edits.length : 0;
+    return `${displayPath(resolvePath(input.file_path, ctx.cwd), ctx.cwd)}${n ? `, ${n} edit${n === 1 ? '' : 's'}` : ''}`;
+  },
+  filePath(input, ctx) { return resolvePath(input.file_path, ctx.cwd); },
+  plan(input, ctx) {
+    const file = resolvePath(input.file_path, ctx.cwd);
+    const edits = Array.isArray(input.edits) ? input.edits : [];
+    if (!edits.length) return { error: 'edits must be a non-empty list of {old_string, new_string}.' };
+    const steps = edits.map((e) => ({
+      oldStr: String(e?.old_string ?? '').replace(/\r\n/g, '\n'),
+      newStr: String(e?.new_string ?? '').replace(/\r\n/g, '\n'),
+      all: Boolean(e?.replace_all),
+    }));
+    const exists = fs.existsSync(file);
+    let unseen = null;
+    let meta = { crlf: false, bom: false, encoding: 'utf8' };
+    let before = '';
+    if (exists) {
+      if (fs.statSync(file).isDirectory()) return { error: `${file} is a directory` };
+      unseen = fileStanding(file, ctx); // as in Edit: a unique old_string shows the model has the text it replaces
+      if (unseen && steps.some((s) => s.all)) {
+        return { error: unseen === 'unread'
+          ? 'File has not been read yet. Read it first before replacing every occurrence in it (replace_all).'
+          : 'File has been modified since it was last read, either by the user or by a command. Read it again before replacing every occurrence in it (replace_all).' };
+      }
+      const current = readText(file);
+      if (!current) return { error: notText(file) };
+      if (current.lossy) return { error: notRewritable(file, current) };
+      meta = { crlf: current.crlf, bom: current.bom, encoding: current.encoding };
+      before = current.text.replace(/\r\n/g, '\n');
+    } else if (steps[0].oldStr !== '') {
+      return { error: `File does not exist: ${file}. Create it with Write, or with a first edit whose old_string is empty.` };
+    }
+    let text = before;
+    for (let i = 0; i < steps.length; i++) {
+      const { oldStr, newStr, all } = steps[i];
+      const r = applyEdit(text, oldStr, newStr, all);
+      const step = steps.length > 1 ? `Edit ${i + 1} of ${steps.length}: ` : '';
+      if (r.error) return { error: `${missed(r, text, oldStr, unseen, step)}${steps.length > 1 ? ' No edit was made.' : ''}` };
+      text = r.result;
+    }
+    const cannot = unwritable(file, text, meta);
+    if (cannot) return { error: cannot };
+    return { file, before, after: text, meta, count: steps.length, unseen, created: !exists };
+  },
+  validate(input, ctx) { return this.plan(input, ctx).error || null; },
+  preview(input, ctx, p = this.plan(input, ctx)) { return EditTool.preview(input, ctx, p); },
+  async call(input, ctx) {
+    const p = this.plan(input, ctx);
+    if (p.error) return { isError: true, content: p.error };
+    const ops = p.created ? null : diffLines(splitLines(p.before), splitLines(p.after));
+    const preview = p.created ? { kind: 'create', path: p.file, lines: splitLines(p.after) } : { kind: 'diff', path: p.file, hunks: makeHunks(ops), ...countChanges(ops) };
+    const prior = ctx.fileState.get(p.file);
+    const hash = writeText(p.file, p.after, p.meta);
+    ctx.fileState.set(p.file, { mtimeMs: mtime(p.file), partial: !p.created && (!prior || Boolean(prior.partial) || p.unseen === 'modified'), hash });
+    if (p.created) return { content: `File created successfully at: ${p.file}`, display: { summary: `Created ${displayPath(p.file, ctx.cwd)}`, preview } };
+    const text = `The file ${p.file} has been updated successfully: ${p.count} edit${p.count === 1 ? '' : 's'} (${changedRanges(ops)}).`;
     return { content: p.unseen ? `${text} ${UNSEEN_NOTE[p.unseen]}` : text, display: { summary: changeSummary(preview), preview } };
   },
 };

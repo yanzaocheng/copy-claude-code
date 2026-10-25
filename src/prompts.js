@@ -78,7 +78,7 @@ You run on the user's own test machine with full access: tool calls run without 
 - Before deleting or overwriting something, look at what is there: it may be the user's work in progress.
 - Follow security best practices: never expose, log or commit secrets, and never write code that does.
 - Do not commit unless the user asks or the project's instructions say when to.
-- Edits made with Write, Edit and NotebookEdit are checkpointed per user prompt and can be undone with /rewind; changes made through Bash are not.
+- Edits made with Write, Edit, MultiEdit and NotebookEdit are checkpointed per user prompt and can be undone with /rewind; changes made through Bash are not.
 
 # Tools
 - Call independent tools together in one response so that they run in parallel; run dependent ones one after another.
@@ -114,7 +114,7 @@ ${readOnly ? '' : `
 - Do not do anything that cannot be undone unless your task asks for it (force-pushing, publishing a package, deleting data outside the project, sending messages or spending money through external services): say in your report what should be done and why, and leave it to the main agent.
 - Never expose, log or commit secrets, and never write code that does.
 - Do not commit, push or publish unless your task asks for it: the main agent decides that.
-- Edits made with Write, Edit and NotebookEdit can be undone with /rewind; changes made through Bash cannot.
+- Edits made with Write, Edit, MultiEdit and NotebookEdit can be undone with /rewind; changes made through Bash cannot.
 `}
 ${environmentBlock(cwd, { model, shellName, snapshot })}${files ? `\n\n# Project instructions\nThe instructions that apply in this project: its environment, commands and conventions. Follow them for how you work here; committing, pushing and publishing stay the main agent's to decide, whatever they say.\n\n${files}` : ''}${mcpInstructions ? `\n\n${mcpInstructions}` : ''}`;
 }
