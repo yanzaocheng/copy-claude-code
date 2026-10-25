@@ -210,17 +210,25 @@ async function searchDuckDuckGo(query, signal) {
     body: new URLSearchParams({ q: query }).toString(),
     signal: withTimeout(signal),
   });
-  const html = await res.text();
+  return parseDuckDuckGo(await res.text());
+}
+
+// The results of DuckDuckGo's HTML page, one block per result link. (One regex with an optional snippet group after
+// a lazy gap never took the snippet: the gap matched nothing, and every snippet came back empty.)
+export function parseDuckDuckGo(html) {
   const results = [];
-  const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/g;
-  let m;
-  while ((m = re.exec(html)) && results.length < 10) {
-    let href = decodeEntities(m[1]);
+  const starts = [...html.matchAll(/<a[^>]+class="result__a"/g)].map((m) => m.index);
+  for (let i = 0; i < starts.length && results.length < 10; i++) {
+    const block = html.slice(starts[i], starts[i + 1] ?? html.length);
+    const a = /^<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(block);
+    if (!a) continue;
+    let href = decodeEntities(a[1]);
     const uddg = /[?&]uddg=([^&]+)/.exec(href);
     if (uddg) href = decodeURIComponent(uddg[1]);
     if (href.startsWith('//')) href = 'https:' + href;
     if (/duckduckgo\.com\/y\.js/.test(href)) continue; // ads
-    results.push({ title: decodeEntities(m[2].replace(/<[^>]+>/g, '')).trim(), url: href, snippet: decodeEntities((m[3] || '').replace(/<[^>]+>/g, '')).trim() });
+    const s = /class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|div|td)>/.exec(block);
+    results.push({ title: decodeEntities(a[2].replace(/<[^>]+>/g, '')).trim(), url: href, snippet: s ? decodeEntities(s[1].replace(/<[^>]+>/g, '')).trim() : '' });
   }
   return results;
 }
