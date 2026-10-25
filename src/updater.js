@@ -8,6 +8,7 @@ import path from 'node:path';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { CONFIG_DIR, INSTALL_DIR, VERSION } from './config.js';
+import { killTree } from './utils/shell.js';
 
 // The name on npm (scoped: npm refused plain `claude-pro` as too close to another package's name).
 export const PACKAGE_NAME = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).name;
@@ -101,9 +102,12 @@ function runNpm(args, { timeoutMs = 300_000 } = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, { shell: process.platform === 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { out += d; });
-    const timer = setTimeout(() => child.kill(), timeoutMs);
+    const take = (d) => { out = (out + d).slice(-200_000); };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+    // With shell: true, child.kill() ends only cmd.exe: npm kept the pipes open, 'close' never came and the
+    // timeout did nothing. The whole tree goes.
+    const timer = setTimeout(() => { killTree(child); }, timeoutMs);
     child.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, output: e.message }); });
     child.on('close', (code) => { clearTimeout(timer); resolve({ ok: code === 0, output: out.trim() }); });
   });
