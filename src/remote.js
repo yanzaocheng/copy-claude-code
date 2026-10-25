@@ -190,7 +190,7 @@ export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(
 
 export class RemoteControl {
   // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model}, seed() -> items, status() -> object,
-  // peerMessage(message), changed() (online or viewers changed).
+  // peerMessage(message), changed() (online or viewers changed), refused(status) (the key was refused: closed).
   constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
@@ -214,6 +214,7 @@ export class RemoteControl {
     this.flushTimer = null;
     this.streamAbort = null;
     this.registered = false;
+    this.refused = null; // the status (401/403) of the gateway refusing the key after the start: the connection ended
     this.seenPeer = new Set(); // ids of the messages from other sessions already handled (the gateway sends again what was not acknowledged)
   }
 
@@ -267,18 +268,42 @@ export class RemoteControl {
   async loop() {
     let wait = 1000;
     while (!this.closed) {
+      const began = Date.now();
       try {
         if (!this.registered) await this.register();
         await this.listen();
-        wait = 1000;
       } catch (e) {
         if (e.status === 404) this.registered = false; // the gateway forgot the session (restarted): register again
+        if (e.status === 401 || e.status === 403) { this.refuse(e.status); break; }
       }
-      if (this.online) { this.online = false; this.handlers.changed?.(); }
+      if (this.online) {
+        this.online = false;
+        // Nothing is uploaded while offline (see flush), and the stream's next opening sends a snapshot.
+        this.needSnapshot = true;
+        this.events = [];
+        this.handlers.changed?.();
+      }
       if (this.closed) break;
+      // The backoff starts afresh only after a stream that held: one the gateway closes at once is not a recovery.
+      if (Date.now() - began > 30_000) wait = 1000;
       await sleep(wait);
       wait = Math.min(wait * 2, 30_000);
     }
+  }
+
+  // The gateway refused the key (401/403: the key was revoked, the account changed): that does not get better by
+  // retrying, so the connection ends and the App leaves this key alone until the login changes (handlers.refused).
+  refuse(status) {
+    if (this.closed) return;
+    this.refused = status;
+    this.closed = true;
+    this.registered = false; // no bye with a key the gateway refuses
+    this.online = false;
+    clearTimeout(this.flushTimer);
+    clearInterval(this.statusTimer);
+    this.streamAbort?.abort();
+    try { this.handlers.refused?.(status); } catch { /* the App's problem */ }
+    this.handlers.changed?.();
   }
 
   async listen() {
@@ -288,7 +313,10 @@ export class RemoteControl {
       headers: { authorization: `Bearer ${this.apiKey}`, accept: 'text/event-stream' },
       signal: abort.signal,
     });
-    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+    if (!res.ok) {
+      res.body?.cancel?.().catch(() => {}); // or its socket stays open until garbage collection
+      throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
+    }
     this.online = true;
     this.needSnapshot = true; // the gateway may have been restarted: it gets the whole conversation again
     this.handlers.changed?.();
@@ -441,8 +469,10 @@ export class RemoteControl {
   urgentKey(status) { return `${Boolean(status.busy)}|${Boolean(status.asking)}`; }
 
   // What has changed goes into the next upload: a snapshot when one is due, else the events; and the status.
+  // Not while the command stream is down: every upload would fail and leave a snapshot due, so a session used to
+  // build and POST (twice) a snapshot of up to 1.5 MB every 500 ms for as long as the gateway was unreachable.
   flush() {
-    if (this.closed || !this.registered) return;
+    if (this.closed || !this.registered || (!this.online && !this.closing)) return;
     this.takeProgress();
     const status = this.status();
     if (this.needSnapshot || this.sinceSnapshot > SNAPSHOT_EVERY) {
@@ -481,6 +511,7 @@ export class RemoteControl {
       this.needSnapshot = true;
       this.events = [];
       if (e.status === 404) { this.registered = false; this.streamAbort?.abort(); }
+      if (e.status === 401 || e.status === 403) this.refuse(e.status);
     } finally {
       this.sending = false;
     }

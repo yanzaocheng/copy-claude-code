@@ -651,6 +651,12 @@ export class App {
           this.screen.schedule();
           if (remote.online && Date.now() - this.remotePeersAt > 10_000) this.refreshRemotePeers();
         },
+        // The key was refused after the start (revoked on the web page, say): offline until the login changes.
+        refused: () => {
+          this.remoteRefused = login.apiKey;
+          if (this.remote === remote) { this.remote = null; this.remotePeers = []; }
+          this.notice('The gateway refused this computer\'s key: this session is offline there now (/logout, then /login).', 'warn');
+        },
       },
     });
     remote.account = login.account?.email || login.account?.name || null;
