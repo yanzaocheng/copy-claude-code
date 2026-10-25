@@ -101,7 +101,6 @@ sequenceDiagram
   - 页面上改名字、目录、模型、effort 都是发斜杠命令（`/rename <名字>`、`/cd <目录>`、`/model <值>`、`/effort <值>`），和终端里输入一样：带参数时不弹选择框（`/model`、`/effort` 在缓存热时仍会弹 confirmCacheLoss，页面能回答）。
 - **`/cd <目录>`**（`App.changeDirectory`）：绝对路径、`~`、`D:`，或相对当前目录的路径（`normalizeDir`，否则 `path.resolve(cwd, …)`）；不存在、不是目录、和当前目录相同时只打印一行，不重启；忙时拒绝；不在监督进程下（`canRestart()` 为假）时报错。否则走重启：`requestRestart({cwd})` → `restartNow` 先用 `moveSession()`（[`src/session.js`](src/session.js)）把会话文件写到新目录的项目目录（`projects/<新目录>/<同一个 id>.jsonl`，第一行 meta 的 `cwd` 换成新目录，`/resume` 在新目录能找到，`SessionStore(cwd, id)` 也接着往这里写），重启状态里带 `cwd` 和 `changedDirectory: true`，写成功后才删旧文件（写失败就删新文件、不重启）。新进程的 `main.js` 在取到重启状态后 `process.chdir(state.cwd)`（监督进程总是在第一次启动的目录里拉起子进程，所以之后每次重启的状态里都带 `cwd`），于是项目设置、CLAUDE.md、auto memory、系统提示词里的目录和 git 状态、`@` 文件索引、输入历史全部按新目录加载。保持不变的：对话、远程控制 id（`handoff()`）、模型/effort/模式、待办、排队的消息、草稿；`/rename` 或 `--name` 起的名字（`customTitle` 不为空）通过 `peerName` 带过去，按目录取的默认名字不带（新进程按新目录名取，网关注册时 `name`、`cwd` 都是新的）。`/cd` 不计入"5 分钟 5 次"的重启循环保护。新进程在 `resumeAfterRestart` 里打印 `Working directory: <目录>`（代替"↻ Restarted"），并把这一行放进 `seedOutput`，远程控制的初始条目（`seed()`）在对话后面带上它，所以页面重新拿到快照后也看得到；`/clear`、`/resume` 清空它。
 - **退出与重启**：`close({restarting})` 把剩下的消息和 `{t:'bye',restarting}` 一起发出，进程等它最多 1.5 秒再退出。重启后的新进程用同一个 id 注册（`persistent`：网关暂时连不上也不放弃，后台重试），网关上的页面看到同一个会话回来并收到新快照。
-- 测试：[`test/remote.test.js`](test/remote.test.js) 在无头终端里驱动真实 App（`CLAUDE_PRO_ONLINE=1`），假网关同时扮演中转和页面：登录了就自动上线、页面发命令跑一轮（工具调用和回答以事件到达）、在页面上回答 `AskUserQuestion`、忙时的命令和过期的对话框被拒绝、网关忘掉会话后自动重新注册并补发对话、`/clear` 重置、`/status` 显示状态（没有链接和二维码）、`/logout` 发 bye 下线、`/login` 立即重新上线、别的窗口退出登录后 `syncRemote` 下线；被拒绝的 key 只报一次、不再重试，换了登录才上线。
 
 ### 3.1.3 会话之间的消息（本机和其他电脑）
 
@@ -114,7 +113,6 @@ sequenceDiagram
 - **接收**：`RemoteControl.peerMessage` 按 `cid` 去重（重推的消息只确认），交给 `App.onPeerMessage`（`from.name` 是 `machine/name`，`from.remote = true`），然后用 `POST …/results {cid, ok: true}` 确认，确认后网关从信箱删除。之后的流程和本机消息相同：任务排队成一轮，`answerPeers` 在这一轮结束后把最终文本作为 reply 发回，远端的经网关（`remote.sendPeer`），本机的经 PeerNode。
 - **`@` 补全**：`suggest()` 在光标前是 `(行首|空白)@词` 时把文件和会话放进同一列表（文件保留目录与带空格路径的引号逻辑，会话项显示本机/电脑和目录），所以句中的 `@公` 也能补全。行首命中会话的 `@名字 任务` 直接发送；文件和会话同名时用 `@./名字` 强制文件；其他位置的 `@名字` 由 `peerMentions` 解析后作为 system-reminder 告诉模型是哪个会话、可以用 MessagePeer 联系它。附带的图片如果来自文件（`source`），把路径也告诉模型。
 - **名字**：`/rename`（`App.renameSession`）改本机 PeerNode 的名字（`setName` 在本机重名时加 -2），没有 PeerNode 时记在 `sessionName`；同时作为对话标题 `customTitle`（`sessionLabel()` 优先用它，`refreshTopic` 不再改标题），写进会话文件的 meta `name`（`/resume` 时恢复名字和标题）；再向网关注册一次（网关用注册时的 name 填 `from`），并推一次状态（网关列表用状态里的 name）。名字允许任何文字的字母（`cleanName` 用 `\p{L}\p{M}\p{N}`）。
-- 测试：[`test/remote.test.js`](test/remote.test.js) 里假网关列出另一台电脑的会话：输入 `@` 弹出它（与文件补全混合）、`@公司 …` 发任务、回答显示并被确认、那边发来的任务跑完后经网关回答、重推的任务只确认不再跑、`@` 在行中补全、`/rename` 重新注册新名字。
 
 ### 3.1.4 输入框的光标与回退菜单
 
@@ -405,26 +403,10 @@ flowchart TD
 | [`src/remote.js`](src/remote.js) | 远程控制：经网关中转的客户端、事件归约（网关页面里有同一份） |
 | [`src/peers.js`](src/peers.js) | 本机会话之间的消息（注册表 `peers/<id>.json` 和 127.0.0.1 上的小 HTTP 服务） |
 | [`src/print.js`](src/print.js) | 非交互输出协议 |
-| [`test/`](test/) | 单元、Agent、UI、gateway 和集成测试 |
 
 ## 12. 测试与验证
 
-项目使用 Node.js 内置 test runner：
-
-```powershell
-npm test
-```
-
-与本架构最相关的测试是 [`test/providers.test.js`](test/providers.test.js)，覆盖：
-
-- provider 和模型 alias 解析。
-- gateway key、请求体和 gateway system prompt。
-- gateway key、请求失败重试，以及 key 不可用时的明确错误。
-- gateway 模式的完整 tool loop、SSE 组装和缓存降级。
-
-真实网络测试由 `CLAUDE_PRO_LIVE_TEST` 显式开启，默认不在普通测试中访问网关。
-
-`npm test` 带 `--test-force-exit`(测试结束后有残留句柄也立即退出)和 `--test-timeout=60000`(单个测试卡住 60 秒即判失败),一个卡住的测试不会拖住整轮。`npm run check` 是约 1 秒的启动自检(`--self-check`)。验证按风险分级:语法检查 → `npm run check` → 相关测试文件 → 较大改动最后跑一次 `npm test`,细则见仓库根目录的 [`CLAUDE.md`](CLAUDE.md)。
+没有测试套件（2026-10-20 移除）。`npm run check` 是约 1 秒的启动自检（`--self-check`，见 [`src/selfcheck.js`](src/selfcheck.js)）：加载所有入口模块，在假终端里启动真正的 `App`，检查工具定义和系统提示词；每次重启前也会先跑它。其余验证按改动的风险决定，细则见仓库根目录的 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 13. 修改代码时的建议
 

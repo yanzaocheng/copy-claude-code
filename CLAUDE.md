@@ -12,7 +12,7 @@
 
 ## 省时间的事实
 
-- Git Bash 的 `/tmp` 不是 Node 的 `os.tmpdir()`:给 node 传临时路径用 `C:/Users/...` 形式。
-- TUI 测试用无头 xterm 驱动真实 App(`test/tui-harness.js`),默认关掉话题标题请求。
-- 测试绝不能碰真实的 `~/.claude-pro` 和 `~/.claude`:在 import `src/` 之前把 `CLAUDE_PRO_CONFIG_DIR` 和凭据路径指到临时目录;OAuth 测试把 `endpoint.url` 指向不存在的地址。
+- Node 把 `/tmp/x` 解析成当前盘的 `D:\tmp\x`(Git Bash 的 `/tmp` 其实是 `os.tmpdir()`):给 node 脚本传临时路径用 `C:/Users/...` 形式。claude-pro 自己的工具(Read、Edit、Grep 等)按 Git Bash 的挂载表转换 `/tmp`、`/usr` 这类路径。
+- 没有测试套件(2026-10-20 移除)。要在假终端里驱动真实 App,照 `src/selfcheck.js` 的做法:PassThrough 当 stdin、Writable 当 stdout,`new App({..., selfCheck: true})`。
+- 临时测试脚本绝不能碰真实的 `~/.claude-pro`:在 import `src/` 之前把 `CLAUDE_PRO_CONFIG_DIR` 指到临时目录;用到网关时把 `CLAUDE_PRO_GATEWAY_URL` 指向不存在的地址并给一个假的 `CLAUDE_PRO_GATEWAY_API_KEY`,或者替换 `globalThis.fetch`。
 - 改系统提示词(`src/prompts.js`、`src/context.js`)或任何工具说明,重启后整段对话都要重写一次提示词缓存。几处这类改动尽量攒到一次重启。
