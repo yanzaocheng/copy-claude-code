@@ -155,23 +155,49 @@ export class SessionStore {
     };
   }
 
+  // The conversations of the project, newest first: {id, file, mtime, title, count}. Each file's title and message
+  // count are kept in sessions-index.json by its size and time, so that only the files that changed since are
+  // parsed (parsing all of them, tens of MB with screenshots, made -c and /resume wait a third of a second and
+  // more as conversations piled up).
   static list(cwd) {
     const dir = projectDir(cwd);
     let files = [];
     try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
-    return files.map((f) => {
+    const indexFile = path.join(dir, SESSION_INDEX);
+    let index = {};
+    try { index = JSON.parse(fs.readFileSync(indexFile, 'utf8')) || {}; } catch { /* none yet, or damaged: rebuilt */ }
+    const next = {};
+    let changed = false;
+    const sessions = files.map((f) => {
       const file = path.join(dir, f);
-      const st = fs.statSync(file);
-      let title = null, count = 0;
-      try {
-        const loaded = SessionStore.load(file);
-        title = loaded.name || loaded.topic || loaded.title; // its name, else what it was about last, else its first message
-        count = loaded.messages.length;
-      } catch { /* ignore */ }
-      return { id: f.slice(0, -6), file, mtime: st.mtimeMs, title: title || '(no prompt)', count };
-    }).filter((s) => s.count > 0).sort((a, b) => b.mtime - a.mtime);
+      let st;
+      try { st = fs.statSync(file); } catch { return null; }
+      let e = index[f];
+      if (!e || e.mtime !== st.mtimeMs || e.size !== st.size) {
+        let title = null, count = 0;
+        try {
+          const loaded = SessionStore.load(file);
+          title = loaded.name || loaded.topic || loaded.title; // its name, else what it was about last, else its first message
+          count = loaded.messages.length;
+        } catch { /* ignore */ }
+        e = { mtime: st.mtimeMs, size: st.size, title, count };
+        changed = true;
+      }
+      next[f] = e;
+      return { id: f.slice(0, -6), file, mtime: st.mtimeMs, title: e.title || '(no prompt)', count: e.count };
+    }).filter((s) => s && s.count > 0).sort((a, b) => b.mtime - a.mtime);
+    if (changed || Object.keys(index).length !== Object.keys(next).length) {
+      try { // whole or not at all: another window may list at the same time (a lost update is only a re-parse)
+        const tmp = `${indexFile}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(next));
+        fs.renameSync(tmp, indexFile);
+      } catch { /* parsed again next time */ }
+    }
+    return sessions;
   }
 }
+
+const SESSION_INDEX = 'sessions-index.json';
 
 export function firstUserText(message) {
   const blocks = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content;
