@@ -189,6 +189,22 @@ class HttpTransport {
 
 const sanitize = (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, '_');
 
+// initialize, then notifications/initialized. Over HTTP the notification is a request of its own: what comes next
+// must not overtake it, or a server that insists on a finished handshake answers "not initialized".
+async function handshake(transport) {
+  const timeout = parseInt(process.env.MCP_TIMEOUT, 10) || 30_000;
+  const init = await transport.request('initialize', {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: 'claude-pro', version: VERSION },
+  }, { timeout });
+  await transport.notify('notifications/initialized', {});
+  return init;
+}
+
+const RESTARTS = 3; // a stdio server that exits is started again at most this often...
+const RESTART_WINDOW_MS = 10 * 60_000; // ... in this time
+
 function convertContent(result) {
   const blocks = [];
   for (const c of result.content || []) {
@@ -219,17 +235,10 @@ export class McpManager {
       const transport = type === 'http' ? new HttpTransport(name, cfg) : new StdioTransport(name, cfg, this.cwd);
       entry.transport = transport;
       await transport.connect();
-      const timeout = parseInt(process.env.MCP_TIMEOUT, 10) || 30_000;
-      const init = await transport.request('initialize', {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: 'claude-pro', version: VERSION },
-      }, { timeout });
+      const init = await handshake(transport);
       entry.serverInfo = init?.serverInfo;
       entry.instructions = init?.instructions;
-      // Over HTTP the notification is a request of its own: tools/list must not overtake it, or a
-      // server that insists on a finished handshake answers "not initialized".
-      await transport.notify('notifications/initialized', {});
+      const timeout = parseInt(process.env.MCP_TIMEOUT, 10) || 30_000;
       const tools = [];
       let cursor;
       do {
@@ -267,13 +276,41 @@ export class McpManager {
       : '';
   }
 
+  // A stdio server that exited (crashed, killed) is started again at the next call of one of its tools, once per
+  // exit and at most RESTARTS times in RESTART_WINDOW_MS. Its tools stay listed meanwhile: the tool list is part of
+  // the cached request prefix, and they used to fail with "is not running" for the rest of the session.
+  revive(name, entry) {
+    entry.reviving ??= (async () => {
+      const now = Date.now();
+      const why = entry.transport.stderr?.trim().split('\n').slice(-3).join(' ') || '';
+      entry.restarts = (entry.restarts || []).filter((t) => now - t < RESTART_WINDOW_MS);
+      if (entry.restarts.length >= RESTARTS) throw new Error(`MCP server "${name}" exited again; it was restarted ${entry.restarts.length} times in the last 10 minutes and is not started again. ${why}`.trim());
+      entry.restarts.push(now);
+      const transport = new StdioTransport(name, entry.config, this.cwd);
+      try {
+        await transport.connect();
+        await handshake(transport); // its instructions are not taken again: they are in the system prompt
+      } catch (e) {
+        transport.close();
+        throw new Error(`MCP server "${name}" exited and could not be started again: ${e.message}`);
+      }
+      entry.transport = transport;
+    })().finally(() => { entry.reviving = null; });
+    return entry.reviving;
+  }
+
   tools() {
     const out = [];
     const toolTimeout = parseInt(process.env.MCP_TOOL_TIMEOUT, 10) || 600_000;
+    const manager = this;
+    const taken = new Set(); // names cut to 64 characters, or sanitized alike (get.user, get_user), must stay distinct
     for (const [server, entry] of this.clients) {
       if (entry.status !== 'connected') continue;
       for (const t of entry.tools) {
-        const name = `mcp__${sanitize(server)}__${sanitize(t.name)}`.slice(0, 64);
+        const base = `mcp__${sanitize(server)}__${sanitize(t.name)}`.slice(0, 64);
+        let name = base;
+        for (let n = 2; taken.has(name); n++) name = `${base.slice(0, 64 - String(n).length - 1)}_${n}`;
+        taken.add(name);
         out.push({
           name,
           mcp: { server, tool: t.name },
@@ -285,6 +322,7 @@ export class McpManager {
           },
           label() { return `${server} - ${t.title || t.name} (MCP)`; },
           async call(input, ctx) {
+            if (entry.transport?.closed && !manager.closing) await manager.revive(server, entry);
             const result = await entry.transport.request('tools/call', { name: t.name, arguments: input }, { timeout: toolTimeout, signal: ctx.signal });
             return { content: convertContent(result || {}), isError: !!result?.isError };
           },
@@ -295,10 +333,17 @@ export class McpManager {
   }
 
   status() {
-    return [...this.clients.entries()].map(([name, e]) => ({ name, status: e.status, tools: e.tools.length, error: e.error, serverInfo: e.serverInfo }));
+    return [...this.clients.entries()].map(([name, e]) => ({
+      name,
+      status: e.status === 'connected' && e.transport?.closed ? 'exited (started again at its next tool call)' : e.status,
+      tools: e.tools.length,
+      error: e.error,
+      serverInfo: e.serverInfo,
+    }));
   }
 
   close() {
+    this.closing = true;
     for (const e of this.clients.values()) e.transport?.close();
   }
 }
