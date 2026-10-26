@@ -202,7 +202,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 ## 功能
 
-**工具**：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`MultiEdit`（一次调用改一个文件的多处，按顺序，要么全改要么全不改）、`Edit`（old_string 必须与文件当前内容唯一匹配：没 Read 过、或读后被命令改过的文件也能直接改，结果里会注明；replace_all 和 `Write` 仍要先读、并检测外部修改；只是时间戳变了、内容没变不算修改；保留 CRLF/BOM 和文件编码：UTF-8、带 BOM 的 UTF-16、GBK）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；PATH 上没有 rg 时自动用 VS Code 自带的 rg.exe，也可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`、`WebSearch`（DuckDuckGo/Bing）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`AskUserQuestion`，以及 MCP 工具。
+**工具**：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`MultiEdit`（一次调用改一个文件的多处，按顺序，要么全改要么全不改）、`Edit`（old_string 必须与文件当前内容唯一匹配：没 Read 过、或读后被命令改过的文件也能直接改，结果里会注明；replace_all 和 `Write` 仍要先读、并检测外部修改；只是时间戳变了、内容没变不算修改；保留 CRLF/BOM 和文件编码：UTF-8、带 BOM 的 UTF-16、GBK）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；PATH 上没有 rg 时自动用 VS Code 自带的 rg.exe，也可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`（也能读 x.com 上的单条帖子）、`WebSearch`（在网关上用模型自带的搜索：默认 claude-haiku-5-5，约 8 秒、不到 1 美分一次，返回标题、链接、日期和带 [n] 出处标记的摘要；`allowed_domains: ["x.com"]` 搜 X 上的帖子，`["github.com"]` 搜 GitHub；Claude 不可用时改用 gpt-6.1-sol，都不行才退回抓取 DuckDuckGo/Bing 网页；`CLAUDE_PRO_SEARCH_MODEL` 可换模型）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`AskUserQuestion`，以及 MCP 工具。
 
 **交互**
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
@@ -311,7 +311,7 @@ src/commands.js       斜杠命令
 
 ## 其他说明
 
-WebSearch 通过抓取 DuckDuckGo/Bing 实现。检查点只覆盖文件工具的修改，不覆盖 Bash 命令造成的改动。
+WebSearch 依赖网关：没有网关时只能抓取 DuckDuckGo/Bing 网页，而它们常把程序当爬虫拦下（DuckDuckGo 返回 202，Bing 只按查询的第一个词搜），结果可能离题。GitHub 相关的查询，系统提示词让模型优先用 Bash 跑 `gh`（需要已安装并登录）。检查点只覆盖文件工具的修改，不覆盖 Bash 命令造成的改动。
 
 提示：全屏模式里的鼠标选择不会自动写入剪贴板；使用 `Ctrl+C` 复制、`Ctrl+V` 粘贴。按住 Shift 的终端原生选择行为由终端自身决定。
 

@@ -311,7 +311,8 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
             break;
           case 'content_block_start': {
             const b = { ...ev.content_block };
-            if (b.type === 'tool_use') { b.input = {}; jsonBufs[ev.index] = ''; }
+            // (server_tool_use: a search the model ran on the server, in WebSearch's request; its input is the query)
+            if (b.type === 'tool_use' || b.type === 'server_tool_use') { b.input = {}; jsonBufs[ev.index] = ''; }
             if (b.type === 'text') b.text = b.text || '';
             if (b.type === 'thinking') { b.thinking = b.thinking || ''; b.signature = b.signature || ''; }
             blocks[ev.index] = b;
@@ -326,6 +327,8 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
             if (d.type === 'text_delta') { b.text += d.text; onEvent({ type: 'text', index: ev.index, text: d.text }); }
             else if (d.type === 'thinking_delta') { b.thinking += d.thinking; onEvent({ type: 'thinking', index: ev.index, text: d.thinking }); }
             else if (d.type === 'signature_delta') b.signature = (b.signature || '') + d.signature;
+            // where a text block's statement comes from, in a web search answer: kept (see WebSearch)
+            else if (d.type === 'citations_delta') (b.citations ||= []).push(d.citation);
             else if (d.type === 'input_json_delta') {
               jsonBufs[ev.index] += d.partial_json;
               onEvent({ type: 'tool_input', index: ev.index, partial: jsonBufs[ev.index], block: b });
@@ -334,7 +337,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
           }
           case 'content_block_stop': {
             const b = blocks[ev.index];
-            if (b?.type === 'tool_use') {
+            if (b?.type === 'tool_use' || b?.type === 'server_tool_use') {
               const raw = jsonBufs[ev.index];
               try { b.input = raw ? JSON.parse(raw) : {}; } catch { b.input = { __invalid_json: raw }; }
             }

@@ -326,7 +326,7 @@ flowchart TD
 | 文件 | `Read`、`Write`、`Edit`、`MultiEdit`、`NotebookEdit`；Read 的行号不补空格（`12\t`，GPT 上每行省 2 个 token）；Edit/MultiEdit 的 old_string 在当前文件里唯一匹配就能改（没读过也行），没找到时报错里给出最相似的几行；MultiEdit 一次调用改一个文件的多处，按顺序、要么全改要么全不改（GPT 几乎从不在一次回复里发多个 Edit）；Write 要先完整读过；只有时间戳变而内容没变不算外部修改；保留 CRLF/BOM 和编码 |
 | 搜索 | `Glob`、`Grep`；优先使用 ripgrep，缺失时使用 JS fallback |
 | Shell | `Bash`、`BashOutput`、`KillShell`；支持 cwd、超时、后台进程和输出落盘 |
-| Web | `WebFetch`、`WebSearch`；包含 HTML 转 Markdown、缓存和摘要查询 |
+| Web | `WebFetch`、`WebSearch`；WebFetch 做 HTML 转 Markdown、缓存和摘要查询。WebSearch 不再自己抓搜索引擎（2026-10-27 实测：DuckDuckGo 返回 202 反爬页，Bing 只按第一个词搜），而是向网关发一个小请求：模型 `CLAUDE_PRO_SEARCH_MODEL`（默认 haiku），带服务端工具 `web_search_20250305`（`max_uses` 5，`allowed_domains` 或 `blocked_domains` 直接交给搜索端；网关对 GPT 转成 Codex 的 web_search，不带域名限制，所以提示词里也写上并在本地过滤）。`readSearchReply()` 从 `web_search_tool_result` 取结果（标题、链接、page_age；网页内容是加密的），从回答里文字块的 `citations`（`api.js` 收 `citations_delta`）标出 `[n]` 出处；GPT 的回答没有结果块，链接从文本里取。失败（错误状态、搜索工具的 error_code、90 秒超时）时依次换 GPT 模型（会话本身是 GPT 时用它，否则 gpt-6.1-sol），都失败才抓 DuckDuckGo/Bing，并在结果前注明。搜索成功但没有结果就直接回"No results"，不再换。实测 haiku 一次约 8 秒、$0.002–0.005；GPT 约 21 秒、$0.08。费用经 `streamMessage` 记入会话。 |
 | Agent | `Task`、`TaskOutput`、`TaskStop`；支持前台和后台子 Agent |
 | 交互 | `TodoWrite`、`AskUserQuestion` |
 | 扩展 | `Skill`、MCP 动态工具 |

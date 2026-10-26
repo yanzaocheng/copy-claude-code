@@ -1,7 +1,9 @@
 // WebFetch (fetch a page, convert to markdown-ish text, answer a prompt about it with the
-// currently selected model) and WebSearch (DuckDuckGo HTML endpoint with a Bing fallback).
+// currently selected model) and WebSearch (the models' own search through the gateway, see searchWithModel;
+// scraping DuckDuckGo or Bing only as the last resort).
 
-import { quickQuery } from '../api.js';
+import { quickQuery, streamMessage } from '../api.js';
+import { localDate } from '../context.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const cache = new Map(); // url -> {at, text, status, bytes}; only successful responses
@@ -247,14 +249,122 @@ async function searchBing(query, signal) {
   return results;
 }
 
+// ---- WebSearch through the gateway
+//
+// The search runs where the models run: a small request to a fast model with the server-side search tool
+// (Anthropic's web_search; the gateway gives GPT models Codex's), which searches, reads the results and reports what
+// they say, each statement marked with its source. Scraping search engines' pages from here, which this tool used to
+// do, gets their bot pages (DuckDuckGo: 202), or Bing's results for the first word of the query only (2026-10-27:
+// "run iOS simulator on Windows 2026 without Mac" gave ten dictionary entries for "run"): that is the last resort
+// now. Measured on the gateway: claude-haiku-5-5 8 s and $0.003 for two searches with 20 results; gpt-6.1-sol (the
+// fallback when Claude does not answer) 21 s and $0.08.
+
+export const searchLimits = { timeoutMs: 90_000, maxUses: 5, maxTextChars: 8000, maxResults: 40 };
+
+const searchSystem = (today) => `You run web searches for another AI agent and report what they found. Search for the query (search again with other words when the first results miss it), then write what the results say that answers it: facts, versions, numbers, dates and names exactly as the pages give them. Do not answer from your own knowledge; when the results do not answer the query, say so plainly. Be brief: at most about 300 words, no preamble. Today's date is ${today}.`;
+
+// The models to search with, in order: CLAUDE_PRO_SEARCH_MODEL (default haiku: fast and cheap), then a GPT model,
+// whose search runs on another upstream (the session's model when it is one).
+function searchModels(config) {
+  const first = config.resolveModel(String(config.env.CLAUDE_PRO_SEARCH_MODEL ?? '').trim() || 'haiku');
+  const main = config.model;
+  const gpt = /^gpt-/i.test(main.id) ? main : config.resolveModel('gpt-6.1-sol');
+  return gpt.id === first.id ? [first] : [first, gpt];
+}
+
+const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+const domainMatch = (host, d) => host === d || host.endsWith(`.${String(d).replace(/^\.+/, '')}`);
+
+// Whether a result's URL passes the call's allowed_domains / blocked_domains.
+function domainFilter(input) {
+  const allowed = (input.allowed_domains || []).map((d) => String(d).toLowerCase());
+  const blocked = (input.blocked_domains || []).map((d) => String(d).toLowerCase());
+  return (url) => {
+    const host = hostOf(url).toLowerCase();
+    if (!host) return false;
+    if (allowed.length && !allowed.some((d) => domainMatch(host, d))) return false;
+    return !blocked.some((d) => domainMatch(host, d));
+  };
+}
+
+// What a search request brought back: {results: [{url, title, age}], text, errors, queries}. Anthropic's search
+// gives its results as web_search_tool_result blocks (their text is encrypted: what the pages say comes through the
+// answer, whose statements carry citations, here marked [n] after the result they come from); Codex's, through the
+// gateway, as links in the answer. `keep(url)`: whether a result may be shown.
+export function readSearchReply(blocks, keep = () => true) {
+  const results = [];
+  const index = new Map();
+  const add = (url, title, age) => {
+    if (!/^https?:\/\//i.test(url || '') || !keep(url)) return -1;
+    if (!index.has(url)) {
+      results.push({ url, title: String(title || '').replace(/\s+/g, ' ').trim(), age: age || '' });
+      index.set(url, results.length - 1);
+    }
+    return index.get(url);
+  };
+  const errors = [];
+  const queries = [];
+  let text = '';
+  for (const b of blocks) {
+    if (b.type === 'server_tool_use' && b.input?.query) queries.push(String(b.input.query));
+    else if (b.type === 'web_search_tool_result') {
+      if (Array.isArray(b.content)) for (const r of b.content) add(r.url, r.title, r.page_age);
+      else if (b.content?.error_code) errors.push(b.content.error_code);
+    } else if (b.type === 'text') {
+      const cited = [...new Set((b.citations || []).map((c) => add(c.url, c.title)).filter((i) => i >= 0))];
+      text += b.text + cited.map((i) => `[${i + 1}]`).join('');
+    }
+  }
+  if (!blocks.some((b) => b.type === 'web_search_tool_result')) {
+    for (const m of text.matchAll(/\[([^\]\n]{1,200})\]\((https?:\/\/[^\s)]+)\)/g)) add(m[2], m[1]);
+    for (const m of text.matchAll(/https?:\/\/[^\s)\]>"'`]+/g)) add(m[0].replace(/[.,;:]+$/, ''), '');
+  }
+  return { results, text: text.trim(), errors, queries };
+}
+
+// One search request with `model`; throws when it fails (an error status, a timeout).
+async function searchWithModel(config, model, input, signal) {
+  const tool = { type: 'web_search_20250305', name: 'web_search', max_uses: searchLimits.maxUses };
+  // Anthropic's search takes one of the two lists; the gateway passes neither to GPT. So the prompt says them as
+  // well, and the results are filtered here (readSearchReply).
+  if (input.allowed_domains?.length) tool.allowed_domains = input.allowed_domains;
+  else if (input.blocked_domains?.length) tool.blocked_domains = input.blocked_domains;
+  const scope = [
+    input.allowed_domains?.length ? `Only use results from: ${input.allowed_domains.join(', ')}.` : '',
+    input.blocked_domains?.length ? `Leave out results from: ${input.blocked_domains.join(', ')}.` : '',
+  ].filter(Boolean).join(' ');
+  const res = await streamMessage(config, {
+    model,
+    system: searchSystem(localDate()),
+    messages: [{ role: 'user', content: `Query: ${input.query}${scope ? `\n\n${scope}` : ''}` }],
+    tools: [tool],
+    maxTokens: 4000,
+    effort: /^gpt-/i.test(model.id) ? 'low' : null, // GPT's default effort thinks for long: a search does not need it
+    cacheBucket: 'other',
+    cacheMessages: false,
+  }, { signal, waitForRateLimit: false });
+  return readSearchReply(res.message.content, domainFilter(input));
+}
+
+function formatSearch(query, found, model) {
+  const { results, text, queries } = found;
+  const shown = results.slice(0, searchLimits.maxResults);
+  const list = shown.map((r, i) => `${i + 1}. [${(r.title || hostOf(r.url)).replace(/[[\]]/g, '')}](${r.url})${r.age ? ` · ${r.age}` : ''}`).join('\n');
+  const ran = queries.length > 1 || (queries.length === 1 && queries[0] !== query) ? ` (searched: ${queries.map((q) => `"${q}"`).join(', ')})` : '';
+  const said = text.length > searchLimits.maxTextChars ? `${text.slice(0, searchLimits.maxTextChars)}…` : text;
+  const parts = [`Web search results for query: "${query}"${ran}`];
+  if (list) parts.push(list);
+  if (said) parts.push(`What the results say (summarized by ${model.id}${list ? '; [n] is result n above' : ''}):\n${said}`);
+  return parts.join('\n\n');
+}
+
 export const WebSearchTool = {
   name: 'WebSearch',
   readOnly: true,
-  description: `- Allows searching the web and using the results to inform responses
-- Provides up-to-date information for current events and recent data
-- Returns search results (title, URL, snippet) for the query
-- Use this tool for accessing information beyond your knowledge cutoff
-- Use WebFetch afterwards to read a promising result in full
+  description: `- Searches the web and returns the results (title, URL, age) with a summary of what they say, each statement marked with the result it comes from
+- Use it for current information, documentation, releases, error messages and anything beyond your knowledge cutoff
+- Use WebFetch afterwards to read a result in full (it also reads a single post on X from its x.com URL)
+- allowed_domains limits the search to some sites: ["x.com"] for posts on X (Twitter), ["github.com"] for repositories and issues (gh in Bash gives exact GitHub data when it is installed); blocked_domains leaves sites out
 - After answering from search results, include a "Sources:" section listing the relevant URLs as markdown links`,
   input_schema: {
     type: 'object',
@@ -265,8 +375,30 @@ export const WebSearchTool = {
     },
     required: ['query'],
   },
-  summarize(input) { return `"${input.query}"`; },
+  summarize(input) { return `"${input.query}"${input.allowed_domains?.length ? ` on ${input.allowed_domains.join(', ')}` : ''}`; },
   async call(input, ctx) {
+    const failures = [];
+    if (ctx.config) {
+      for (const model of searchModels(ctx.config)) {
+        const timeout = AbortSignal.timeout(searchLimits.timeoutMs);
+        try {
+          const found = await searchWithModel(ctx.config, model, input, AbortSignal.any([...(ctx.signal ? [ctx.signal] : []), timeout]));
+          if (found.results.length || (found.text && !found.errors.length)) {
+            return { content: formatSearch(input.query, found, model), display: { summary: `Found ${found.results.length} results` } };
+          }
+          if (!found.errors.length) {
+            // a search that worked and found nothing: so it is (another engine would not do better)
+            return { content: `No results found for "${input.query}"${input.allowed_domains?.length ? ` on ${input.allowed_domains.join(', ')}` : ''}.`, display: { summary: 'No results' } };
+          }
+          failures.push(`${model.id}: ${found.errors.join(', ')}`);
+        } catch (e) {
+          if (ctx.signal?.aborted) throw e;
+          failures.push(`${model.id}: ${timeout.aborted ? `timed out after ${searchLimits.timeoutMs / 1000}s` : (e.message || String(e)).slice(0, 200)}`);
+        }
+      }
+    }
+    // The last resort: a search engine's page, scraped.
+    const note = failures.length ? `(The search through the gateway failed: ${failures.join('; ')}. These results are scraped from a search engine's page instead and may be off-topic.)\n\n` : '';
     let results = [];
     const errors = [];
     for (const engine of [searchDuckDuckGo, searchBing]) {
@@ -278,14 +410,12 @@ export const WebSearchTool = {
         errors.push(e.cause?.message || e.message);
       }
     }
-    const host = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
-    const match = (h, d) => h === d || h.endsWith('.' + d);
-    if (input.allowed_domains?.length) results = results.filter((r) => input.allowed_domains.some((d) => match(host(r.url), d)));
-    if (input.blocked_domains?.length) results = results.filter((r) => !input.blocked_domains.some((d) => match(host(r.url), d)));
+    const keep = domainFilter(input);
+    results = results.filter((r) => keep(r.url));
     if (!results.length) {
-      return { isError: !!errors.length, content: errors.length ? `Web search failed: ${errors.join('; ')}` : `No results found for "${input.query}"`, display: { summary: 'No results' } };
+      return { isError: Boolean(errors.length || failures.length), content: errors.length || failures.length ? `Web search failed: ${[...failures, ...errors].join('; ')}` : `No results found for "${input.query}"`, display: { summary: 'No results' } };
     }
     const text = results.map((r, i) => `${i + 1}. [${r.title}](${r.url})\n   ${r.snippet}`).join('\n\n');
-    return { content: `Web search results for query: "${input.query}"\n\n${text}`, display: { summary: `Found ${results.length} results` } };
+    return { content: `${note}Web search results for query: "${input.query}"\n\n${text}`, display: { summary: `Found ${results.length} results` } };
   },
 };
