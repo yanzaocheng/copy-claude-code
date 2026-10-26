@@ -839,6 +839,15 @@ export class App {
     if (!value.trim() && pictures.length) value = pictures.map((_, i) => `[Image #${i + 1}]`).join(' ');
     if (!value.trim()) throw new Error('The message is empty.');
     if (this.exiting) throw new Error('The session is ending.');
+    // The page's "end the session" (/exit, /quit) ends it even while a task runs or a question waits, as ctrl+c twice
+    // does here: the page has no ctrl+c, and a /exit sent right behind one of its own commands was refused. Its answer
+    // still goes out before the session closes (see RemoteControl.shutdown).
+    if (/^\/(exit|quit)$/i.test(value.trim()) && (this.isTurnRunning() || this.dialogs.length)) {
+      for (const d of this.dialogs.splice(0)) d.resolve(d.cancelValue);
+      this.echoUser(value.trim());
+      this.exit(0);
+      return { queued: false };
+    }
     if (this.isTurnRunning() && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
     if (this.dialogs.length && !this.isTurnRunning()) throw new Error('A question is open: answer it first.');
     const queued = this.isTurnRunning();
