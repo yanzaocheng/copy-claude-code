@@ -380,7 +380,7 @@ export class RemoteControl {
     if (cmd.type === 'peer') { this.peerMessage(cmd); return; }
     // A command of the page, answered with POST …/results {cid, ok: true, …fields} or {cid, ok: false, error} (the
     // gateway waits 15 s for it, and takes it until 3 s after the stream closed). close() waits for the answers on
-    // their way: a /cd or /exit from the page ends the session from inside its command.
+    // their way: a /cd from the page restarts the session from inside its command.
     const reply = (result) => {
       const sent = this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, result).catch(() => { /* the page times out */ });
       this.replying.add(sent);
@@ -569,9 +569,9 @@ export class RemoteControl {
 
   async shutdown(restarting) {
     // First the answers on their way, while the command stream is still open (the gateway takes them until 3 s
-    // after it closes). Among them the answer to the command that ends the session: a /cd, /restart or /exit from
-    // the page closes it from inside that command, and its answer is sent when the command returns, hence the
-    // wait for the current call to finish first.
+    // after it closes). Among them the answer to the command that restarts the session: a /cd from the page closes
+    // it from inside that command (the page may not end or restart it otherwise, see App.remoteSend), and its answer
+    // is sent when the command returns, hence the wait for the current call to finish first.
     await null;
     if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
     this.closing = true; // what flush() collects now goes out with the last message, not on its own
