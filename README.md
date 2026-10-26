@@ -152,7 +152,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 - **自动上线**：`/login` 成功后当前会话立即注册；之后每个交互会话启动时自动注册，断线自动重连；`/logout` 后停止远程连接。`CLAUDE_PRO_ONLINE=0` 可以关闭远程发布。
 - **网页能看到**：会话列表、在线/离线/结束状态、模型、目录、机器名、viewer 数、transcript、流式文本和 thinking、工具调用与输出、todos、后台任务、排队消息、问题文本和连接状态。
-- **网页能做**：发消息（等同在终端输入框回车：`/命令`、`!shell`、`#记忆`、`@会话`，最多 6 张图片；忙时排队，`/exit` 则停下任务直接结束会话）、回答对话框（选项、多选、“其他”文字、文本框、取消）、停止（等同 Esc，同时取消等待中的问题）、切换 model/effort（发 `/model`、`/effort`）、浏览目录并 `/cd`（会话在新目录重启，网页接着看）、输入补全（`/命令`、`@文件`、`@会话`）、查看某次工具调用的完整输出（最多 1 MB，运行中的也行）。
+- **网页能做**：发消息（等同在终端输入框回车：`/命令`、`!shell`、`#记忆`、`@会话`，最多 6 张图片；忙时排队）、回答对话框（选项、多选、“其他”文字、文本框、取消）、停止（等同 Esc，同时取消等待中的问题）、切换 model/effort（发 `/model`、`/effort`）、浏览目录并 `/cd`（会话在新目录重启，网页接着看）、输入补全（`/命令`、`@文件`、`@会话`）、查看某次工具调用的完整输出（最多 1 MB，运行中的也行）。
 - **只读开关**：`CLAUDE_PRO_REMOTE_COMMANDS=0`（环境变量，或 `claude-pro config set CLAUDE_PRO_REMOTE_COMMANDS 0`）让这台电脑的会话在网页上只能看、不能操作；会话上线时读取，`/status` 会显示 read-only。
 - **网页不能做**：新建会话、恢复/删除历史、打开终端、更新程序或管理电脑；这些只能在本地终端完成。
 - **协议**：远程入口是 `/user#remote`。终端用 `POST /v1/remote/sessions` 注册，并在 `commands` 里声明它接受的指令（`send`、`interrupt`、`dialog`、`options`、`suggest`、`list`、`output`；只读时不带这个字段，网关只转发声明过的类型）；`GET .../commands`（SSE）接收 viewer/snapshot/peer 帧和网页的指令 `{cid, type, body}`，用 `POST .../results` 回复 `{cid, ok, …}`；`POST .../events` 发布 snapshot/batch/status/bye。
