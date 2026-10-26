@@ -68,8 +68,9 @@ const imageBlock = (img) => ({ type: 'image', source: { type: 'base64', media_ty
 // The images the remote page sends with a message ({media_type, data: base64}), checked as the API would: at most
 // REMOTE_MAX_IMAGES, each a PNG, JPEG, GIF or WebP of at most 5 MB. Throws what to tell the page.
 const REMOTE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-// What the page may not send (see App.remoteSend): ending or restarting the session, with or without arguments.
-const TERMINAL_ONLY = /^\s*\/(exit|quit|restart|reload)(?:\s|$)/i;
+// What the page may not send (see App.remoteSend): ending or restarting the session, or updating claude-pro (which
+// restarts it), with or without arguments. The gateway uses the same pattern.
+const TERMINAL_ONLY = /^\s*\/(exit|quit|restart|reload|update)(?:\s|$)/i;
 const REMOTE_MAX_IMAGES = 6;
 const REMOTE_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export function remoteImages(images) {
@@ -840,9 +841,10 @@ export class App {
     let value = String(text ?? '').replace(/\r\n/g, '\n');
     if (!value.trim() && pictures.length) value = pictures.map((_, i) => `[Image #${i + 1}]`).join(' ');
     if (!value.trim()) throw new Error('The message is empty.');
-    // The user's rule: the page does not end or restart the session, only the terminal does. The gateway refuses
-    // these too (with the same pattern); this holds when it does not (another gateway, or one that misses them).
-    if (TERMINAL_ONLY.test(value)) throw new Error('结束和重启会话只能在终端里操作');
+    // The user's rule: the page does not end or restart the session, nor update claude-pro; only the terminal does
+    // (the automatic update goes on as before: it is not a command of the page). The gateway refuses these too, with
+    // the same pattern and message; this holds when it does not (another gateway, or one that misses them).
+    if (TERMINAL_ONLY.test(value)) throw new Error('结束、重启会话和更新 claude-pro 只能在终端里操作');
     if (this.exiting) throw new Error('The session is ending.');
     if (this.isTurnRunning() && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
     if (this.dialogs.length && !this.isTurnRunning()) throw new Error('A question is open: answer it first.');

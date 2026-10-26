@@ -570,7 +570,7 @@ export class RemoteControl {
   async shutdown(restarting) {
     // First the answers on their way, while the command stream is still open (the gateway takes them until 3 s
     // after it closes). Among them the answer to the command that restarts the session: a /cd from the page closes
-    // it from inside that command (the page may not end or restart it otherwise, see App.remoteSend), and its answer
+    // it from inside that command (the page may not end, restart or update it otherwise, see App.remoteSend), and its answer
     // is sent when the command returns, hence the wait for the current call to finish first.
     await null;
     if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
