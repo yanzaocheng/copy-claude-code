@@ -210,8 +210,8 @@ export class Config {
   }
 
   // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}. The window is the one the
-  // gateway gives the model (its model list, once loaded: DeepSeek, GLM and Kimi K3 have 1M there, hy3 192k), else
-  // what is known of the model here; [1m] asks for 1M.
+  // gateway gives the model (its model list, once loaded: DeepSeek, GLM and Kimi K3 have 1M there, gpt-6.1-sol 500k,
+  // hy3 192k), else what is known of the model here; [1m] asks for 1M.
   resolveModel(spec) {
     let name = (spec || '').trim() || 'sonnet';
     let oneM = false;
@@ -222,9 +222,9 @@ export class Config {
       return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
     const served = servedWindows.get(`${this.gatewayUrl}\n${name}`);
-    // GPT models are served by the gateway's Codex backend and use its standard context window, 272k: above it a
-    // request costs twice as much (the gateway takes 500k on gpt-6.1-sol).
-    if (/^gpt-/i.test(name)) return { id: name, contextWindow: Math.min(served || 272_000, 272_000), label: name };
+    // GPT models are served by the gateway's Codex backend, whose standard window is 272k. A request above 272k costs
+    // twice as much (see pricing.js), but the user wants the gateway's window here too (2026-10-27).
+    if (/^gpt-/i.test(name)) return { id: name, contextWindow: served || 272_000, label: name };
     const nativeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
     return { id: name, contextWindow: oneM ? 1_000_000 : served || (nativeOneM ? 1_000_000 : 200_000), label: `${name}${oneM ? '[1m]' : ''}` };
   }
@@ -297,7 +297,8 @@ export class Config {
     const pct = int(this.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 0);
     if (pct > 0 && pct <= 100) return Math.floor(window * pct / 100);
     // A GPT window counts input only (the output has a limit of its own), so the room left only has to cover what the
-    // estimate of the latest tool results misses: compact at 90%, Codex's default for every model (244.8k of 272k).
+    // estimate of the latest tool results misses: compact at 90%, Codex's default for every model (450k of
+    // gpt-6.1-sol's 500k, 244.8k of 272k).
     if (/^gpt-/i.test(model.id)) return Math.floor(window * 0.9);
     // Leave room for the summary itself and the next response (replies rarely come close to the
     // max_tokens ceiling, so the reserve is capped; an overflow is handled by compacting on the error).
