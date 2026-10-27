@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { c, ESC, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
 import { Screen, queryCursorRow, mouseFilter } from './screen.js';
-import { Editor, topBorder } from './editor.js';
+import { Editor, topBorder, shownQuotes } from './editor.js';
 import { SelectDialog } from './dialogs.js';
 import { MarkdownStream, renderMarkdown } from './markdown.js';
 import {
@@ -243,7 +243,7 @@ export class App {
     };
     this.editor = new Editor({
       history: loadHistory(cwd),
-      onSubmit: (value, raw, images) => { try { this.onSubmit(value, raw, images); } catch (e) { this.logError(e); } },
+      onSubmit: (value, raw, images, display) => { try { this.onSubmit(value, raw, images, display); } catch (e) { this.logError(e); } },
       onDoubleEscape: () => this.openRewind(),
       imageFromPath: (p) => {
         const r = imageFromFile(resolvePath(p, this.cwd));
@@ -1242,7 +1242,24 @@ export class App {
       return;
     }
     // Right-click is intentionally inert. Clipboard operations use Ctrl+C and Ctrl+V only.
-    this.screen.mouse(m);
+    const had = this.screen.selection;
+    if (this.screen.mouse(m)?.quote) this.quoteSelection(); // the Quote button beside a selection
+    else if (this.screen.selection && this.screen.selection !== had) this.flashMessage = null; // the footer says what a selection takes
+  }
+
+  // Quote what is selected in the conversation in the message being written, as ChatGPT's "Ask ChatGPT" does: the
+  // Quote button beside a selection, or ctrl+q (alt+q where the terminal keeps ctrl+q). The box shows
+  // "[Quote #1 +12 lines]"; the model gets the text and the line of the conversation it is under (see
+  // Editor.insertQuote), so that it knows which part, and which file or command, the question is about.
+  quoteSelection() {
+    if (!this.screen.full) { this.flash('Quoting works in fullscreen (/tui fullscreen): select text with the mouse, then ctrl+q', 'warn'); return; }
+    const quote = this.screen.selectionQuote();
+    if (!quote?.text.trim()) { this.flash('Select part of the conversation first (drag over it, or double/triple-click), then ctrl+q', 'warn'); return; }
+    if (this.dialogs.length) { this.flash('Answer the open question first, then quote', 'warn'); return; }
+    if (this.finder) this.closeFind();
+    this.screen.clearSelection();
+    const label = this.editor.insertQuote(quote.text, quote.source);
+    this.flash(`${label}${quote.source ? ` from ${quote.source}` : ''}: type your question below it`);
   }
 
   copyText(text) {
@@ -1349,6 +1366,7 @@ export class App {
       // then does what it does.
       if (this.screen.selection) {
         if (key.ctrl && key.name === 'c') { this.copyText(this.screen.selectedText()); this.screen.clearSelection(); return; }
+        if ((key.ctrl || key.meta) && key.name === 'q') { this.quoteSelection(); return; }
         this.screen.clearSelection();
         if (key.name === 'escape') return;
       }
@@ -1360,6 +1378,7 @@ export class App {
     if (key.ctrl && key.name === 'c' && this.finder && !this.dialogs.length) { this.closeFind(); return; } // not the hidden input's text
     if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
     if ((key.ctrl || key.meta) && key.name === 'v') { this.pasteClipboard(); return; } // alt+v: the clipboard's image
+    if ((key.ctrl || key.meta) && key.name === 'q') { this.quoteSelection(); return; } // nothing selected: says how
     const dialog = this.dialogs[0];
     if (dialog) {
       dialog.handleKey(str, key);
@@ -1485,7 +1504,8 @@ export class App {
     ];
   }
 
-  onSubmit(value, raw, images = []) {
+  // `display`: how the message shows in the transcript when that is not `value` (a quote shows its first lines).
+  onSubmit(value, raw, images = [], display = undefined) {
     const text = value.trim();
     if (!text) { this.screen.schedule(); return; }
     if (this.screen.scrolledUp) this.screen.scrollBy('bottom'); // what was sent, and what comes of it, is in view
@@ -1493,11 +1513,11 @@ export class App {
     if (this.sendTypedToPeer(text)) return;
     if (this.isTurnRunning()) {
       if (text.startsWith('/')) { this.notice('Wait for the current task to finish (or press Esc) before running commands.', 'warn'); return; }
-      this.queue.push({ text: value, images });
+      this.queue.push({ text: value, images, ...(display ? { display } : {}) });
       this.screen.schedule();
       return;
     }
-    if (images.length) { this.startTurn(value, { images }); return; }
+    if (images.length) { this.startTurn(value, { images, display }); return; }
     if (text === '?') { this.screen.log(this.shortcutsHelp()); return; }
     if (raw.startsWith('!')) { this.runBashMode(value.slice(1).trim()); return; }
     if (raw.startsWith('#')) { this.addMemory(value.slice(1).trim()); return; }
@@ -1510,11 +1530,11 @@ export class App {
         Promise.resolve(cmd.run(args, rest)).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
         return;
       }
-      if (!/^\/[\w:-]+$/.test(text.split(/\s/)[0])) { this.startTurn(value); return; } // e.g. a path like /usr/bin
+      if (!/^\/[\w:-]+$/.test(text.split(/\s/)[0])) { this.startTurn(value, { display }); return; } // e.g. a path like /usr/bin
       this.notice(`Unknown command: /${name}. Type /help for the list of commands.`, 'warn');
       return;
     }
-    this.startTurn(value);
+    this.startTurn(value, { display });
   }
 
   // `@name message`: the message goes to that session, as a task for it. A session on another computer of the
@@ -1555,7 +1575,8 @@ export class App {
       ['PgUp/PgDn, wheel to scroll', 'ctrl + home/end to the top/bottom'],
       ['# to memorize', 'ctrl + t to toggle todos'],
       ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
-      ['ctrl + c to copy selection', 'ctrl + v to paste text or an image'],
+      ['ctrl + c to copy selection', 'ctrl + q to quote it in your message'],
+      ['ctrl + v to paste text or an image', ''],
     ];
     return rows.map(([a, b]) => c.dim('  ' + padEnd(a, 30) + b));
   }
@@ -1976,7 +1997,7 @@ export class App {
       for (const b of blocks) {
         const bash = m.role === 'user' && b.type === 'text' ? bashModeLines(b.text) : null;
         if (bash) this.screen.log(bash, '');
-        else if (m.role === 'user' && b.type === 'text' && !b.text.startsWith('<system-reminder>')) this.screen.log(renderUserMessage(b.text.slice(0, 2000), this.width));
+        else if (m.role === 'user' && b.type === 'text' && !b.text.startsWith('<system-reminder>')) this.screen.log(renderUserMessage(shownQuotes(b.text).slice(0, 2000), this.width));
         if (m.role === 'assistant' && b.type === 'text') this.screen.log(renderMarkdown(b.text, { width: this.width - 1, firstPrefix: `${DOT} `, indent: '  ' }), '');
         if (m.role === 'assistant' && b.type === 'tool_use') {
           const tool = toolMap.get(b.name) || { name: b.name };
@@ -2425,6 +2446,7 @@ export class App {
     const flash = this.flashMessage && Date.now() < this.flashMessage.until ? this.flashMessage : null;
     if (this.exitArmed && Date.now() - this.exitArmed < 1500) left = c.dim('  Press Ctrl-C again to exit');
     else if (flash) left = (flash.kind === 'warn' ? c.yellow : c.dim)('  ' + truncate(flash.text, w - 4));
+    else if (this.screen.full && this.screen.selection) left = c.dim('  ctrl+c to copy · ctrl+q to quote it in your message');
     else if (this.restartRequest) left = c.dim('  ↻ restarting when this turn ends');
     else if (this.editor.mode === 'bash') left = c.magenta('  ! for bash mode');
     else if (this.editor.mode === 'memory') left = c.blue('  # to memorize');

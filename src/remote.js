@@ -14,6 +14,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { stripAnsi } from './ui/ansi.js';
 import { toolHeader, renderToolResult, bashModeLines } from './ui/render.js';
+import { shownQuotes } from './ui/editor.js';
 
 export const REMOTE_WIDTH = 100; // columns that tool headers and results are laid out for on the page
 const MAX_ITEMS = 800; // kept for a snapshot; the oldest are dropped beyond that
@@ -98,9 +99,10 @@ export function hydrate(items) {
   return state;
 }
 
-// What a user message of the conversation looks like on the page: without the notes for the model.
+// What a user message of the conversation looks like on the page: without the notes for the model, a quote as its
+// first lines (see Editor.insertQuote).
 function shownUserText(text) {
-  return String(text)
+  return shownQuotes(text)
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
     .replace(/<peer-message from="([^"]*)" kind="(task|reply)">\n?/g, (_, from, kind) => `✉ ${kind === 'reply' ? 'answer from' : 'task from'} @${from}: `)
     .replace(/\n?<\/peer-message>/g, '')

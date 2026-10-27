@@ -4,6 +4,26 @@ import { c, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './an
 
 const PASTE_THRESHOLD_CHARS = 800;
 const PASTE_THRESHOLD_LINES = 8;
+const QUOTE_PREVIEW_LINES = 3; // of a quote, shown in the transcript (see quotePreview)
+
+// What the model gets for a quote (see Editor.insertQuote): the text, and the line of the conversation it is under.
+export function quoteBlock(text, source = '') {
+  return `<quote${source ? ` source="${source.replace(/"/g, '&quot;')}"` : ''}>\n${text}\n</quote>`;
+}
+
+// How a quote shows in the transcript: where it is from, then its first lines, each behind a bar.
+export function quotePreview(text, source = '') {
+  const lines = text.split('\n');
+  const shown = lines.slice(0, QUOTE_PREVIEW_LINES).map((l) => `│ ${l.length > 200 ? `${l.slice(0, 199)}…` : l}`);
+  if (lines.length > QUOTE_PREVIEW_LINES) shown.push(`│ … +${lines.length - QUOTE_PREVIEW_LINES} lines`);
+  return [...(source ? [`Quoting ${source}${/[:：]$/.test(source) ? '' : ':'}`] : []), ...shown].join('\n');
+}
+
+// A message as it was sent, each quote in it (see quoteBlock) as the transcript shows it (see quotePreview): for a
+// conversation shown again, resumed or on the web page.
+export function shownQuotes(text) {
+  return String(text).replace(/<quote(?: source="([^"]*)")?>\n([\s\S]*?)\n<\/quote>/g, (_, source = '', body) => quotePreview(body, source.replace(/&quot;/g, '"')));
+}
 
 // "╭─ left ───── right ─╮", the parts cut short to fit (the start of the directory goes first).
 export function topBorder(boxW, color, title) {
@@ -105,6 +125,8 @@ export class Editor {
     this.pasteCounter = 0;
     this.images = new Map(); // "[Image #1]" -> {media_type, data}
     this.imageCounter = 0;
+    this.quotes = new Map(); // "[Quote #1 +3 lines]" -> how it shows in the transcript (its text is in `pastes`)
+    this.quoteCounter = 0;
     this.imageFromPath = imageFromPath; // (path) => image | null, for pasted/dropped image files
     this.pasting = false;
     this.pasteBuf = '';
@@ -134,6 +156,7 @@ export class Editor {
     this.pastes = new Map();
     this.images = new Map();
     this.imageCounter = 0;
+    this.quotes = new Map();
     this.historyIndex = null;
   }
 
@@ -141,7 +164,7 @@ export class Editor {
   // with its pasted text and images, even after other messages were sent meanwhile.
   discard() {
     if (this.text.trim()) {
-      this.cleared = { text: this.text, cursor: this.cursor, pastes: this.pastes, images: this.images, imageCounter: this.imageCounter };
+      this.cleared = { text: this.text, cursor: this.cursor, pastes: this.pastes, images: this.images, imageCounter: this.imageCounter, quotes: this.quotes };
     }
     this.clear();
   }
@@ -176,8 +199,26 @@ export class Editor {
     this.pastes = d.pastes;
     this.images = d.images;
     this.imageCounter = d.imageCounter;
+    this.quotes = d.quotes || new Map();
     this.set(d.text, d.cursor);
     return true;
+  }
+
+  // A part of the conversation quoted in the message (see App.quoteSelection), as ChatGPT's "Ask ChatGPT" does:
+  // "[Quote #1 +12 lines]" on a line of its own, the cursor on the line after it, where the question goes. What is
+  // sent has the text itself in a <quote>, with the line of the conversation it is under as its source (see
+  // quoteBlock), so that the model knows which part is meant; the transcript shows its first lines (see displayed).
+  // Deleted like a paste: one backspace takes the whole placeholder.
+  insertQuote(text, source = '') {
+    const lines = text.split('\n').length;
+    const label = `[Quote #${++this.quoteCounter} +${lines} line${lines === 1 ? '' : 's'}]`;
+    this.pastes.set(label, quoteBlock(text, source));
+    this.quotes.set(label, quotePreview(text, source));
+    const before = this.text.slice(0, this.cursor);
+    const newline = this.text.slice(this.cursor).startsWith('\n');
+    this.insert((before && !before.endsWith('\n') ? '\n' : '') + label + (newline ? '' : '\n'));
+    if (newline) this.set(this.text, this.cursor + 1);
+    return label;
   }
 
   insertImage(image) {
@@ -218,6 +259,13 @@ export class Editor {
     return t;
   }
 
+  // The text as the transcript shows it: as expanded(), but each quote as its first lines (see quotePreview).
+  displayed() {
+    let t = this.text;
+    for (const [label, content] of this.pastes) t = t.split(label).join(this.quotes.get(label) ?? content);
+    return t;
+  }
+
   refreshSuggestions() {
     if (!this.getSuggestions || this.suggestionsDismissedFor === this.text) { this.suggestions = null; return; }
     const s = this.getSuggestions(this.text, this.cursor);
@@ -240,11 +288,13 @@ export class Editor {
   submit() {
     const value = this.expanded();
     const raw = this.text;
+    // `display`: how the message shows in the transcript, when that is not `value` (a quote shows its first lines)
+    const display = [...this.quotes.keys()].some((label) => raw.includes(label)) ? this.displayed() : undefined;
     // Only images whose placeholder is still in the text are sent.
     const images = [...this.images].filter(([label]) => raw.includes(label)).map(([, img]) => img);
     if (raw.trim() && this.history[this.history.length - 1] !== raw) this.history.push(raw);
     this.clear();
-    this.onSubmit?.(value, raw, images);
+    this.onSubmit?.(value, raw, images, display);
   }
 
   // Returns true when the key was consumed.
