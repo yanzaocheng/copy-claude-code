@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
-import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, SUMMARY_SYSTEM } from './prompts.js';
+import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, keptUserMessagesIn, SUMMARY_SYSTEM } from './compaction.js';
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
 import { CacheStats, TTL_MS } from './cache.js';
@@ -141,6 +141,44 @@ const toQueuedBlocks = (items) => items.map((q) => (typeof q === 'string' ? { ty
 
 function toBlocks(content) {
   return typeof content === 'string' ? [{ type: 'text', text: content }] : content;
+}
+
+// How much of the user's own messages a compaction keeps word for word, in estimated tokens (Codex keeps 20k).
+const KEPT_USER_TOKENS = 20_000;
+// Text the program puts in a user message, not the user: notes for the model, reports of background agents and of
+// other sessions, bash mode, interruptions. The summaries of earlier compactions are read for the messages they kept.
+const PROGRAM_TEXT = /^(?:<(?:system-reminder|task-notification|peer-message|bash-input)\b|\[Request interrupted by user)/;
+const SUMMARY_TEXT = /^(?:This session is being continued|\[Summarized conversation\])/;
+
+// The user's own messages in `messages`, oldest first, to keep word for word through a compaction as Codex does: what
+// they typed ("[image]" for a picture) and what earlier summaries kept. The newest that fit in `budget` estimated
+// tokens are kept whole, the next one shortened in the middle to what is left (when that is worth it), none older.
+export function keptUserMessages(messages, budget = KEPT_USER_TOKENS) {
+  const all = [];
+  for (const m of messages) {
+    if (m.role !== 'user') continue;
+    const typed = [];
+    for (const b of toBlocks(m.content)) {
+      if (b.type === 'image') typed.push('[image]');
+      else if (b.type !== 'text' || !b.text?.trim() || PROGRAM_TEXT.test(b.text)) continue;
+      else if (SUMMARY_TEXT.test(b.text)) all.push(...keptUserMessagesIn(b.text));
+      else typed.push(b.text);
+    }
+    if (typed.length) all.push(typed.join('\n'));
+  }
+  const kept = [];
+  let left = budget;
+  for (let i = all.length - 1; i >= 0 && left > 0; i--) {
+    const text = all[i];
+    const tokens = estimateTokens(text);
+    if (tokens <= left) { kept.push(text); left -= tokens; continue; }
+    if (left >= 200) {
+      const half = Math.floor(text.length * left / tokens / 2);
+      kept.push(`${text.slice(0, half)}\n[… ${text.length - 2 * half} characters left out …]\n${text.slice(text.length - half)}`);
+    }
+    break;
+  }
+  return kept.reverse();
 }
 
 // Merge consecutive same-role messages and drop empties so the API always sees a valid sequence.
@@ -1163,7 +1201,7 @@ export class Agent {
       throw err;
     }
     const state = this.compactWorkState(res);
-    const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary, state.state) }] };
+    const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary, state.state, keptUserMessages(part === 'before' ? before : after)) }] };
     this.replaceMessages(part === 'before' ? [note, ...after] : [...before, note]);
     if (part === 'before') this.cache.noteCompacted(); // from its first message on: nothing of it is cached (the start of "after" still is)
     if (part === 'after') this.todos = []; // what they were about may be summarized away; the model keeps them in the summary
@@ -1203,7 +1241,8 @@ export class Agent {
     }
     const state = this.compactWorkState(res);
     const todoNote = this.todos.length ? `\n\n<system-reminder>Current todo list:\n${this.todos.map((t) => `- [${t.status}] ${t.content}`).join('\n')}</system-reminder>` : '';
-    this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto, workState: state.state, workStateWarning: state.warning }) + todoNote }] }]);
+    const userMessages = keptUserMessages(this.messages);
+    this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto, workState: state.state, workStateWarning: state.warning, userMessages }) + todoNote }] }]);
     this.cache.noteCompacted();
     this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
     this.fileState.clear();

@@ -314,7 +314,7 @@ flowchart TD
 - `Write`、`Edit`、`MultiEdit`、`NotebookEdit` 在执行前写入检查点；Bash 造成的文件变化不在检查点覆盖范围内。
 - 超大的工具结果保存到 `tool-results` 文件，只把预览和路径发回模型，避免挤占上下文。
 - 配置 `CLAUDE_PRO_VERIFY_COMMAND`、`--verify` 或 `/verify` 后，完成文件修改的回合会执行验证命令；失败输出会再次交给模型修复，最多执行 3 轮（`verifyMaxRounds`）。
-- 到达上下文阈值或收到 prompt-too-long 错误时，使用 `compact()` 生成摘要，并通过 reset 记录替换旧消息；摘要请求复用对话自己的提示词缓存（6.5）。自动压缩失败时（`compactOnTheWay`），只要请求还放得下，这一轮照常继续；连续失败 `MAX_COMPACT_FAILURES`（3）次后本对话不再自动压缩，直到 `/compact` 成功或 `/clear`。prompt-too-long 时的压缩失败仍然报错结束这一轮。
+- 到达上下文阈值或收到 prompt-too-long 错误时，使用 `compact()` 生成摘要，并通过 reset 记录替换旧消息；摘要请求复用对话自己的提示词缓存（6.5）。阈值（`Config.autoCompactThreshold`）：GPT 的窗口只算输入，在 90% 压缩（Codex 的默认，272k 的 244.8k）；Claude 的窗口含输出，留出最多 48k。另一个模型报的 token 数（切换模型后）不触发压缩，等当前模型的第一次请求量出来。压缩的提示词和替代对话的那条消息在 [`src/compaction.js`](src/compaction.js)：它不在 `prompts.js` 里，改它不会变 `PROMPT_CODE_VERSION`，运行中的对话不用重建系统提示词。用户自己的消息不进摘要，而是像 Codex 一样逐字保留：`keptUserMessages()`（agent.js）取用户打的字（不含提醒、通知、其他会话的消息、bash 模式、中断标记，图片记作 `[image]`）和上次摘要保留的那些，最新的在估算 2 万 tokens 内整条保留，再早一条从中间截短，更早的丢掉；它们放在摘要后面的 `<user-messages>` 段里（放在后面，`<work-state>` 才是文本里的第一个），下一次压缩用 `keptUserMessagesIn()` 读回。摘要本身只写 work-state 装不下的交接信息，不再复述用户消息。自动压缩失败时（`compactOnTheWay`），只要请求还放得下，这一轮照常继续；连续失败 `MAX_COMPACT_FAILURES`（3）次后本对话不再自动压缩，直到 `/compact` 成功或 `/clear`。prompt-too-long 时的压缩失败仍然报错结束这一轮。
 - 工具结果只放必要的内容：Edit 只回一行和改动的行号范围（不再附带 `cat -n` 片段）；Read 一次最多返回 40 万字符，截断时写明最后显示的是哪一行。
 
 ## 8. 工具与扩展点
@@ -389,6 +389,7 @@ flowchart TD
 | [`src/config.js`](src/config.js) | 配置来源、provider、模型和限制 |
 | [`src/runtime.js`](src/runtime.js) | 依赖装配和 Agent 创建 |
 | [`src/agent.js`](src/agent.js) | 消息循环、工具调度、压缩、验证 |
+| [`src/compaction.js`](src/compaction.js) | 压缩的提示词、替代对话的摘要消息、逐字保留的用户消息段 |
 | [`src/api.js`](src/api.js) | Anthropic SDK、SSE、重试、错误 |
 | [`src/ratelimit.js`](src/ratelimit.js) | 限流响应头解析、等待决策、墙上时钟休眠、提示文案 |
 | [`src/filestate.js`](src/filestate.js) | 恢复会话时重建“已读文件”状态 |

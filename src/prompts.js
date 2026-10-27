@@ -1,4 +1,4 @@
-// System prompts for the main agent, sub-agents and compaction.
+// System prompts for the main agent and sub-agents (the compaction's own are in compaction.js).
 
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -133,62 +133,6 @@ ${message}
 </message>
 
 ${current ? 'Does this message start a new topic (a different task or question), or does it continue the current one (a follow-up, "continue", an answer, a correction)? ' : ''}Reply with only a JSON object: {"isNewTopic": ${current ? 'true or false' : 'true'}, "title": ...}. For a new topic, "title" names it in 2 to 6 words (at most about 16 characters in Chinese or Japanese), in the language of the user's message, with no quotes, no emoji and no punctuation at the end. Otherwise "title" is null.`;
-}
-
-// The system prompt of the plain summary request (see Agent.requestSummary).
-export const SUMMARY_SYSTEM = 'You are a helpful AI assistant tasked with summarizing conversations.';
-
-export function compactPrompt(instructions) {
-  return `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools: the conversation above is complete, and the only thing wanted now is the structured state and summary below.
-
-Your task is to preserve the state needed to continue the work after this conversation is compacted and to create a detailed summary of the conversation. Pay close attention to the user's explicit requests, your previous actions, exact file paths, commands, test results, failures and unresolved questions.
-
-First write exactly one <work-state> block containing one valid JSON object. Do not use markdown fences inside the block. Use this schema exactly; use an empty string or [] when a field has no value:
-<work-state>
-{"schema_version":1,"objective":"","constraints":[],"decisions":[],"files":[],"edits":[],"tests":[],"failures":[],"open_questions":[],"next_action":"","tool_artifacts":[]}
-</work-state>
-All array items must be strings. Keep paths, commands, error messages and next actions precise. The state is machine-validated, so do not add prose before or after the JSON inside <work-state>.
-
-Then write a detailed narrative in <summary> tags. Do your reasoning in your thinking, not in the reply: only the work-state and the summary are kept, so text outside them is thrown away (and writing it makes the compaction take minutes longer). The narrative should retain technical details, code patterns and architectural decisions that would be useful if the structured state is incomplete.
-
-Use these summary sections:
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Include full code snippets where applicable and a summary of why each file read or edit is important.
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback.
-5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the user's feedback and changing intent.
-7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, including file names and code snippets.
-9. Optional Next Step: The next step directly in line with the user's most recent explicit request. Include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off.
-
-Write the summary in the same language the user has been using.
-Do NOT call any tools. Respond with text only.${instructions ? `\n\nAdditional instructions from the user for this summary:\n${instructions}` : ''}`;
-}
-
-// The instruction for /rewind's "Summarize from here" (part 'after') and "Summarize up to here" ('before'): only
-// that part of the conversation is summarized, the rest stays in it word for word.
-export function partialCompactPrompt(part, label, instructions = '') {
-  const at = label ? `the user's message that begins "${String(label).slice(0, 200)}"` : 'the point the user chose';
-  const scope = part === 'before'
-    ? `Summarize ONLY the part of the conversation BEFORE ${at}. That message and everything after it stay in the conversation word for word: do not summarize them. The summary replaces only what comes before that message, so it has to carry everything from that earlier part that the rest of the conversation builds on.`
-    : `Summarize ONLY the part of the conversation that starts with ${at} (that message included) and goes on to the end. Everything before that message stays in the conversation word for word: do not summarize it. The summary replaces only that later part.`;
-  return compactPrompt(`${scope}${instructions ? `\n${instructions}` : ''}`);
-}
-
-// The message that stands in the conversation for the part a partial summary replaced.
-export function partialSummaryMessage(part, summary, workState = null) {
-  const state = workState ? `\n\nThe validated structured work state for this summarized section is:\n<work-state>\n${JSON.stringify(workState, null, 2)}\n</work-state>` : '';
-  return part === 'before'
-    ? `[Summarized conversation] The earlier part of this conversation was summarized at the user's request; the messages after this one are as they were. The summary of the earlier part:${state}\n${summary}`
-    : `[Summarized conversation] The later part of this conversation, from the user's message where this summary stands to where it was, was summarized at the user's request. The summary of that part:${state}\n${summary}`;
-}
-
-export function continuationMessage(summary, { auto, workState = null, workStateWarning = '' }) {
-  const state = workState ? `\n\nThe validated structured work state is:\n<work-state>\n${JSON.stringify(workState, null, 2)}\n</work-state>` : '';
-  const warning = workStateWarning ? `\n\n<system-reminder>${workStateWarning}</system-reminder>` : '';
-  return `This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:${state}${warning}
-${summary}${auto ? '\n\nPlease continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.' : ''}`;
 }
 
 export const INIT_PROMPT = `Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of this coding agent to operate in this repository.
