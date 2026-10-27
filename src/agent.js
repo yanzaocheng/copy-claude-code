@@ -730,7 +730,13 @@ export class Agent {
             continue;
           }
         }
-        if (!text) this.io.notice?.('The model ended its turn without a reply.', 'warn');
+        // A refusal (stop_reason "refusal") comes without text too, but the model did not just fall silent: it declined
+        // the request, and the same request, or "go on" after it, is usually declined again. Said as such, with what
+        // helps, as Claude Code does: the message reworded, or the context that led to it left out.
+        if (!text) {
+          this.io.notice?.(stopReason !== 'refusal' ? 'The model ended its turn without a reply.'
+            : `The model declined this request (stop_reason: refusal) and gave no reply.${this.isSubagent ? '' : ' Press esc twice to go back and reword the message, or /compact or /clear to leave out the context that led to it.'}`, 'warn');
+        }
         return tracedReturn({ text: finalText, interrupted: false });
       }
 
