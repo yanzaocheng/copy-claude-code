@@ -115,7 +115,8 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
 
   // Every agent uses the model selected for this session; effort may still be specific to the task.
   runtime.spawnSubagent = async ({ def, prompt, description, ctx, effort }) => {
-    const model = config.model;
+    const spec = config.modelSpec;
+    const model = config.resolveModel(spec);
     const subIo = io.subagentIo ? io.subagentIo({ def, description, parentCtx: ctx }) : {};
     // The main agent is depth 0; an agent below the nesting limit may start sub-agents itself.
     const depth = (ctx.depth ?? ctx.agent?.depth ?? 0) + 1;
@@ -128,7 +129,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
       tools: subTools,
       systemPrompt: subagentSystemPrompt({ cwd: ctx.cwd, model, shellName: shell.name, agentPrompt: def.prompt, snapshot: snapshotFor(ctx.cwd), mcpInstructions: subTools.some((tool) => tool.mcp) ? mcp.promptInstructions() : '', readOnly: Boolean(def.readOnly) }),
       io: subIo,
-      model,
+      model: () => config.resolveModel(spec), // the model of now, with the window the gateway's model list gives it
       isSubagent: true,
       cwd: ctx.cwd,
       name: def.name,

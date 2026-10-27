@@ -6,7 +6,7 @@ import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, readGatewayLogin, gatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { loginWithBrowser, readGatewayLogin, gatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
@@ -398,6 +398,7 @@ export function buildCommands(app) {
       cfg.modelOverride = forget ? null : choice;
       if (changed) app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
+      await loadGatewayModels(cfg); // the window shown may come from the gateway's model list (see Config.resolveModel)
       out(`Model set to ${c.bold(cfg.model.label)} ${c.dim(`(${formatTokens(cfg.model.contextWindow)} context)`)}${kept}${changed ? c.dim(' · restored conversation remains in context for the next request') : ''}`);
     },
   });

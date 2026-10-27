@@ -4,7 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
-import { gatewayLogin, fetchGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
+import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
 import { fitImagesIn } from './utils/images.js';
 import { costOf } from './pricing.js';
 
@@ -267,14 +267,10 @@ function charge(config, requested, served, usage) {
 export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true } = {}) {
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
   // Load gateway model metadata before the synchronous parameter builder; the cache is keyed by gateway and key,
-  // so changing accounts or gateway URLs cannot leak a model's effort levels into another context.
-  if (/^gpt-/i.test(request.model?.id)) {
-    const login = gatewayLogin(config.gatewayUrl, config.env.CLAUDE_PRO_GATEWAY_API_KEY);
-    if (login) {
-      // A gateway that does not answer costs at most a few seconds once (see fetchGatewayModels), not the request.
-      try { await fetchGatewayModels(login, { signal }); } catch { if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] }); }
-    }
-  }
+  // so changing accounts or gateway URLs cannot leak a model's effort levels into another context. A gateway that
+  // does not answer costs at most a few seconds once (see fetchGatewayModels), not the request.
+  await loadGatewayModels(config, signal);
+  if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
   const client = getClient(config);
   const params = buildParams(config, request);
   // The gateway keeps a conversation on the upstream account that served it, where its prompt cache is; the

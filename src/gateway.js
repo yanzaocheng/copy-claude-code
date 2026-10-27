@@ -9,7 +9,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { CONFIG_DIR, GATEWAY_DEFAULT_URL } from './config.js';
+import { CONFIG_DIR, GATEWAY_DEFAULT_URL, noteServedModels } from './config.js';
 
 export { GATEWAY_DEFAULT_URL };
 export const gatewayLoginFile = () => path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json');
@@ -74,9 +74,10 @@ export async function fetchGatewayAccount({ url, apiKey }, { fetchImpl = globalT
 }
 
 // The models the gateway serves (GET /v1/models), fetched once per gateway and key. The reasoning fields are
-// optional so older gateways still work; when present they are kept with the model for /effort and requests.
-// Every GPT request waits for it the first time, so it gives up after a few seconds, and after a failure it is not
-// asked again for a minute: a gateway whose /v1/models fails must not slow down every request.
+// optional so older gateways still work; when present they are kept with the model for /effort and requests. Each
+// model's max_input_tokens is its window (see Config.resolveModel).
+// The first request waits for it, so it gives up after a few seconds, and after a failure it is not asked again for
+// a minute: a gateway whose /v1/models fails must not slow down every request.
 const modelLists = new Map();
 const modelListFailures = new Map(); // key -> {at, error}
 const MODELS_TIMEOUT_MS = 5000;
@@ -103,7 +104,17 @@ export async function fetchGatewayModels({ url, apiKey }, { fetchImpl = globalTh
       : m.default_reasoning_level?.effort || m.default_effort || null,
   }));
   modelLists.set(key, list);
+  noteServedModels(normalizeGatewayUrl(url), list);
   return list;
+}
+
+// The gateway's model list for a configuration, for the synchronous code that reads it: buildParams (a GPT model's
+// effort levels) and Config.resolveModel (every model's window). When the gateway does not answer, the built-in
+// values stand in. Never throws.
+export async function loadGatewayModels(config, signal) {
+  const login = gatewayLogin(config.gatewayUrl, config.env.CLAUDE_PRO_GATEWAY_API_KEY);
+  if (!login) return;
+  try { await fetchGatewayModels(login, { signal }); } catch { /* the built-in values stand in */ }
 }
 
 export function cachedGatewayModel(login, modelId) {

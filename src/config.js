@@ -173,6 +173,16 @@ const int = (v, d) => {
 };
 const isOn = (v) => /^(1|true|yes)$/i.test(String(v ?? '').trim());
 
+// The input window of each model a gateway serves (max_input_tokens in its GET /v1/models, which fetchGatewayModels
+// passes on here), by gateway and model id: what resolveModel takes once the list is in.
+const servedWindows = new Map();
+export function noteServedModels(url, models) {
+  for (const m of models || []) {
+    const tokens = Number(m?.max_input_tokens);
+    if (typeof m?.id === 'string' && Number.isInteger(tokens) && tokens > 0) servedWindows.set(`${url}\n${m.id}`, tokens);
+  }
+}
+
 export class Config {
   constructor(env, sources, settings, cwd) {
     this.env = env;
@@ -199,7 +209,9 @@ export class Config {
     return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
   }
 
-  // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}.
+  // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}. The window is the one the
+  // gateway gives the model (its model list, once loaded: DeepSeek, GLM and Kimi K3 have 1M there, hy3 192k), else
+  // what is known of the model here; [1m] asks for 1M.
   resolveModel(spec) {
     let name = (spec || '').trim() || 'sonnet';
     let oneM = false;
@@ -209,10 +221,12 @@ export class Config {
       const inner = this.resolveModel(aliased);
       return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
+    const served = servedWindows.get(`${this.gatewayUrl}\n${name}`);
+    // GPT models are served by the gateway's Codex backend and use its standard context window, 272k: above it a
+    // request costs twice as much (the gateway takes 500k on gpt-6.1-sol).
+    if (/^gpt-/i.test(name)) return { id: name, contextWindow: Math.min(served || 272_000, 272_000), label: name };
     const nativeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
-    // GPT models are served by the gateway's Codex backend and use its standard context window.
-    if (/^gpt-/i.test(name)) return { id: name, contextWindow: 272_000, label: name };
-    return { id: name, contextWindow: oneM || nativeOneM ? 1_000_000 : 200_000, label: `${name}${oneM ? '[1m]' : ''}` };
+    return { id: name, contextWindow: oneM ? 1_000_000 : served || (nativeOneM ? 1_000_000 : 200_000), label: `${name}${oneM ? '[1m]' : ''}` };
   }
 
   // The selected model: the configured default unless /model has overridden it for this session.

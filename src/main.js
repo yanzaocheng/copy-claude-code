@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { VERSION, KNOWN_KEYS, loadConfig, settingsFiles, updateSettingsFile, applyRememberedChoices } from './config.js';
+import { loadGatewayModels } from './gateway.js';
 import { resolvePath } from './utils/paths.js';
 import { SessionStore } from './session.js';
 import { takeRestartState } from './restart.js';
@@ -88,7 +89,7 @@ function parseArgs(argv) {
   return { flags, positional };
 }
 
-function configCommand(args, cwd) {
+async function configCommand(args, cwd) {
   const [sub, key, ...rest] = args;
   const scopeFlag = rest.find((r) => r === '--project' || r === '--local') || (key === '--project' || key === '--local' ? key : null);
   const files = settingsFiles(cwd);
@@ -103,6 +104,7 @@ function configCommand(args, cwd) {
       console.log(`${k}=${v ?? ''}${cfg.sources[k] ? `    # ${cfg.sources[k]}` : ''}`);
     }
     if (sub !== 'get') {
+      await loadGatewayModels(cfg); // the model's window may come from the gateway's model list (see Config.resolveModel)
       console.log(`\nprovider: ${cfg.provider} (${cfg.endpointLabel})`);
       console.log(`model: ${cfg.model.label} (context ${cfg.model.contextWindow.toLocaleString()})${cfg.effort ? `, effort ${cfg.effort}` : ''}`);
       if (remembered.model || remembered.effort) {

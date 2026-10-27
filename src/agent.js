@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { streamMessage, contextTokens, isAbort } from './api.js';
+import { loadGatewayModels } from './gateway.js';
 import { compactPrompt, partialCompactPrompt, partialSummaryMessage, continuationMessage, keptUserMessagesIn, SUMMARY_SYSTEM } from './compaction.js';
 import { toolResultsDir } from './session.js';
 import { rebuildFileState } from './filestate.js';
@@ -690,6 +691,9 @@ export class Agent {
     let compactedForError = false;
     let finalText = '';
     for (;;) {
+      // The model's window may come from the gateway's model list (see Config.resolveModel): loaded before the check,
+      // or a resumed conversation is measured against a guess (deepseek-v4.1-flash was compacted at 160k of its 1M).
+      await loadGatewayModels(this.config, signal);
       if (signal?.aborted) return tracedReturn(this.handleInterrupt(null));
       if (this.shouldAutoCompact()) {
         const outcome = await this.compactOnTheWay(signal);

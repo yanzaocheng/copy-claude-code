@@ -18,7 +18,7 @@ import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
-import { gatewayLogin, normalizeGatewayUrl, formatUsd } from '../gateway.js';
+import { gatewayLogin, loadGatewayModels, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands, modelChoices, effortChoices } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -287,6 +287,9 @@ export class App {
       this.screen.schedule();
     };
     this.commands = buildCommands(this);
+    // The window of the model in use may come from the gateway's model list (see Config.resolveModel): asked for now,
+    // so that the footer shows it before the first request.
+    if (!this.driven) loadGatewayModels(this.runtime.config).then(() => this.screen.schedule());
     // What the session showed before a restart: scrolled back to in fullscreen, repainted after a resize otherwise.
     if (Array.isArray(this.flags.restart?.screenHistory)) this.screen.history = this.flags.restart.screenHistory.filter((l) => typeof l === 'string');
     if (this.fullscreenWanted()) this.screen.setFull(true);
