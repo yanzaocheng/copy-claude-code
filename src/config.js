@@ -282,6 +282,9 @@ export class Config {
     const window = this.compactWindow(model, own);
     const pct = int(this.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 0);
     if (pct > 0 && pct <= 100) return Math.floor(window * pct / 100);
+    // A GPT window counts input only (the output has a limit of its own), so the room left only has to cover what the
+    // estimate of the latest tool results misses: compact at 90%, Codex's default for every model (244.8k of 272k).
+    if (/^gpt-/i.test(model.id)) return Math.floor(window * 0.9);
     // Leave room for the summary itself and the next response (replies rarely come close to the
     // max_tokens ceiling, so the reserve is capped; an overflow is handled by compacting on the error).
     return Math.floor(window - Math.min(window * 0.2, Math.max(20_000, Math.min(this.maxOutputTokens, 64_000))));

@@ -305,6 +305,7 @@ export class Agent {
     this.projectRoot = cwd;
     this.cwd = cwd;
     this.lastContextTokens = 0;
+    this.usageModel = null; // the model whose usage report last set lastContextTokens (see shouldAutoCompact)
     this.tokensSinceUsage = 0;
     this.heldTokens = 0; // room taken by tool results not yet in the conversation (see takeContext)
     // What this agent's own requests used. `requests` counts the turns' requests; the summary requests of
@@ -773,6 +774,10 @@ export class Agent {
   shouldAutoCompact() {
     if (!this.config.autoCompactEnabled || this.messages.length <= 2) return false;
     if (this.compactFailures >= MAX_COMPACT_FAILURES) return false;
+    // A count reported by another model (the user switched) is in another tokenizer's tokens: Opus counted 304k where
+    // GPT had counted 207k of the same conversation, and GPT compacted at once. The next request measures it instead;
+    // a conversation too long for this model is compacted on the error.
+    if (this.usageModel && this.usageModel !== this.model.id) return false;
     const threshold = this.config.autoCompactThreshold(this.model, this.compactWindow);
     if (this.contextEstimate < threshold) return false;
     // Right after a compaction the base context (system prompt, tools, summary) may itself be
@@ -868,6 +873,7 @@ export class Agent {
       onEvent: (ev) => this.io.streamEvent?.(ev, this),
     });
     this.lastContextTokens = contextTokens(res.usage);
+    this.usageModel = request.model.id;
     this.tokensSinceUsage = 0;
     if (this.postCompactTokens === null) this.postCompactTokens = this.lastContextTokens;
     return res;
