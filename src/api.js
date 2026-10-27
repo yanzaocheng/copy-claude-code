@@ -226,11 +226,14 @@ function describeError(err, config) {
   if (err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError) return err;
   const status = err?.status;
   let msg = err?.error?.error?.message || err?.error?.message || err?.message || String(err);
-  const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded/i.test(msg);
+  const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded|exceeds the context window/i.test(msg);
   if (err instanceof APIError) return err;
   if (status === 401) msg = `The gateway refused the login (401). Run /login to log in again. ${msg}`;
   if (status === 402) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (or run /login to check the balance). ${msg}`;
-  const retryable = !status || status === 408 || status === 409 || status === 429 || status >= 500;
+  // A prompt over the window fails the same way every time, so it is not retried: the agent compacts at once. Through
+  // the gateway a GPT overflow comes in the stream, without a 4xx: "Your input exceeds the context window of this
+  // model. ... (context_length_exceeded)", and was sent 6 more times, with the waits in between, before compacting.
+  const retryable = !promptTooLong && (!status || status === 408 || status === 409 || status === 429 || status >= 500);
   const header = typeof err?.headers?.get === 'function' ? err.headers.get('retry-after') : err?.headers?.['retry-after'];
   const overloaded = status === 529 || (err?.error?.error?.type || err?.error?.type) === 'overloaded_error';
   return new APIError(msg, { status, retryable, promptTooLong, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()), overloaded });
