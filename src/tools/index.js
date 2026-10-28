@@ -2,6 +2,7 @@ import { ReadTool, WriteTool, EditTool, MultiEditTool } from './files.js';
 import { makeBashTool, BashOutputTool, KillShellTool } from './bash.js';
 import { GlobTool, GrepTool } from './search.js';
 import { makeWebFetchTool, WebSearchTool } from './web.js';
+import { makeBrowserTool, browserToolEnabled } from './browser.js';
 import { TodoWriteTool, AskUserQuestionTool } from './interaction.js';
 import { makeTaskTool, TaskOutputTool, TaskStopTool } from './task.js';
 import { NotebookEditTool } from './notebook.js';
@@ -29,6 +30,7 @@ export function buildTools(config, { agents, skills, mcpTools = [], restart = fa
     NotebookEditTool,
     makeWebFetchTool(config),
     WebSearchTool,
+    ...(browserToolEnabled(config) ? [makeBrowserTool()] : []),
     TodoWriteTool,
     BashOutputTool,
     KillShellTool,

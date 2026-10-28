@@ -67,6 +67,7 @@ export const KNOWN_KEYS = {
   BASH_MAX_OUTPUT_LENGTH: 'Max characters of Bash output returned to the model; the full text is saved to a file (default 60000)',
   CLAUDE_CODE_GIT_BASH_PATH: 'Windows: path to bash.exe (Git Bash)',
   CLAUDE_PRO_RIPGREP_PATH: 'Path to ripgrep (rg) for Grep and @-file suggestions; "off" forces the built-in JS scanner (default: rg from PATH, else the JS scanner)',
+  CLAUDE_PRO_BROWSER: 'The browser the Browser tool drives: auto (default: the first of Edge, Chrome, Brave, Chromium whose remote debugging is turned on, at edge://inspect/#remote-debugging and the like), edge, chrome, brave, chromium, own (claude-pro\'s own Chrome profile, nothing to allow), a DevTools address (ws://…, http://host:port, a port), or off (no Browser tool)',
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
   CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the current model for the current topic after each message (the tab title then shows the first message of the session)',

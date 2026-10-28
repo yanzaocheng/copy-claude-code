@@ -2,6 +2,7 @@
 // (or JSON), tool activity goes to stderr with --verbose.
 
 import { createRuntime } from './runtime.js';
+import { closeBrowser } from './browser/session.js';
 import { SessionStore } from './session.js';
 import { describePause, resumeText, shouldAnnounce } from './ratelimit.js';
 import { c } from './ui/ansi.js';
@@ -90,7 +91,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   } catch (e) {
     if (format === 'json') emit({ type: 'result', is_error: true, error: e.message });
     else err(c.red(`Error: ${e.message}`));
-    runtime.tasks.killAll(); runtime.mcp.close();
+    runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser();
     return 1;
   } finally {
     process.off('SIGINT', onSigint);
@@ -111,6 +112,6 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   } else {
     stdout.write(result.text + '\n');
   }
-  runtime.tasks.killAll(); runtime.mcp.close();
+  runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser(); // an open browser connection keeps the process alive
   return result.interrupted ? 130 : 0;
 }
