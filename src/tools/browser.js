@@ -13,8 +13,8 @@ export const browserToolLimits = { snapshotChars: 10_000, diffLines: 60, diffCha
 
 const ACTIONS = ['tabs', 'open', 'switch', 'navigate', 'back', 'forward', 'reload', 'close', 'snapshot', 'find', 'text', 'click', 'type', 'press', 'hover', 'scroll', 'select', 'upload', 'wait', 'eval', 'screenshot', 'dialog', 'disconnect'];
 // After these the page is another one: it is shown whole. After these it is the same page: what changed is shown.
-const NAVIGATING = new Set(['open', 'switch', 'navigate', 'back', 'forward', 'reload']);
-const ACTING = new Set(['click', 'type', 'press', 'hover', 'scroll', 'select', 'upload', 'wait', 'dialog']);
+// After a step that reads the page (the model chose how to look at it), the page is not shown again at the end.
+const READING = new Set(['find', 'text', 'eval', 'screenshot']);
 
 const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -241,6 +241,14 @@ async function pageState(tab, kind) {
   return `${header(tab)}\n${body ?? capped(tab, page.view)}`;
 }
 
+// When the last step read the page (switch, then find): only where the tab is, the page not shown again. It is
+// still recorded, so that the next action shows what it changed instead of the whole page.
+async function quietState(tab, unsettled) {
+  if (unsettled) await browserSession.settle(tab);
+  if (!tab.dialog) remember(tab, await readPage(tab));
+  return header(tab);
+}
+
 async function run(input, ctx) {
   const s = browserSession;
   const steps = Array.isArray(input.steps) && input.steps.length ? input.steps : [input];
@@ -260,16 +268,22 @@ async function run(input, ctx) {
   }
   let failed = false;
   let pending = null; // what to show of the page at the end: 'page' | 'changes'
+  let unsettled = false; // a step changed the page, and it has not settled since
+  let lastRead = false;
   const images = [];
   for (const [i, x] of steps.entries()) {
     const n = steps.length > 1 ? `${i + 1}. ` : '';
     try {
+      // what a step started (a page loading, a menu opening) is done before the next step reads or acts on the page
+      if (unsettled && s.current) { await s.settle(s.current); unsettled = false; }
       const r = await step(x, ctx);
       out.push(`${n}${r.line}`);
       if (r.images) images.push(...r.images);
       if (r.report === 'page') pending = 'page';
       else if (r.report === 'changes') pending = pending === 'page' ? 'page' : 'changes';
       else if (r.report === 'shown') pending = null; // a snapshot shows the page already
+      if (r.report === 'page' || r.report === 'changes') unsettled = true;
+      lastRead = READING.has(x.action);
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       failed = true;
@@ -280,7 +294,7 @@ async function run(input, ctx) {
   }
   const tab = s.connected ? s.current : null;
   if (pending && tab) {
-    try { out.push(await pageState(tab, pending)); } catch (e) {
+    try { out.push(lastRead && !failed ? await quietState(tab, unsettled) : await pageState(tab, pending)); } catch (e) {
       if (e?.name === 'AbortError') throw e;
       out.push(`(the page could not be read: ${e.message})`);
     }

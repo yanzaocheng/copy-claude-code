@@ -150,25 +150,36 @@ export const renderLines = (lines) => lines.map((l) => `${'  '.repeat(l.depth)}$
 // the new snapshot (indented as there), and how many lines are gone. The focus moving is no change: every click
 // moves it.
 export function diffLines(before, after) {
-  const key = (l) => l.ref || `${l.depth}:${l.text}`;
+  // a line without a ref (text) is known by what it says, and the same text twice by its count: a second "Saved"
+  // is a change
+  const keyed = (lines) => {
+    const count = new Map();
+    return lines.map((l) => {
+      if (l.ref) return [l.ref, l];
+      const k = `${l.depth}:${l.text}`;
+      const n = (count.get(k) || 0) + 1;
+      count.set(k, n);
+      return [`${k}#${n}`, l];
+    });
+  };
   const same = (t) => t.replace(' [focused]', '');
-  const old = new Map(before.map((l) => [key(l), same(l.text)]));
+  const oldKeyed = keyed(before);
+  const old = new Map(oldKeyed.map(([k, l]) => [k, same(l.text)]));
   const seen = new Set();
   const out = [];
-  for (const l of after) {
-    const k = key(l);
+  for (const [k, l] of keyed(after)) {
     seen.add(k);
     if (!old.has(k)) out.push({ ...l, mark: '+' });
     else if (old.get(k) !== same(l.text)) out.push({ ...l, mark: '~' });
   }
-  const gone = before.filter((l) => !seen.has(key(l)));
+  const gone = oldKeyed.filter(([k]) => !seen.has(k)).map(([, l]) => l);
   return { changed: out, gone };
 }
 
 export function renderDiff({ changed, gone }) {
   const lines = changed.map((l) => `${l.mark} ${'  '.repeat(l.depth)}${l.text}`);
   if (gone.length) {
-    const names = gone.filter((l) => l.kind !== 'text').slice(0, 5).map((l) => l.text.replace(/^- /, '').replace(/ \[ref=e\d+\]/, '')).join('; ');
+    const names = gone.slice(0, 5).map((l) => cut(l.text.replace(/^- /, '').replace(/ \[ref=e\d+\]/, ''), 60)).join('; ');
     lines.push(`- ${gone.length} line${gone.length === 1 ? '' : 's'} gone${names ? ` (${names}${gone.length > 5 ? '; …' : ''})` : ''}`);
   }
   return lines.join('\n');
