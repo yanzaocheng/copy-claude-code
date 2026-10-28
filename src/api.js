@@ -192,7 +192,9 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
   const params = {
     model: model.id,
     max_tokens: outputCaps.has(model.id) ? Math.min(wanted, outputCaps.get(model.id)) : wanted,
-    system: [{ type: 'text', text: system, ...(systemMark ? { cache_control: systemMark } : {}) }],
+    // An empty system prompt (an empty profile chosen with /prompts) is left out: Anthropic refuses an empty text
+    // block ("cache_control cannot be set for empty text blocks"), and DeepSeek and the others take none as well.
+    ...(typeof system === 'string' && system.trim() ? { system: [{ type: 'text', text: system, ...(systemMark ? { cache_control: systemMark } : {}) }] } : {}),
     messages: withCacheControl(messages, cacheMessages ? mark('messages') : null),
     stream: true,
   };
