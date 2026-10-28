@@ -12,7 +12,7 @@ const background = new Map(); // id -> {child, command, output, readPos, status,
 let bgCounter = 0;
 const PROGRESS_CHARS = 8192; // the end of the output the live view gets while a command runs
 
-function truncateOutput(text, max) {
+export function truncateOutput(text, max) {
   if (text.length <= max) return text;
   const head = text.slice(0, Math.floor(max * 0.4));
   const tail = text.slice(-Math.floor(max * 0.6));
@@ -21,7 +21,7 @@ function truncateOutput(text, max) {
 }
 
 // Keep the full text of truncated output so the model can still get at it.
-function saveFullOutput(root, text) {
+export function saveFullOutput(root, text) {
   try {
     const dir = toolResultsDir(root);
     fs.mkdirSync(dir, { recursive: true });
@@ -44,7 +44,7 @@ export function appendOutput(bg, text, max = 5_000_000, keep = 2_000_000) {
   }
 }
 
-function childEnv() {
+export function childEnv() {
   const env = { ...process.env };
   // Keep child processes non-interactive and colour free.
   Object.assign(env, { GIT_EDITOR: 'true', GIT_PAGER: 'cat', PAGER: 'cat', NO_COLOR: '1', CLAUDE_PRO: '1' });

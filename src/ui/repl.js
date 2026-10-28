@@ -27,6 +27,7 @@ import { listDirectory, recentDirectories } from '../utils/dirs.js';
 import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
+import { shutdownInterpreters } from '../tools/code.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn, imageSize } from '../utils/images.js';
@@ -419,6 +420,7 @@ export class App {
     clearInterval(this.spinnerTimer);
     this.sourceWatch?.close();
     shutdownBackgroundShells();
+    shutdownInterpreters();
     this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
     this.peers?.close();
