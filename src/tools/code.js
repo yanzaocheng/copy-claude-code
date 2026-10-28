@@ -64,13 +64,31 @@ while True:
 // Node: the code is evaluated as the DevTools console does it, through the process's own inspector with replMode,
 // which takes top-level await and lets let, const and class be declared again in a later call (node:repl's
 // evaluator never calls back for that: "Identifier has already been declared" hung the call). require() resolves
-// from the working directory.
+// from the working directory. Code evaluated through the inspector has no dynamic import of its own ("A dynamic
+// import callback was not specified", with any flag): its import(...) calls are rewritten (rewriteDynamicImports)
+// to the driver's, which resolves from the working directory too.
 const NODE_DRIVER = String.raw`const inspector = require('node:inspector');
 const util = require('node:util');
 const path = require('node:path');
 const readline = require('node:readline');
-const { createRequire } = require('node:module');
+const { pathToFileURL } = require('node:url');
+const { createRequire, isBuiltin } = require('node:module');
 const TOKEN = process.argv[2];
+function importFrom(spec, options) {
+  let target = spec;
+  if (typeof spec === 'string') {
+    if (/^[a-zA-Z]:[\\/]/.test(spec) || /^[\\/]/.test(spec) || /^\.\.?([\\/]|$)/.test(spec)) {
+      target = pathToFileURL(path.resolve(process.cwd(), spec)).href;
+    } else if (!isBuiltin(spec) && !/^[a-z][a-z0-9+.-]*:/i.test(spec)) {
+      try {
+        const resolved = createRequire(path.join(process.cwd(), '[repl]')).resolve(spec);
+        if (path.isAbsolute(resolved)) target = pathToFileURL(resolved).href;
+      } catch {}
+    }
+  }
+  return options === undefined ? import(target) : import(target, options);
+}
+Object.defineProperty(globalThis, '__claudeProImport', { value: importFrom });
 const session = new inspector.Session();
 session.connect();
 const post = (method, params) => new Promise((resolve, reject) => session.post(method, params, (e, r) => (e ? reject(e) : resolve(r))));
@@ -113,6 +131,44 @@ async function next() {
   process.stdout.write('\n' + TOKEN + JSON.stringify({ id: req.id, error }) + '\n', () => { busy = false; next(); });
 }
 `;
+
+// The code's dynamic import(...) calls, made calls of the Node driver's importFrom. Strings, template literals and
+// comments are left alone; import.meta and a method named import are not calls of import().
+export function rewriteDynamicImports(code) {
+  let out = '';
+  let i = 0;
+  const n = code.length;
+  while (i < n) {
+    const ch = code[i];
+    let end = -1;
+    if (ch === '/' && code[i + 1] === '/') { end = code.indexOf('\n', i); if (end < 0) end = n; }
+    else if (ch === '/' && code[i + 1] === '*') { end = code.indexOf('*/', i + 2); end = end < 0 ? n : end + 2; }
+    else if (ch === '"' || ch === "'") {
+      end = i + 1;
+      while (end < n && code[end] !== ch && code[end] !== '\n') end += code[end] === '\\' ? 2 : 1;
+      end = Math.min(n, end + 1);
+    } else if (ch === '`') {
+      end = i + 1;
+      let depth = 0;
+      while (end < n && (depth > 0 || code[end] !== '`')) {
+        if (code[end] === '\\') { end += 2; continue; }
+        if (code[end] === '$' && code[end + 1] === '{') { depth++; end += 2; continue; }
+        if (depth > 0 && code[end] === '}') depth--;
+        end++;
+      }
+      end = Math.min(n, end + 1);
+    }
+    if (end > i) { out += code.slice(i, end); i = end; continue; }
+    if (ch === 'i' && code.startsWith('import', i) && !/[\w$.]/.test(code[i - 1] || '')) {
+      let j = i + 6;
+      while (j < n && /\s/.test(code[j])) j++;
+      if (code[j] === '(') { out += '__claudeProImport('; i = j + 1; continue; }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
 
 const LANGUAGES = {
   python: { label: 'Python', driver: PYTHON_DRIVER, ext: 'py' },
@@ -296,7 +352,7 @@ Use it to work with data: load a log, a JSON or CSV file, a database or an API r
       }
       const timeoutMs = Math.min(Math.max(1000, Number(input.timeout) || replLimits.defaultTimeoutMs), replLimits.maxTimeoutMs);
       const started = Date.now();
-      const r = await interp.run(code, { cwd, timeoutMs, signal: ctx.signal });
+      const r = await interp.run(lang === 'node' ? rewriteDynamicImports(code) : code, { cwd, timeoutMs, signal: ctx.signal });
       if (r.startError) {
         interpreters.delete(lang);
         const hint = lang === 'python' ? ` Is Python installed and on PATH? CLAUDE_PRO_PYTHON can name the interpreter (now: ${pythonCommand(ctx.config?.env)}).` : '';
