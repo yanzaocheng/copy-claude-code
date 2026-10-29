@@ -6,7 +6,7 @@ import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, readGatewayLogin, gatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { loginWithBrowser, gatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
@@ -38,7 +38,7 @@ export async function modelChoices(cfg) {
   const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).id}` }];
   opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ value: a, label: a, description: `→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}` })));
   // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
-  const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+  const login = gatewayLogin(cfg.gatewayUrl);
   let served = null;
   try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
   const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
@@ -55,7 +55,7 @@ export async function effortChoices(cfg) {
   const id = cfg.model.id;
   let info = null;
   if (isGpt(id)) {
-    const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+    const login = gatewayLogin(cfg.gatewayUrl);
     try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
   }
   const levels = effortLevels(id, info);
@@ -344,9 +344,9 @@ export function buildCommands(app) {
         return;
       }
       const cfg = app.runtime.config;
-      const lines = [c.bold('Configuration') + c.dim('  (precedence: .env < ~/.claude-pro/settings.json < .claude-pro/settings.json < .claude-pro/settings.local.json < shell env < flags)'), ''];
+      const lines = [c.bold('Configuration') + c.dim('  (precedence: ~/.claude-pro/settings.json < .claude-pro/settings.json < .claude-pro/settings.local.json < shell env < flags)'), ''];
       for (const k of Object.keys(KNOWN_KEYS)) {
-        const v = cfg.display(k);
+        const v = cfg.env[k];
         if (v === undefined) continue;
         lines.push(`${padEnd(k, 34)} ${c.bold(v)}  ${c.dim(cfg.sources[k] || '')}`);
       }
@@ -405,7 +405,7 @@ export function buildCommands(app) {
     name: 'effort',
     get argHint() {
       const cfg = app.runtime.config;
-      const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+      const login = gatewayLogin(cfg.gatewayUrl);
       return `[${effortLevels(cfg.model.id, cachedGatewayModel(login, cfg.model.id)).join('|')}|auto|default]`;
     },
     description: 'Set reasoning effort (output_config.effort; kept for later sessions)',
@@ -476,7 +476,7 @@ export function buildCommands(app) {
       if (choice && choice !== 'gateway') { out(c.red(`Unknown login method "${choice}". Only gateway login is supported.`)); return; }
 
       const url = cfg.gatewayUrl;
-      const saved = readGatewayLogin(url);
+      const saved = gatewayLogin(url);
       if (saved) {
         try {
           const account = await fetchGatewayAccount(saved);
@@ -539,7 +539,7 @@ export function buildCommands(app) {
         row('cwd', app.cwd),
         row('Provider', cfg.provider),
         row('Endpoint', cfg.endpointLabel),
-        row('Auth', gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY) ? `gateway key of ${gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)')),
+        row('Auth', gatewayLogin(cfg.gatewayUrl) ? `gateway key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)')),
         row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
         row('Effort', cfg.effort || 'auto'),
         row('System prompt', app.flags.systemPrompt !== undefined
@@ -596,7 +596,7 @@ export function buildCommands(app) {
         `Session time:  ${formatDuration(Date.now() - app.sessionStart)}`,
       ]);
       const cfg = app.runtime.config;
-      const saved = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+      const saved = gatewayLogin(cfg.gatewayUrl);
       if (!saved) return;
       try {
         const account = await fetchGatewayAccount(saved);
@@ -993,7 +993,7 @@ export function buildCommands(app) {
         `${c.green('✔')} Node ${process.versions.node}`,
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
         `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
-        `${gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY) ? c.green('✔') : c.red('✘')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY) ? '' : ' missing (/login)'}`,
+        `${gatewayLogin(cfg.gatewayUrl) ? c.green('✔') : c.red('✘')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/login)'}`,
       ];
       out(lines);
       app.busy = true;

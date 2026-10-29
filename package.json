@@ -21,7 +21,6 @@
   "files": [
     "bin/",
     "src/",
-    ".env.example",
     "README.md",
     "LICENSE"
   ],

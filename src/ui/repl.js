@@ -361,7 +361,7 @@ export class App {
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
     // Nothing configured yet: the gateway is the default, and its browser login starts first.
-    else if (!gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY)) {
+    else if (!gatewayLogin(this.config.gatewayUrl)) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
     this.fileIndex.refresh();
@@ -644,7 +644,7 @@ export class App {
     const env = this.config.env;
     if (!onlineEnabled(env)) return false;
     if (this.driven && !/^(1|true|yes|on)$/i.test(env.CLAUDE_PRO_ONLINE || '')) return false;
-    return Boolean(gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY));
+    return Boolean(gatewayLogin(this.config.gatewayUrl));
   }
 
   // Online at the gateway from the start when this computer is logged in, and after a restart with the same
@@ -659,7 +659,7 @@ export class App {
   }
 
   // Connect this session to the gateway (see remote.js): the web page and the sessions on the account's other
-  // computers reach it from then on. Needs the gateway login from /login or CLAUDE_PRO_GATEWAY_API_KEY; throws
+  // computers reach it from then on. Needs the gateway login from /login; throws
   // {code: 'NO_GATEWAY_LOGIN'} without it. A gateway that cannot be reached now is tried again in the background;
   // one that refuses the key throws, and that key is not tried again (see syncRemote).
   startRemote({ id } = {}) {
@@ -673,7 +673,7 @@ export class App {
   syncRemote() {
     if (this.exiting) return Promise.resolve(null);
     if (this.remoteStarting) return this.remoteStarting.catch(() => null);
-    const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
+    const login = gatewayLogin(this.config.gatewayUrl);
     const r = this.remote;
     // logged out, or another account: not this account's session any more
     if (r && (!login || login.apiKey !== r.apiKey || normalizeGatewayUrl(login.url || this.config.gatewayUrl) !== normalizeGatewayUrl(r.base))) this.stopRemote();
@@ -686,7 +686,7 @@ export class App {
   }
 
   async connectRemote({ id }) {
-    const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
+    const login = gatewayLogin(this.config.gatewayUrl);
     if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login logs in)`), { code: 'NO_GATEWAY_LOGIN' });
     // What the page may do here, besides watching (see remote.js): nothing with CLAUDE_PRO_REMOTE_COMMANDS=0.
     const commands = remoteCommandsEnabled(this.config.env) ? {
@@ -760,7 +760,7 @@ export class App {
       return { text };
     }
     if (this.remoteStarting) return { text: 'connecting…' };
-    const login = gatewayLogin(this.config.gatewayUrl, this.config.env.CLAUDE_PRO_GATEWAY_API_KEY);
+    const login = gatewayLogin(this.config.gatewayUrl);
     if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login)`) };
     if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/logout, then /login)') };
     if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)') };
@@ -1261,7 +1261,7 @@ export class App {
       c.claude('╰' + '─'.repeat(w - 2) + '╯'),
     ];
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
-    if (!gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY)) lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
+    if (!gatewayLogin(cfg.gatewayUrl)) lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
     const mcp = this.runtime.mcp.status();
     if (mcp.length) {
       const ok = mcp.filter((m) => m.status === 'connected').length;

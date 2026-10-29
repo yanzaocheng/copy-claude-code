@@ -17,8 +17,9 @@ const LOGIN_TIMEOUT_MS = 10 * 60_000;
 
 export const normalizeGatewayUrl = (url) => String(url || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, '');
 
-// {url, apiKey, account, savedAt}, or null when there is none for this gateway.
-export function readGatewayLogin(url) {
+// The login /login saved for this gateway, {url, apiKey, account, savedAt}, or null when there is none. It is where
+// the key of every model and remote request comes from: there is no environment variable or .env file for it.
+export function gatewayLogin(url) {
   try {
     const data = JSON.parse(fs.readFileSync(gatewayLoginFile(), 'utf8'));
     if (!data?.apiKey || (url && normalizeGatewayUrl(data.url) !== normalizeGatewayUrl(url))) return null;
@@ -26,12 +27,6 @@ export function readGatewayLogin(url) {
   } catch {
     return null;
   }
-}
-
-// A key supplied for a headless run is equivalent to a saved login for model and remote requests.
-// It has no account metadata, so the UI uses a neutral account label.
-export function gatewayLogin(url, apiKey = process.env.CLAUDE_PRO_GATEWAY_API_KEY) {
-  return readGatewayLogin(url) || (apiKey ? { url: normalizeGatewayUrl(url), apiKey, account: {} } : null);
 }
 
 export function saveGatewayLogin(login) {
@@ -112,7 +107,7 @@ export async function fetchGatewayModels({ url, apiKey }, { fetchImpl = globalTh
 // effort levels) and Config.resolveModel (every model's window). When the gateway does not answer, the built-in
 // values stand in. Never throws.
 export async function loadGatewayModels(config, signal) {
-  const login = gatewayLogin(config.gatewayUrl, config.env.CLAUDE_PRO_GATEWAY_API_KEY);
+  const login = gatewayLogin(config.gatewayUrl);
   if (!login) return;
   try { await fetchGatewayModels(login, { signal }); } catch { /* the built-in values stand in */ }
 }

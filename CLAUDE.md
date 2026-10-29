@@ -14,5 +14,5 @@
 
 - Node 把 `/tmp/x` 解析成当前盘的 `D:\tmp\x`(Git Bash 的 `/tmp` 其实是 `os.tmpdir()`):给 node 脚本传临时路径用 `C:/Users/...` 形式。claude-pro 自己的工具(Read、Edit、Grep 等)按 Git Bash 的挂载表转换 `/tmp`、`/usr` 这类路径。
 - 没有测试套件(2026-10-20 移除)。要在假终端里驱动真实 App,照 `src/selfcheck.js` 的做法:PassThrough 当 stdin、Writable 当 stdout,`new App({..., selfCheck: true})`。
-- 临时测试脚本绝不能碰真实的 `~/.claude-pro`:在 import `src/` 之前把 `CLAUDE_PRO_CONFIG_DIR` 指到临时目录;用到网关时把 `CLAUDE_PRO_GATEWAY_URL` 指向不存在的地址并给一个假的 `CLAUDE_PRO_GATEWAY_API_KEY`,或者替换 `globalThis.fetch`。
+- 临时测试脚本绝不能碰真实的 `~/.claude-pro`:在 import `src/` 之前把 `CLAUDE_PRO_CONFIG_DIR` 指到临时目录;用到网关时把 `CLAUDE_PRO_GATEWAY_URL` 指向不存在的地址(或本地的假网关),并在那个临时目录里写一个 `gateway.json`(`{"url": 和 CLAUDE_PRO_GATEWAY_URL 相同, "apiKey": "test"}`;key 只从这里读,没有环境变量),或者替换 `globalThis.fetch`。
 - 改系统提示词(`src/prompts.js`、`src/context.js`)或任何工具说明,重启后整段对话都要重写一次提示词缓存。几处这类改动尽量攒到一次重启。

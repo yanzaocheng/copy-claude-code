@@ -14,8 +14,7 @@ const SIGNATURE_PREFIX = 'cgw1:';
 
 // The gateway provider's key, from /login. Without one the request fails the way a refused key does.
 function gatewayKey(config) {
-  const login = gatewayLogin(config.gatewayUrl, config.env.CLAUDE_PRO_GATEWAY_API_KEY);
-  const key = login?.apiKey || config.env.CLAUDE_PRO_GATEWAY_API_KEY;
+  const key = gatewayLogin(config.gatewayUrl)?.apiKey;
   if (!key) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /login and choose the gateway.`, { status: 401, retryable: false });
   return key;
 }
@@ -110,7 +109,7 @@ const thinkingStaysOn = new Set();
 
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
 // the other models that take one; null for a model that takes none or is not known.
-const gatewayModelInfo = (config, id) => cachedGatewayModel(gatewayLogin(config.gatewayUrl, config.env.CLAUDE_PRO_GATEWAY_API_KEY), id);
+const gatewayModelInfo = (config, id) => cachedGatewayModel(gatewayLogin(config.gatewayUrl), id);
 export function defaultEffort(modelId, config = null) {
   const id = String(modelId || '');
   if (!effortSupported(id)) return null;

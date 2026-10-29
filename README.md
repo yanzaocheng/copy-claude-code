@@ -69,24 +69,16 @@ claude-pro --provider gateway -p "用 Read 工具读取 package.json，告诉我
 
 ## 配置
 
-只需要配置网关地址、模型和可选的本机网关 key：
+网关 key 只来自 `/login`：登录后保存在 `~/.claude-pro/gateway.json`，不用手动填写，也没有环境变量或 `.env` 文件可以设置它（没有浏览器的机器可以把另一台登录过的电脑的 `gateway.json` 拷过去）。
 
-```bash
-CLAUDE_PRO_PROVIDER=gateway
-CLAUDE_PRO_GATEWAY_URL=https://gw.predix.icu
-CLAUDE_PRO_GATEWAY_MODEL=opus
-```
-
-通常不需要手动填写 key；运行 `/login` 后它会保存到 `~/.claude-pro/gateway.json`。无浏览器的自动化场景也可以设置 `CLAUDE_PRO_GATEWAY_API_KEY`。
-
-项目、用户和本地配置文件仍按原来的优先级加载：
+其他配置（网关地址、模型等）写在 settings.json 的 `env` 里，用命令改：
 
 ```bash
 claude-pro config list
 claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 ```
 
-会话中用 `/config`、`/model`、`/effort` 修改。`--provider` 仅接受 `gateway`，其他 provider 已移除。
+从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`、进程环境变量、命令行参数。会话中用 `/config`、`/model`、`/effort` 修改。`--provider` 仅接受 `gateway`，其他 provider 已移除。
 
 ## 持久化系统提示词
 
@@ -294,7 +286,7 @@ src/restart.js        重启的程序侧：交接的状态、启动检查（runS
 src/selfcheck.js      `--self-check`：在假终端里把整个程序启动一遍并检查工具/系统提示词
 src/tools/restart.js  Restart 工具
 src/main.js           参数解析、config 子命令
-src/config.js         配置加载（.env / settings.json / 环境变量）与模型解析
+src/config.js         配置加载（settings.json / 环境变量）与模型解析
 src/api.js            后端路由、Anthropic SDK 封装：流式、重试、effort/thinking 参数
 src/ratelimit.js      限流：解析重置时间响应头、决定等多久、墙上时钟休眠、提示文案
 src/agent.js          Agent 循环：工具调度、并行只读工具、中断、自动压缩、验证循环

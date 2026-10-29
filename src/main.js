@@ -99,7 +99,7 @@ async function configCommand(args, cwd) {
     const remembered = applyRememberedChoices(cfg);
     const keys = sub === 'get' && key ? [key] : Object.keys(KNOWN_KEYS);
     for (const k of keys) {
-      const v = cfg.display(k);
+      const v = cfg.env[k];
       if (v === undefined && sub !== 'get') continue;
       console.log(`${k}=${v ?? ''}${cfg.sources[k] ? `    # ${cfg.sources[k]}` : ''}`);
     }

@@ -1,14 +1,14 @@
 // Configuration loading. Mirrors Claude Code's environment variables so the same
 // settings work here. Sources, lowest precedence first:
 //   1. built-in defaults
-//   2. <install dir>/.env
-//   3. ~/.claude-pro/settings.json            ("env" block)
-//   4. <project>/.claude-pro/settings.json    ("env" block)
-//   5. <project>/.claude-pro/settings.local.json
-//   6. process environment
-//   7. command line flags (--model, --effort ...)
+//   2. ~/.claude-pro/settings.json            ("env" block)
+//   3. <project>/.claude-pro/settings.json    ("env" block)
+//   4. <project>/.claude-pro/settings.local.json
+//   5. process environment
+//   6. command line flags (--model, --effort ...)
 // The model and effort chosen with /model and /effort are remembered apart from these (see
-// rememberChoice) and win over 1-6.
+// rememberChoice) and win over 1-5. The gateway key comes from /login alone (gateway.json, see
+// gatewayLogin): there is no variable for it, and no .env file is read.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,7 +30,6 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'packag
 export const KNOWN_KEYS = {
   CLAUDE_PRO_PROVIDER: 'Authentication backend: gateway only (codex-gateway account, /login)',
   CLAUDE_PRO_GATEWAY_URL: `codex-gateway address (default https://gw.predix.icu)`,
-  CLAUDE_PRO_GATEWAY_API_KEY: 'Gateway API key (normally saved by /login in gateway.json)',
   CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
   CLAUDE_PRO_SEARCH_MODEL: 'Model that runs WebSearch\'s searches on the gateway (default: haiku, fast and cheap; gpt-6.1-sol is tried next when it fails)',
   CLAUDE_PRO_FETCH_MODEL: 'Model that answers WebFetch\'s prompt about a page (default: haiku, fast and cheap; the session\'s model is tried next when it fails)',
@@ -77,29 +76,6 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_TRACE_MAX_SIZE: 'Maximum size of one runtime trace file in bytes before rotating it (default 20 MB)',
 };
 
-const SECRET_KEYS = new Set(['CLAUDE_PRO_GATEWAY_API_KEY']);
-
-export function parseDotEnv(text) {
-  const env = {};
-  for (let line of text.replace(/^\uFEFF/, '').split(/\r?\n/)) {
-    line = line.trim();
-    if (!line || line.startsWith('#')) continue;
-    if (line.startsWith('export ')) line = line.slice(7);
-    const eq = line.indexOf('=');
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-      if (line[eq + 1] === '"') val = val.replace(/\\n/g, '\n');
-    } else {
-      val = val.replace(/\s+#.*$/, '');
-    }
-    env[key] = val;
-  }
-  return env;
-}
-
 function readJson(file) {
   try {
     // a BOM in front (Windows PowerShell's Set-Content -Encoding UTF8 writes one) made the whole file unreadable
@@ -119,7 +95,7 @@ export function settingsFiles(cwd) {
 }
 
 
-export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.join(INSTALL_DIR, '.env') } = {}) {
+export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   const env = {};
   const sources = {};
   const set = (obj, source) => {
@@ -129,8 +105,6 @@ export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.
       sources[k] = source;
     }
   };
-
-  if (fs.existsSync(dotEnvFile)) set(parseDotEnv(fs.readFileSync(dotEnvFile, 'utf8')), dotEnvFile);
 
   const files = settingsFiles(cwd);
   // Settings files can still carry "permissions" from other tools; there are no permission rules here, so they are ignored.
@@ -343,12 +317,6 @@ export class Config {
   }
   get traceMaxBytes() { return Math.max(100_000, int(this.env.CLAUDE_PRO_TRACE_MAX_SIZE, 20 * 1024 * 1024)); }
 
-  display(key) {
-    const v = this.env[key];
-    if (v === undefined) return undefined;
-    if (SECRET_KEYS.has(key)) return v.length > 10 ? `${v.slice(0, 5)}…${v.slice(-4)}` : '****';
-    return v;
-  }
 }
 
 // Update the "env" block (or another top level key) of a settings file. A file that is there but is not
