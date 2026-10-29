@@ -91,6 +91,10 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     if (extra && !saved.endsWith(`\n\n${extra}`)) return false;
     const modelIn = (text) => /^You are powered by the model (.+)\.$/m.exec(text)?.[1];
     if (modelIn(saved) !== config.model.id) return false;
+    // a prompt from before the project's directory got another name (see projectDir) points the model to the old
+    // memory directory, where it would write again
+    const memoryAt = /memory for this project at `([^`]+)`/.exec(saved)?.[1];
+    if (memoryAt && path.resolve(memoryAt) !== path.resolve(memoryDir)) return false;
     promptCache = saved;
     promptStale = false;
     const then = /^Today's date: (\d{4}-\d{2}-\d{2})$/m.exec(saved)?.[1];

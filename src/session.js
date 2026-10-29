@@ -8,9 +8,79 @@ import crypto from 'node:crypto';
 import { CONFIG_DIR } from './config.js';
 import { PROMPT_CODE_VERSION } from './prompts.js';
 
+// The directory of a project's state (conversations, memory, checkpoints, traces): its path with every character
+// but a-z, A-Z and 0-9 made '-', as Claude Code names it. A path with characters beyond ASCII in it also gets a hash
+// of the whole path: those all became '-', so that D:\d\node\聊天 and D:\d\node\共享 were one directory, their
+// conversations and memory shared. The directory such a project had before is taken over the first time (adoptOldDir).
 export function projectDir(cwd) {
-  const name = path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
-  return path.join(CONFIG_DIR, 'projects', name);
+  const abs = path.resolve(cwd);
+  const name = abs.replace(/[^a-zA-Z0-9]/g, '-');
+  const base = path.join(CONFIG_DIR, 'projects');
+  if (!/[^\x00-\x7f]/.test(abs)) return path.join(base, name);
+  return adoptOldDir(abs, path.join(base, name), path.join(base, `${name}-${pathHash(abs)}`));
+}
+
+// A path as the file system tells paths apart: in any case on Windows, and in one Unicode form (macOS gives NFD).
+function pathKey(p) {
+  const key = path.resolve(p).normalize('NFC');
+  return process.platform === 'win32' ? key.toLowerCase() : key;
+}
+
+function pathHash(abs) {
+  return crypto.createHash('sha256').update(pathKey(abs)).digest('hex').slice(0, 8);
+}
+
+const adopted = new Map(); // a project's new directory -> the directory this process uses for it
+
+// The directory to use for `abs` (see projectDir): `dir`, after what was this project's in `oldDir` (the name from
+// before the hash) has moved there. Its conversations say which directory they ran in (their first line). When they
+// are all this project's, so is the rest: the directory is renamed. Else it was shared: this project's conversations
+// (with their traces) move, its memory is copied (it cannot be told apart), and the rest stays for the other
+// project, which takes the directory over in its turn. With no conversation to tell, the memory is copied and the
+// directory left. Once per process; when the rename is refused (a file in it held open on Windows), the old
+// directory is used as it is, and moved another time.
+function adoptOldDir(abs, oldDir, dir) {
+  if (adopted.has(dir)) return adopted.get(dir);
+  let use = dir;
+  try {
+    if (!fs.existsSync(dir) && fs.existsSync(oldDir)) {
+      const key = pathKey(abs);
+      const sessions = fs.readdirSync(oldDir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f, cwd: sessionCwd(path.join(oldDir, f)) }));
+      const mine = sessions.filter((s) => s.cwd && pathKey(s.cwd) === key);
+      const others = sessions.filter((s) => s.cwd && pathKey(s.cwd) !== key);
+      if (mine.length && !others.length) {
+        try { fs.renameSync(oldDir, dir); } catch { use = fs.existsSync(dir) ? dir : oldDir; } // moved by another process first, or held open
+      } else {
+        fs.mkdirSync(dir, { recursive: true });
+        const memory = path.join(oldDir, 'memory');
+        if ((mine.length || !others.length) && fs.existsSync(memory)) fs.cpSync(memory, path.join(dir, 'memory'), { recursive: true });
+        for (const { f } of mine) {
+          const id = f.slice(0, -'.jsonl'.length);
+          const moves = [[f, f], [path.join('traces', `${id}.jsonl`), path.join('traces', `${id}.jsonl`)], [path.join('traces', `${id}.jsonl.1`), path.join('traces', `${id}.jsonl.1`)]];
+          for (const [from, to] of moves) {
+            if (!fs.existsSync(path.join(oldDir, from))) continue;
+            fs.mkdirSync(path.dirname(path.join(dir, to)), { recursive: true });
+            try { fs.renameSync(path.join(oldDir, from), path.join(dir, to)); } catch { /* left where it was */ }
+          }
+        }
+      }
+    }
+  } catch { /* the new directory, as it is */ }
+  adopted.set(dir, use);
+  return use;
+}
+
+// The directory a conversation file ran in, from its first line (a meta line with cwd), or null.
+function sessionCwd(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(64 * 1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const first = buf.subarray(0, n).toString('utf8').split('\n')[0];
+    const meta = JSON.parse(first);
+    return meta?.type === 'meta' && typeof meta.cwd === 'string' ? meta.cwd : null;
+  } catch { return null; } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ } }
 }
 
 // Where oversized tool output is saved (see persistLargeOutput in agent.js).
