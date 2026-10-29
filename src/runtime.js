@@ -13,7 +13,7 @@ import { isAbort } from './api.js';
 import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
-import { autoMemoryDir, pruneToolResults, pruneCheckpoints, projectDir } from './session.js';
+import { autoMemoryDir, pruneToolResults, pruneCheckpoints, pruneTraces, projectDir } from './session.js';
 import { loadAutoMemoryIndex, takeEnvSnapshot, takeEnvSnapshotAsync, localDate } from './context.js';
 import { canRestart } from './restart.js';
 import { RuntimeTrace } from './trace.js';
@@ -26,6 +26,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   if (flags.verify) config.verifyOverride = flags.verify;
   pruneToolResults(cwd);
   pruneCheckpoints(cwd);
+  if (!config.traceDir) pruneTraces(cwd); // a directory of the user's own is theirs to keep
   pruneStaleShellFiles();
   // Full access: nothing is ever asked.
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));

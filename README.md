@@ -114,7 +114,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 ## 运行时 Trace：用真实数据优化模型和工具
 
-默认在每个会话写入独立的隐私保护 JSONL：`~/.claude-pro/projects/<项目>/traces/<session-id>.jsonl`。Trace 只保存 turn/request/tool/compaction/verification 的计数、耗时、token 数、缓存 fingerprint 和参数结构，不保存 API key、cookie、token、密码、完整 prompt、工具输入或工具输出。大输出只记录大小和是否落盘；单个文件默认 20 MB，超出后轮换为 `.1`。
+默认在每个会话写入独立的隐私保护 JSONL：`~/.claude-pro/projects/<项目>/traces/<session-id>.jsonl`。Trace 只保存 turn/request/tool/compaction/verification 的计数、耗时、token 数、缓存 fingerprint 和参数结构，不保存 API key、cookie、token、密码、完整 prompt、工具输入或工具输出。大输出只记录大小和是否落盘；单个文件默认 20 MB，超出后轮换为 `.1`；30 天没再写入的 trace 在启动时清理（`CLAUDE_PRO_TRACE_DIR` 指定的目录除外）。
 
 ```text
 /trace       # 当前会话的请求、工具、缓存、压缩和验证汇总

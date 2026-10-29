@@ -100,6 +100,19 @@ export function pruneToolResults(cwd, maxAgeMs = 7 * 24 * 3600_000) {
   }
 }
 
+// Delete the traces (see trace.js) of conversations not traced for maxAgeMs: one file a conversation, up to 40 MB
+// with its rotation, kept for good before (best effort, run at startup).
+export function pruneTraces(cwd, maxAgeMs = 30 * 24 * 3600_000) {
+  const dir = path.join(projectDir(cwd), 'traces');
+  let entries = [];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const name of entries) {
+    const file = path.join(dir, name);
+    try { if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+  }
+}
+
 // Where /rewind keeps file snapshots: one sub-directory per run of the program.
 export function checkpointsDir(cwd) {
   return path.join(projectDir(cwd), 'checkpoints');
