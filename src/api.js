@@ -1,7 +1,8 @@
 // Thin layer over the Anthropic SDK: builds request params from config and turns the
 // raw SSE stream into a fully assembled assistant message while reporting progress.
 
-import Anthropic from '@anthropic-ai/sdk';
+// The SDK is loaded with the first request: importing it took about 70 ms of every start, restarts included.
+let Anthropic = null;
 import { parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
@@ -19,7 +20,8 @@ function gatewayKey(config) {
   return key;
 }
 
-export function getClient(config) {
+export async function getClient(config) {
+  Anthropic ??= (await import('@anthropic-ai/sdk')).default;
   const authToken = gatewayKey(config);
   const key = `${config.gatewayUrl}|${authToken}|${config.apiTimeout}`;
   if (cached?.key === key && cached.fetch === globalThis.fetch) return cached.client;
@@ -225,7 +227,7 @@ export class APIError extends Error {
 }
 
 function describeError(err, config) {
-  if (err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError) return err;
+  if (err?.name === 'AbortError' || (Anthropic && err instanceof Anthropic.APIUserAbortError)) return err;
   const status = err?.status;
   let msg = err?.error?.error?.message || err?.error?.message || err?.message || String(err);
   const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded|exceeds the context window/i.test(msg);
@@ -244,7 +246,7 @@ function describeError(err, config) {
 // Our own aborts are named AbortError and the SDK's is an APIUserAbortError. The message test only
 // accepts the bare "aborted" wording: a server error that merely mentions "aborted" is not the user.
 export function isAbort(err) {
-  return err?.name === 'AbortError' || err instanceof Anthropic.APIUserAbortError || /^(?:request was )?aborted\.?$/i.test(err?.message || '');
+  return err?.name === 'AbortError' || (Anthropic !== null && err instanceof Anthropic.APIUserAbortError) || /^(?:request was )?aborted\.?$/i.test(err?.message || '');
 }
 
 // USD for a request at the list prices (see pricing.js), by the model that answered, else the one asked for;
@@ -276,7 +278,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   // does not answer costs at most a few seconds once (see fetchGatewayModels), not the request.
   await loadGatewayModels(config, signal);
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
-  const client = getClient(config);
+  const client = await getClient(config);
   const params = buildParams(config, request);
   // The gateway keeps a conversation on the upstream account that served it, where its prompt cache is; the
   // session id names the conversation, in the header Claude Code sends it in.
