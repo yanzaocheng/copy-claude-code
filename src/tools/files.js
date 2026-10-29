@@ -188,6 +188,8 @@ Usage:
     const limit = Math.max(1, Math.floor(input.limit || (large ? Infinity : MAX_LINES)));
     const slice = lines.slice(start - 1, start - 1 + limit);
     let content = numberLines(slice, start, large ? Infinity : MAX_LINE_CHARS);
+    // a line cut short is not seen whole either: a Write from what was shown would put "… [line truncated]" in the file
+    const longLines = !large && slice.some((l) => l.length > MAX_LINE_CHARS);
     if (large) {
       const fit = ctx.agent?.takeContext?.(content);
       if (fit && !fit.ok) {
@@ -208,7 +210,7 @@ Usage:
       content = `${kept}${whole ? '' : '\n'}… [output cut at ${why}: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit, or pass allow_large: true to read it all at once]`;
       cut = true;
     }
-    seen(cut || start > 1 || end < lines.length);
+    seen(cut || longLines || start > 1 || end < lines.length);
     if (end < lines.length) content += `\n\n(File has ${lines.length} lines total; showing lines ${start}-${end}. Use offset/limit to read more.)`;
     content += note;
     return { content, display: { summary: `Read ${slice.length} line${slice.length === 1 ? '' : 's'}` } };
@@ -240,7 +242,7 @@ export function checkFreshness(file, ctx, { full = false } = {}) {
   const standing = fileStanding(file, ctx);
   if (standing === 'unread') return 'File has not been read yet. Read it first before writing to it.';
   if (full && ctx.fileState.get(file).partial) {
-    return 'Only part of this file has been seen (a Read with offset/limit, or edits without a whole Read), so Write would overwrite content you have not seen. Read the whole file first, or use Edit for targeted changes.';
+    return 'Only part of this file has been seen (a Read with offset/limit or one that cut long lines short, or edits without a whole Read), so Write would overwrite content you have not seen. Read the whole file first (allow_large: true shows long lines whole), or use Edit for targeted changes.';
   }
   if (standing === 'modified') {
     return 'File has been modified since it was last read, either by the user or by a linter. Read it again before attempting to write it.';

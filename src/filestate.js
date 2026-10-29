@@ -21,7 +21,8 @@ const resultText = (content) => (typeof content === 'string' ? content : '');
 function readWasPartial(input, text) {
   return Number(input?.offset) > 1
     || /\(File has \d+ lines total; showing lines /.test(text)
-    || /\[output cut at \d+ characters/.test(text);
+    || /\[output cut at /.test(text) // "… characters" or "about 25k tokens"
+    || /… \[line truncated\]/.test(text);
 }
 
 // messages: the restored conversation. times: when each message was stored (ms since epoch,

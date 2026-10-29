@@ -190,7 +190,8 @@ export function findLines(lines, query, max = 30) {
   let test;
   const re = /^\/(.+)\/([a-z]*)$/.exec(query);
   if (re) {
-    const rx = new RegExp(re[1], re[2].includes('i') ? re[2] : `${re[2]}i`);
+    const flags = re[2].replace(/[gy]/g, ''); // test() with g or y goes on from the last match: lines were skipped
+    const rx = new RegExp(re[1], flags.includes('i') ? flags : `${flags}i`);
     test = (s) => rx.test(s);
   } else {
     const q = query.toLowerCase();

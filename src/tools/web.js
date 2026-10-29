@@ -81,8 +81,10 @@ export function htmlToMarkdown(html, baseUrl) {
   let s = html;
   const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(s)?.[1];
   s = s.replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<(script|style|noscript|svg|iframe|template|head)[\s\S]*?<\/\1>/gi, '')
-    .replace(/<(nav|footer)[\s\S]*?<\/\1>/gi, '');
+    // the name ends where the tag's does: <header>, <navbar-menu>, <style-guide> are other elements (taken for <head>,
+    // <nav>, <style>, they ran on to a later closing tag and took the page's text with them)
+    .replace(/<(script|style|noscript|svg|iframe|template|head)(?=[\s>/])[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<(nav|footer)(?=[\s>/])[\s\S]*?<\/\1\s*>/gi, '');
   const abs = (href) => { try { return new URL(decodeEntities(href), baseUrl).href; } catch { return href; } };
   s = s.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (m, code) => `\n\`\`\`\n${decodeEntities(code.replace(/<[^>]+>/g, ''))}\n\`\`\`\n`)
     .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (m, n, t) => `\n\n${'#'.repeat(+n)} ${t.replace(/<[^>]+>/g, '').trim()}\n\n`)

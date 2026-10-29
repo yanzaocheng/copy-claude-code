@@ -35,11 +35,21 @@ After actions you get what changed in the snapshot (+ added, ~ changed), or the 
 - Work in tabs you opened or the one the user points to: do not read or change their other tabs.
 - Before you publish, send, buy, delete or change settings, ask, unless the user asked for exactly that.`;
 
+// The file of a tab's whole snapshot. Named by this process too: tab ids (t1, t2…) start again in every session, so
+// two sessions wrote the same file and one of them read the other's page. Files a day old go.
+let snapshotsSwept = false;
 function snapshotFile(tab, text) {
   const dir = path.join(CONFIG_DIR, 'browser-snapshots');
   try {
     fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${tab.id}.txt`);
+    if (!snapshotsSwept) {
+      snapshotsSwept = true;
+      for (const name of fs.readdirSync(dir)) {
+        const old = path.join(dir, name);
+        try { if (Date.now() - fs.statSync(old).mtimeMs > 86_400_000) fs.rmSync(old, { force: true }); } catch { /* gone */ }
+      }
+    }
+    const file = path.join(dir, `${process.pid}-${tab.id}.txt`);
     fs.writeFileSync(file, text);
     return file;
   } catch { return null; }
