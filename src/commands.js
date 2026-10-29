@@ -862,7 +862,11 @@ export function buildCommands(app) {
           await app.agent.summarizePart(index, { part, label: entry.label, signal: app.controller.signal });
           store.summarized(id, part, index);
           app.remote?.resync();
-          if (part === 'after' && prompt) app.editor.set(prompt); // as Claude Code does: the prompt to send again or edit
+          // as Claude Code does: the prompt to send again or edit; not over what was typed while it summarized
+          if (part === 'after' && prompt) {
+            if (!app.editor.text.trim()) app.editor.set(prompt);
+            else out(c.dim('The prompt was not put back in the input box: it holds what you typed meanwhile.'));
+          }
         } catch (e) {
           if (!app.controller.signal.aborted) out(c.red(`Could not summarize: ${e.message}`));
           else out(c.red('Summarizing interrupted'));

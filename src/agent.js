@@ -1217,6 +1217,7 @@ export class Agent {
     const state = this.compactWorkState(res);
     const note = { role: 'user', content: [{ type: 'text', text: partialSummaryMessage(part, summary, state.state, keptUserMessages(part === 'before' ? before : after)) }] };
     this.replaceMessages(part === 'before' ? [note, ...after] : [...before, note]);
+    this.fileState.clear(); // the files read in the part summarized are not in view any more: Write wants them read again
     if (part === 'before') this.cache.noteCompacted(); // from its first message on: nothing of it is cached (the start of "after" still is)
     if (part === 'after') this.todos = []; // what they were about may be summarized away; the model keeps them in the summary
     this.lastContextTokens = estimateTokens(this.messages) + estimateTokens(this.toolSchemas()) + 2000;

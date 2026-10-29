@@ -1032,6 +1032,8 @@ export class App {
       continueWith: request.continueTurn ? restartNote(request) : '',
       cwd: request.cwd || this.cwd,
       changedDirectory: Boolean(request.cwd),
+      // where the agent's shell is (a `cd` in Bash moves it): the next process goes on there, not at the project's root
+      agentCwd: request.cwd ? null : this.agent.cwd,
       sessionId: this.store.id,
       sessionFile: moved?.file || this.store.file,
       modelOverride: cfg.modelOverride,
@@ -1088,6 +1090,9 @@ export class App {
       this.loadSession(state.sessionFile, state.sessionId, { quiet: true });
       if (Array.isArray(state.todos)) this.agent.todos = state.todos;
       if (state.checkpoints) this.runtime.checkpoints.adopt(state.checkpoints);
+      if (typeof state.agentCwd === 'string' && state.agentCwd !== this.cwd) {
+        try { if (fs.statSync(state.agentCwd).isDirectory()) this.agent.cwd = state.agentCwd; } catch { /* gone: the project's root */ }
+      }
     }
     if (typeof state.draft === 'string' && state.draft) this.editor.restoreDraft(state.draft, state.draftCursor, state.draftParts);
     // Fullscreen starts on an empty screen: without what the process before showed (an older version, or one

@@ -190,6 +190,7 @@ export function rewind(agent, store, id, mode = 'both') {
   }
   if (mode !== 'code') {
     agent.replaceMessages(agent.messages.slice(0, entry.messageIndex));
+    agent.fileState.clear(); // what was read after that point is gone from the conversation: Write wants it read again
     agent.todos = [];
     agent.lastContextTokens = estimateTokens(agent.messages);
     agent.tokensSinceUsage = 0;
