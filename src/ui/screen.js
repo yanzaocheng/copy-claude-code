@@ -123,7 +123,9 @@ export function mouseFilter(stdin, onMouse) {
       try { onMouse({ button: Number(b), x: Number(x), y: Number(y), release: kind === 'm' }); } catch { /* the listener's problem */ }
       return '';
     });
-    const partial = /\x1b\[<[\d;]*$/.exec(text);
+    // the start of a report cut off at the end of the chunk, as far as ESC or ESC [ alone: passed on, those two let
+    // the rest of the report ("<0;35;12M") through as typed text
+    const partial = /\x1b(?:\[(?:<[\d;]*)?)?$/.exec(text);
     if (partial) {
       pending = partial[0];
       text = text.slice(0, partial.index);
