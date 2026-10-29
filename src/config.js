@@ -33,6 +33,7 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_GATEWAY_API_KEY: 'Gateway API key (normally saved by /login in gateway.json)',
   CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
   CLAUDE_PRO_SEARCH_MODEL: 'Model that runs WebSearch\'s searches on the gateway (default: haiku, fast and cheap; gpt-6.1-sol is tried next when it fails)',
+  CLAUDE_PRO_FETCH_MODEL: 'Model that answers WebFetch\'s prompt about a page (default: haiku, fast and cheap; the session\'s model is tried next when it fails)',
   CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online on the gateway\'s web page whenever this computer is logged in, and sessions on your other computers can send it tasks (@computer/name)',
   CLAUDE_PRO_REMOTE_COMMANDS: 'Set to 0 to make this computer\'s sessions read-only on the gateway\'s web page: it can watch them, but not send them messages, answer their questions, stop them, switch model or effort, or change their directory (default: on; read when a session goes online)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',

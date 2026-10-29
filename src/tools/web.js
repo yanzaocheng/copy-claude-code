@@ -144,7 +144,7 @@ export function makeWebFetchTool(config) {
   return {
     name: 'WebFetch',
     readOnly: true,
-    description: `- Fetches content from a specified URL (any scheme the network allows, including localhost and private addresses), converts HTML to markdown, and answers a prompt about it using the model currently selected for this session
+    description: `- Fetches content from a specified URL (any scheme the network allows, including localhost and private addresses), converts HTML to markdown, and answers a prompt about it using a small, fast model
 - Takes a URL and a prompt as input
 - Set raw: true to get the converted page text itself instead of an answer: use it when you need the exact content, code, tables or the whole document (very long pages are saved to a file and previewed; read the file for the rest)
 - Use this tool when you need to retrieve and analyze web content
@@ -159,7 +159,7 @@ Usage notes:
       properties: {
         url: { type: 'string', format: 'uri', description: 'The URL to fetch content from' },
         prompt: { type: 'string', description: 'The prompt to run on the fetched content' },
-        raw: { type: 'boolean', description: 'Return the converted page text itself instead of an answer from the selected model' },
+        raw: { type: 'boolean', description: 'Return the converted page text itself instead of an answer from the small model' },
       },
       required: ['url'],
     },
@@ -184,24 +184,34 @@ Usage notes:
         return { content: text || '(the page has no text content)', display };
       }
       const content = page.text.length > 400_000 ? page.text.slice(0, 400_000) + '\n\n[content truncated]' : page.text;
-      try {
-        const answer = await quickQuery(config, {
-          model: config.model,
-          system: 'You extract information from web pages. Answer only from the provided content. Be complete and precise: include every relevant detail, exact quotes, numbers and code. Keep code blocks intact.',
-          prompt: `Web page content from ${page.finalUrl || url.href}:\n---\n${content}\n---\n\n${input.prompt || 'Summarize this page, keeping all important details, code and numbers.'}\n\nRespond based only on the content above.`,
-          maxTokens: 16_000,
-          signal: ctx.signal,
-          // Nobody is told about a pause that happens inside a tool call, so the summary is skipped
-          // instead (the page text below is returned as it is) and the main agent does the waiting.
-          waitForRateLimit: false,
-        });
-        return { content: answer || content.slice(0, 50_000), display };
-      } catch (e) {
-        if (ctx.signal?.aborted) throw e;
-        return { content: content.slice(0, 100_000), display };
+      for (const model of fetchModels(config)) {
+        try {
+          const answer = await quickQuery(config, {
+            model,
+            system: 'You extract information from web pages. Answer only from the provided content. Be complete and precise: include every relevant detail, exact quotes, numbers and code. Keep code blocks intact.',
+            prompt: `Web page content from ${page.finalUrl || url.href}:\n---\n${content}\n---\n\n${input.prompt || 'Summarize this page, keeping all important details, code and numbers.'}\n\nRespond based only on the content above.`,
+            maxTokens: 16_000,
+            signal: ctx.signal,
+            // Nobody is told about a pause that happens inside a tool call, so the summary is skipped
+            // instead (the page text below is returned as it is) and the main agent does the waiting.
+            waitForRateLimit: false,
+          });
+          if (answer) return { content: answer, display };
+        } catch (e) {
+          if (ctx.signal?.aborted) throw e;
+        }
       }
+      return { content: content.slice(0, 100_000), display };
     },
   };
+}
+
+// The models that answer WebFetch's prompt, in order: CLAUDE_PRO_FETCH_MODEL (default haiku, as Claude Code's small
+// fast model: a page is up to 100k tokens, about $0.5 a fetch on Opus and $0.1 on haiku), then the session's model
+// when that one fails (an account without Claude models, say).
+function fetchModels(config) {
+  const first = config.resolveModel(String(config.env.CLAUDE_PRO_FETCH_MODEL ?? '').trim() || 'haiku');
+  return first.id === config.model.id ? [first] : [first, config.model];
 }
 
 // A search engine that never answers must not hold the tool call for minutes.
