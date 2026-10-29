@@ -46,14 +46,8 @@ export const GlobTool = {
     const files = [];
     const start = Date.now();
     try {
-      for await (const f of fs.promises.glob(pattern, { cwd: base, exclude })) {
-        if (ctx.signal?.aborted) break;
-        const abs = path.resolve(base, f);
-        try {
-          const st = fs.statSync(abs);
-          if (st.isFile()) files.push({ abs, mtime: st.mtimeMs });
-        } catch { /* vanished */ }
-        if (files.length >= 20_000) break;
+      for (const abs of await globFiles(base, pattern, { skip: exclude, signal: ctx.signal, max: 20_000 })) {
+        try { files.push({ abs, mtime: fs.statSync(abs).mtimeMs }); } catch { /* vanished */ }
       }
     } catch (e) {
       return { isError: true, content: `Glob failed: ${e.message}` };
@@ -66,6 +60,37 @@ export const GlobTool = {
     return { content, display: { summary: `Found ${files.length} file${files.length === 1 ? '' : 's'} in ${Date.now() - start}ms` } };
   },
 };
+
+// The files under `base` that `pattern` matches, as fs.glob finds them (in any case on Windows) but with dotfiles and
+// dot directories too: fs.glob leaves those out of * and ** and has no option for them, so "**/*.yml" missed
+// .github/workflows/ci.yml, which Grep (searching hidden files) found. `skip(name)`: a directory not to go into. The
+// walk starts at the pattern's fixed leading directories, and goes no deeper than its segments without a "**". A
+// linked directory is not entered (it can make a loop).
+async function globFiles(base, pattern, { skip, signal, max }) {
+  const parts = pattern.replace(/^(?:\.\/)+/, '').split('/');
+  const fixed = [];
+  while (parts.length > 1 && !/[*?[\]{}]/.test(parts[0])) fixed.push(parts.shift());
+  const rest = parts.join('/');
+  const re = globToRegExp(rest, process.platform === 'win32');
+  const maxDepth = /\*\*|[{}]/.test(rest) ? Infinity : parts.length;
+  const found = [];
+  const walk = async (dir, rel, depth) => {
+    if (signal?.aborted || found.length >= max) return;
+    let entries;
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (found.length >= max) return;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      const abs = path.join(dir, e.name);
+      let isFile = e.isFile();
+      if (e.isSymbolicLink()) { try { isFile = (await fs.promises.stat(abs)).isFile(); } catch { /* a broken link */ } }
+      if (isFile) { if (re.test(r)) found.push(abs); }
+      else if (e.isDirectory() && depth < maxDepth && !skip(e.name)) await walk(abs, r, depth + 1);
+    }
+  };
+  await walk(path.join(base, ...fixed), '', 1);
+  return found;
+}
 
 // rg --type names (plus a few aliases) → file extensions, for the JS scanner.
 const TYPE_EXT = {
