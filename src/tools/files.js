@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { diffLines, makeHunks, countChanges, splitLines } from '../utils/diff.js';
 import { fitImage } from '../utils/images.js';
@@ -166,27 +167,37 @@ Usage:
         return { isError: true, content: `Could not parse notebook: ${e.message}` };
       }
     }
-    const buf = fs.readFileSync(file);
-    const decoded = readText(file, buf);
-    if (!decoded) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
-    const note = encodingNote(decoded);
-    const lines = splitLines(decoded.text);
-    // `partial` records that part of the file was not shown, so Write can refuse to overwrite it; `hash` tells a
-    // later change of its time without a change of its bytes from a real one (see fileStanding).
-    const seen = (partial) => ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial, hash: hashOf(buf) });
-    if (lines.length === 0) {
-      seen(false);
-      return { content: '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>', display: { summary: 'Read 0 lines (empty file)' } };
-    }
     const start = Math.max(1, Math.floor(input.offset || 1));
-    if (start > lines.length) {
-      seen(true);
-      return { content: `<system-reminder>Warning: the file exists but is shorter than the provided offset (${start}). The file has ${lines.length} lines.</system-reminder>`, display: { summary: 'Read 0 lines' } };
-    }
     // allow_large: no line, character or line length limit, only the room left in the context (see Agent.takeContext).
     const large = input.allow_large === true;
     const limit = Math.max(1, Math.floor(input.limit || (large ? Infinity : MAX_LINES)));
-    const slice = lines.slice(start - 1, start - 1 + limit);
+    // `total`: the file's lines; `slice`: those asked for; `hash` of its bytes. A big UTF-8 file is read in chunks for
+    // the lines asked for (see readLineRange); the rest is read whole, decoded and split.
+    let total, slice, hash, note = '';
+    const streamed = stat.size > STREAM_READ_BYTES && Number.isFinite(limit) ? await readLineRange(file, start, limit) : null;
+    if (streamed?.binary) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
+    if (streamed) ({ total, slice, hash } = streamed);
+    else {
+      const buf = fs.readFileSync(file);
+      const decoded = readText(file, buf);
+      if (!decoded) return { isError: true, content: `This appears to be a binary file (${stat.size} bytes) and cannot be displayed as text.` };
+      note = encodingNote(decoded);
+      const lines = splitLines(decoded.text);
+      total = lines.length;
+      slice = lines.slice(start - 1, start - 1 + limit);
+      hash = hashOf(buf);
+    }
+    // `partial` records that part of the file was not shown, so Write can refuse to overwrite it; `hash` tells a
+    // later change of its time without a change of its bytes from a real one (see fileStanding).
+    const seen = (partial) => ctx.fileState.set(file, { mtimeMs: stat.mtimeMs, partial, hash });
+    if (total === 0) {
+      seen(false);
+      return { content: '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>', display: { summary: 'Read 0 lines (empty file)' } };
+    }
+    if (start > total) {
+      seen(true);
+      return { content: `<system-reminder>Warning: the file exists but is shorter than the provided offset (${start}). The file has ${total} lines.</system-reminder>`, display: { summary: 'Read 0 lines' } };
+    }
     let content = numberLines(slice, start, large ? Infinity : MAX_LINE_CHARS);
     // a line cut short is not seen whole either: a Write from what was shown would put "… [line truncated]" in the file
     const longLines = !large && slice.some((l) => l.length > MAX_LINE_CHARS);
@@ -210,14 +221,74 @@ Usage:
       content = `${kept}${whole ? '' : '\n'}… [output cut at ${why}: line ${end} is the last one shown${whole ? '' : ', and only in part'}; read on from there with offset/limit, or pass allow_large: true to read it all at once]`;
       cut = true;
     }
-    seen(cut || longLines || start > 1 || end < lines.length);
-    if (end < lines.length) content += `\n\n(File has ${lines.length} lines total; showing lines ${start}-${end}. Use offset/limit to read more.)`;
+    seen(cut || longLines || start > 1 || end < total);
+    if (end < total) content += `\n\n(File has ${total} lines total; showing lines ${start}-${end}. Use offset/limit to read more.)`;
     content += note;
     return { content, display: { summary: `Read ${slice.length} line${slice.length === 1 ? '' : 's'}` } };
   },
 };
 
 const hashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
+
+const STREAM_READ_BYTES = 8 * 1024 * 1024;
+
+// Lines [start, start + limit) of a big file, read in chunks without blocking and without the whole file in memory
+// (a Read of 20 lines of a 183 MB log took 0.7 s, blocked, and 768 MB): {total, slice, hash}, as the whole read
+// gives them (splitLines: \r\n is a line end, no line after the last end; the BOM is not text). {binary: true} for
+// a binary file; null when the file is not UTF-8 as a whole (UTF-16, GBK): it is read whole then.
+async function readLineRange(file, start, limit) {
+  const hash = crypto.createHash('sha1');
+  const slice = [];
+  const end = start + limit;
+  let ended = 0; // the lines ended so far (by a \n)
+  let parts = null; // the bytes of the line going on, when it is one asked for
+  let carry = null; // a character the last chunk did not finish, checked with the next one
+  let first = true;
+  let last = -1; // the file's last byte
+  for await (let chunk of fs.createReadStream(file, { highWaterMark: 1 << 20 })) {
+    hash.update(chunk);
+    if (first) {
+      first = false;
+      if ((chunk[0] === 0xff && chunk[1] === 0xfe) || (chunk[0] === 0xfe && chunk[1] === 0xff)) return null;
+      if (chunk[0] === 0xef && chunk[1] === 0xbb && chunk[2] === 0xbf) chunk = chunk.subarray(3);
+      if (chunk.subarray(0, 8000).includes(0)) return { binary: true };
+    }
+    if (!chunk.length) continue;
+    const data = carry ? Buffer.concat([carry, chunk]) : chunk;
+    const keep = unfinishedTail(data);
+    if (!isUtf8(data.subarray(0, data.length - keep))) return null;
+    carry = keep ? Buffer.from(data.subarray(data.length - keep)) : null;
+    let from = 0;
+    for (let nl = chunk.indexOf(10); nl >= 0; nl = chunk.indexOf(10, from)) {
+      const n = ++ended;
+      if (n >= start && n < end) {
+        let line = parts ? Buffer.concat([...parts, chunk.subarray(from, nl)]) : chunk.subarray(from, nl);
+        if (line[line.length - 1] === 13) line = line.subarray(0, -1);
+        slice.push(line.toString('utf8'));
+      }
+      parts = null;
+      from = nl + 1;
+    }
+    if (from < chunk.length && ended + 1 >= start && ended + 1 < end) (parts ??= []).push(Buffer.from(chunk.subarray(from)));
+    last = chunk[chunk.length - 1];
+  }
+  if (carry) return null; // a character cut off at the end
+  const total = ended + (last !== -1 && last !== 10 ? 1 : 0);
+  if (parts && total >= start && total < end) slice.push(Buffer.concat(parts).toString('utf8'));
+  return { total, slice, hash: hash.digest('hex') };
+}
+
+// How many bytes at the end of `buf` start a UTF-8 character it does not finish (0 to 3).
+function unfinishedTail(buf) {
+  const n = buf.length;
+  for (let k = 1; k <= Math.min(3, n); k++) {
+    const b = buf[n - k];
+    if ((b & 0xc0) === 0x80) continue; // a continuation byte: its lead is further back
+    const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+    return need > k ? k : 0;
+  }
+  return 0;
+}
 
 // How a file stands against what the model has seen of it: null (read or written by it, unchanged since),
 // 'unread', or 'modified' (changed on disk since). A time that moved while the bytes stayed the same (git, a
