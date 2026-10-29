@@ -115,8 +115,8 @@ export function graphemeWidth(g) {
   if (g === '\t') return 4;
   const cp = g.codePointAt(0);
   let w = codePointWidth(cp);
-  // Emoji presentation selector or ZWJ sequences render wide.
-  if (g.length > 1 && /[️‍]/.test(g) && w === 1) w = 2;
+  // Emoji presentation selector or ZWJ sequences render wide, and so does a flag (two regional indicators).
+  if (g.length > 1 && w === 1 && (/[️‍]/.test(g) || (cp >= 0x1f1e6 && cp <= 0x1f1ff))) w = 2;
   return w;
 }
 

@@ -369,12 +369,19 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       const cost = charge(config, params.model, model, usage);
       return { message: { role: 'assistant', content }, usage, stopReason, model, cost, cache: { ...cachePlanOf(params), fingerprint: fingerprint(params), at: startedAt } };
     } catch (raw) {
-      if (signal?.aborted || isAbort(raw)) {
-        // An interrupted reply is billed for what it had read and written: the output so far is estimated.
+      // A reply cut off (interrupted, or failed on the way: a stream error, a stream that ended early) is billed for
+      // what it had read and written once it started: the output so far is estimated. A failure before it started
+      // (an error status) costs nothing.
+      const chargeCut = () => {
+        if (usage.input_tokens == null) return;
         const written = blocks.reduce((n, b) => n + (b?.text?.length || 0) + (b?.thinking?.length || 0), 0) + jsonBufs.join('').length;
         charge(config, params.model, model, { ...usage, output_tokens: Math.max(usage.output_tokens || 0, Math.ceil(written / 4)) });
+      };
+      if (signal?.aborted || isAbort(raw)) {
+        chargeCut();
         throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
       }
+      chargeCut();
       const err = describeError(raw, config);
       // Not every model takes an effort level. Leave it out for this one, and for the rest of the session.
       if (err.status === 400 && params.output_config && /does not support the effort parameter/i.test(err.message)) {

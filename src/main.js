@@ -217,6 +217,11 @@ export async function main(argv) {
   }
 
   // mintty (Git Bash's default window) connects programs through pipes, not a console.
+  // -r without an id opens the picker of an interactive session; a -p run has none, and went on as a new conversation
+  if (flags.resume && !flags.resumeId && (flags.print || !process.stdout.isTTY || !process.stdin.isTTY)) {
+    process.stderr.write('Error: -r without a conversation id needs an interactive session to pick one. Give the id (-r <id>), or use -c for the newest conversation.\n');
+    return 2;
+  }
   if (!flags.print && !process.stdin.isTTY && process.env.TERM_PROGRAM === 'mintty') {
     process.stderr.write('Interactive mode needs a real console. In mintty/Git Bash run `winpty claude-pro` (or `winpty node bin/claude-pro.js`), or use Windows Terminal. For scripts use `claude-pro -p`.\n');
     return 1;

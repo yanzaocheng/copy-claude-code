@@ -91,7 +91,8 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
       result = await runtime.agent.run(runtime.agent.drainNotifications(), { signal: ctrl.signal });
     }
   } catch (e) {
-    if (format === 'json') emit({ type: 'result', is_error: true, error: e.message });
+    // stream-json ends with a result as well, or its reader waits for one that never comes
+    if (format === 'json' || format === 'stream-json') emit({ type: 'result', subtype: 'error', is_error: true, error: e.message });
     else err(c.red(`Error: ${e.message}`));
     runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser(); shutdownInterpreters(); shutdownBackgroundShells();
     return 1;
