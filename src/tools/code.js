@@ -12,7 +12,10 @@ import { OutputDecoder } from '../utils/encoding.js';
 import { stripAnsi } from '../ui/ansi.js';
 import { childEnv, truncateOutput, saveFullOutput } from './bash.js';
 
-export const replLimits = { defaultTimeoutMs: 120_000, maxTimeoutMs: 600_000, outputChars: 20_000, startMs: 20_000 };
+export const replLimits = { defaultTimeoutMs: 120_000, maxTimeoutMs: 600_000, outputChars: 20_000 };
+// A run's output kept in memory: past OUTPUT_MAX characters only the newest OUTPUT_KEEP stay, as in Bash.
+const OUTPUT_MAX = 10_000_000;
+const OUTPUT_KEEP = 5_000_000;
 
 // The driver each interpreter runs: it reads one JSON request per line on stdin ({id, code, cwd}), runs the code in
 // one namespace that lives as long as the process, and after what the code printed writes a line that starts with
@@ -194,8 +197,7 @@ class Interpreter {
   constructor(lang, { cwd, env }) {
     this.lang = lang;
     this.token = `@@claude-pro-repl-${crypto.randomBytes(8).toString('hex')}@@`;
-    this.stdout = '';
-    this.stderr = '';
+    this.clearOutput();
     this.waiting = null; // {resolve, id}
     this.nextId = 1;
     this.queue = Promise.resolve();
@@ -212,8 +214,11 @@ class Interpreter {
     });
     const out = new OutputDecoder();
     const err = new OutputDecoder();
-    this.child.stdout.on('data', (c) => { this.stdout += out.write(c); this.check(); });
-    this.child.stderr.on('data', (c) => { this.stderr += err.write(c); });
+    this.child.stdout.on('data', (c) => this.onStdout(out.write(c)));
+    this.child.stderr.on('data', (c) => {
+      this.stderr += err.write(c);
+      if (this.stderr.length > OUTPUT_MAX) this.stderr = this.stderr.slice(-OUTPUT_KEEP);
+    });
     this.child.on('close', (code, signal) => {
       this.exited = { code, signal };
       const w = this.waiting;
@@ -223,20 +228,54 @@ class Interpreter {
     this.child.stdin.on('error', () => {}); // a dead interpreter: reported by 'close'
   }
 
+  clearOutput() {
+    this.stdout = '';
+    this.stderr = '';
+    this.carry = ''; // the end of stdout so far, the token's length less one: a token split between two chunks
+    this.tokenAt = -1; // where the token is in stdout, once it came
+    this.endAt = -1; // where the line after it ends
+    this.droppedHead = false; // the start of the output was not kept (OUTPUT_MAX)
+  }
+
+  // What the code prints, then the end of the run: the token and a line of JSON. Each chunk is looked at once, with
+  // the end of the one before it, and stdout itself is not touched until the run is over: searching all of it again
+  // for every chunk was quadratic (160 MB of output took over a minute, with the program frozen).
+  onStdout(text) {
+    if (!text) return;
+    const start = this.stdout.length; // where `text` goes in stdout
+    this.stdout += text;
+    if (this.tokenAt < 0) {
+      const win = this.carry + text;
+      const at = win.indexOf(this.token);
+      if (at >= 0) this.tokenAt = start - this.carry.length + at;
+      else {
+        this.carry = win.slice(-(this.token.length - 1));
+        if (this.stdout.length > OUTPUT_MAX) { this.stdout = this.stdout.slice(-OUTPUT_KEEP); this.droppedHead = true; }
+        return;
+      }
+    }
+    if (this.endAt < 0) { // the JSON line after the token has no newline of its own
+      const nl = text.indexOf('\n', Math.max(0, this.tokenAt + this.token.length - start));
+      if (nl >= 0) this.endAt = start + nl;
+    }
+    this.check();
+  }
+
   check() {
     const w = this.waiting;
-    if (!w) return;
-    const at = this.stdout.indexOf(this.token);
-    if (at < 0) return;
-    const end = this.stdout.indexOf('\n', at);
-    if (end < 0) return;
+    if (!w || this.endAt < 0) return;
+    const all = this.stdout;
     let meta = {};
-    try { meta = JSON.parse(this.stdout.slice(at + this.token.length, end)); } catch { /* reported as no error */ }
-    const output = this.stdout.slice(0, at).replace(/\n$/, '');
-    this.stdout = this.stdout.slice(end + 1);
+    try { meta = JSON.parse(all.slice(this.tokenAt + this.token.length, this.endAt)); } catch { /* reported as no error */ }
+    const output = all.slice(0, this.tokenAt).replace(/\n$/, '');
+    const droppedHead = this.droppedHead;
+    this.stdout = '';
+    this.carry = '';
+    this.tokenAt = -1;
+    this.endAt = -1;
     this.waiting = null;
     // stderr comes on its own pipe: what the code wrote there before it finished arrives a moment later at most
-    setTimeout(() => w.resolve({ output, error: meta.error || null }), 30);
+    setTimeout(() => w.resolve({ output, error: meta.error || null, droppedHead }), 30);
   }
 
   get alive() { return !this.dead && !this.exited && this.child.exitCode === null; }
@@ -262,8 +301,7 @@ class Interpreter {
     const failed = await this.started;
     if (failed) return { startError: failed };
     if (!this.alive) return { died: true };
-    this.stdout = '';
-    this.stderr = '';
+    this.clearOutput();
     const id = this.nextId++;
     const done = new Promise((resolve) => { this.waiting = { resolve, id }; });
     let timedOut = false;
@@ -276,7 +314,7 @@ class Interpreter {
       const r = await done;
       const stderr = this.stderr;
       this.stderr = '';
-      if (r.died) return { died: true, timedOut, aborted, output: this.stdout, stderr };
+      if (r.died) return { died: true, timedOut, aborted, output: this.stdout, stderr, droppedHead: this.droppedHead };
       return { ...r, stderr };
     } finally {
       clearTimeout(timer);
@@ -377,7 +415,8 @@ Use it to work with data: load a log, a JSON or CSV file, a database or an API r
         const saved = saveFullOutput(ctx.projectRoot, text);
         const size = text.length;
         text = truncateOutput(text, replLimits.outputChars);
-        text += `\n\n(The output was ${size} characters and has been cut${saved ? `; all of it is in ${saved}` : ''}. Print less: a count, the first rows, a summary.)`;
+        const kept = r.droppedHead ? `over ${OUTPUT_MAX.toLocaleString('en-US')} characters and has been cut${saved ? `; the last ${size} are in ${saved}` : ''}` : `${size} characters and has been cut${saved ? `; all of it is in ${saved}` : ''}`;
+        text += `\n\n(The output was ${kept}. Print less: a count, the first rows, a summary.)`;
       }
       const lines = text ? text.split('\n').length : 0;
       const secs = ((Date.now() - started) / 1000).toFixed(1);

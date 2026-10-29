@@ -161,15 +161,19 @@ When you commit (the system prompt says when): run git status, git diff and git 
           resolve({ isError, content: text || '(no output)', display: { output: text, exitCode: code } });
         };
         // The live view shows the last lines: it gets the end of the output and the line count, not all of it
-        // stripped again on every chunk (quadratic on a noisy build, with up to 10 MB re-split every frame).
+        // stripped again on every chunk (quadratic on a noisy build, with up to 10 MB re-split every frame). The end
+        // is kept apart: slicing `output` itself made V8 copy all of it into one string for every chunk, which froze
+        // the program for seconds on a 100 MB output.
         let lines = 0;
         let droppedHead = false;
+        let tail = '';
         watchShell(child, {
           onOutput: (text) => {
             output += text;
+            tail = (tail + text).slice(-PROGRESS_CHARS);
             for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) lines++;
             if (output.length > 10_000_000) { output = output.slice(-5_000_000); droppedHead = true; }
-            ctx.onProgress?.(stripAnsi(output.slice(-PROGRESS_CHARS)), { lines, all: () => stripAnsi(output) });
+            ctx.onProgress?.(stripAnsi(tail), { lines, all: () => stripAnsi(output) });
           },
           done: finish,
         });
