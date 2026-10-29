@@ -74,9 +74,10 @@ function wordLeft(text, i) {
 }
 
 // How `body` is shown in a box `textW` columns wide: its rows, each with the cursor stops on it ({i: index in
-// body, col}). A long line wraps onto more rows; every index has exactly one stop (one where a row wraps is at the
-// start of the next row, the end of a line is where its newline is). The input box draws these rows, and up and
-// down move between them, so that they move through a long wrapped line too.
+// body, col, g: the character there}; no g: a newline or the end). A long line wraps onto more rows; every index
+// has exactly one stop (one where a row wraps is at the start of the next row, the end of a line is where its
+// newline is). The input box draws these rows, and up and down move between them, so that they move through a
+// long wrapped line too.
 export function layoutRows(body, textW) {
   const row = () => ({ text: '', width: 0, stops: [] });
   const rows = [row()];
@@ -89,7 +90,7 @@ export function layoutRows(body, textW) {
     } else {
       const w = graphemeWidth(g);
       if (r.width && r.width + w > textW) { r = row(); rows.push(r); }
-      r.stops.push({ i: idx, col: r.width });
+      r.stops.push({ i: idx, col: r.width, g });
       r.text += g === '\t' ? '    ' : g;
       r.width += w;
     }
@@ -136,6 +137,8 @@ export class Editor {
     this.onDoubleEscape = onDoubleEscape;
     this.textW = 76; // the width of the text in the box, as last drawn: up and down move by the rows shown
     this.goalCol = null; // the column up and down aim for, kept while they are pressed in a row
+    this.selection = null; // {from, to}: text selected with the mouse (see mouse), indexes into `text`
+    this.press = null; // the mouse button held down on the text: {at, moved}
   }
 
   get mode() {
@@ -147,8 +150,107 @@ export class Editor {
   set(text, cursor = text.length) {
     this.text = text;
     this.cursor = Math.max(0, Math.min(cursor, text.length));
+    this.selection = null;
     this.refreshSuggestions();
     this.onChange?.();
+  }
+
+  // ------------------------------------------------------------ the mouse (fullscreen)
+  //
+  // As in Claude Code: a click on the text puts the cursor there. A drag selects from the cell it started in to the
+  // one it is over, both included (as in the conversation, see Screen.mouse); a double click selects a word, a
+  // triple click the line. A selection is there to be copied (ctrl+c, see App.onKey): any other key clears it and
+  // then does what it does, so typing does not replace it (there is no undo to bring the text back).
+
+  // The place in the text under a cell of the rows shown (see place): `row` among them, `col` the column in the
+  // text. {i, end}: the index of the character drawn in that cell, or, for a cell past the text of the row, of the
+  // row's end (end: true), where a click there puts the cursor.
+  at(row, col) {
+    const { rows, offset } = this.place();
+    const r = rows[Math.max(0, Math.min(rows.length - 1, row))];
+    const x = Math.max(0, col);
+    for (const st of r.stops) {
+      if (st.g !== undefined && x >= st.col && x < st.col + graphemeWidth(st.g)) return { i: offset + st.i, end: false };
+    }
+    const tail = r.stops[r.stops.length - 1]; // the newline, the end, or (a row that wraps) its last character
+    return { i: offset + tail.i + (tail.g?.length ?? 0), end: true };
+  }
+
+  // A mouse event on the text (see Screen.inputAt): {kind: 'press' | 'drag' | 'release', row, col, count}.
+  mouse({ kind, row, col, count = 1 }) {
+    const at = this.at(row, col);
+    if (kind === 'press') {
+      this.press = null;
+      this.selection = null;
+      if (count >= 3) this.selection = this.lineRange(at);
+      else if (count === 2) this.selection = this.wordRange(at);
+      else this.press = { at, moved: false };
+    } else if (!this.press) {
+      return;
+    } else if (kind === 'drag') {
+      const a = this.press.at;
+      this.press.moved = true;
+      // the cells in order; of two at the same index, the one past the end of a row comes first (it holds nothing)
+      const [lo, hi] = at.i < a.i || (at.i === a.i && at.end) ? [at, a] : [a, at];
+      const to = hi.end ? hi.i : nextBoundary(this.text, hi.i);
+      this.selection = to > lo.i ? { from: lo.i, to } : null;
+    } else { // released: without a drag, a click
+      const click = !this.press.moved;
+      this.press = null;
+      if (click) { this.goalCol = null; this.set(this.text, at.i); return; }
+    }
+    this.onChange?.();
+  }
+
+  // The word (what is between spaces, as in the conversation) under `at`, or null.
+  wordRange(at) {
+    const t = this.text;
+    const offset = this.mode === 'prompt' ? 0 : 1;
+    const word = (ch) => ch !== undefined && !/\s/.test(ch);
+    if (at.end || !word(t[at.i])) return null;
+    let from = at.i;
+    let to = at.i;
+    while (from > offset && word(t[from - 1])) from--;
+    while (to < t.length && word(t[to])) to++;
+    return { from, to };
+  }
+
+  // The line `at` is on, without its newline, or null when it is empty.
+  lineRange(at) {
+    const from = Math.max(this.mode === 'prompt' ? 0 : 1, lineStartOf(this.text, at.i));
+    const nl = this.text.indexOf('\n', at.i);
+    const to = nl < 0 ? this.text.length : nl;
+    return to > from ? { from, to } : null;
+  }
+
+  // The text selected, pasted text in it as what its placeholder stands for (see expanded).
+  selectedText() {
+    if (!this.selection) return '';
+    let t = this.text.slice(this.selection.from, this.selection.to);
+    for (const [label, content] of this.pastes) t = t.split(label).join(content);
+    return t;
+  }
+
+  clearSelection() {
+    if (!this.selection && !this.press) return false;
+    this.selection = null;
+    this.press = null;
+    this.onChange?.();
+    return true;
+  }
+
+  // A row of the rows shown (see layoutRows) with what is selected in reverse video, its newline as a space.
+  paintRow(row, offset) {
+    const { from, to } = this.selection;
+    let out = '';
+    let on = false;
+    for (const st of row.stops) {
+      const sel = offset + st.i >= from && offset + st.i < to;
+      if (st.g === undefined && !sel) continue; // a newline, drawn as a space when selected (the end of the text never is)
+      if (sel !== on) { out += sel ? '\x1b[7m' : '\x1b[27m'; on = sel; }
+      out += st.g === undefined ? (row.width < this.textW ? ' ' : '') : st.g === '\t' ? '    ' : st.g;
+    }
+    return on ? out + '\x1b[27m' : out;
   }
 
   clear() {
@@ -458,7 +560,7 @@ export class Editor {
     const promptCh = mode === 'bash' ? '!' : mode === 'memory' ? '#' : '>';
     const body = mode === 'prompt' ? this.text : this.text.slice(1);
     this.textW = textW;
-    const { rows: laid, r, col } = this.place();
+    const { rows: laid, r, col, offset } = this.place();
     const rows = laid.map((row) => row.text);
     const cur = { row: r, col };
 
@@ -466,11 +568,13 @@ export class Editor {
     rows.forEach((r, i) => {
       let content = r;
       if (!body && i === 0 && placeholder) content = c.dim(truncate(placeholder, textW));
+      else if (this.selection) content = this.paintRow(laid[i], offset);
       const lead = i === 0 ? (mode === 'prompt' ? promptCh : color(promptCh)) + ' ' : '  ';
       lines.push(color('│') + ' ' + lead + padEnd(content, textW) + ' ' + color('│'));
     });
     lines.push(color('╰' + '─'.repeat(boxW - 2) + '╯'));
-    return { lines, cursor: active ? { row: cur.row + 1, col: 4 + cur.col } : null };
+    // `text`: where the text is in `lines` (its first row, how many, the column it starts at), for the mouse
+    return { lines, cursor: active ? { row: cur.row + 1, col: 4 + cur.col } : null, text: { row: 1, rows: rows.length, col: 4 } };
   }
 
   renderSuggestions(width) {

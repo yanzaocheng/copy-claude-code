@@ -1238,6 +1238,7 @@ export class App {
 
   // Fullscreen: the wheel scrolls the conversation (3 rows a notch); a drag,
   // a double or a triple click selects text. Selection is copied only with Ctrl+C.
+  // In the input box a click moves the cursor and a drag selects its text (see Editor.mouse).
   onMouse(m) {
     if (!this.screen.full || this.exiting) return;
     if (m.button & 64) {
@@ -1248,8 +1249,12 @@ export class App {
     }
     // Right-click is intentionally inert. Clipboard operations use Ctrl+C and Ctrl+V only.
     const had = this.screen.selection;
-    if (this.screen.mouse(m)?.quote) this.quoteSelection(); // the Quote button beside a selection
-    else if (this.screen.selection && this.screen.selection !== had) this.flashMessage = null; // the footer says what a selection takes
+    const hadInput = this.editor.selection;
+    const r = this.screen.mouse(m);
+    if (r?.input) this.editor.mouse(r.input);
+    else if ((m.button & 3) === 0 && !(m.button & 32) && !m.release) this.editor.clearSelection(); // a press elsewhere
+    if (r?.quote) this.quoteSelection(); // the Quote button beside a selection
+    else if ((this.screen.selection && this.screen.selection !== had) || (this.editor.selection && this.editor.selection !== hadInput)) this.flashMessage = null; // the footer says what a selection takes
   }
 
   // Quote what is selected in the conversation in the message being written, as ChatGPT's "Ask ChatGPT" does: the
@@ -1375,6 +1380,14 @@ export class App {
         this.screen.clearSelection();
         if (key.name === 'escape') return;
       }
+    }
+    // A selection in the input box (see Editor.mouse), the same way: ctrl+c copies it (and neither interrupts nor
+    // clears the message), esc only clears it, any other key clears it and then does what it does.
+    if (this.editor.selection) {
+      const shown = !this.dialogs.length && !this.finder; // else the box is not on screen, and the key is not for it
+      if (shown && key.ctrl && key.name === 'c') { this.copyText(this.editor.selectedText()); this.editor.clearSelection(); return; }
+      this.editor.clearSelection();
+      if (shown && key.name === 'escape') return;
     }
     if (key.name === 'paste-start' || key.sequence === '\x1b[200~') {
       this.bracketedPaste = { raw: '' };
@@ -2420,11 +2433,12 @@ export class App {
     const top = lines.length;
     lines.push(...r.lines);
     if (r.cursor) cursor = { row: top + r.cursor.row, col: r.cursor.col };
+    const input = r.text ? { ...r.text, row: top + r.text.row } : null; // where the mouse reaches the input box's text
     if (this.finder) lines.push(c.dim(truncate('  ⏎ or ↑ older · shift+⏎ or ↓ newer · PgUp/PgDn scroll · esc to close', w)));
     else if (this.editor.suggestions) lines.push(...this.editor.renderSuggestions(w));
     else if (this.editor.text === '?') lines.push(...this.shortcutsHelp());
     else lines.push(this.footer(w));
-    return { lines, cursor };
+    return { lines, cursor, input };
   }
 
   // In the input box's top border: the directory the agent is in now (a `cd` moves it), and this
@@ -2452,6 +2466,7 @@ export class App {
     if (this.exitArmed && Date.now() - this.exitArmed < 1500) left = c.dim('  Press Ctrl-C again to exit');
     else if (flash) left = (flash.kind === 'warn' ? c.yellow : c.dim)('  ' + truncate(flash.text, w - 4));
     else if (this.screen.full && this.screen.selection) left = c.dim('  ctrl+c to copy · ctrl+q to quote it in your message');
+    else if (this.editor.selection) left = c.dim('  ctrl+c to copy · esc to clear');
     else if (this.restartRequest) left = c.dim('  ↻ restarting when this turn ends');
     else if (this.editor.mode === 'bash') left = c.magenta('  ! for bash mode');
     else if (this.editor.mode === 'memory') left = c.blue('  # to memorize');

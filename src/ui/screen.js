@@ -218,6 +218,8 @@ export class Screen {
     this.dragging = false;
     this.quoteButton = null; // fullscreen: where the Quote button is on screen, {row, from, to} (see quoteSpot)
     this.lastClick = { at: 0, x: 0, y: 0, count: 0 };
+    this.inputBox = null; // fullscreen: where the input box's text is on screen, {top, rows, col} (see inputAt)
+    this.inputDrag = null; // fullscreen: the mouse button held down on the input box's text: the cell it is over, {x, y, moved}
     this.cursorRow = 0; // row of the terminal cursor, relative to the top of the live region
     this.staticQueue = [];
     this.history = []; // the most recent static lines, for repainting after a resize
@@ -552,6 +554,19 @@ export class Screen {
     return true;
   }
 
+  // The cell of the input box's text at screen cell (x, y), 1-based: {row, col}, the row among the rows of the text
+  // and the column in it (negative left of it). null when (x, y) is not on a row of the text shown; `clamp` (a drag
+  // that left the box): the start of its first row on screen above it, the end of the text below it.
+  inputAt(x, y, clamp = false) {
+    const b = this.inputBox;
+    if (!b) return null;
+    const first = Math.max(0, this.lastArea - b.top); // rows the conversation covers (the box taller than the screen)
+    const row = y - 1 - b.top;
+    if (row >= first && row < b.rows) return { row, col: x - 1 - b.col };
+    if (!clamp) return null;
+    return row < first ? { row: first, col: -1 } : { row: b.rows - 1, col: Infinity };
+  }
+
   // The point of the conversation at screen cell (x, y), 1-based: the nearest row that shows some of it.
   pointAt(x, y) {
     let i = Math.max(0, Math.min(this.lastArea - 1, y - 1));
@@ -580,7 +595,9 @@ export class Screen {
   // A mouse report (fullscreen). Mouse selection only highlights text; Ctrl+C copies it. Drag to select (the view
   // scrolls at its edges), double-click a word, triple-click a line; a click clears the selection; a click on the
   // "Jump to bottom" bar goes there. A click on the Quote button beside a selection returns {quote: true}: the caller
-  // quotes it (see quoteSpot).
+  // quotes it (see quoteSpot). On the input box's text it returns {input: {kind, row, col, count}} instead, for the
+  // editor (Editor.mouse): a press there, then a drag (once for each cell the mouse moves to) and the release, from
+  // wherever the mouse is by then.
   mouse({ button, x, y, release }) {
     if (!this.full || this.closed) return null;
     if (button & 64) return null; // the wheel: the caller scrolls
@@ -594,8 +611,16 @@ export class Screen {
       const c = this.lastClick;
       const count = now - c.at < MULTI_CLICK_MS && Math.abs(c.x - x) <= 1 && c.y === y ? c.count + 1 : 1;
       this.lastClick = { at: now, x, y, count };
+      this.inputDrag = null;
       if (this.barRow !== null && y - 1 === this.barRow) { this.selection = null; this.scrollBy('bottom'); return null; }
-      if (y - 1 >= this.lastArea) { this.clearSelection(); return null; } // the input box, the footer
+      const cell = this.inputAt(x, y);
+      if (cell) {
+        this.clearSelection();
+        this.dragging = false;
+        if (count === 1) this.inputDrag = { x, y, moved: false };
+        return { input: { kind: 'press', ...cell, count } };
+      }
+      if (y - 1 >= this.lastArea) { this.clearSelection(); return null; } // the input box's border, the footer
       const p = this.pointAt(x, y);
       if (!p) { this.clearSelection(); return null; }
       if (count >= 2) {
@@ -608,6 +633,19 @@ export class Screen {
       this.selection = { anchor: p, focus: { ...p }, moved: false };
       this.dragging = true;
       return null;
+    }
+    const d = this.inputDrag;
+    if (d) {
+      if (motion && d.x === x && d.y === y) return null; // still the same cell
+      const cell = this.inputAt(x, y, true);
+      if (release) {
+        this.inputDrag = null;
+        if (d.moved) this.lastClick.count = 0; // a drag: the next click starts a count of its own
+        return cell && { input: { kind: 'release', ...cell } };
+      }
+      if (!motion) return null;
+      Object.assign(d, { x, y, moved: true });
+      return cell && { input: { kind: 'drag', ...cell } };
     }
     if (!this.dragging || !this.selection) return null;
     if (motion) {
@@ -681,11 +719,13 @@ export class Screen {
       const gap = rows - current;
       layout.rows.unshift(...Array(gap).fill(''));
       if (layout.cursorRow !== null) layout.cursorRow += gap;
+      if (layout.box) layout.box.top += gap;
       return layout;
     }
     if (current > rows) {
       const dropped = current - rows;
       layout.rows.splice(0, dropped);
+      if (layout.box) layout.box.top -= dropped;
       if (layout.cursorRow !== null) {
         layout.cursorRow -= dropped;
         if (layout.cursorRow < 0) layout.cursorRow = null;
@@ -709,6 +749,7 @@ export class Screen {
     }
     const area = Math.max(0, screenRows - layout.rows.length);
     this.lastArea = area;
+    this.inputBox = layout.box && { ...layout.box, top: area + layout.box.top };
     if (this.finding) this.refreshFind();
     const shown = this.view(area, cols);
     this.viewMap = shown;
@@ -800,7 +841,9 @@ export class Screen {
     return lines;
   }
 
-  // The live region as rows (pre-wrapped to cols-1, capped to fit the viewport) and where the cursor goes.
+  // The live region as rows (pre-wrapped to cols-1, capped to fit the viewport) and where the cursor goes. `box`:
+  // where the input box's text is among the rows, {top, rows, col}, from what renderLive says (`input`: its first
+  // line, how many, the column the text starts at); null when its rows did not stay one row each.
   layoutLive(cols) {
     let live;
     try {
@@ -808,10 +851,12 @@ export class Screen {
     } catch (e) {
       live = { lines: [`\x1b[31mrender error: ${e.message}\x1b[0m`] };
     }
-    const { lines = [], cursor = null } = live;
+    const { lines = [], cursor = null, input = null } = live;
     const rows = [];
+    const starts = []; // the row each line starts on
     let cursorRow = null, cursorCol = 0;
     lines.forEach((line, i) => {
+      starts.push(rows.length);
       const wrapped = wrapLine(cleanLine(line), cols - 1);
       if (cursor && cursor.row === i) {
         const col = cursor.col;
@@ -821,14 +866,18 @@ export class Screen {
       }
       rows.push(...wrapped);
     });
+    starts.push(rows.length);
+    const end = input ? starts[input.row + input.rows] : undefined;
+    const box = end !== undefined && end - starts[input.row] === input.rows ? { top: starts[input.row], rows: input.rows, col: input.col } : null;
     // Cap to the terminal height so there is always a way back to the top.
     const maxRows = Math.max(1, Math.min(this.height, this.out.rows || this.height) - 1);
     if (rows.length > maxRows) {
       const dropped = rows.length - maxRows;
       rows.splice(0, dropped);
       if (cursorRow !== null) cursorRow = Math.max(0, cursorRow - dropped);
+      if (box) box.top -= dropped;
     }
-    return { rows, cursorRow, cursorCol };
+    return { rows, cursorRow, cursorCol, box };
   }
 
   // Escape sequence that leaves the cursor where the user types, and the bookkeeping for the next redraw.
