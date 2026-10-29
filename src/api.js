@@ -2,7 +2,7 @@
 // raw SSE stream into a fully assembled assistant message while reporting progress.
 
 import Anthropic from '@anthropic-ai/sdk';
-import { humanDuration, parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
+import { parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
 import { fitImagesIn } from './utils/images.js';

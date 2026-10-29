@@ -212,7 +212,6 @@ export class RemoteControl {
     this.id = /^[\w-]{8,64}$/.test(id || '') ? id : newRemoteId();
     this.handlers = handlers;
     this.fetch = fetchImpl;
-    this.url = null; // the session's page on the gateway
     this.online = false; // the command stream is open
     this.viewers = null; // pages watching, as the gateway counts them (null: not told yet)
     this.closed = false;
@@ -279,7 +278,6 @@ export class RemoteControl {
     const commands = this.commands;
     const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), version: info.version, ...info, ...(commands.length ? { commands } : {}) });
     if (data.id) this.id = data.id;
-    this.url = data.url || this.url || `${this.base}/user`;
     this.registered = true;
     this.needSnapshot = true;
   }

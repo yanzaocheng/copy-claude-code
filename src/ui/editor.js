@@ -129,8 +129,6 @@ export class Editor {
     this.quotes = new Map(); // "[Quote #1 +3 lines]" -> how it shows in the transcript (its text is in `pastes`)
     this.quoteCounter = 0;
     this.imageFromPath = imageFromPath; // (path) => image | null, for pasted/dropped image files
-    this.pasting = false;
-    this.pasteBuf = '';
     this.pendingSubmit = null;
     this.lastEscape = 0;
     this.suggestionsDismissedFor = null;
@@ -424,14 +422,7 @@ export class Editor {
       this.pendingSubmit = null;
       this.insert('\n');
     }
-    if (key.name === 'paste-start') { this.pasting = true; this.pasteBuf = ''; return true; }
-    if (key.name === 'paste-end') { this.pasting = false; this.insertPaste(this.pasteBuf); this.pasteBuf = ''; return true; }
-    if (this.pasting) {
-      if (key.name === 'return' || key.name === 'enter') this.pasteBuf += '\n';
-      else if (str) this.pasteBuf += str;
-      return true;
-    }
-
+    // A bracketed paste never gets here: App.onKey takes it whole and calls insertPaste.
     const name = key.name;
     if (!(name === 'up' || name === 'down' || (key.ctrl && (name === 'p' || name === 'n')))) this.goalCol = null;
     if (name === 'return' && !key.meta && !key.shift) {

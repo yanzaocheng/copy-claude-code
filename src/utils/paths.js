@@ -50,15 +50,6 @@ export function displayPath(p, cwd) {
   return p;
 }
 
-export function isInside(child, parent) {
-  const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
-export function samePath(a, b) {
-  return isWin ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
-}
-
 // `input` as an absolute directory: "" (or ~) is the home directory, "D:" is the root of D:, and forward slashes do
 // on Windows too. null when it is not absolute.
 export function normalizeDir(input, { platform = process.platform, home = os.homedir() } = {}) {

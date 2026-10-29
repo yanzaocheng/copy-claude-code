@@ -31,12 +31,6 @@ export function activePromptName() {
   return isPromptName(name) ? String(name).trim() : null;
 }
 
-export function loadPrompt(name) {
-  const file = profileFile(name);
-  const text = fs.readFileSync(file, 'utf8');
-  return { name: String(name), file, text };
-}
-
 // Returns null for the built-in prompt, or a descriptor with an error when the selected file disappeared.
 export function loadActivePrompt() {
   const name = activePromptName();

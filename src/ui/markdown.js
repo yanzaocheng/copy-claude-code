@@ -2,7 +2,7 @@
 // rendered immediately (tables are buffered until they end) and the in-progress line
 // can be previewed separately.
 
-import { c, stringWidth, wordWrap, wrapLine, padEnd } from './ansi.js';
+import { c, stringWidth, wordWrap, wrapLine } from './ansi.js';
 
 const KEYWORDS = new Set(('abstract as async await break case catch class const continue debugger def default del delete do elif else enum export extends ' +
   'false final finally fn for from func function go if impl import in instanceof interface is lambda let loop match mod module mut new nil none null ' +
@@ -246,4 +246,3 @@ export function renderMarkdown(text, opts) {
   return [...s.write(text), ...s.end()];
 }
 
-export { padEnd };

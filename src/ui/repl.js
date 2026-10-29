@@ -801,8 +801,6 @@ export class App {
     if (!d) return null;
     d.remoteId ??= ++this.remoteDialogs;
     const base = { id: d.remoteId, title: d.title || '', question: d.question || '', body: d.body || [], markdown: d.markdown || null };
-    // a question answered with typed text (TextDialog): a text box on the page, answered with {id, text}
-    if (d.input) return { ...base, input: { placeholder: d.input.placeholder || '', value: d.value || '', multiline: Boolean(d.input.multiline) } };
     if (!Array.isArray(d.options)) return base;
     return { ...base, multi: Boolean(d.multi), options: d.options.map((o) => ({ label: String(o.label ?? ''), description: o.description || '', other: o.value === '__other__' })) };
   }
@@ -810,17 +808,11 @@ export class App {
   // ---------------------------------------------------------------- the page's commands (see remote.js)
 
   // The answer to the dialog the status showed the page (remoteDialog): {id, index}, {id, indices}, {id, text,
-  // indices?} (its "other" option), {id, text} (a text box) or {id, cancel: true}.
+  // indices?} (its "other" option) or {id, cancel: true}.
   answerDialog({ id, index, indices, text, cancel } = {}) {
     const d = this.dialogs[0];
     if (!d || d.remoteId !== id) throw new Error('That question is no longer open.');
     if (cancel) { d.resolve(d.cancelValue); return {}; }
-    if (d.input) {
-      if (typeof text !== 'string') throw new Error('Type an answer first.');
-      d.resolve(text);
-      this.screen.schedule();
-      return {};
-    }
     if (!Array.isArray(d.options)) throw new Error('This dialog cannot be answered from the page.');
     const valueAt = (i) => {
       const o = d.options[i];
@@ -1631,7 +1623,7 @@ export class App {
     if (this.finder && !seed.trim()) { this.finder.selected = Boolean(this.finder.text); this.screen.schedule(); return; } // open: select what is typed
     const text = (seed.split('\n').find((l) => l.trim()) || '').trim() || this.lastFind || '';
     if (!this.finder) this.screen.openFind();
-    this.finder = { text, cursor: text.length, selected: Boolean(text), pasting: null };
+    this.finder = { text, cursor: text.length, selected: Boolean(text) };
     this.screen.setFind(text);
     this.screen.schedule();
   }
@@ -1657,13 +1649,7 @@ export class App {
       if (f.selected) edit(t, t.length);
       else edit(f.text.slice(0, f.cursor) + t + f.text.slice(f.cursor), f.cursor + t.length);
     };
-    if (name === 'paste-start') { f.pasting = ''; return; }
-    if (f.pasting !== null) {
-      if (name === 'paste-end') { const t = f.pasting.split(/\r?\n/).find((l) => l.trim()) || ''; f.pasting = null; insert(t.trim()); }
-      else if (name === 'return' || name === 'enter') f.pasting += '\n';
-      else if (str) f.pasting += str;
-      return;
-    }
+    // a bracketed paste never gets here: App.onKey takes it whole (see insertFindText)
     if (name === 'escape') { this.closeFind(); return; }
     const back = (name === 'return' && (key.meta || key.shift)) || name === 'enter' || key.sequence === '\x1b[13;2u' || (name === 'f3' && key.shift);
     if (back || name === 'down' || (key.ctrl && name === 'n')) { f.selected = false; this.screen.findStep(-1); return; }
@@ -2316,7 +2302,6 @@ export class App {
     if (!this.isMain(agent)) return;
     this.flushStreaming();
     this.status = auto ? 'Auto-compacting conversation' : 'Compacting conversation';
-    this.compactTokens = 0;
     this.screen.schedule();
   }
 
@@ -2326,11 +2311,10 @@ export class App {
     else if (ev.type === 'rate_limit_wait' || ev.type === 'rate_limit_resume') this.rateLimitEvent(ev);
   }
 
-  compactEnd(summary, agent, err, { part } = {}) {
+  compactEnd(_summary, agent, err, { part } = {}) {
     if (!this.isMain(agent)) return;
     this.status = null;
     if (err) return;
-    this.lastSummary = summary;
     this.store.setCacheUntil(agent.cache.clockUntil, agent.cacheState());
     const what = part === 'before' ? 'The earlier part of the conversation was summarized' : part === 'after' ? 'The conversation from that message on was summarized' : 'Conversation compacted';
     this.screen.log(c.dim(`✻ ${what} (the summary is in context; /context to see usage)`), '');

@@ -470,8 +470,4 @@ export class RuntimeTrace {
   recent(limit = 20) {
     return this.recentEvents.slice(-Math.max(1, Math.min(200, Number(limit) || 20)));
   }
-
-  close() {}
 }
-
-export const TRACE_DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES;

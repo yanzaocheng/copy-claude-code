@@ -45,10 +45,8 @@ export const c = {
   cyan: hex('#56b6c2'),
   magenta: hex('#c678dd'),
   gray: hex('#8a8a8a'),
-  white: hex('#ffffff'),
   claude: hex('#d77757'), // the orange brand accent
   permission: hex('#b1b9f9'),
-  edits: hex('#af87ff'),
   code: hex('#b1b9f9'),
   userBg: hex('#373737', true), // the band behind the user's messages (see renderUserMessage)
   userText: hex('#e4e4e4'),
@@ -317,11 +315,8 @@ export const ESC = {
   hideCursor: '\x1b[?25l',
   showCursor: '\x1b[?25h',
   clearDown: '\x1b[0J',
-  clearLine: '\x1b[2K',
   up: (n) => (n > 0 ? `\x1b[${n}A` : ''),
-  down: (n) => (n > 0 ? `\x1b[${n}B` : ''),
   right: (n) => (n > 0 ? `\x1b[${n}C` : ''),
-  col0: '\r',
   bracketedPasteOn: '\x1b[?2004h',
   bracketedPasteOff: '\x1b[?2004l',
   clearScreen: '\x1b[2J\x1b[3J\x1b[H',

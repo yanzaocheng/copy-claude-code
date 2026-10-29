@@ -2,7 +2,6 @@
 
 import { c, colorEnabled, stringWidth, truncate, padEnd, wordWrap, wrapLine } from './ansi.js';
 import { displayPath } from '../utils/paths.js';
-import { renderMarkdown } from './markdown.js';
 
 export const DOT = '⏺';
 const RESULT_PREFIX = '  ⎿  ';

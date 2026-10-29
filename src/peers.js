@@ -113,12 +113,6 @@ export class PeerNode {
     return n;
   }
 
-  setCwd(cwd) {
-    if (cwd === this.cwd) return;
-    this.cwd = cwd;
-    this.write();
-  }
-
   write() {
     if (!this.port) return;
     fs.mkdirSync(PEERS_DIR, { recursive: true });

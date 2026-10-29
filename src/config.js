@@ -23,7 +23,6 @@ export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.u
 export const SOURCE_CHECKOUT = fs.existsSync(path.join(INSTALL_DIR, '.git'));
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
 export const APP_NAME = 'claude-pro';
-export const PROVIDERS = ['gateway'];
 export const GATEWAY_DEFAULT_URL = 'https://gw.predix.icu';
 export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).version;
 

@@ -71,10 +71,6 @@ export function listAutoMemories(dir) {
   try { return fs.readdirSync(dir).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md'); } catch { return []; }
 }
 
-export function projectMemoryFile(cwd) {
-  return path.join(cwd, 'CLAUDE.md');
-}
-
 // The date where the user is (YYYY-MM-DD). toISOString() would give the UTC date, which for someone in
 // UTC+8 is yesterday's between midnight and 8 o'clock.
 export function localDate(now = new Date()) {
