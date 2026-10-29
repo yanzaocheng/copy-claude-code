@@ -236,6 +236,7 @@ export class App {
     this.cost = 0; // what this conversation's requests have cost so far (USD at list prices): the footer and /cost
     this.fileIndex = new FileIndex(cwd, () => this.runtime?.config);
     this.store = new SessionStore(cwd);
+    SessionStore.onError = (e, store) => this.notice(`Could not save the conversation to ${store.file} (${e.code || e.message}): it is written again whole before a restart, but /resume may miss what was not saved.`, 'warn');
     // What the terminal prints goes to the remote page too, except what it is told about as events.
     this.screen.onLog = (items) => {
       const lines = () => items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/));
@@ -996,6 +997,8 @@ export class App {
     if (request.cwd) {
       try { moved = moveSession(this.store.file, this.store.id, request.cwd); } catch (e) { this.notice(`Could not change the directory: ${e.message}`, 'warn'); return; }
     }
+    // a write of the conversation failed at some point: the file lacks part of it, and the next process goes on from it
+    if (this.store.lost) { this.store.lost = false; this.store.reset(this.agent.messages); }
     const state = {
       at: now,
       reason: request.reason || '',
@@ -2537,5 +2540,8 @@ export async function runRepl({ flags, cwd, initialPrompt }) {
     process.stderr.write(`\nUnexpected error: ${e?.stack || e}\n`);
     process.exit(1);
   });
+  // A promise without a handler that rejects is a bug to show, not a reason to end the session: Node ends the process
+  // on one by default (through the handler above, with exit code 1, which the supervisor does not restart).
+  process.on('unhandledRejection', (e) => { try { app.logError(e); } catch { /* the screen is gone */ } });
   return await app.start(initialPrompt);
 }

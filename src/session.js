@@ -77,6 +77,8 @@ export function moveSession(file, id, cwd) {
 }
 
 export class SessionStore {
+  static onError = null; // (error, store): a write of the conversation failed (the first time for a store)
+
   constructor(cwd, id = crypto.randomUUID()) {
     this.cwd = cwd;
     this.id = id;
@@ -93,7 +95,12 @@ export class SessionStore {
         if (!fs.existsSync(this.file)) fs.appendFileSync(this.file, JSON.stringify({ type: 'meta', cwd: this.cwd, created: new Date().toISOString() }) + '\n');
       }
       fs.appendFileSync(this.file, JSON.stringify(entry) + '\n');
-    } catch { /* persistence is best effort */ }
+    } catch (e) {
+      // Best effort, but a message that did not get in leaves the file without it, and a restart or /resume would go
+      // on from a conversation that lacks it: noted (`lost`, see App.restartNow), and said once (SessionStore.onError).
+      this.lost = true;
+      if (!this.warned) { this.warned = true; try { SessionStore.onError?.(e, this); } catch { /* ignore */ } }
+    }
   }
 
   message(message) { this.append({ type: 'message', message, at: Date.now() }); }

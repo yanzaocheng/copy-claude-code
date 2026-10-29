@@ -741,6 +741,7 @@ export class Agent {
           continue;
         }
         const queued = [...toQueuedBlocks(this.io.takeQueued?.() || []), ...(this.isSubagent ? [] : this.drainNotifications())];
+        await fitImagesIn(queued); // a pasted photo at full size: scaled now, not after the API refuses it
         if (queued.length) {
           this.pushMessage({ role: 'user', content: queued });
           continue;
@@ -790,8 +791,9 @@ export class Agent {
 
       const outcome = await this.runTools(toolUses, signal);
       const resultContent = [...outcome.results];
-      const queued = this.io.takeQueued?.() || [];
-      resultContent.push(...toQueuedBlocks(queued));
+      const queued = toQueuedBlocks(this.io.takeQueued?.() || []);
+      await fitImagesIn(queued);
+      resultContent.push(...queued);
       if (!this.isSubagent) resultContent.push(...this.drainNotifications());
       if (outcome.interrupted) {
         resultContent.push({ type: 'text', text: INTERRUPT_TOOL_MESSAGE });

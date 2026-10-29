@@ -75,7 +75,8 @@ export function imageFromFile(file) {
   let st;
   try { st = fs.statSync(file); } catch { return { error: `File not found: ${file}` }; }
   if (!st.isFile()) return { error: `Not a file: ${file}` };
-  if (st.size > MAX_IMAGE_BYTES) return { error: `Image is too large (${(st.size / 1e6).toFixed(1)}MB, max 3.7MB)` };
+  // the turn scales it down to what the API takes (fitImagesIn), as it does a Read image: a 5 MB phone photo is fine
+  if (st.size > 30 * 1024 * 1024) return { error: `Image is too large (${(st.size / 1e6).toFixed(1)}MB, max 30MB)` };
   return { image: { media_type: media, data: fs.readFileSync(file).toString('base64'), bytes: st.size, source: file } };
 }
 
