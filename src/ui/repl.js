@@ -2431,15 +2431,18 @@ export class App {
     }
     if (lines.length) lines.push('');
     const placeholder = this.isTurnRunning() ? 'Type a message to queue it for the agent…' : (this.agent.messages.length ? '' : 'Try "explain this codebase" or "fix the failing test"');
-    const r = this.finder ? this.renderFind(width) : this.editor.render(width, { placeholder, title: this.boxTitle() });
+    const after = this.finder ? [c.dim(truncate('  ⏎ or ↑ older · shift+⏎ or ↓ newer · PgUp/PgDn scroll · esc to close', w))]
+      : this.editor.suggestions ? this.editor.renderSuggestions(w)
+        : this.editor.text === '?' ? this.shortcutsHelp()
+          : [this.footer(w)];
+    // the box's text gets the screen less what is above and below it, its borders, and two rows of the conversation
+    const maxRows = Math.max(3, this.screen.height - 1 - lines.length - after.length - 2 - 2);
+    const r = this.finder ? this.renderFind(width) : this.editor.render(width, { placeholder, title: this.boxTitle(), maxRows });
     const top = lines.length;
     lines.push(...r.lines);
     if (r.cursor) cursor = { row: top + r.cursor.row, col: r.cursor.col };
     const input = r.text ? { ...r.text, row: top + r.text.row } : null; // where the mouse reaches the input box's text
-    if (this.finder) lines.push(c.dim(truncate('  ⏎ or ↑ older · shift+⏎ or ↓ newer · PgUp/PgDn scroll · esc to close', w)));
-    else if (this.editor.suggestions) lines.push(...this.editor.renderSuggestions(w));
-    else if (this.editor.text === '?') lines.push(...this.shortcutsHelp());
-    else lines.push(this.footer(w));
+    lines.push(...after);
     return { lines, cursor, input };
   }
 

@@ -165,7 +165,7 @@ export class Editor {
   // row's end (end: true), where a click there puts the cursor.
   at(row, col) {
     const { rows, offset } = this.place();
-    const r = rows[Math.max(0, Math.min(rows.length - 1, row))];
+    const r = rows[Math.max(0, Math.min(rows.length - 1, (this.viewTop || 0) + row))]; // the rows shown start at viewTop
     const x = Math.max(0, col);
     for (const st of r.stops) {
       if (st.g !== undefined && x >= st.col && x < st.col + graphemeWidth(st.g)) return { i: offset + st.i, end: false };
@@ -269,14 +269,26 @@ export class Editor {
     this.clear();
   }
 
-  // The rows the text is shown in (see layoutRows), and the row and column of the cursor among them.
+  // The rows the text is shown in (see layoutRows), and the row and column of the cursor among them. The rows are
+  // laid out again only when the text or the width changed: this runs for every frame (a 3000-line draft took 64 ms
+  // a frame, laid out and searched whole), and the cursor's row is found by bisection.
   place() {
     const offset = this.mode === 'prompt' ? 0 : 1; // the ! or # is drawn as the prompt sign, not as text
-    const rows = layoutRows(this.text.slice(offset), this.textW);
+    const L = this.layout;
+    let rows;
+    if (L && L.text === this.text && L.textW === this.textW && L.offset === offset) rows = L.rows;
+    else {
+      rows = layoutRows(this.text.slice(offset), this.textW);
+      this.layout = { text: this.text, textW: this.textW, offset, rows };
+    }
     const at = Math.max(0, this.cursor - offset);
-    let r = 0;
+    let r = 0; // the last row that starts at or before the cursor (every row has a stop)
+    for (let hi = rows.length - 1; r < hi;) {
+      const mid = (r + hi + 1) >> 1;
+      if (rows[mid].stops[0].i <= at) r = mid; else hi = mid - 1;
+    }
     let col = 0;
-    rows.forEach((row, ri) => { for (const st of row.stops) if (st.i <= at) { r = ri; col = st.col; } });
+    for (const st of rows[r].stops) if (st.i <= at) col = st.col;
     return { rows, r, col, offset };
   }
 
@@ -560,7 +572,10 @@ export class Editor {
 
   // Render as a rounded box. Returns {lines, cursor:{row,col}}.
   // `title`: {left, right}, shown in the top border (left: the directory; right: the session's name).
-  render(width, { placeholder = '', active = true, borderColor, title = null } = {}) {
+  // `maxRows`: the most rows of text to show. A longer text shows a window of them that follows the cursor (from
+  // viewTop), and the bottom border says how many rows are above and below it: the whole box used to be drawn and
+  // the screen cut its top off, so that the cursor stood on a row that was not the one typed in.
+  render(width, { placeholder = '', active = true, borderColor, title = null, maxRows = Infinity } = {}) {
     const boxW = Math.max(20, width - 1);
     const textW = boxW - 6;
     const mode = this.mode;
@@ -569,20 +584,26 @@ export class Editor {
     const body = mode === 'prompt' ? this.text : this.text.slice(1);
     this.textW = textW;
     const { rows: laid, r, col, offset } = this.place();
-    const rows = laid.map((row) => row.text);
-    const cur = { row: r, col };
+    const shown = Math.max(1, Math.min(laid.length, Math.floor(maxRows)));
+    let top = Math.min(this.viewTop || 0, laid.length - shown); // the window moves only as far as the cursor needs
+    if (r < top) top = r;
+    else if (r >= top + shown) top = r - shown + 1;
+    this.viewTop = top = Math.max(0, top);
 
     const lines = [topBorder(boxW, color, title)];
-    rows.forEach((r, i) => {
-      let content = r;
+    for (let i = top; i < top + shown; i++) {
+      let content = laid[i].text;
       if (!body && i === 0 && placeholder) content = c.dim(truncate(placeholder, textW));
       else if (this.selection) content = this.paintRow(laid[i], offset);
       const lead = i === 0 ? (mode === 'prompt' ? promptCh : color(promptCh)) + ' ' : '  ';
       lines.push(color('│') + ' ' + lead + padEnd(content, textW) + ' ' + color('│'));
-    });
-    lines.push(color('╰' + '─'.repeat(boxW - 2) + '╯'));
+    }
+    const below = laid.length - top - shown;
+    const hidden = [top ? `↑ ${top} more rows` : '', below ? `↓ ${below} more rows` : ''].filter(Boolean).join(' · ');
+    const label = hidden && boxW > stringWidth(hidden) + 6 ? ` ${hidden} ` : '';
+    lines.push(color('╰─') + c.dim(label) + color('─'.repeat(boxW - 3 - stringWidth(label)) + '╯'));
     // `text`: where the text is in `lines` (its first row, how many, the column it starts at), for the mouse
-    return { lines, cursor: active ? { row: cur.row + 1, col: 4 + cur.col } : null, text: { row: 1, rows: rows.length, col: 4 } };
+    return { lines, cursor: active ? { row: r - top + 1, col: 4 + col } : null, text: { row: 1, rows: shown, col: 4 } };
   }
 
   renderSuggestions(width) {
