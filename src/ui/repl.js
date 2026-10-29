@@ -1424,7 +1424,8 @@ export class App {
     if (key.ctrl && key.name === 't') { this.showTodos = !this.showTodos; this.screen.schedule(); return; }
     if (key.ctrl && key.name === 'l') { if (this.screen.full) this.screen.repaint(); else this.screen.clearScreen(); return; }
     if (key.ctrl && key.name === 'd' && !this.editor.text) { this.keyboardExit(); return; }
-    if (key.name === 'escape' && this.isTurnRunning()) { this.interrupt(); return; }
+    // esc closes an open completion list first (the editor does that), and only then stops the turn
+    if (key.name === 'escape' && this.isTurnRunning() && !this.editor.suggestions) { this.interrupt(); return; }
     this.exitArmed = 0;
     this.editor.handleKey(str, key);
     this.screen.schedule();

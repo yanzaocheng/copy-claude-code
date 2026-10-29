@@ -190,6 +190,7 @@ export class Screen {
     this.dropped = 0; // fullscreen: lines dropped from the top of the history so far (the first one's number)
     this.selection = null; // fullscreen: {anchor, focus}, points {line, sub, col} of the conversation (history line, wrapped row, column)
     this.dragging = false;
+    this.dragFrom = null; // fullscreen: where a drag in the conversation started, {line, sub, col}
     this.lastClick = { at: 0, x: 0, y: 0, count: 0 };
     this.inputBox = null; // fullscreen: where the input box's text is on screen, {top, rows, col} (see inputAt)
     this.inputDrag = null; // fullscreen: the mouse button held down on the input box's text: the cell it is over, {x, y, moved}
@@ -266,7 +267,7 @@ export class Screen {
   }
 
   wrappedAt(i, cols) {
-    if (this.wrapCols !== cols) { this.wrapped = []; this.wrapCols = cols; this.selection = null; } // its rows are other rows now
+    if (this.wrapCols !== cols) { this.wrapped = []; this.wrapCols = cols; this.selection = null; this.dragFrom = null; } // its rows are other rows now
     if (this.wrapped[i]) return this.wrapped[i];
     let rows = wrapLine(this.history[i], Math.max(1, cols - 1));
     // a band now wider than the window: each of its rows starts in its colours and fills the rest of the row
@@ -582,6 +583,7 @@ export class Screen {
       const count = now - c.at < MULTI_CLICK_MS && Math.abs(c.x - x) <= 1 && c.y === y ? c.count + 1 : 1;
       this.lastClick = { at: now, x, y, count };
       this.inputDrag = null;
+      this.dragFrom = null;
       if (this.barRow !== null && y - 1 === this.barRow) { this.selection = null; this.scrollBy('bottom'); return null; }
       const cell = this.inputAt(x, y);
       if (cell) {
@@ -599,7 +601,10 @@ export class Screen {
         this.draw();
         return null;
       }
-      this.selection = { anchor: p, focus: { ...p }, moved: false };
+      // where a drag starts: the selection is made once the mouse moves, so that a click selects nothing (it showed
+      // a cell in reverse video while the button was down, and cleared the footer's message)
+      this.clearSelection();
+      this.dragFrom = p;
       this.dragging = true;
       return null;
     }
@@ -616,20 +621,23 @@ export class Screen {
       Object.assign(d, { x, y, moved: true });
       return cell && { input: { kind: 'drag', ...cell } };
     }
-    if (!this.dragging || !this.selection) return null;
+    if (!this.dragging || !this.dragFrom) return null;
     if (motion) {
       // past the top or the bottom of the conversation: it scrolls, and the selection goes on with it
       if (y <= 1) this.scrollBy(1);
       else if (y - 1 >= this.lastArea - 1 && this.scroll > 0) this.scrollBy(-1);
       const p = this.pointAt(x, y);
-      if (p) { this.selection.focus = p; this.selection.moved = true; }
+      if (p) {
+        if (this.selection) this.selection.focus = p;
+        else this.selection = { anchor: { ...this.dragFrom }, focus: p };
+      }
       this.draw();
       return null;
     }
     // released
     this.dragging = false;
-    if (!this.selection.moved) { this.clearSelection(); return null; } // a plain click
-    this.lastClick.count = 0; // a drag: the next click starts a count of its own
+    this.dragFrom = null;
+    if (this.selection) this.lastClick.count = 0; // a drag: the next click starts a count of its own
     return null;
   }
 
@@ -780,6 +788,10 @@ export class Screen {
       if (this.selection) {
         for (const p of [this.selection.anchor, this.selection.focus]) p.line -= drop;
         if (this.selection.anchor.line < 0 || this.selection.focus.line < 0) this.selection = null;
+      }
+      if (this.dragFrom) {
+        this.dragFrom.line -= drop;
+        if (this.dragFrom.line < 0) this.dragFrom = null;
       }
     }
     return lines;

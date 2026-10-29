@@ -17,6 +17,12 @@ function box(lines, width, color) {
   return out;
 }
 
+// The rows `lines` take inside box(), which wraps the long ones.
+function boxRows(lines, width) {
+  const inner = Math.max(20, width - 1) - 4;
+  return lines.reduce((n, l) => n + (stringWidth(l) > inner ? wordWrap(l, inner).length : 1), 0);
+}
+
 // A question answered with typed text: Enter submits, Esc cancels (shift/alt+Enter starts a new line when
 // `multiline`). On the remote page it is a text box ({input: {placeholder, value, multiline}}, see App.remoteDialog).
 export class TextDialog {
@@ -93,8 +99,8 @@ export class SelectDialog {
     if (this.other) {
       if (key.name === 'escape') { this.other = null; return true; }
       if (key.name === 'return' && !key.meta) {
-        const text = this.other.text.trim();
-        if (text) this.resolve(this.multi ? [...[...this.checked].map((i) => this.options[i].value), text] : text);
+        const text = this.other.expanded().trim(); // a long paste is a placeholder in the text
+        if (text) this.resolve(this.multi ? [...this.checkedValues(), text] : text);
         return true;
       }
       return this.other.handleKey(str, key);
@@ -124,12 +130,16 @@ export class SelectDialog {
       return true;
     }
     if (this.multi) {
-      const values = this.checked.size ? [...this.checked].sort().map((i) => this.options[i].value) : [opt.value];
-      this.resolve(values);
+      this.resolve(this.checked.size ? this.checkedValues() : [opt.value]);
     } else {
       this.resolve(opt.value);
     }
     return true;
+  }
+
+  // The checked options' values, in the order they are shown (a plain sort() put option 10 before option 2).
+  checkedValues() {
+    return [...this.checked].sort((a, b) => a - b).map((i) => this.options[i].value);
   }
 
   render(width, maxHeight = 40) {
@@ -141,7 +151,7 @@ export class SelectDialog {
     const inner = Math.max(20, width - 1) - 4;
     // Show a window of options around the selection when they don't all fit.
     const perOption = this.options.some((o) => o.description) ? 2 : 1;
-    const room = Math.max(3, Math.floor((maxHeight - lines.length - 4 - (this.other ? 5 : 0)) / perOption));
+    const room = Math.max(3, Math.floor((maxHeight - boxRows(lines, width) - 4 - (this.other ? 5 : 0)) / perOption));
     let first = 0;
     if (this.options.length > room) first = Math.min(Math.max(0, this.selected - Math.floor(room / 2)), this.options.length - room);
     const last = Math.min(this.options.length, first + room);
@@ -159,7 +169,7 @@ export class SelectDialog {
     if (this.other) {
       lines.push('');
       const r = this.other.render(width - 4, { placeholder: 'Type your answer, Enter to submit, Esc to go back' });
-      const top = lines.length + 1; // +1 for the box's top border
+      const top = boxRows(lines, width) + 1; // the rows above it once box() has wrapped the long ones, and its top border
       lines.push(...r.lines.map((l) => truncate(l, inner)));
       if (r.cursor) cursor = { row: top + r.cursor.row, col: 2 + r.cursor.col };
     }

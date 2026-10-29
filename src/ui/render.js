@@ -45,7 +45,7 @@ function numberWidth(hunks) {
 
 export function renderDiff(preview, width, maxLines = 40) {
   const out = [];
-  const w = Math.max(20, width - RESULT_INDENT.length - 1);
+  const w = Math.max(20, width - 1); // `width` is what is left beside the result's indentation already
   if (preview.kind === 'create') {
     const nw = String(preview.lines.length).length;
     preview.lines.slice(0, maxLines).forEach((line, i) => {
