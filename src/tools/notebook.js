@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 import { resolvePath, displayPath } from '../utils/paths.js';
-import { checkFreshness, mtime } from './files.js';
+import { checkFreshness, mtime, hashOf } from './files.js';
 
 // Jupyter stores cell source as an array of lines, each keeping its trailing newline.
 function toSource(text) {
@@ -52,7 +52,12 @@ export const NotebookEditTool = {
     if (err) return { isError: true, content: err };
     const file = resolvePath(input.notebook_path, ctx.cwd);
     let nb;
-    try { nb = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return { isError: true, content: `Could not parse notebook: ${e.message}` }; }
+    let bom = false; // a BOM in front made the notebook unreadable here; it is kept when the notebook is written
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      bom = text.startsWith('\uFEFF');
+      nb = JSON.parse(bom ? text.slice(1) : text);
+    } catch (e) { return { isError: true, content: `Could not parse notebook: ${e.message}` }; }
     nb.cells ||= [];
     const mode = input.edit_mode || 'replace';
     let summary;
@@ -84,8 +89,10 @@ export const NotebookEditTool = {
         summary = `Updated cell ${input.cell_id}`;
       }
     }
-    fs.writeFileSync(file, JSON.stringify(nb, null, 1) + '\n', 'utf8');
-    ctx.fileState.set(file, { mtimeMs: mtime(file) });
+    const out = Buffer.from(`${bom ? '\uFEFF' : ''}${JSON.stringify(nb, null, 1)}\n`, 'utf8');
+    fs.writeFileSync(file, out);
+    // with its hash, as after a Read: a later change of its time alone (a sync, a scan) is not taken for an edit
+    ctx.fileState.set(file, { mtimeMs: mtime(file), hash: hashOf(out) });
     return { content: summary, display: { summary } };
   },
 };

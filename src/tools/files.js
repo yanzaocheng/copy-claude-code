@@ -156,7 +156,7 @@ Usage:
     if (ext === '.ipynb') {
       try {
         const raw = fs.readFileSync(file);
-        const nb = JSON.parse(raw.toString('utf8'));
+        const nb = JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, ''));
         const rendered = renderNotebook(nb);
         if (rendered.length > MAX_OUTPUT_CHARS || tooManyTokens(rendered)) {
           return { isError: true, content: `Notebook content (${Math.round(rendered.length / 1024)}KB, about ${tokensOf(rendered).toLocaleString('en-US')} tokens) exceeds the maximum allowed size. Look at parts of it with the Bash tool (python or jq on its JSON), or use Grep to search it.` };
@@ -228,7 +228,7 @@ Usage:
   },
 };
 
-const hashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
+export const hashOf = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
 
 const STREAM_READ_BYTES = 8 * 1024 * 1024;
 

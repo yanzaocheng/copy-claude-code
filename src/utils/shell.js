@@ -7,6 +7,9 @@ import { OutputDecoder } from './encoding.js';
 const isWin = process.platform === 'win32';
 let shellCache;
 
+// The shell findShell found, or undefined before it was looked for.
+export const knownShell = () => shellCache;
+
 // Locate the shell used by the Bash tool. On Windows we need Git Bash, like Claude Code.
 export function findShell(config) {
   if (shellCache) return shellCache;
