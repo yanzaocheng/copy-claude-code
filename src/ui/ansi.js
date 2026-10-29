@@ -146,8 +146,47 @@ function tokenize(s) {
   return tokens;
 }
 
+// The SGR state (colours and attributes) after `params` (what is between ESC[ and m), from `s`.
+function sgrApply(s, params) {
+  const p = params === '' ? [0] : params.split(';').map(Number);
+  for (let i = 0; i < p.length; i++) {
+    const n = p[i];
+    if (n === 0) s = {};
+    else if (n === 1) s.bold = 1; else if (n === 2) s.dim = 2; else if (n === 22) { delete s.bold; delete s.dim; }
+    else if (n === 3) s.italic = 3; else if (n === 23) delete s.italic;
+    else if (n === 4) s.underline = 4; else if (n === 24) delete s.underline;
+    else if (n === 7) s.inverse = 7; else if (n === 27) delete s.inverse;
+    else if (n === 9) s.strike = 9; else if (n === 29) delete s.strike;
+    else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) s.fg = n; else if (n === 39) delete s.fg;
+    else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) s.bg = n; else if (n === 49) delete s.bg;
+    else if (n === 38 || n === 48) {
+      const key = n === 38 ? 'fg' : 'bg';
+      if (p[i + 1] === 5) { s[key] = `${n};5;${p[i + 2]}`; i += 2; }
+      else if (p[i + 1] === 2) { s[key] = `${n};2;${p[i + 2]};${p[i + 3]};${p[i + 4]}`; i += 4; }
+    }
+  }
+  return s;
+}
+
+// The rows a line was wrapped onto, each one after the first starting in the colours the row before it ended in: the
+// screen resets them at the end of every row, so a bold or coloured span that was wrapped lost them on its next rows.
+function carryStyles(rows) {
+  let s = {};
+  return rows.map((row, i) => {
+    const codes = Object.values(s);
+    const out = i && codes.length ? `\x1b[${codes.join(';')}m${row}` : row;
+    for (const m of row.matchAll(/\x1b\[([0-9;]*)m/g)) s = sgrApply(s, m[1]);
+    return out;
+  });
+}
+
 // Hard-wrap a (possibly ANSI colored) single line to the given width. Returns array of lines.
 export function wrapLine(line, width) {
+  const rows = hardWrap(line, width);
+  return rows.length > 1 ? carryStyles(rows) : rows;
+}
+
+function hardWrap(line, width) {
   width = Math.max(1, width);
   if (stringWidth(line) <= width) return [line];
   const lines = [];
@@ -168,28 +207,73 @@ export function wrapLine(line, width) {
   return lines;
 }
 
-// Word-aware wrap for prose; falls back to hard wrap for long words.
+// A run of text with CJK in it: such text has no spaces between its words (see wordWrap).
+const CJK = /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/;
+// What does not start a row (closing punctuation) and what does not end one (opening brackets), as CJK typesetting
+// has it.
+const NO_ROW_START = /^[，。、；：？！）」』】》〉’”…,.;:?!)\]}]$/;
+const NO_ROW_END = /^[（「『【《〈‘“([{]$/;
+
+// `word` cut where its first `room` columns end, or before: [head, rest], head '' when no place fits. It is cut only
+// next to a wide character, never inside a run of narrow ones (an English word, a number, a path) nor before
+// closing punctuation; colour codes in front of a character stay with it.
+function cutNearWide(word, room) {
+  let at = 0, w = 0, cut = 0, prevEnd = 0, prevWide = false, prev = null;
+  for (const tok of tokenize(word)) {
+    if (tok.ansi) { at += tok.t.length; continue; }
+    const tw = tok.t === '\t' ? 4 : tok.w;
+    const wide = tw > 1;
+    if (prev !== null && (wide || prevWide) && !NO_ROW_START.test(tok.t) && !NO_ROW_END.test(prev)) cut = prevEnd;
+    if (w + tw > room) break;
+    w += tw;
+    at += tok.t.length;
+    prevEnd = at;
+    prevWide = wide;
+    prev = tok.t;
+  }
+  return cut ? [word.slice(0, cut), word.slice(cut)] : ['', word];
+}
+
+// Word-aware wrap for prose; falls back to hard wrap for long words. A run with CJK in it that does not fit goes on
+// in the rest of the row (see cutNearWide): moved to a row of its own, as an English word is, it left a short ragged
+// row before every such run ("先用 Node 24 " alone, the Chinese after it on the next rows).
 export function wordWrap(line, width) {
   width = Math.max(1, width);
   if (stringWidth(line) <= width) return [line];
   const words = line.split(/(\s+)/);
   const lines = [];
   let cur = '', curW = 0;
-  for (const word of words) {
+  const flush = () => { lines.push(cur); cur = ''; curW = 0; };
+  for (let word of words) {
     if (!word) continue;
-    const w = stringWidth(word);
+    let w = stringWidth(word);
     if (curW + w <= width) { cur += word; curW += w; continue; }
-    if (/^\s+$/.test(word)) { lines.push(cur); cur = ''; curW = 0; continue; }
+    if (/^\s+$/.test(word)) { flush(); continue; }
+    if (CJK.test(word)) {
+      while (curW + w > width) {
+        const [head, rest] = cutNearWide(word, width - curW);
+        if (head) { cur += head; flush(); word = rest; w = stringWidth(word); continue; }
+        if (curW > 0) { flush(); continue; }
+        // no place to cut on a whole row either (a long run of narrow characters): anywhere
+        const parts = hardWrap(word, width);
+        lines.push(...parts.slice(0, -1));
+        word = parts[parts.length - 1];
+        w = stringWidth(word);
+      }
+      cur += word;
+      curW += w;
+      continue;
+    }
     if (curW > 0) { lines.push(cur); cur = ''; curW = 0; }
     if (w > width) {
-      const parts = wrapLine(word, width);
+      const parts = hardWrap(word, width);
       lines.push(...parts.slice(0, -1));
       cur = parts[parts.length - 1];
       curW = stringWidth(cur);
     } else { cur = word; curW = w; }
   }
   lines.push(cur);
-  return lines;
+  return lines.length > 1 ? carryStyles(lines) : lines;
 }
 
 // Cut a (possibly ANSI colored) string to `width` columns, ending in `ellipsis` when it was longer. It reads only as
