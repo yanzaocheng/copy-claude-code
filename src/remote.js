@@ -290,7 +290,15 @@ export class RemoteControl {
     while (!this.closed) {
       const began = Date.now();
       try {
-        if (!this.registered) await this.register();
+        if (!this.registered) {
+          await this.register();
+          // closed while it registered (/logout, another account): the session that ended must not go online again,
+          // and the registration that just went through gets the bye that close() could not send yet
+          if (this.closed) {
+            this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'bye', restarting: false }] }, { timeout: 1500 }).catch(() => {});
+            break;
+          }
+        }
         await this.listen();
       } catch (e) {
         if (e.status === 404) this.registered = false; // the gateway forgot the session (restarted): register again
@@ -327,6 +335,7 @@ export class RemoteControl {
   }
 
   async listen() {
+    if (this.closed) return;
     const abort = new AbortController();
     this.streamAbort = abort;
     const res = await this.fetch(`${this.base}/v1/remote/sessions/${encodeURIComponent(this.id)}/commands`, {
@@ -369,6 +378,7 @@ export class RemoteControl {
   }
 
   command(cmd) {
+    if (this.closed) return; // the page of a session that has gone offline steers nothing
     if (cmd.type === 'viewers') {
       const was = this.viewers;
       this.viewers = Math.max(0, Number(cmd.count) || 0);
@@ -451,8 +461,14 @@ export class RemoteControl {
     ev.seq = ++this.seq;
     applyEvent(this.state, ev);
     if (this.state.items.length > MAX_ITEMS) this.state.items.splice(0, this.state.items.length - MAX_ITEMS + 100);
+    if (ev.t === 'done') this.progress.delete(ev.id); // also while offline, when nothing takes it: it holds all the tool's output
     if (this.viewing && !this.needSnapshot) {
-      this.events.push(ev);
+      // A streamed reply's deltas in a row go out as one: one event each made a full snapshot (up to 1.5 MB) due every
+      // few seconds of a long reply, since SNAPSHOT_EVERY counts events. The page takes the newest seq of the merged
+      // ones; it only skips events at or below the seq it has.
+      const last = this.events[this.events.length - 1];
+      if (ev.t === 'delta' && last?.t === 'delta' && last.kind === ev.kind) { last.text += ev.text; last.seq = ev.seq; }
+      else this.events.push(ev);
       this.scheduleFlush();
     }
   }

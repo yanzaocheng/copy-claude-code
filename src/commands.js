@@ -463,12 +463,17 @@ export function buildCommands(app) {
   };
   const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
   let pendingLogin = null;
-  // Logged in to the gateway: this session goes online there at once for read-only viewing and peer messaging.
+  // Logged in to the gateway: this session goes online there at once, for its web page and peer messaging. The page
+  // can steer the session too (send messages, `!` commands, /cd...) unless CLAUDE_PRO_REMOTE_COMMANDS=0: said as it
+  // is, since this message called the page read-only.
   const goOnline = async () => {
     const remote = await app.syncRemote();
     if (!remote) return;
+    const page = remote.commands?.length
+      ? 'its web page shows it and can send it messages and commands (CLAUDE_PRO_REMOTE_COMMANDS=0 makes the page read-only)'
+      : 'the read-only web page shows it';
     out(remote.registered
-      ? `${c.green('⇄')} This session is online at the gateway: the read-only web page shows it.`
+      ? `${c.green('⇄')} This session is online at the gateway: ${page}.`
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
   };
 
@@ -566,8 +571,8 @@ export function buildCommands(app) {
     },
   });
 
-  // /status about the gateway: whether this session is publishing a read-only view there and its
-  // name for sessions on the other computers.
+  // /status about the gateway: whether this session is online there (its web page) and its name for sessions on the
+  // other computers.
   function remoteLines(row) {
     const cfg = app.runtime.config;
     const remote = app.remoteState();
