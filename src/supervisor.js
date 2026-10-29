@@ -68,7 +68,16 @@ export function supervise(argv, { entry, env = process.env, execPath = process.e
     const handlers = {
       SIGINT: () => { /* the terminal sends it to the child too, which decides what it means */ },
       SIGTERM: () => stop('SIGTERM'),
-      SIGHUP: () => stop('SIGHUP'),
+      // The terminal closed. The child hears it too (the console's close event on Windows, the hangup of its process
+      // group elsewhere) and ends cleanly: background shells, MCP servers, its entry at the gateway. On Windows
+      // kill() is TerminateProcess whatever the signal, which cut that short and left the shells' processes running:
+      // there the child is only killed if it is still running a while later (Windows ends everything about 10 s
+      // after the close anyway). Elsewhere the signal is passed on, a real one.
+      SIGHUP: () => {
+        stopping = true;
+        if (process.platform !== 'win32') stop('SIGHUP');
+        setTimeout(() => stop('SIGKILL'), 5000).unref();
+      },
     };
     for (const [signal, fn] of Object.entries(handlers)) { try { process.on(signal, fn); } catch { /* not on this platform */ } }
 
