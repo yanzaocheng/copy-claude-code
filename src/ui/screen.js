@@ -61,6 +61,15 @@ const MULTI_CLICK_MS = 450;
 const FIND_MATCH = '\x1b[30;43m';
 const FIND_CURRENT = '\x1b[30;48;5;208m';
 const FIND_MAX = 10_000;
+
+// The text of a line's wrapped rows without colours, all of it and where each row starts in it (see scanFind). It is
+// what paintRow walks through, so offsets in it are the offsets it counts.
+function plainRows(rows) {
+  const plains = rows.map((r) => stripAnsi(r));
+  const starts = [];
+  for (let k = 0, at = 0; k < plains.length; at += plains[k].length, k++) starts.push(at);
+  return { text: plains.join(''), starts };
+}
 // A line that starts a part of the conversation: a tool call or a reply ("⏺ …"), a message of the user ("> …"), a
 // command of bash mode ("! …"), a message of another session ("✉ …"). What a quote is from (see selectionQuote).
 const HEADING = /^(?:⏺|>|!|✉) /;
@@ -330,19 +339,21 @@ export class Screen {
     if (!sel && !hits) return e.text;
     const fill = e.text.includes(FILL);
     const base = fill ? LEAD.exec(e.text)?.[0] || '' : '';
-    const style = (col) => {
+    const style = (col, off) => {
       if (sel && col >= sel[0] && col < sel[1]) return '\x1b[7m';
-      const hit = hits?.find((h) => col >= h.from && col < h.to);
+      const hit = hits?.find((h) => off >= h.from && off < h.to); // a match's place in the row's text (see scanFind)
       return !hit ? base : hit.match === this.finding.matches[this.finding.index] ? FIND_CURRENT : FIND_MATCH;
     };
     let out = '';
     let open = '';
     let col = 0;
+    let off = 0;
     for (const g of graphemes(stripAnsi(e.text))) {
-      const s = style(col);
+      const s = style(col, off);
       if (s !== open) { out += '\x1b[0m' + s; open = s; }
       out += g;
       col += graphemeWidth(g);
+      off += g.length;
     }
     if (fill) return out + '\x1b[0m' + base + FILL;
     return out + (open ? '\x1b[0m' : '');
@@ -434,7 +445,9 @@ export class Screen {
   }
 
   // The matches of f.query in history lines [from, to), newest first, entered in f.byRow; `rows`: the rows those
-  // lines take (fromEnd counts from the end of line to - 1).
+  // lines take (fromEnd counts from the end of line to - 1). A match's place on a row is kept as offsets in the row's
+  // text, which paintRow counts as it draws: columns (stringWidth for every match) took most of the time of a key
+  // typed in the search, 130 ms over 20,000 lines. The rows' text without colours is kept with them (plainRows).
   scanFind(f, from, to, cols) {
     const re = new RegExp(f.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
     const matches = [];
@@ -442,26 +455,25 @@ export class Screen {
     for (let line = to - 1; line >= from; line--) {
       const rows = this.wrappedAt(line, cols);
       if (matches.length < FIND_MAX) {
-        const plains = rows.map((r) => stripAnsi(r));
-        const text = plains.join('');
-        const starts = [];
-        for (let k = 0, at = 0; k < plains.length; at += plains[k].length, k++) starts.push(at);
-        // offset -> {sub, col}: the row it falls on, and the column there (`end`: an end offset belongs to the row before)
-        const place = (offset, end = false) => {
-          let sub = plains.length - 1;
+        rows.plain ??= plainRows(rows);
+        const { text, starts } = rows.plain;
+        // offset -> the row it falls on (`end`: an end offset belongs to the row before)
+        const rowOf = (offset, end = false) => {
+          let sub = starts.length - 1;
           while (sub > 0 && (end ? starts[sub] >= offset : starts[sub] > offset)) sub--;
-          return { sub, col: stringWidth(plains[sub].slice(0, offset - starts[sub])) };
+          return sub;
         };
         const found = [];
         for (const m of text.matchAll(re)) {
           if (!m[0]) continue;
-          const a = place(m.index);
-          const b = place(m.index + m[0].length, true);
-          const match = { abs: this.dropped + line, offset: m.index, line, sub: a.sub, col: a.col, fromEnd: rowsAfter + rows.length - 1 - a.sub };
-          for (let sub = a.sub; sub <= b.sub; sub++) {
+          const end = m.index + m[0].length;
+          const a = rowOf(m.index);
+          const b = rowOf(end, true);
+          const match = { abs: this.dropped + line, offset: m.index, line, sub: a, fromEnd: rowsAfter + rows.length - 1 - a };
+          for (let sub = a; sub <= b; sub++) {
             const k = `${line}:${sub}`;
             if (!f.byRow.has(k)) f.byRow.set(k, []);
-            f.byRow.get(k).push({ from: sub === a.sub ? a.col : 0, to: sub === b.sub ? b.col : Infinity, match });
+            f.byRow.get(k).push({ from: sub === a ? m.index - starts[sub] : 0, to: sub === b ? end - starts[sub] : Infinity, match });
           }
           found.push(match);
         }
