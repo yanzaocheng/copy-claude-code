@@ -294,6 +294,23 @@ export class Editor {
     return true;
   }
 
+  // What the draft is made of besides its text, for the next process of a restart: the pasted text, images and
+  // quotes its placeholders stand for (those still in it), and the numbers the next ones get. Without them the draft
+  // came back as bare placeholders, and "[Pasted text #1 +40 lines]" was what the model got.
+  draftParts() {
+    const inText = (m) => [...m].filter(([label]) => this.text.includes(label));
+    return { pastes: inText(this.pastes), images: inText(this.images), quotes: inText(this.quotes), pasteCounter: this.pasteCounter, imageCounter: this.imageCounter, quoteCounter: this.quoteCounter };
+  }
+
+  restoreDraft(text, cursor, parts) {
+    const pairs = (v) => (Array.isArray(v) ? v.filter((p) => Array.isArray(p) && typeof p[0] === 'string' && p[1] != null) : []);
+    this.pastes = new Map(pairs(parts?.pastes));
+    this.images = new Map(pairs(parts?.images));
+    this.quotes = new Map(pairs(parts?.quotes));
+    for (const key of ['pasteCounter', 'imageCounter', 'quoteCounter']) if (Number.isFinite(parts?.[key])) this[key] = parts[key];
+    this.set(text, cursor);
+  }
+
   restoreCleared() {
     const d = this.cleared;
     if (!d || this.text || this.historyIndex !== null) return false;

@@ -1010,7 +1010,9 @@ export class App {
       draft: this.editor.text,
       screenHistory: this.screen.history.slice(-3000),
       draftCursor: this.editor.cursor,
-      queue: this.queue.map((q) => ({ text: q.text, images: q.images || [] })),
+      draftParts: this.editor.draftParts(),
+      // `peer`: a task of another session, which gets the answer of the turn that handles it
+      queue: this.queue.map((q) => ({ text: q.text, images: q.images || [], display: q.display ?? null, peer: q.peer || null })),
       checkpoints: this.runtime.checkpoints.snapshot(),
       // a /cd is the user's: it does not count towards the restarts that look like a loop
       restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), ...(request.cwd ? [] : [now])],
@@ -1056,7 +1058,7 @@ export class App {
       if (Array.isArray(state.todos)) this.agent.todos = state.todos;
       if (state.checkpoints) this.runtime.checkpoints.adopt(state.checkpoints);
     }
-    if (typeof state.draft === 'string' && state.draft) this.editor.set(state.draft, state.draftCursor);
+    if (typeof state.draft === 'string' && state.draft) this.editor.restoreDraft(state.draft, state.draftCursor, state.draftParts);
     // Fullscreen starts on an empty screen: without what the process before showed (an older version, or one
     // that ran classic), the conversation is drawn again from the session.
     if (this.screen.full && resumable && !Array.isArray(state.screenHistory)) this.printTranscript(this.agent.messages.slice(-80));
@@ -1075,7 +1077,14 @@ export class App {
     const queued = (Array.isArray(state.queue) ? state.queue : []).filter((q) => q && typeof q.text === 'string' && q.text.trim());
     if (!state.continueWith && !queued.length) return;
     const typed = queued.map((q) => q.text).join('\n\n');
-    this.startTurn([state.continueWith, typed].filter(Boolean).join('\n\n'), { echo: queued.length > 0, display: typed, topic: typed, images: queued.flatMap((q) => q.images || []) });
+    const shown = queued.map((q) => (typeof q.display === 'string' ? q.display : q.text)).join('\n\n');
+    this.startTurn([state.continueWith, typed].filter(Boolean).join('\n\n'), {
+      echo: queued.length > 0,
+      display: shown,
+      topic: shown,
+      images: queued.flatMap((q) => (Array.isArray(q.images) ? q.images : [])),
+      peers: queued.map((q) => q.peer).filter((p) => p && typeof p === 'object' && p.from),
+    });
   }
 
   // Follow the program's own source: once a turn is over (or at once when idle) a change to it is loaded by
