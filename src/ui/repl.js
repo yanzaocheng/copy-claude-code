@@ -95,17 +95,49 @@ const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '
 const VERBS = ['Thinking', 'Pondering', 'Crafting', 'Brewing', 'Computing', 'Conjuring', 'Cooking', 'Musing', 'Noodling', 'Percolating', 'Ruminating', 'Synthesizing', 'Working', 'Tinkering', 'Mulling', 'Deliberating', 'Churning', 'Forging', 'Hatching', 'Simmering'];
 const HISTORY_FILE = path.join(CONFIG_DIR, 'history.jsonl');
 
+const HISTORY_KEEP = 500; // entries a project's history loads (and keeps, see loadHistory)
+const HISTORY_PRUNE_CHARS = 5_000_000;
+const HISTORY_PASTE_CHARS = 100_000; // pasted text kept with an entry in the file, at most (images are not kept)
+
+// The input history of the project, oldest first: the text, or {text, parts} with the pasted text and quotes its
+// placeholders stand for (see Editor.submit). A file past HISTORY_PRUNE_CHARS is written again with the last
+// HISTORY_KEEP entries of each project: it grew for good (every message of every project), read whole at each start.
 function loadHistory(cwd) {
-  try {
-    return fs.readFileSync(HISTORY_FILE, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
-      .filter((e) => e && e.project === cwd).map((e) => e.display).slice(-500);
-  } catch { return []; }
+  let text;
+  try { text = fs.readFileSync(HISTORY_FILE, 'utf8'); } catch { return []; }
+  const entries = text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((e) => e && typeof e.display === 'string');
+  if (text.length > HISTORY_PRUNE_CHARS) pruneHistory(entries);
+  return entries.filter((e) => e.project === cwd).slice(-HISTORY_KEEP).map((e) => (Array.isArray(e.pastes) && e.pastes.length
+    ? { text: e.display, parts: { pastes: e.pastes, quotes: Array.isArray(e.quotes) ? e.quotes : [] } }
+    : e.display));
 }
 
-function appendHistory(cwd, text) {
+function pruneHistory(entries) {
+  const count = new Map();
+  const keep = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const n = count.get(entries[i].project) || 0;
+    if (n >= HISTORY_KEEP) continue;
+    count.set(entries[i].project, n + 1);
+    keep.push(entries[i]);
+  }
+  try { // whole or not at all; an entry another window adds meanwhile may be lost, which costs an up-arrow
+    const tmp = `${HISTORY_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, keep.reverse().map((e) => JSON.stringify(e)).join('\n') + '\n');
+    fs.renameSync(tmp, HISTORY_FILE);
+  } catch { /* pruned another time */ }
+}
+
+function appendHistory(cwd, text, parts = null) {
+  const entry = { display: text, project: cwd, timestamp: Date.now() };
+  const pastes = (parts?.pastes || []).filter(([label]) => text.includes(label));
+  if (pastes.length && pastes.reduce((n, [, content]) => n + String(content).length, 0) <= HISTORY_PASTE_CHARS) {
+    entry.pastes = pastes;
+    if (parts.quotes?.length) entry.quotes = parts.quotes;
+  }
   try {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.appendFileSync(HISTORY_FILE, JSON.stringify({ display: text, project: cwd, timestamp: Date.now() }) + '\n');
+    fs.appendFileSync(HISTORY_FILE, JSON.stringify(entry) + '\n');
   } catch { /* ignore */ }
 }
 
@@ -245,7 +277,7 @@ export class App {
     };
     this.editor = new Editor({
       history: loadHistory(cwd),
-      onSubmit: (value, raw, images, display) => { try { this.onSubmit(value, raw, images, display); } catch (e) { this.logError(e); } },
+      onSubmit: (value, raw, images, display, parts) => { try { this.onSubmit(value, raw, images, display, parts); } catch (e) { this.logError(e); } },
       onDoubleEscape: () => this.openRewind(),
       imageFromPath: (p) => {
         const r = imageFromFile(resolvePath(p, this.cwd));
@@ -1533,11 +1565,11 @@ export class App {
   }
 
   // `display`: how the message shows in the transcript when that is not `value` (a quote shows its first lines).
-  onSubmit(value, raw, images = [], display = undefined) {
+  onSubmit(value, raw, images = [], display = undefined, parts = null) {
     const text = value.trim();
     if (!text) { this.screen.schedule(); return; }
     if (this.screen.scrolledUp) this.screen.scrollBy('bottom'); // what was sent, and what comes of it, is in view
-    appendHistory(this.cwd, raw);
+    appendHistory(this.cwd, raw, parts);
     if (this.sendTypedToPeer(text)) return;
     if (this.isTurnRunning()) {
       if (text.startsWith('/')) { this.notice('Wait for the current task to finish (or press Esc) before running commands.', 'warn'); return; }

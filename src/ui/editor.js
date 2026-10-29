@@ -102,6 +102,9 @@ export function layoutRows(body, textW) {
   return rows;
 }
 
+// A history entry's text: an entry is the text, or {text, parts} when it had placeholders (see Editor.submit).
+export const historyText = (entry) => (typeof entry === 'string' ? entry : entry?.text);
+
 function wordRight(text, i) {
   let j = i;
   while (j < text.length && /\s/.test(text[j])) j++;
@@ -421,9 +424,13 @@ export class Editor {
     const display = [...this.quotes.keys()].some((label) => raw.includes(label)) ? this.displayed() : undefined;
     // Only images whose placeholder is still in the text are sent.
     const images = [...this.images].filter(([label]) => raw.includes(label)).map(([, img]) => img);
-    if (raw.trim() && this.history[this.history.length - 1] !== raw) this.history.push(raw);
+    // The history keeps what the placeholders stand for: up brought back "[Pasted text #1 +20 lines]" alone, and
+    // sending it again sent those words.
+    const parts = this.draftParts();
+    const entry = parts.pastes.length || parts.images.length || parts.quotes.length ? { text: raw, parts } : raw;
+    if (raw.trim() && historyText(this.history[this.history.length - 1]) !== raw) this.history.push(entry);
     this.clear();
-    this.onSubmit?.(value, raw, images, display);
+    this.onSubmit?.(value, raw, images, display, typeof entry === 'string' ? null : parts);
   }
 
   // Returns true when the key was consumed.
@@ -546,13 +553,15 @@ export class Editor {
     return false;
   }
 
+  // Up and down through the history. The draft is kept with what its placeholders stand for, since an entry brings
+  // its own (see submit), and comes back whole after the newest entry.
   historyPrev() {
     this.goalCol = null;
     if (!this.history.length) return true;
-    if (this.historyIndex === null) { this.draft = this.text; this.historyIndex = this.history.length; }
+    if (this.historyIndex === null) { this.draft = { text: this.text, cursor: this.cursor, parts: this.draftParts() }; this.historyIndex = this.history.length; }
     if (this.historyIndex > 0) {
       this.historyIndex--;
-      this.set(this.history[this.historyIndex]);
+      this.recall(this.history[this.historyIndex]);
     }
     return true;
   }
@@ -563,11 +572,16 @@ export class Editor {
     this.historyIndex++;
     if (this.historyIndex >= this.history.length) {
       this.historyIndex = null;
-      this.set(this.draft);
+      this.restoreDraft(this.draft.text, this.draft.cursor, this.draft.parts);
     } else {
-      this.set(this.history[this.historyIndex]);
+      this.recall(this.history[this.historyIndex]);
     }
     return true;
+  }
+
+  recall(entry) {
+    if (typeof entry === 'string') this.restoreDraft(entry, entry.length, null);
+    else this.restoreDraft(entry.text, entry.text.length, entry.parts);
   }
 
   // Render as a rounded box. Returns {lines, cursor:{row,col}}.
