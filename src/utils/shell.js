@@ -63,7 +63,18 @@ export function parsePsRows(text) {
 // member of its process group (a child whose parent already exited is no longer linked to it).
 export function msysTree(rows, rootPid) {
   const root = rows.find((r) => r.pid === rootPid);
-  if (!root) return [];
+  if (!root) {
+    // The shell has ended. What it left running in the background stays in its process group, which it led, and has
+    // no parent any more (PPID 1): those, and what they started. A group that only has the same number by now is
+    // not taken: its leader has a parent.
+    const group = rows.filter((r) => r.pgid === rootPid);
+    const take = new Set(group.filter((r) => r.ppid === 1).map((r) => r.pid));
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const r of group) if (!take.has(r.pid) && take.has(r.ppid)) { take.add(r.pid); grew = true; }
+    }
+    return group.filter((r) => take.has(r.pid)).map((r) => r.winpid);
+  }
   const children = new Map();
   for (const r of rows) {
     if (!children.has(r.ppid)) children.set(r.ppid, []);
@@ -135,11 +146,17 @@ function runAsync(cmd, args, { timeout = 5000 } = {}) {
 // Kill a process and all its children, without blocking the event loop (`ps -W` and taskkill take up to seconds,
 // and Ctrl+C, a timeout or KillShell used to freeze the interface for that long). Resolves when done; never
 // rejects. The tree has to be looked up before anything is killed: once its parents are gone the links are too.
-export async function killTree(child) {
-  if (!child || child.exitCode !== null || child.killed) return;
+// `orphans`: also when the process itself has ended, for what it left running (a background shell whose `server &`
+// still holds its output open): only the processes found through it then, never its own pid, which may be another
+// process's by now. Only for callers that know something of it still runs (a background shell not closed yet).
+export async function killTree(child, { orphans = false } = {}) {
+  if (!child || child.killed) return;
+  const ended = child.exitCode !== null || child.signalCode !== null;
+  if (ended && !orphans) return;
   try {
     if (isWin) {
-      const pids = new Set([child.pid, ...(child.claudeProPidFile ? await msysDescendants(child, { sync: false }) : [])]);
+      const pids = new Set([...(ended ? [] : [child.pid]), ...(child.claudeProPidFile ? await msysDescendants(child, { sync: false }) : [])]);
+      if (!pids.size) return;
       const args = ['/F', '/T'];
       for (const pid of pids) args.push('/PID', String(pid));
       await runAsync('taskkill', args);
@@ -148,16 +165,19 @@ export async function killTree(child) {
       process.kill(-child.pid, 'SIGKILL');
     }
   } catch {
-    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    if (!ended) { try { child.kill('SIGKILL'); } catch { /* ignore */ } }
   }
 }
 
 // The same, done before it returns: for the exit, after which nothing would be left to finish the kill.
-export function killTreeSync(child) {
-  if (!child || child.exitCode !== null || child.killed) return;
+export function killTreeSync(child, { orphans = false } = {}) {
+  if (!child || child.killed) return;
+  const ended = child.exitCode !== null || child.signalCode !== null;
+  if (ended && !orphans) return;
   try {
     if (isWin) {
-      const pids = new Set([child.pid, ...(child.claudeProPidFile ? msysDescendants(child, { sync: true }) : [])]);
+      const pids = new Set([...(ended ? [] : [child.pid]), ...(child.claudeProPidFile ? msysDescendants(child, { sync: true }) : [])]);
+      if (!pids.size) return;
       const args = ['/F', '/T'];
       for (const pid of pids) args.push('/PID', String(pid));
       spawnSync('taskkill', args, { windowsHide: true, stdio: 'ignore' });
@@ -166,7 +186,7 @@ export function killTreeSync(child) {
       process.kill(-child.pid, 'SIGKILL');
     }
   } catch {
-    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    if (!ended) { try { child.kill('SIGKILL'); } catch { /* ignore */ } }
   }
 }
 

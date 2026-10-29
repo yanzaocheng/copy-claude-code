@@ -47,7 +47,8 @@ export function appendOutput(bg, text, max = 5_000_000, keep = 2_000_000) {
 export { childEnv };
 
 export function shutdownBackgroundShells() {
-  for (const bg of background.values()) if (bg.status === 'running') killTreeSync(bg.child); // the program is exiting
+  // the program is exiting; `orphans`: a shell that has ended but is still "running" left something holding its output
+  for (const bg of background.values()) if (bg.status === 'running') killTreeSync(bg.child, { orphans: true });
 }
 
 export function listBackgroundShells() {
@@ -228,7 +229,7 @@ export const KillShellTool = {
     if (!bg) return { isError: true, content: `No background shell with id ${input.shell_id}` };
     if (bg.status !== 'running') return { content: `Shell ${input.shell_id} is not running (status: ${bg.status})` };
     bg.status = 'killed';
-    await killTree(bg.child);
+    await killTree(bg.child, { orphans: true }); // still running: the shell, or what it left running after it ended
     return { content: `Successfully killed shell: ${input.shell_id} (${bg.command})` };
   },
 };
