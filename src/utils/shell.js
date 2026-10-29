@@ -171,9 +171,20 @@ export function killTreeSync(child) {
 }
 
 // Run a quick command and return stdout (used for git info etc.). Never throws.
-export function run(cmd, args, { cwd, timeout = 5000 } = {}) {
+// The environment of what the program starts (Bash, REPL, hooks, MCP servers): non-interactive and colour free, and
+// without what makes a process a restartable session of this program (a hook that ran `claude-pro -p` was given the
+// Restart tool and the prompt about its own source).
+export function childEnv() {
+  const env = { ...process.env };
+  Object.assign(env, { GIT_EDITOR: 'true', GIT_PAGER: 'cat', PAGER: 'cat', NO_COLOR: '1', CLAUDE_PRO: '1' });
+  delete env.FORCE_COLOR;
+  for (const key of ['CLAUDE_PRO_SUPERVISED', 'CLAUDE_PRO_RESTART_FILE', 'CLAUDE_PRO_RESTARTED']) delete env[key];
+  return env;
+}
+
+export function run(cmd, args, { cwd, timeout = 5000, maxBuffer = 1024 * 1024 } = {}) {
   try {
-    const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout, maxBuffer, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     if (r.status !== 0) return null;
     return r.stdout.trim();
   } catch {

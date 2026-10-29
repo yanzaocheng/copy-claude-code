@@ -4,6 +4,7 @@
 import { createRuntime } from './runtime.js';
 import { closeBrowser } from './browser/session.js';
 import { shutdownInterpreters } from './tools/code.js';
+import { shutdownBackgroundShells } from './tools/bash.js';
 import { SessionStore } from './session.js';
 import { describePause, resumeText, shouldAnnounce } from './ratelimit.js';
 import { c } from './ui/ansi.js';
@@ -92,7 +93,7 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   } catch (e) {
     if (format === 'json') emit({ type: 'result', is_error: true, error: e.message });
     else err(c.red(`Error: ${e.message}`));
-    runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser(); shutdownInterpreters();
+    runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser(); shutdownInterpreters(); shutdownBackgroundShells();
     return 1;
   } finally {
     process.off('SIGINT', onSigint);
@@ -113,6 +114,8 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   } else {
     stdout.write(result.text + '\n');
   }
-  runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser(); shutdownInterpreters(); // an open connection or interpreter keeps the process alive
+  // an open connection, interpreter or background shell (a dev server started with run_in_background) keeps the
+  // process alive: -p never ended
+  runtime.tasks.killAll(); runtime.mcp.close(); closeBrowser(); shutdownInterpreters(); shutdownBackgroundShells();
   return result.interrupted ? 130 : 0;
 }

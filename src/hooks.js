@@ -8,7 +8,7 @@
 // let through, unless the hook says "onFailure": "block" (as in Claude Code): then they block like exit code 2.
 // <system-reminder> tags in a hook's output are escaped, so that it cannot pass itself off as the harness.
 
-import { spawnShell, killTree, findShell, watchShell } from './utils/shell.js';
+import { childEnv, spawnShell, killTree, findShell, watchShell } from './utils/shell.js';
 import { stripAnsi } from './ui/ansi.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -28,7 +28,7 @@ function runCommand(shell, command, { cwd, payload, timeout, signal }) {
       const json = JSON.stringify(payload);
       child = spawnShell(shell, command, {
         cwd,
-        env: { ...process.env, CLAUDE_PRO_HOOK_INPUT: json, CLAUDE_PROJECT_DIR: cwd, CLAUDE_PRO: '1' },
+        env: { ...childEnv(), CLAUDE_PRO_HOOK_INPUT: json, CLAUDE_PROJECT_DIR: cwd },
         stdin: json,
       });
     } catch (e) {

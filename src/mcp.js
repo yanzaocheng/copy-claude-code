@@ -5,7 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import { VERSION } from './config.js';
-import { killTreeSync } from './utils/shell.js';
+import { childEnv, killTreeSync } from './utils/shell.js';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const isWin = process.platform === 'win32';
@@ -32,7 +32,7 @@ class StdioTransport {
   }
 
   async connect() {
-    const env = { ...process.env };
+    const env = childEnv();
     for (const [k, v] of Object.entries(this.cfg.env || {})) env[k] = expandEnv(v);
     const command = expandEnv(this.cfg.command);
     const args = (this.cfg.args || []).map(expandEnv);

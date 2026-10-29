@@ -81,7 +81,7 @@ const SECRET_KEYS = new Set(['CLAUDE_PRO_GATEWAY_API_KEY']);
 
 export function parseDotEnv(text) {
   const env = {};
-  for (let line of text.split(/\r?\n/)) {
+  for (let line of text.replace(/^\uFEFF/, '').split(/\r?\n/)) {
     line = line.trim();
     if (!line || line.startsWith('#')) continue;
     if (line.startsWith('export ')) line = line.slice(7);
@@ -102,7 +102,8 @@ export function parseDotEnv(text) {
 
 function readJson(file) {
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    // a BOM in front (Windows PowerShell's Set-Content -Encoding UTF8 writes one) made the whole file unreadable
+    return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
   } catch (e) {
     if (e.code !== 'ENOENT') process.stderr.write(`warning: could not parse ${file}: ${e.message}\n`);
     return null;
@@ -367,7 +368,17 @@ export function updateSettingsFile(file, mutate) {
   }
   mutate(json);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+  // written aside and renamed over it, so that a crash or a full disk does not leave half a settings file; when the
+  // rename is refused (Windows: the file held open by another program), written in place as before
+  const text2 = JSON.stringify(json, null, 2) + '\n';
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text2);
+    fs.renameSync(tmp, file);
+  } catch {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    fs.writeFileSync(file, text2);
+  }
 }
 
 // What /model and /effort chose, kept per provider in the "remembered" block of the user settings so that

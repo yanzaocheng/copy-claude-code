@@ -14,8 +14,9 @@ export function gitInfo(cwd) {
   let main = null;
   for (const b of ['main', 'master']) if (run('git', ['rev-parse', '--verify', '--quiet', b], { cwd }) !== null) { main = b; break; }
   // quotepath=false: file names with non-ASCII characters (Chinese ones) are shown as they are, not as "\344\275\240".
-  let status = run('git', ['-c', 'core.quotepath=false', 'status', '--short'], { cwd }) || '';
-  const statusLines = status.split('\n');
+  // null: git status failed or took too long (a huge tree), which is not a clean one
+  let status = run('git', ['-c', 'core.quotepath=false', 'status', '--short'], { cwd, maxBuffer: 64 * 1024 * 1024 });
+  const statusLines = status ? status.split('\n') : [];
   if (statusLines.length > 40) status = statusLines.slice(0, 40).join('\n') + `\n... (${statusLines.length - 40} more lines, run "git status" for the rest)`;
   const log = run('git', ['log', '--oneline', '-n', '5'], { cwd }) || '';
   const user = run('git', ['config', 'user.name'], { cwd });
@@ -108,7 +109,8 @@ export function environmentBlock(cwd, { model, shellName, snapshot = null }) {
     // gateway refuses requests carrying that exact line (code 11128, shown as a 529 "overloaded") for its models.
     if (git.main) lines.push(`Main branch: ${git.main}`);
     if (git.user) lines.push(`Git user: ${git.user}`);
-    lines.push('', `Status:\n${git.status || '(clean)'}`, '', `Recent commits:\n${git.log || '(none)'}`);
+    const status = git.status === null ? '(unknown: git status failed or timed out; run it to see)' : git.status || '(clean)';
+    lines.push('', `Status:\n${status}`, '', `Recent commits:\n${git.log || '(none)'}`);
   }
   return lines.join('\n');
 }

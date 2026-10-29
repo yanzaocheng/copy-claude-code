@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findShell, killTree, killTreeSync, spawnShell, watchShell } from '../utils/shell.js';
+import { childEnv, findShell, killTree, killTreeSync, spawnShell, watchShell } from '../utils/shell.js';
 import { stripAnsi } from '../ui/ansi.js';
 import { OutputDecoder } from '../utils/encoding.js';
 import { toolResultsDir } from '../session.js';
@@ -44,15 +44,7 @@ export function appendOutput(bg, text, max = 5_000_000, keep = 2_000_000) {
   }
 }
 
-export function childEnv() {
-  const env = { ...process.env };
-  // Keep child processes non-interactive and colour free.
-  Object.assign(env, { GIT_EDITOR: 'true', GIT_PAGER: 'cat', PAGER: 'cat', NO_COLOR: '1', CLAUDE_PRO: '1' });
-  delete env.FORCE_COLOR;
-  // What commands run from here start must not believe they are a restartable session of this program.
-  for (const key of ['CLAUDE_PRO_SUPERVISED', 'CLAUDE_PRO_RESTART_FILE', 'CLAUDE_PRO_RESTARTED']) delete env[key];
-  return env;
-}
+export { childEnv };
 
 export function shutdownBackgroundShells() {
   for (const bg of background.values()) if (bg.status === 'running') killTreeSync(bg.child); // the program is exiting

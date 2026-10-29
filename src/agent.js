@@ -150,6 +150,9 @@ const KEPT_USER_TOKENS = 20_000;
 // other sessions, bash mode, interruptions. The summaries of earlier compactions are read for the messages they kept.
 const PROGRAM_TEXT = /^(?:<(?:system-reminder|task-notification|peer-message|bash-input)\b|\[Request interrupted by user)/;
 const SUMMARY_TEXT = /^(?:This session is being continued|\[Summarized conversation\])/;
+// The note a restarted session goes on with (see restartNote), in front of what the user had queued meanwhile: not the
+// user's either, and in a session that restarts often those notes took the room of what the user wrote.
+const RESTART_NOTE = /^\[claude-pro restarted[\s\S]*?\](?:\n\n|$)/;
 
 // The user's own messages in `messages`, oldest first, to keep word for word through a compaction as Codex does: what
 // they typed ("[image]" for a picture) and what earlier summaries kept. The newest that fit in `budget` estimated
@@ -160,10 +163,12 @@ export function keptUserMessages(messages, budget = KEPT_USER_TOKENS) {
     if (m.role !== 'user') continue;
     const typed = [];
     for (const b of toBlocks(m.content)) {
-      if (b.type === 'image') typed.push('[image]');
-      else if (b.type !== 'text' || !b.text?.trim() || PROGRAM_TEXT.test(b.text)) continue;
-      else if (SUMMARY_TEXT.test(b.text)) all.push(...keptUserMessagesIn(b.text));
-      else typed.push(b.text);
+      if (b.type === 'image') { typed.push('[image]'); continue; }
+      if (b.type !== 'text') continue;
+      const text = (b.text || '').replace(RESTART_NOTE, '');
+      if (!text.trim() || PROGRAM_TEXT.test(text)) continue;
+      if (SUMMARY_TEXT.test(text)) all.push(...keptUserMessagesIn(text));
+      else typed.push(text);
     }
     if (typed.length) all.push(typed.join('\n'));
   }
@@ -1003,7 +1008,10 @@ export class Agent {
     const fail = (content, extra = {}) => finish({ block: { type: 'tool_result', tool_use_id: tu.id, is_error: true, content }, ...extra }, { error: true, ...extra });
     try {
       if (!tool) return fail(`Error: No such tool available: ${tu.name}`, { error_type: 'unknown_tool' });
-      const input = tool.normalizeInput && tu.input && typeof tu.input === 'object' ? tool.normalizeInput({ ...tu.input }) : (tu.input || {});
+      // A copy: validation turns numbers sent as strings into numbers, and the tool_use block must stay as it was sent
+      // and saved, or a restarted session sends it differently and the prompt cache misses from there on.
+      const own = tu.input && typeof tu.input === 'object' ? { ...tu.input } : (tu.input || {});
+      const input = tool.normalizeInput && tu.input && typeof tu.input === 'object' ? tool.normalizeInput(own) : own;
       if (input.__invalid_json !== undefined) {
         return fail('Error: the tool input was not valid JSON (it may have been truncated by the output token limit). Try again with a smaller input, e.g. write large files in several steps.', { validation_error: true, error_type: 'invalid_json' });
       }

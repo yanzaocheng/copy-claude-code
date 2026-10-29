@@ -290,7 +290,8 @@ export class App {
     this.commands = buildCommands(this);
     // The window of the model in use may come from the gateway's model list (see Config.resolveModel): asked for now,
     // so that the footer shows it before the first request.
-    if (!this.driven) loadGatewayModels(this.runtime.config).then(() => this.screen.schedule());
+    // not in the self-check a restart runs first: that would ask the gateway once more for every restart
+    if (!this.driven && !this.selfCheck) loadGatewayModels(this.runtime.config).then(() => this.screen.schedule());
     // What the session showed before a restart: scrolled back to in fullscreen, repainted after a resize otherwise.
     if (Array.isArray(this.flags.restart?.screenHistory)) this.screen.history = this.flags.restart.screenHistory.filter((l) => typeof l === 'string');
     if (this.fullscreenWanted()) this.screen.setFull(true);
@@ -1121,7 +1122,9 @@ export class App {
       return;
     }
     if (this.isTurnRunning() || this.dialogs.length) { this.sourceChanged = changed; return; } // something started meanwhile: later
-    this.requestRestart({ reason: this.updateRestart ? `updated to ${APP_NAME} ${this.updateRestart}` : 'source changed', force: true });
+    const r = this.requestRestart({ reason: this.updateRestart ? `updated to ${APP_NAME} ${this.updateRestart}` : 'source changed', force: true });
+    // refused (too many restarts in a row): say so, or later changes would go unloaded without a word
+    if (!r.ok) this.notice(`The program's source changed, but it was not restarted to load it: ${r.message.replace(/ That looks like a loop:.*$/, '')} A change after that window loads it, or /restart once it has passed.`, 'warn');
   }
 
   // A newer version on npm (see updater.js): it is installed once no session of this machine is working, and then
