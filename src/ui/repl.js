@@ -1162,15 +1162,13 @@ export class App {
     if (!r.ok) this.notice(`The program's source changed, but it was not restarted to load it: ${r.message.replace(/ That looks like a loop:.*$/, '')} A change after that window loads it, or /restart once it has passed.`, 'warn');
   }
 
-  // A newer version on npm (see updater.js): it is installed once no session of this machine is working, and then
-  // loaded by a restart (this session's; the others restart when they see the files change). `force`: the /update
-  // command, which also says when there is nothing to do. `quiet`: the periodic check, which says nothing when an
-  // install fails (it is tried again in a minute).
-  async autoUpdate({ force = false, quiet = false } = {}) {
-    if (this.updating) { if (force) this.notice(`${APP_NAME} ${this.updating} is being installed.`); return; }
+  // /update: a newer version on npm (see updater.js) is installed once no session of this machine is working, and
+  // then loaded by a restart (this session's; the others restart when they see the files change).
+  async updateFromNpm() {
+    if (this.updating) { this.notice(`${APP_NAME} ${this.updating} is being installed.`); return; }
     let r;
     try {
-      r = await checkForUpdate({ force, env: { ...process.env, ...this.config.env } });
+      r = await checkForUpdate();
     } catch (e) {
       r = { status: 'failed', error: e.message };
     }
@@ -1178,18 +1176,17 @@ export class App {
     if (r.status === 'available') {
       if (this.pendingUpdate !== r.version) {
         this.pendingUpdate = r.version;
-        this.updateQuiet = quiet;
         this.screen.schedule();
       }
-      if (force && this.working()) this.notice(`${APP_NAME} ${r.version} is out: it is installed as soon as this session's work is done.`);
-      await this.maybeInstallUpdate({ force });
+      if (this.working()) this.notice(`${APP_NAME} ${r.version} is out: it is installed as soon as this session's work is done.`);
+      await this.maybeInstallUpdate({ force: true });
     } else if (r.status === 'installed') {
-      if (force || this.updateRestart !== r.version) this.notice(`${APP_NAME} ${r.version} is installed already; this session restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
+      this.notice(`${APP_NAME} ${r.version} is installed already; this session restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
       this.updateRestart = r.version;
       if (canRestart()) { this.sourceChanged ||= true; if (!this.isTurnRunning()) this.maybeAutoReload(); }
     } else if (r.status === 'failed') {
-      if (force || (r.version && !quiet)) this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
-    } else if (force) {
+      this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
+    } else {
       this.notice(r.status === 'dev' ? `This copy runs from a source checkout (${INSTALL_DIR}): update it with git.` : `${APP_NAME} ${VERSION} is the latest version.`);
     }
   }
@@ -1243,7 +1240,7 @@ export class App {
       }
       return;
     }
-    if (force || !this.updateQuiet) this.notice(`Could not update ${APP_NAME} to ${version}: ${r.error}`, 'warn');
+    this.notice(`Could not update ${APP_NAME} to ${version}: ${r.error}`, 'warn');
   }
 
   printWelcome() {

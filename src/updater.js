@@ -1,7 +1,7 @@
 // Manual update support for `npm i -g claude-pro`: the interactive session checks npm and installs a release only
-// when `/update` calls App.autoUpdate({ force: true }). Installation is serialized by a lock file and the session
-// loads the new package with a restart (the conversation carries over). A git checkout (the development copy) is
-// never touched. The environment switches remain for callers that want to disable even manual checks.
+// when `/update` asks for it (App.updateFromNpm). Installation is serialized by a lock file and the session loads
+// the new package with a restart (the conversation carries over). A git checkout (the development copy) is never
+// touched.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,20 +11,12 @@ import { CONFIG_DIR, INSTALL_DIR, VERSION } from './config.js';
 import { killTree } from './utils/shell.js';
 
 // The name on npm (scoped: npm refused plain `claude-pro` as too close to another package's name).
-export const PACKAGE_NAME = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).name;
-const STATE_FILE = path.join(CONFIG_DIR, 'update-check.json');
+const PACKAGE_NAME = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).name;
 const LOCK_FILE = path.join(CONFIG_DIR, 'update.lock');
 const LOCK_STALE_MS = 15 * 60_000;
-export const CHECK_EVERY_MS = 5 * 60_000; // a release reaches the running sessions within minutes
-const RETRY_FAILED_MS = 60_000; // a release's tarball can take minutes to be downloadable after it is published
-
-export function autoUpdateEnabled(env = process.env) {
-  if (/^(1|true|yes)$/i.test(env.DISABLE_AUTOUPDATER || '')) return false;
-  return !/^(0|false|no|off)$/i.test(env.CLAUDE_PRO_AUTO_UPDATE || '');
-}
 
 // The node_modules directory a package is installed in: one level up, or two for a scoped (@scope/name) package.
-export function modulesDir(dir = INSTALL_DIR) {
+function modulesDir(dir = INSTALL_DIR) {
   const up = path.dirname(dir);
   return path.basename(up).startsWith('@') ? path.dirname(up) : up;
 }
@@ -77,10 +69,7 @@ function releaseLock() {
   } catch { /* gone already */ }
 }
 
-function readState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
-function writeState(s) { try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(STATE_FILE, JSON.stringify(s)); } catch { /* ignore */ } }
-
-export function latestVersion({ timeoutMs = 10_000 } = {}) {
+function latestVersion({ timeoutMs = 10_000 } = {}) {
   return new Promise((resolve, reject) => {
     // past the registry's CDN cache, which can answer with the version before the one just published
     const url = `https://registry.npmjs.org/${PACKAGE_NAME.replace('/', '%2f')}/latest?t=${Date.now()}`;
@@ -113,23 +102,13 @@ function runNpm(args, { timeoutMs = 300_000 } = {}) {
   });
 }
 
-// Look for a newer version. Resolves with {status: 'disabled'|'dev'|'skipped'|'current'|'available'|'installed', version}:
+// Look for a newer version on npm. Resolves with {status: 'dev'|'current'|'available'|'installed', version}:
 // 'available' to be installed (installUpdate), 'installed' when it is on disk already (another session installed
-// it: a restart loads it). Within the interval the registry is not asked again, but what another session found is
-// still 'available'. `force`: ask now, whatever the last check was (the /update command).
-export async function checkForUpdate({ force = false, env = process.env } = {}) {
-  if (!force && !autoUpdateEnabled(env)) return { status: 'disabled' };
+// it: a restart loads it). (The background checks every few minutes, with their state file and switches, are gone:
+// /update is the only caller.)
+export async function checkForUpdate() {
   if (!installedByNpm()) return { status: 'dev' };
-  const state = readState();
-  let latest;
-  if (!force && state.checkedAt && Date.now() - state.checkedAt < CHECK_EVERY_MS) {
-    if (!state.available) return { status: 'skipped' };
-    latest = state.available;
-  } else {
-    writeState({ ...state, checkedAt: Date.now() });
-    latest = await latestVersion();
-    writeState({ ...readState(), available: latest });
-  }
+  const latest = await latestVersion();
   if (!isNewer(latest, VERSION)) return { status: 'current', version: latest };
   if (!isNewer(latest, installedVersion())) return { status: 'installed', version: installedVersion() };
   return { status: 'available', version: latest };
@@ -137,29 +116,24 @@ export async function checkForUpdate({ force = false, env = process.env } = {}) 
 
 // Install `version` with npm. Resolves with {status: 'updated'|'installed'|'locked'|'failed', version, error}:
 // 'locked' while another session of the machine is installing.
-export async function installUpdate(version, { onInstalling } = {}) {
+export async function installUpdate(version) {
   if (!takeLock()) return { status: 'locked', version };
   try {
     if (!isNewer(version, installedVersion())) return { status: 'installed', version: installedVersion() };
-    return await install(version, onInstalling);
+    return await install(version);
   } finally {
     releaseLock();
   }
 }
 
-async function install(latest, onInstalling) {
+async function install(latest) {
   // Only a global install is updated by `npm i -g`: one in a project's node_modules belongs to that project.
   const root = await runNpm(['root', '-g'], { timeoutMs: 30_000 });
   if (!root.ok || path.resolve(root.output.split(/\r?\n/).pop()) !== path.resolve(modulesDir())) {
     return { status: 'failed', version: latest, error: `this copy (${INSTALL_DIR}) is not the global npm install; update it with npm yourself` };
   }
-  onInstalling?.(latest);
   // --prefer-online: not npm's own cache of the package's versions, which may not know this one yet
   const r = await runNpm(['install', '-g', '--prefer-online', `${PACKAGE_NAME}@${latest}`]);
-  if (!r.ok) {
-    writeState({ ...readState(), checkedAt: Date.now() - CHECK_EVERY_MS + RETRY_FAILED_MS }); // again in a minute
-    return { status: 'failed', version: latest, error: r.output.split('\n').slice(-5).join('\n') };
-  }
-  writeState({ ...readState(), installed: latest });
+  if (!r.ok) return { status: 'failed', version: latest, error: r.output.split('\n').slice(-5).join('\n') };
   return { status: 'updated', version: latest };
 }

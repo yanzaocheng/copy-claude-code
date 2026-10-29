@@ -10,9 +10,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function check() {
   const problems = [];
   const fail = (text) => problems.push(text);
-  // The App starts as a session does (the fullscreen renderer, the update timer, ...), so that code only a real
-  // start runs is checked too, but this process must not show up as a session, go online or install an update.
-  Object.assign(process.env, { CLAUDE_PRO_PEERS: '0', CLAUDE_PRO_ONLINE: '0', CLAUDE_PRO_AUTO_UPDATE: '0' });
+  // The App starts as a session does (the fullscreen renderer, ...), so that code only a real start runs is checked
+  // too, but this process must not show up as a session or go online.
+  Object.assign(process.env, { CLAUDE_PRO_PEERS: '0', CLAUDE_PRO_ONLINE: '0' });
 
   let App;
   try {

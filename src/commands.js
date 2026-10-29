@@ -740,7 +740,7 @@ export function buildCommands(app) {
   add({
     name: 'update',
     description: `Look for a newer ${APP_NAME} on npm now and install it`,
-    async run() { out(c.dim(`Version ${VERSION} · checking npm…`)); await app.autoUpdate({ force: true }); },
+    async run() { out(c.dim(`Version ${VERSION} · checking npm…`)); await app.updateFromNpm(); },
   });
 
   add({
