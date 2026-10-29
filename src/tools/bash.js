@@ -101,6 +101,9 @@ When you commit (the system prompt says when): run git status, git diff and git 
         const id = `bash_${++bgCounter}`;
         const bg = { child, command, description: String(input.description || ''), output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
         background.set(id, bg);
+        // the shells that ended stay listed, with what was not read of their output: the oldest go past 50
+        const ended = [...background].filter(([, b]) => b.status !== 'running');
+        for (const [old] of ended.slice(0, Math.max(0, ended.length - 50))) background.delete(old);
         // Line by line, UTF-8 or the console code page (GBK here), never cutting a character (see OutputDecoder).
         for (const stream of [child.stdout, child.stderr]) {
           const decoder = new OutputDecoder();
@@ -195,7 +198,8 @@ export const BashOutputTool = {
     const bg = background.get(input.bash_id);
     if (!bg) return { isError: true, content: `No background shell with id ${input.bash_id}. Known: ${[...background.keys()].join(', ') || 'none'}` };
     let fresh = bg.output.slice(bg.readPos);
-    bg.readPos = bg.output.length;
+    bg.output = ''; // what was read is not read again (up to 5 MB a shell, kept for good before)
+    bg.readPos = 0;
     if (input.filter) {
       try {
         const re = new RegExp(input.filter);

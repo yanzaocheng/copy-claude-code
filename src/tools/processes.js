@@ -116,14 +116,17 @@ function descendants(list, root) {
     children.get(p.ppid).push(p);
   }
   const out = [];
-  const walk = (pid, depth) => {
+  // A process that started before the one its parent id names is not its child: Windows gives no new parent to an
+  // orphan, and its parent's id may be another process's by now (a tree listed or killed unrelated processes).
+  const walk = (pid, depth, started) => {
     for (const c of children.get(pid) || []) {
       if (out.length > 2000) return;
+      if (started && c.started && c.started < started) continue;
       out.push({ ...c, depth });
-      walk(c.pid, depth + 1);
+      walk(c.pid, depth + 1, c.started);
     }
   };
-  walk(root, 1);
+  walk(root, 1, list.find((p) => p.pid === root)?.started);
   return out;
 }
 
