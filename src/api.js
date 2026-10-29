@@ -5,7 +5,7 @@
 let Anthropic = null;
 import { parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
-import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort } from './gateway.js';
+import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort, nearestEffort } from './gateway.js';
 import { fitImagesIn } from './utils/images.js';
 import { costOf } from './pricing.js';
 
@@ -111,13 +111,6 @@ const thinkingStaysOn = new Set();
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
 // the other models that take one; null for a model that takes none or is not known.
 const gatewayModelInfo = (config, id) => cachedGatewayModel(gatewayLogin(config.gatewayUrl, config.env.CLAUDE_PRO_GATEWAY_API_KEY), id);
-const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-const nearestEffort = (effort, supported) => {
-  if (!effort || !supported.length || supported.includes(effort)) return effort;
-  const want = EFFORT_ORDER.indexOf(effort);
-  return supported.reduce((best, item) => Math.abs(EFFORT_ORDER.indexOf(item) - want) < Math.abs(EFFORT_ORDER.indexOf(best) - want) ? item : best, supported[0]);
-};
-
 export function defaultEffort(modelId, config = null) {
   const id = String(modelId || '');
   if (!effortSupported(id)) return null;
@@ -282,7 +275,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   const params = buildParams(config, request);
   // The gateway keeps a conversation on the upstream account that served it, where its prompt cache is; the
   // session id names the conversation, in the header Claude Code sends it in.
-  const options = { signal, ...(config.usesGateway && config.sessionId ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) };
+  const options = { signal, ...(config.sessionId ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) };
   let imagesFitted = false;
   const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
   const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0, overloaded: 0, overloadedWaitMs: 0 };

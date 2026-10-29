@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { MAX_IMAGE_BYTES } from './images.js';
 
-export const MAX_IMAGE_BYTES = 3_750_000; // ~5MB once base64 encoded
 const IMAGE_EXT = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
 
 function run(cmd, args, { env, timeout = 15_000 } = {}) {
@@ -126,7 +126,8 @@ async function readLinux() {
       child.on('close', (code) => { clearTimeout(timer); resolve(code === 0 ? Buffer.concat(chunks) : null); });
     });
     if (r?.length) {
-      if (r.length > MAX_IMAGE_BYTES) return { error: 'Image is too large (max 3.7MB)' };
+      // scaled down when it is sent (fitImagesIn), as a dropped image file is
+      if (r.length > 30 * 1024 * 1024) return { error: `Image is too large (${(r.length / 1e6).toFixed(1)}MB, max 30MB)` };
       return { image: { media_type: 'image/png', data: r.toString('base64'), bytes: r.length } };
     }
   }

@@ -37,16 +37,14 @@ export async function modelChoices(cfg) {
   const configured = cfg.configuredModelSpec;
   const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).id}` }];
   opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ value: a, label: a, description: `→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}` })));
-  if (cfg.usesGateway) {
-    // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
-    const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
-    let served = null;
-    try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
-    const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
-    for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
-      if (aliased.has(m.id)) continue;
-      opts.push({ value: m.id, label: m.id, description: isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || '' });
-    }
+  // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
+  const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+  let served = null;
+  try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
+  const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
+  for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
+    if (aliased.has(m.id)) continue;
+    opts.push({ value: m.id, label: m.id, description: isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || '' });
   }
   return opts;
 }
@@ -56,7 +54,7 @@ export async function modelChoices(cfg) {
 export async function effortChoices(cfg) {
   const id = cfg.model.id;
   let info = null;
-  if (cfg.usesGateway && isGpt(id)) {
+  if (isGpt(id)) {
     const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
     try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
   }
@@ -82,7 +80,7 @@ export function buildCommands(app) {
   // /model and /effort choices are kept for later sessions (rememberChoice); say so, or why they are not.
   const keep = (cfg, patch, forgotten) => {
     try {
-      rememberChoice(cfg.provider, patch);
+      rememberChoice(patch);
       return c.dim(forgotten ? ' · the configured default from now on' : ' · kept for later sessions');
     } catch (e) {
       return c.yellow(` · for this session only (${e.message})`);
@@ -407,7 +405,7 @@ export function buildCommands(app) {
     name: 'effort',
     get argHint() {
       const cfg = app.runtime.config;
-      const login = cfg.usesGateway ? gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY) : null;
+      const login = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
       return `[${effortLevels(cfg.model.id, cachedGatewayModel(login, cfg.model.id)).join('|')}|auto|default]`;
     },
     description: 'Set reasoning effort (output_config.effort; kept for later sessions)',
@@ -440,17 +438,10 @@ export function buildCommands(app) {
     },
   });
 
-  // Keep the gateway selection in the user settings and apply its remembered /model and /effort.
-  const switchProvider = (provider) => {
+  // After a login: the configuration read again, with the remembered /model and /effort. (It wrote
+  // CLAUDE_PRO_PROVIDER=gateway into the settings files at every login, from when there were other providers.)
+  const afterLogin = () => {
     const cfg = app.runtime.config;
-    const files = settingsFiles(app.cwd);
-    // The choice goes where the setting that wins is now: a project's settings file overrides the user's,
-    // so writing only the user's file would change nothing in this project.
-    const winning = cfg.sources.CLAUDE_PRO_PROVIDER;
-    const file = [files.local, files.project].includes(winning) ? winning : files.user;
-    const set = (f) => updateSettingsFile(f, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_PROVIDER: provider }; });
-    set(files.user); // the default for the other projects too
-    if (file !== files.user) set(file);
     const model = cfg.model.id;
     reloadConfig();
     cfg.modelOverride = null;
@@ -458,8 +449,6 @@ export function buildCommands(app) {
     cfg.effortBoost = null;
     applyRememberedChoices(cfg, app.flags);
     if (cfg.model.id !== model) app.runtime.invalidateSystemPrompt();
-    if (cfg.provider !== provider) return c.red(` · NOT switched: CLAUDE_PRO_PROVIDER=${cfg.provider} is set by ${cfg.sources.CLAUDE_PRO_PROVIDER}, which overrides the settings files; change it there`);
-    return file !== files.user ? c.dim(` · also saved in ${displayPath(file, app.cwd)}, which overrides the user settings in this project`) : '';
   };
   const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
   let pendingLogin = null;
@@ -491,8 +480,8 @@ export function buildCommands(app) {
       if (saved) {
         try {
           const account = await fetchGatewayAccount(saved);
-          const note = switchProvider('gateway');
-          out([`Using the gateway ${c.bold(url)}: ${cfg.model.label}${note}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
+          afterLogin();
+          out([`Using the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
           await goOnline();
           return;
         } catch (e) {
@@ -509,8 +498,8 @@ export function buildCommands(app) {
           signal: controller.signal,
           onUrl: (page) => out([`Opening the gateway login in your browser. If it does not open, visit:`, c.blue(page), c.dim('Waiting for the browser (10 minutes at most)…')]),
         });
-        const note = switchProvider('gateway');
-        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.model.label}${note}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
+        afterLogin();
+        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
         await goOnline();
       } catch (e) {
         if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
@@ -607,7 +596,7 @@ export function buildCommands(app) {
         `Session time:  ${formatDuration(Date.now() - app.sessionStart)}`,
       ]);
       const cfg = app.runtime.config;
-      const saved = cfg.usesGateway && gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
+      const saved = gatewayLogin(cfg.gatewayUrl, cfg.env.CLAUDE_PRO_GATEWAY_API_KEY);
       if (!saved) return;
       try {
         const account = await fetchGatewayAccount(saved);

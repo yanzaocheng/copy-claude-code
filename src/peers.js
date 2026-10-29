@@ -11,16 +11,13 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { CONFIG_DIR } from './config.js';
+import { processAlive as alive } from './utils/shell.js';
 
 export const PEERS_DIR = path.join(CONFIG_DIR, 'peers');
 const MAX_BODY = 2_000_000;
 
 export function peersEnabled(env = process.env) {
   return !/^(0|false|no|off)$/i.test(env.CLAUDE_PRO_PEERS || '');
-}
-
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
 export const cleanName = (s) => String(s || '').replace(/[^\p{L}\p{M}\p{N}_.-]+/gu, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40) || 'agent';

@@ -1,9 +1,8 @@
 // Effort: the model changes its own reasoning effort in the middle of a request, typically raising it for a hard
 // problem. The change lasts until the user's next message, which goes back to the effort the user chose.
 
-import { defaultEffort } from '../api.js';
+import { defaultEffort, CLAUDE_EFFORTS } from '../api.js';
 
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function makeEffortTool(config) {
   return {
@@ -16,7 +15,7 @@ Do not raise it for routine work, and do not switch back and forth: the prompt c
     input_schema: {
       type: 'object',
       properties: {
-        level: { type: 'string', enum: EFFORT_LEVELS, description: 'The new effort level' },
+        level: { type: 'string', enum: CLAUDE_EFFORTS, description: 'The new effort level' },
         reason: { type: 'string', description: 'Why, in a few words. Shown to the user.' },
       },
       required: ['level', 'reason'],
@@ -24,7 +23,7 @@ Do not raise it for routine work, and do not switch back and forth: the prompt c
     summarize(input) { return `${input.level}${input.reason ? `: ${input.reason}` : ''}`; },
     async call(input) {
       const level = String(input.level || '').trim().toLowerCase();
-      if (!EFFORT_LEVELS.includes(level)) return { isError: true, content: `Unknown effort "${input.level}". Use one of: ${EFFORT_LEVELS.join(', ')}.` };
+      if (!CLAUDE_EFFORTS.includes(level)) return { isError: true, content: `Unknown effort "${input.level}". Use one of: ${CLAUDE_EFFORTS.join(', ')}.` };
       const shown = () => config.effort || defaultEffort(config.model.id, config) || 'the model default';
       const before = shown();
       if (level === before) return { content: `The effort is already ${level}.` };

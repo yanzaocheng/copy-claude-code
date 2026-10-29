@@ -125,8 +125,11 @@ export function cachedGatewayModel(login, modelId) {
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export function gatewayEfforts(model) { return model?.supported_reasoning_levels || []; }
 export function gatewayDefaultEffort(model) { return model?.default_reasoning_level || null; }
-export function gatewayEffort(model, effort) {
-  const supported = gatewayEfforts(model);
+export function gatewayEffort(model, effort) { return nearestEffort(effort, gatewayEfforts(model)); }
+
+// The level of `supported` nearest to `effort` (in EFFORT_ORDER), or `effort` itself when it is one of them or there
+// are none.
+export function nearestEffort(effort, supported) {
   if (!effort || !supported.length || supported.includes(effort)) return effort;
   const want = EFFORT_ORDER.indexOf(effort);
   return supported.reduce((best, item) => (Math.abs(EFFORT_ORDER.indexOf(item) - want) < Math.abs(EFFORT_ORDER.indexOf(best) - want) ? item : best), supported[0]);

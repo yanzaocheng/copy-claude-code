@@ -118,7 +118,6 @@ export function settingsFiles(cwd) {
   };
 }
 
-const MODEL_KEYS = { gateway: 'CLAUDE_PRO_GATEWAY_MODEL' };
 
 export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.join(INSTALL_DIR, '.env') } = {}) {
   const env = {};
@@ -160,11 +159,7 @@ export function loadConfig({ cwd = process.cwd(), flags = {}, dotEnvFile = path.
   set(fromProcess, 'process environment');
 
   if (flags.provider) { env.CLAUDE_PRO_PROVIDER = flags.provider; sources.CLAUDE_PRO_PROVIDER = '--provider flag'; }
-  if (flags.model) {
-    const key = MODEL_KEYS[(env.CLAUDE_PRO_PROVIDER || 'gateway').trim().toLowerCase()] || 'CLAUDE_PRO_GATEWAY_MODEL';
-    env[key] = flags.model;
-    sources[key] = '--model flag';
-  }
+  if (flags.model) { env.CLAUDE_PRO_GATEWAY_MODEL = flags.model; sources.CLAUDE_PRO_GATEWAY_MODEL = '--model flag'; }
   if (flags.effort) { env.CLAUDE_CODE_EFFORT_LEVEL = flags.effort; sources.CLAUDE_CODE_EFFORT_LEVEL = '--effort flag'; }
 
   return new Config(env, sources, settings, cwd);
@@ -204,7 +199,6 @@ export class Config {
     if (value !== 'gateway') throw new Error(`Only the gateway provider is supported. Set CLAUDE_PRO_PROVIDER=gateway (received ${value}).`);
     return 'gateway';
   }
-  get usesGateway() { return true; }
   get gatewayUrl() { return (this.env.CLAUDE_PRO_GATEWAY_URL || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, ''); }
   get endpointLabel() { return `${this.gatewayUrl} (codex-gateway)`; }
 
@@ -265,7 +259,7 @@ export class Config {
     if (isOn(this.env.ENABLE_PROMPT_CACHING_1H)) return '1h';
     // The gateway too: measured on its usage records (533 Opus requests), pauses of 5 to 60 minutes rewrote the whole
     // conversation 9 times at 1.25x, $14.77; writing every turn at 2x instead costs $2.80 more.
-    return bucket === 'main' && this.usesGateway ? '1h' : '5m';
+    return bucket === 'main' ? '1h' : '5m';
   }
   // DISABLE_PROMPT_CACHING turns it off for everything; the per-model variables only for the model that
   // their alias resolves to (a different version pinned as the model keeps its caching), wherever it runs.
@@ -387,14 +381,17 @@ export function updateSettingsFile(file, mutate) {
 // the command line win over it, for that run. "/model default" and "/effort default" forget it.
 const userSettingsFile = () => path.join(CONFIG_DIR, 'settings.json');
 
-export function rememberedChoices(provider) {
-  const entry = readJson(userSettingsFile())?.remembered?.[provider];
+// Kept under the name of the provider they were made with, from when there were others: the gateway's.
+const REMEMBERED_KEY = 'gateway';
+
+function rememberedChoices() {
+  const entry = readJson(userSettingsFile())?.remembered?.[REMEMBERED_KEY];
   return entry && typeof entry === 'object' ? entry : {};
 }
 
 // patch: {model?, effort?}; null or '' forgets that one. Returns whether the file changed.
-export function rememberChoice(provider, patch) {
-  const before = rememberedChoices(provider);
+export function rememberChoice(patch) {
+  const before = rememberedChoices();
   const after = { ...before };
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
@@ -404,8 +401,8 @@ export function rememberChoice(provider, patch) {
   if (JSON.stringify(after) === JSON.stringify(before)) return false;
   updateSettingsFile(userSettingsFile(), (json) => {
     const all = json.remembered && typeof json.remembered === 'object' ? json.remembered : {};
-    if (Object.keys(after).length) all[provider] = after;
-    else delete all[provider];
+    if (Object.keys(after).length) all[REMEMBERED_KEY] = after;
+    else delete all[REMEMBERED_KEY];
     if (Object.keys(all).length) json.remembered = all;
     else delete json.remembered;
   });
@@ -413,7 +410,7 @@ export function rememberChoice(provider, patch) {
 }
 
 export function applyRememberedChoices(config, flags = {}) {
-  const remembered = rememberedChoices(config.provider);
+  const remembered = rememberedChoices();
   if (!flags.model && typeof remembered.model === 'string' && remembered.model.trim()) config.modelOverride = remembered.model.trim();
   if (!flags.effort && typeof remembered.effort === 'string' && remembered.effort.trim()) config.effortOverride = remembered.effort.trim().toLowerCase();
   return remembered;

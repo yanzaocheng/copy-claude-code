@@ -10,6 +10,11 @@ let shellCache;
 // The shell findShell found, or undefined before it was looked for.
 export const knownShell = () => shellCache;
 
+// Whether a process with this id runs (EPERM: it does, but is not ours to signal).
+export function processAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
 // Locate the shell used by the Bash tool. On Windows we need Git Bash, like Claude Code.
 export function findShell(config) {
   if (shellCache) return shellCache;

@@ -4,10 +4,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CONFIG_DIR } from './config.js';
+import { CLAUDE_EFFORTS } from './api.js';
 
 const READ_ONLY_TOOLS = ['Glob', 'Grep', 'Read', 'Bash', 'WebFetch', 'WebSearch', 'BashOutput'];
-// The effort levels a Task call or an agent definition may ask for (as Claude Code's Agent tool takes them).
-export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// The effort levels a Task call or an agent definition may ask for (as Claude Code's Agent tool takes them): Claude's.
+export const EFFORTS = CLAUDE_EFFORTS;
 
 export const BUILTIN_AGENTS = [
   {

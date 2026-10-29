@@ -8,7 +8,7 @@ import path from 'node:path';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { CONFIG_DIR, INSTALL_DIR, VERSION } from './config.js';
-import { killTree } from './utils/shell.js';
+import { killTree, processAlive as alive } from './utils/shell.js';
 
 // The name on npm (scoped: npm refused plain `claude-pro` as too close to another package's name).
 const PACKAGE_NAME = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).name;
@@ -38,10 +38,6 @@ export function isNewer(latest, current) {
 // The version installed on disk now (another session may have updated it since this one started).
 export function installedVersion(dir = INSTALL_DIR) {
   try { return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version; } catch { return VERSION; }
-}
-
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
 // One session of the machine installs at a time. A lock left by a session that died, or one that is very old, is taken over.
