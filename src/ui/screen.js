@@ -61,11 +61,6 @@ const MULTI_CLICK_MS = 450;
 const FIND_MATCH = '\x1b[30;43m';
 const FIND_CURRENT = '\x1b[30;48;5;208m';
 const FIND_MAX = 10_000;
-// The button beside a selection (see quoteSpot): a click on it, or ctrl+q, quotes what is selected in the message
-// being written (App.quoteSelection), as ChatGPT's "Ask ChatGPT" does.
-const QUOTE_LABEL = ' Quote (ctrl+q) ';
-const QUOTE_W = QUOTE_LABEL.length;
-const QUOTE_STYLE = '\x1b[1;30;48;5;208m';
 // A line that starts a part of the conversation: a tool call or a reply ("⏺ …"), a message of the user ("> …"), a
 // command of bash mode ("! …"), a message of another session ("✉ …"). What a quote is from (see selectionQuote).
 const HEADING = /^(?:⏺|>|!|✉) /;
@@ -87,27 +82,6 @@ function sliceCols(plain, from, to) {
     col += graphemeWidth(g);
   }
   return out;
-}
-
-// `plain` (a row without escape codes) with `label` drawn over it in `style` from column `col` on. A wide character
-// that an edge of the label cuts leaves spaces in its place, so that the rest of the row stays where it was.
-function overlay(plain, col, label, style) {
-  const end = col + stringWidth(label);
-  let left = '';
-  let right = '';
-  let at = 0;
-  for (const g of graphemes(plain)) {
-    const w = graphemeWidth(g);
-    if (at + w <= col) left += g;
-    else if (at >= end) right += g;
-    else {
-      if (at < col) left += ' '.repeat(col - at);
-      if (at + w > end) right += ' '.repeat(at + w - end);
-    }
-    at += w;
-  }
-  if (at < col) left += ' '.repeat(col - at);
-  return `${left}\x1b[0m${style}${label}\x1b[0m${right}`;
 }
 
 // The text of a selection without the indentation the conversation is drawn with: the first line from where the
@@ -216,7 +190,6 @@ export class Screen {
     this.dropped = 0; // fullscreen: lines dropped from the top of the history so far (the first one's number)
     this.selection = null; // fullscreen: {anchor, focus}, points {line, sub, col} of the conversation (history line, wrapped row, column)
     this.dragging = false;
-    this.quoteButton = null; // fullscreen: where the Quote button is on screen, {row, from, to} (see quoteSpot)
     this.lastClick = { at: 0, x: 0, y: 0, count: 0 };
     this.inputBox = null; // fullscreen: where the input box's text is on screen, {top, rows, col} (see inputAt)
     this.inputDrag = null; // fullscreen: the mouse button held down on the input box's text: the cell it is over, {x, y, moved}
@@ -594,8 +567,7 @@ export class Screen {
 
   // A mouse report (fullscreen). Mouse selection only highlights text; Ctrl+C copies it. Drag to select (the view
   // scrolls at its edges), double-click a word, triple-click a line; a click clears the selection; a click on the
-  // "Jump to bottom" bar goes there. A click on the Quote button beside a selection returns {quote: true}: the caller
-  // quotes it (see quoteSpot). On the input box's text it returns {input: {kind, row, col, count}} instead, for the
+  // "Jump to bottom" bar goes there. On the input box's text it returns {input: {kind, row, col, count}}, for the
   // editor (Editor.mouse): a press there, then a drag (once for each cell the mouse moves to) and the release, from
   // wherever the mouse is by then.
   mouse({ button, x, y, release }) {
@@ -605,8 +577,6 @@ export class Screen {
     if (!left) return null;
     const motion = Boolean(button & 32);
     if (!motion && !release) { // a press
-      const b = this.quoteButton;
-      if (b && y - 1 === b.row && x - 1 >= b.from && x - 1 < b.to) return { quote: true }; // the Quote button
       const now = Date.now();
       const c = this.lastClick;
       const count = now - c.at < MULTI_CLICK_MS && Math.abs(c.x - x) <= 1 && c.y === y ? c.count + 1 : 1;
@@ -624,8 +594,7 @@ export class Screen {
       const p = this.pointAt(x, y);
       if (!p) { this.clearSelection(); return null; }
       if (count >= 2) {
-        const sel = this.expand(p, count >= 3);
-        this.selection = sel && { ...sel, mouseCol: x - 1 }; // where the mouse is: the Quote button goes there
+        this.selection = this.expand(p, count >= 3);
         this.dragging = false;
         this.draw();
         return null;
@@ -661,29 +630,7 @@ export class Screen {
     this.dragging = false;
     if (!this.selection.moved) { this.clearSelection(); return null; } // a plain click
     this.lastClick.count = 0; // a drag: the next click starts a count of its own
-    this.selection.mouseCol = x - 1;
-    this.draw(); // with the Quote button beside it
     return null;
-  }
-
-  // Where the Quote button goes (see draw), {row, col}: on the row next to the end of the selection that the mouse let
-  // go of, below its last row (above its first when it was made upwards, or when there is no room below), from about
-  // the column of the mouse. null while there is no selection, while it is still being made, or when no row next to
-  // it is in view.
-  quoteSpot(shown, area, cols) {
-    const sel = this.selection;
-    if (!sel || this.dragging || area < 2 || cols - 1 < QUOTE_W) return null;
-    let first = -1;
-    let last = -1;
-    for (let i = 0; i < area; i++) {
-      if (shown[i] && this.selectedCols(shown[i])) { if (first < 0) first = i; last = i; }
-    }
-    if (first < 0) return null;
-    const free = (r) => r >= 0 && r < area && r !== this.barRow;
-    const up = !before(sel.anchor, sel.focus);
-    const row = (up ? [first - 1, last + 1] : [last + 1, first - 1]).find(free);
-    if (row === undefined) return null;
-    return { row, col: Math.max(0, Math.min((sel.mouseCol ?? 0) - 1, cols - 1 - QUOTE_W)) };
   }
 
   // Scroll the conversation up (`rows` > 0) or down. 'top' and 'bottom' go to its ends.
@@ -756,9 +703,6 @@ export class Screen {
     const top = shown.map((e) => (e ? this.paintRow(e) : ''));
     this.barRow = this.scroll > 0 && area > 0 ? area - 1 : null;
     if (this.barRow !== null) top[this.barRow] = this.jumpBar(cols);
-    const spot = this.quoteSpot(shown, area, cols);
-    this.quoteButton = spot && { row: spot.row, from: spot.col, to: spot.col + QUOTE_W };
-    if (spot) top[spot.row] = overlay(shown[spot.row] ? stripAnsi(shown[spot.row].text) : '', spot.col, QUOTE_LABEL, QUOTE_STYLE);
     const frame = [...top, ...layout.rows];
     let buf = SYNC_START + ESC.hideCursor + this.titleUpdate();
     if (full) { buf += '\x1b[2J'; this.frame = []; }

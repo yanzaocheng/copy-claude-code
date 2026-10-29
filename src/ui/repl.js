@@ -1253,12 +1253,14 @@ export class App {
     const r = this.screen.mouse(m);
     if (r?.input) this.editor.mouse(r.input);
     else if ((m.button & 3) === 0 && !(m.button & 32) && !m.release) this.editor.clearSelection(); // a press elsewhere
-    if (r?.quote) this.quoteSelection(); // the Quote button beside a selection
-    else if ((this.screen.selection && this.screen.selection !== had) || (this.editor.selection && this.editor.selection !== hadInput)) this.flashMessage = null; // the footer says what a selection takes
+    if ((this.screen.selection && this.screen.selection !== had) || (this.editor.selection && this.editor.selection !== hadInput)) {
+      this.flashMessage = null; // the footer says what a selection takes
+      this.screen.schedule();
+    }
   }
 
-  // Quote what is selected in the conversation in the message being written, as ChatGPT's "Ask ChatGPT" does: the
-  // Quote button beside a selection, or ctrl+q (alt+q where the terminal keeps ctrl+q). The box shows
+  // Quote what is selected in the conversation in the message being written, as ChatGPT's "Ask ChatGPT" does:
+  // ctrl+q (alt+q where the terminal keeps ctrl+q), as the footer says while there is a selection. The box shows
   // "[Quote #1 +12 lines]"; the model gets the text and the line of the conversation it is under (see
   // Editor.insertQuote), so that it knows which part, and which file or command, the question is about.
   quoteSelection() {
