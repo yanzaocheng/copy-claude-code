@@ -4,23 +4,48 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { run } from './utils/shell.js';
+import { run, runText } from './utils/shell.js';
 import { CONFIG_DIR } from './config.js';
 
+// The git facts of the system prompt, or null outside a git repository. Four commands give them all (status -b
+// names the branch too); seven ran one after another before, about 55 ms each on Windows, blocking the program for
+// 400 ms at each start, /clear and compaction. gitInfoAsync runs them at once without blocking (75 ms).
+// quotepath=false: file names with non-ASCII characters (Chinese ones) are shown as they are, not as "\344\275\240".
+const GIT_STATUS = ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-b'];
+const GIT_MAIN = ['for-each-ref', '--format=%(refname:short)', 'refs/heads/main', 'refs/heads/master'];
+const GIT_LOG = ['log', '--oneline', '-n', '5'];
+const GIT_USER = ['config', 'user.name'];
+const GIT_STATUS_MAX = 64 * 1024 * 1024;
+
 export function gitInfo(cwd) {
-  const inside = run('git', ['rev-parse', '--is-inside-work-tree'], { cwd });
-  if (inside !== 'true') return null;
-  const branch = run('git', ['branch', '--show-current'], { cwd }) || '(detached)';
-  let main = null;
-  for (const b of ['main', 'master']) if (run('git', ['rev-parse', '--verify', '--quiet', b], { cwd }) !== null) { main = b; break; }
-  // quotepath=false: file names with non-ASCII characters (Chinese ones) are shown as they are, not as "\344\275\240".
-  // null: git status failed or took too long (a huge tree), which is not a clean one
-  let status = run('git', ['-c', 'core.quotepath=false', 'status', '--short'], { cwd, maxBuffer: 64 * 1024 * 1024 });
-  const statusLines = status ? status.split('\n') : [];
-  if (statusLines.length > 40) status = statusLines.slice(0, 40).join('\n') + `\n... (${statusLines.length - 40} more lines, run "git status" for the rest)`;
-  const log = run('git', ['log', '--oneline', '-n', '5'], { cwd }) || '';
-  const user = run('git', ['config', 'user.name'], { cwd });
-  return { branch, main, status, log, user };
+  const status = run('git', GIT_STATUS, { cwd, maxBuffer: GIT_STATUS_MAX });
+  if (status === null && run('git', ['rev-parse', '--is-inside-work-tree'], { cwd }) !== 'true') return null;
+  const branch = status === null ? run('git', ['branch', '--show-current'], { cwd }) : null;
+  return gitFacts(status, run('git', GIT_MAIN, { cwd }), run('git', GIT_LOG, { cwd }), run('git', GIT_USER, { cwd }), branch);
+}
+
+export async function gitInfoAsync(cwd) {
+  const [status, main, log, user] = await Promise.all([GIT_STATUS, GIT_MAIN, GIT_LOG, GIT_USER].map((args) => runText('git', args, { cwd, maxChars: GIT_STATUS_MAX })));
+  if (status === null && (await runText('git', ['rev-parse', '--is-inside-work-tree'], { cwd })) !== 'true') return null;
+  const branch = status === null ? await runText('git', ['branch', '--show-current'], { cwd }) : null;
+  return gitFacts(status, main, log, user, branch);
+}
+
+// `statusOut`: git status -b's output, null when it failed or took too long (a huge tree), which is not a clean
+// tree (status null). `branch`: the branch when status gave none.
+function gitFacts(statusOut, mainOut, log, user, branch) {
+  let status = null;
+  if (statusOut !== null) {
+    const lines = statusOut.split('\n');
+    const head = lines[0]?.startsWith('## ') ? lines.shift().slice(3) : '';
+    // "main...origin/main [ahead 1]", "main", "No commits yet on main", "HEAD (no branch)"
+    branch = /^HEAD \(no branch\)/.test(head) ? '' : /^(?:No commits yet on |Initial commit on )?(.+?)(?:\.\.\.| \[|$)/.exec(head)?.[1] ?? '';
+    const changes = lines.filter((l) => l.trim());
+    status = changes.length > 40 ? changes.slice(0, 40).join('\n') + `\n... (${changes.length - 40} more lines, run "git status" for the rest)` : changes.join('\n');
+  }
+  const refs = (mainOut || '').split('\n').map((s) => s.trim());
+  const main = refs.includes('main') ? 'main' : refs.includes('master') ? 'master' : null;
+  return { branch: branch || '(detached)', main, status, log: log || '', user };
 }
 
 // Memory files, lowest priority first: user memory, then project files from the
@@ -83,6 +108,10 @@ export function localDate(now = new Date()) {
 // midnight) cannot be read from the prompt cache, and the git status is labelled as a snapshot anyway.
 export function takeEnvSnapshot(cwd) {
   return { date: localDate(), git: gitInfo(cwd) };
+}
+
+export async function takeEnvSnapshotAsync(cwd) {
+  return { date: localDate(), git: await gitInfoAsync(cwd) };
 }
 
 export function environmentBlock(cwd, { model, shellName, snapshot = null }) {

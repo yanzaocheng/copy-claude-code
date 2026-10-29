@@ -811,10 +811,13 @@ export class App {
   contextUsed() {
     const a = this.agent;
     if (a.lastContextTokens) return a.contextEstimate;
-    const key = `${a.messages.length}|${this.runtime.tools.length}`;
+    // not built yet: the prompt is counted once git has answered in the background (building it here blocked on git)
+    const ready = this.runtime.systemPromptReady?.() ?? true;
+    const key = `${a.messages.length}|${this.runtime.tools.length}|${ready}`;
     if (this.contextGuess?.key !== key) {
+      if (!ready) this.runtime.prepareSnapshot().then(() => this.screen.schedule());
       let used = 0;
-      try { used = estimateTokens(this.runtime.systemPrompt()) + estimateTokens(a.toolSchemas()) + estimateTokens(a.messages); } catch { /* 0 */ }
+      try { used = (ready ? estimateTokens(this.runtime.systemPrompt()) : 0) + estimateTokens(a.toolSchemas()) + estimateTokens(a.messages); } catch { /* 0 */ }
       this.contextGuess = { key, used };
     }
     return this.contextGuess.used;

@@ -664,7 +664,7 @@ export class Agent {
     this.busy++; // undone in the finally below
     try {
       if (!this.isSubagent) {
-      this.beforeTurn?.();
+      await this.beforeTurn?.();
       this.endEffortBoost();
       this.noteUserTurn(userContent);
     }
@@ -1258,7 +1258,7 @@ export class Agent {
     const userMessages = keptUserMessages(this.messages);
     this.replaceMessages([{ role: 'user', content: [{ type: 'text', text: continuationMessage(summary, { auto, workState: state.state, workStateWarning: state.warning, userMessages }) + todoNote }] }]);
     this.cache.noteCompacted();
-    this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
+    await this.refreshSystemPrompt?.(); // the conversation starts over: it may start from a freshly built system prompt
     this.fileState.clear();
     if (!this.isSubagent) this.checkpoints?.markConversationStale(); // the checkpoints are the main conversation's: a sub-agent's own compaction does not end them
     this.lastContextTokens = estimateTokens(this.messages) + estimateTokens(this.toolSchemas()) + 2000;

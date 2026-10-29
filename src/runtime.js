@@ -14,7 +14,7 @@ import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
 import { autoMemoryDir, pruneToolResults, pruneCheckpoints, projectDir } from './session.js';
-import { loadAutoMemoryIndex, takeEnvSnapshot, localDate } from './context.js';
+import { loadAutoMemoryIndex, takeEnvSnapshot, takeEnvSnapshotAsync, localDate } from './context.js';
 import { canRestart } from './restart.js';
 import { RuntimeTrace } from './trace.js';
 import { loadActivePrompt } from './prompt-profiles.js';
@@ -56,9 +56,25 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const snapshots = new Map(); // directory -> {date, git}
   const snapshotFor = (dir) => {
     const key = path.resolve(dir);
-    if (!snapshots.has(key)) snapshots.set(key, takeEnvSnapshot(key));
+    if (!snapshots.has(key)) snapshots.set(key, takeEnvSnapshot(key)); // blocks on git: prepareSnapshot usually came first
     return snapshots.get(key);
   };
+  // The snapshot of the project's directory for the prompt built next, taken without blocking: at the start, and
+  // waited for before a turn and after a compaction (see beforeTurn, refreshSystemPrompt), when the prompt is to be
+  // built again. Taken at the build itself, git blocked the program there.
+  let snapshotGen = 0; // invalidateSystemPrompt: a snapshot taken before is not the one wanted any more
+  let preparing = null;
+  runtime.prepareSnapshot = () => {
+    const key = path.resolve(cwd);
+    if (promptCache || snapshots.has(key)) return Promise.resolve();
+    if (preparing?.gen === snapshotGen) return preparing.promise;
+    const gen = snapshotGen;
+    const promise = takeEnvSnapshotAsync(key).then((s) => { if (gen === snapshotGen && !snapshots.has(key)) snapshots.set(key, s); }, () => {});
+    preparing = { gen, promise };
+    return promise;
+  };
+  // Whether the prompt can be built without waiting for git.
+  runtime.systemPromptReady = () => Boolean(promptCache) || snapshots.has(path.resolve(cwd));
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
@@ -73,7 +89,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     return promptCache;
   };
   // Build the prompt again at the next request: for a new conversation (/clear), another model, a compaction.
-  runtime.invalidateSystemPrompt = () => { promptCache = null; promptStale = false; snapshots.clear(); notedDate = null; };
+  runtime.invalidateSystemPrompt = () => { promptCache = null; promptStale = false; snapshots.clear(); snapshotGen++; preparing = null; notedDate = null; };
   // Something it is built from changed in the middle of a conversation: note it, and leave the prompt as it is.
   runtime.deferSystemPromptRefresh = () => { if (promptCache) promptStale = true; };
   Object.defineProperty(runtime, 'systemPromptStale', { get: () => promptStale });
@@ -171,8 +187,9 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     spawnSubagent: runtime.spawnSubagent,
     hooks,
     tasks,
-    refreshSystemPrompt: () => runtime.invalidateSystemPrompt(), // a compaction starts the conversation over
-    beforeTurn: () => runtime.noteDateChange(),
+    // a compaction starts the conversation over, from a prompt built again
+    refreshSystemPrompt: async () => { runtime.invalidateSystemPrompt(); await runtime.prepareSnapshot(); },
+    beforeTurn: async () => { runtime.noteDateChange(); await runtime.prepareSnapshot(); },
     trace,
   });
 

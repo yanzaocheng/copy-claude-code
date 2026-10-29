@@ -129,6 +129,22 @@ function msysDescendants(child, { sync }) {
   return runAsync(ps, ['-W'], { timeout: 5000 }).then((r) => (r.code === 0 ? msysTree(parsePsRows(r.out), root) : []));
 }
 
+// The trimmed output of a command that succeeded, or null, as run() gives it, without blocking the event loop. An
+// output past maxChars is null too. Never rejects.
+export function runText(cmd, args, { cwd, timeout = 5000, maxChars = 1024 * 1024 } = {}) {
+  return new Promise((resolve) => {
+    let out = '';
+    let child;
+    try { child = spawn(cmd, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { resolve(null); return; }
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } }, timeout);
+    const done = (value) => { clearTimeout(timer); resolve(value); };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d) => { out += d; if (out.length > maxChars) try { child.kill(); } catch { /* gone */ } });
+    child.on('error', () => done(null));
+    child.on('close', (code) => done(code === 0 && out.length <= maxChars ? out.trim() : null));
+  });
+}
+
 // A command's exit code and output, without blocking the event loop. Never rejects.
 function runAsync(cmd, args, { timeout = 5000 } = {}) {
   return new Promise((resolve) => {
