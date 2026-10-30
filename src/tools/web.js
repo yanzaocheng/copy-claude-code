@@ -253,26 +253,15 @@ async function searchBing(query, signal) {
 
 // ---- WebSearch through the gateway
 //
-// The search runs where the models run: a small request to a fast model with the server-side search tool
-// (Anthropic's web_search; the gateway gives GPT models Codex's), which searches, reads the results and reports what
-// they say, each statement marked with its source. Scraping search engines' pages from here, which this tool used to
-// do, gets their bot pages (DuckDuckGo: 202), or Bing's results for the first word of the query only (2026-10-27:
-// "run iOS simulator on Windows 2026 without Mac" gave ten dictionary entries for "run"): that is the last resort
-// now. Measured on the gateway: claude-haiku-5-5 8 s and $0.003 for two searches with 20 results; gpt-6.1-sol (the
-// fallback when Claude does not answer) 21 s and $0.08.
+// The search runs where the selected model runs: a request with the server-side search tool (Anthropic's web_search;
+// the gateway gives GPT models Codex's), which searches, reads the results and reports what they say, each statement
+// marked with its source. Scraping search engines' pages from here, which this tool used to do, gets their bot pages
+// (DuckDuckGo: 202), or Bing's results for the first word of the query only (2026-10-27: "run iOS simulator on
+// Windows 2026 without Mac" gave ten dictionary entries for "run"): that is the last resort now.
 
 export const searchLimits = { timeoutMs: 90_000, maxUses: 5, maxTextChars: 8000, maxResults: 40 };
 
 const searchSystem = (today) => `You run web searches for another AI agent and report what they found. Search for the query (search again with other words when the first results miss it), then write what the results say that answers it: facts, versions, numbers, dates and names exactly as the pages give them. Do not answer from your own knowledge; when the results do not answer the query, say so plainly. Be brief: at most about 300 words, no preamble. Today's date is ${today}.`;
-
-// The models to search with, in order: CLAUDE_PRO_SEARCH_MODEL (default haiku: fast and cheap), then a GPT model,
-// whose search runs on another upstream (the session's model when it is one).
-function searchModels(config) {
-  const first = config.resolveModel(String(config.env.CLAUDE_PRO_SEARCH_MODEL ?? '').trim() || 'haiku');
-  const main = config.model;
-  const gpt = /^gpt-/i.test(main.id) ? main : config.resolveModel('gpt-6.1-sol');
-  return gpt.id === first.id ? [first] : [first, gpt];
-}
 
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
 const domainMatch = (host, d) => host === d || host.endsWith(`.${String(d).replace(/^\.+/, '')}`);
@@ -381,22 +370,21 @@ export const WebSearchTool = {
   async call(input, ctx) {
     const failures = [];
     if (ctx.config) {
-      for (const model of searchModels(ctx.config)) {
-        const timeout = AbortSignal.timeout(searchLimits.timeoutMs);
-        try {
-          const found = await searchWithModel(ctx.config, model, input, AbortSignal.any([...(ctx.signal ? [ctx.signal] : []), timeout]));
-          if (found.results.length || (found.text && !found.errors.length)) {
-            return { content: formatSearch(input.query, found, model), display: { summary: `Found ${found.results.length} results` } };
-          }
-          if (!found.errors.length) {
-            // a search that worked and found nothing: so it is (another engine would not do better)
-            return { content: `No results found for "${input.query}"${input.allowed_domains?.length ? ` on ${input.allowed_domains.join(', ')}` : ''}.`, display: { summary: 'No results' } };
-          }
-          failures.push(`${model.id}: ${found.errors.join(', ')}`);
-        } catch (e) {
-          if (ctx.signal?.aborted) throw e;
-          failures.push(`${model.id}: ${timeout.aborted ? `timed out after ${searchLimits.timeoutMs / 1000}s` : (e.message || String(e)).slice(0, 200)}`);
+      const model = ctx.config.model;
+      const timeout = AbortSignal.timeout(searchLimits.timeoutMs);
+      try {
+        const found = await searchWithModel(ctx.config, model, input, AbortSignal.any([...(ctx.signal ? [ctx.signal] : []), timeout]));
+        if (found.results.length || (found.text && !found.errors.length)) {
+          return { content: formatSearch(input.query, found, model), display: { summary: `Found ${found.results.length} results` } };
         }
+        if (!found.errors.length) {
+          // a search that worked and found nothing: so it is (another engine would not do better)
+          return { content: `No results found for "${input.query}"${input.allowed_domains?.length ? ` on ${input.allowed_domains.join(', ')}` : ''}.`, display: { summary: 'No results' } };
+        }
+        failures.push(`${model.id}: ${found.errors.join(', ')}`);
+      } catch (e) {
+        if (ctx.signal?.aborted) throw e;
+        failures.push(`${model.id}: ${timeout.aborted ? `timed out after ${searchLimits.timeoutMs / 1000}s` : (e.message || String(e)).slice(0, 200)}`);
       }
     }
     // The last resort: a search engine's page, scraped.
