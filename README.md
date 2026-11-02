@@ -261,7 +261,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 
 ## 浏览器：指定要操作的标签页
 
-`Browser` 工具操作你自己的 Edge/Chrome（带着你的登录状态），也可以用 claude-pro 自己的浏览器（`browser: "own"`）。先在 Edge 的 `edge://inspect/#remote-debugging`（Chrome 是 `chrome://inspect/#remote-debugging`）里打开允许远程调试；之后每个 claude-pro 进程第一次连接时，浏览器会弹窗问一次是否允许。
+`Browser` 工具操作你自己的 Edge/Chrome（带着你的登录状态），也可以用 claude-pro 自己的浏览器（`browser: "own"`）。先在 Edge 的 `edge://inspect/#remote-debugging`（Chrome 是 `chrome://inspect/#remote-debugging`）里打开允许远程调试。浏览器对每个新连接都会弹窗问“是否允许远程调试”（没有“始终允许”），所以连接由一个后台小进程（`src/browser/broker.js`）替所有 claude-pro 会话保持：每个浏览器实例只需点一次“允许”，claude-pro 重启、新开会话都沿用这个连接，不再弹窗。最后一个用它的会话退出 10 分钟后，后台进程才断开连接并退出；之后再用浏览器会重新问一次。
 
 **用 `/tabs` 指定标签页**：列出浏览器里所有标签页和它们的 ID，用方向键选一个，回车。同时开着几个允许远程调试的浏览器实例时（例如一个用独立数据目录启动的 Edge 应用窗口，它和平常的 Edge 是两个实例，标签页互不相通），先让你选浏览器：`Microsoft Edge`、`Microsoft Edge · ASR-Web\desktop-profile`……；`/tabs edge` 只列 Edge 的实例，`/tabs asr` 按数据目录里的字筛选。标签页列表最后一项“Another browser or profile…”可以换到别的实例。选中标签页后：
 

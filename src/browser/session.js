@@ -12,6 +12,7 @@ import { Cdp, CdpError, abortError } from './cdp.js';
 import { closeRenderer } from './render.js';
 import { CONFIG_DIR } from '../config.js';
 import { runText } from '../utils/shell.js';
+import { connectShared } from './broker.js';
 
 export const browserLimits = {
   connectMs: 120_000, // the user may take a while to click Allow
@@ -405,16 +406,22 @@ class BrowserSession {
     return next;
   }
 
-  // `spec`: what the call asked for (see resolveBrowser), or an instance from browserInstances (/tabs).
+  // `spec`: what the call asked for (see resolveBrowser), or an instance from browserInstances (/tabs). The user's
+  // browsers are reached through the broker (broker.js), whose connection outlives this process: the user allows
+  // it once, not again at every restart and in every session. Another browser asked for is found and connected to
+  // before the one there is let go: a request for one that is not there (chrome, when only Edge allows it) cost
+  // the connection to Edge, and the user had to allow it again.
   async connect(spec, env, onWaiting) {
     const given = spec && typeof spec === 'object' ? spec : null;
     if (this.connected) {
       const w = given ? '' : String(spec || '').trim().toLowerCase();
       if (given ? sameBrowser(given, this.browser) : (!w || w === this.browser.name || (this.browser.dir && /[\\/]/.test(w) && samePath(w, this.browser.dir)))) return null;
-      this.close(); // another browser was asked for
     }
     const target = given || await resolveBrowser(spec, env, this.signal, this.preferred);
-    const cdp = await Cdp.connect(target.url, { signal: this.signal, timeoutMs: browserLimits.connectMs, onWaiting: target.own ? null : () => onWaiting?.(target) });
+    if (this.connected && sameBrowser(target, this.browser)) return null; // the same one, by another name
+    const options = { signal: this.signal, timeoutMs: browserLimits.connectMs, onWaiting: target.own ? null : () => onWaiting?.(target) };
+    const cdp = target.own ? await Cdp.connect(target.url, options) : await connectShared(target.url, options);
+    this.close(); // the one before, now that the new one is there
     this.reset();
     this.cdp = cdp;
     this.browser = target;
