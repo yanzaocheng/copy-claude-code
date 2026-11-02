@@ -547,7 +547,7 @@ export function buildCommands(app) {
           : savedPrompt?.text != null ? `${savedPrompt.name} (saved)` : savedPrompt?.error ? `${savedPrompt.name} (missing; using built-in)` : 'built-in default'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
         row('Prompt cache', cfg.promptCachingDisabled(cfg.model.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
-        row('Auto-compact', cfg.autoCompactEnabled ? `at ${formatTokens(cfg.autoCompactThreshold())} tokens (window ${formatTokens(cfg.compactWindow())})` : 'disabled'),
+        row('Auto-compact', `at ${formatTokens(cfg.compactWindow())} tokens (100% of window)`),
         row('Access', 'full (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
         row('Shell', `${app.runtime.shell.name} ${c.dim(app.runtime.shell.path)}`),
@@ -647,7 +647,7 @@ export function buildCommands(app) {
       const cfg = app.runtime.config;
       const a = app.agent;
       const window = cfg.model.contextWindow;
-      const threshold = cfg.autoCompactThreshold();
+      const threshold = cfg.compactWindow();
       const sys = estimateTokens(app.runtime.systemPrompt());
       const tools = estimateTokens(a.toolSchemas());
       const msgs = estimateTokens(a.messages);
@@ -660,7 +660,7 @@ export function buildCommands(app) {
       out([
         `${bar}  ${c.bold(formatTokens(used))} / ${formatTokens(window)} tokens (${Math.round((used / window) * 100)}%)`,
         c.dim(`System prompt ~${formatTokens(sys)} · Tools ~${formatTokens(tools)} · Messages ~${formatTokens(msgs)} (${a.messages.length})`),
-        cfg.autoCompactEnabled ? c.dim(`Auto-compact at ${formatTokens(threshold)} tokens (┃) — ${Math.max(0, Math.round((1 - used / threshold) * 100))}% left`) : c.dim('Auto-compact disabled'),
+        c.dim(`Auto-compact at ${formatTokens(threshold)} tokens (┃) — ${Math.max(0, Math.round((1 - used / threshold) * 100))}% left`),
       ]);
     },
   });

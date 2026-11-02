@@ -382,7 +382,7 @@ export class Agent {
   // Tokens the context can still take before it reaches the auto-compaction threshold: what a Read with allow_large
   // may use (a larger one would be compacted away right after it was read).
   contextRoom() {
-    return this.config.autoCompactThreshold(this.model, this.compactWindow) - this.contextEstimate - this.heldTokens;
+    return this.config.compactWindow(this.model, this.compactWindow) - this.contextEstimate - this.heldTokens;
   }
 
   // Claim room for a tool result that is about to be added. Read-only tools run in parallel, so what each one
@@ -821,13 +821,13 @@ export class Agent {
   }
 
   shouldAutoCompact() {
-    if (!this.config.autoCompactEnabled || this.messages.length <= 2) return false;
+    if (this.messages.length <= 2) return false;
     if (this.compactFailures >= MAX_COMPACT_FAILURES) return false;
     // A count reported by another model (the user switched) is in another tokenizer's tokens: Opus counted 304k where
     // GPT had counted 207k of the same conversation, and GPT compacted at once. The next request measures it instead;
     // a conversation too long for this model is compacted on the error.
     if (this.usageModel && this.usageModel !== this.model.id) return false;
-    const threshold = this.config.autoCompactThreshold(this.model, this.compactWindow);
+    const threshold = this.config.compactWindow(this.model, this.compactWindow);
     if (this.contextEstimate < threshold) return false;
     // Right after a compaction the base context (system prompt, tools, summary) may itself be
     // near a very small window; require real growth so we don't compact on every step.

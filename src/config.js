@@ -39,8 +39,6 @@ export const KNOWN_KEYS = {
 
   CLAUDE_CODE_EFFORT_LEVEL: 'Reasoning effort: none|minimal|low|medium|high|xhigh|max (sent as output_config.effort)',
   CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'Context size (tokens) used for auto-compaction calculations',
-  CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: 'Percentage (1-100) of the window at which auto-compaction triggers',
-  DISABLE_AUTOCOMPACT: 'Set to 1 to disable auto-compaction',
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 48000; lowered automatically if the gateway allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
   CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the gateway; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
@@ -253,23 +251,11 @@ export class Config {
   get overloadedRetryMaxDelay() { return Math.max(this.overloadedRetryBaseDelay, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS, 32_000)); }
   get overloadedMaxWait() { return Math.max(0, int(this.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS, this.rateLimitMaxWait)); }
 
-  // Effective window for compaction: the configured auto-compact window capped by the model window. `own`: a
-  // sub-agent's autoCompactWindow, which takes the place of the configured one.
+  // Automatic compaction is always on, at 100% of this input window (no percentage or output reserve). An explicit
+  // compact-window setting is capped by the model window; `own` is a sub-agent's autoCompactWindow instead.
   compactWindow(model = this.model, own = 0) {
     const configured = own > 0 ? own : int(this.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, 0);
     return configured > 0 ? Math.min(configured, model.contextWindow) : model.contextWindow;
-  }
-  get autoCompactEnabled() { return !/^(1|true|yes)$/i.test(this.env.DISABLE_AUTOCOMPACT || ''); }
-  autoCompactThreshold(model = this.model, own = 0) {
-    const window = this.compactWindow(model, own);
-    const pct = int(this.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 0);
-    if (pct > 0 && pct <= 100) return Math.floor(window * pct / 100);
-    // GPT's window is the upstream's maximum input, with output already accounted for. Use it whole: no additional
-    // 90% margin (an imprecise estimate that exceeds the limit is handled by compacting on the error).
-    if (/^gpt-/i.test(model.id)) return window;
-    // Leave room for the summary itself and the next response (replies rarely come close to the
-    // max_tokens ceiling, so the reserve is capped; an overflow is handled by compacting on the error).
-    return Math.floor(window - Math.min(window * 0.2, Math.max(20_000, Math.min(this.maxOutputTokens, 64_000))));
   }
 
   get bashDefaultTimeout() { return int(this.env.BASH_DEFAULT_TIMEOUT_MS, 600_000); }

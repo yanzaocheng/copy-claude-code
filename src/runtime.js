@@ -84,7 +84,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
         ? flags.systemPrompt
         : savedPrompt?.text != null
           ? savedPrompt.text
-          : mainSystemPrompt({ cwd, model: config.model, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, autoCompact: config.autoCompactEnabled, snapshot: snapshotFor(cwd) });
+          : mainSystemPrompt({ cwd, model: config.model, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;

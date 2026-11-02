@@ -2522,11 +2522,11 @@ export class App {
       else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when @${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
     }
     const cfg = this.config;
-    const threshold = cfg.autoCompactThreshold(cfg.model);
+    const threshold = cfg.compactWindow();
     const used = this.agent.contextEstimate;
     let notice = '';
     const pctLeft = Math.max(0, Math.round((1 - used / threshold) * 100));
-    if (pctLeft <= 30 && cfg.autoCompactEnabled) notice = c.yellow(`Context left until auto-compact: ${pctLeft}%`);
+    if (pctLeft <= 30) notice = c.yellow(`Context left until auto-compact: ${pctLeft}%`);
     else if (this.runtime.tasks.running().length) notice = c.dim(`${this.runtime.tasks.running().length} background agent${this.runtime.tasks.running().length === 1 ? '' : 's'} running · /tasks`);
     else if (this.verbose) notice = c.dim('verbose');
     // The model and effort in use always have a place at the right: with the notice after it when both fit,
