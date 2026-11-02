@@ -20,7 +20,7 @@ import { activePromptName, listPromptProfiles, loadActivePrompt, promptDirectory
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
-import { browserSession, safeUrl } from './browser/session.js';
+import { browserSession, browserInstances, sameBrowser, safeUrl } from './browser/session.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);
@@ -758,11 +758,13 @@ export function buildCommands(app) {
   // The tab the Browser tool is to work in, picked by the user instead of looked for by the model: the tabs of the
   // browser with their ids, from the same connection the tool uses (so the ids are the tool's), and the one picked is
   // selected there and named in the message being written. Its id stays that tab's after a reconnect or a restart
-  // (BrowserSession.relabel), so the agent goes straight to it.
+  // (BrowserSession.relabel), so the agent goes straight to it. Several browser instances may allow remote debugging
+  // (Edge also on a profile directory of its own, as an app's window has): the user picks one first, and the
+  // session goes back to it after a restart (BrowserSession.preferred).
   add({
     name: 'tabs',
     aliases: ['tab'],
-    argHint: '[edge|chrome|brave|chromium|own]',
+    argHint: '[edge|chrome|brave|chromium|own|words of a profile directory]',
     description: 'Pick a tab of your browser for the Browser tool: it is selected, and its id goes into your message',
     async run(args) {
       // the agent's own browser calls go to the selected tab: not changed under it while it works
@@ -783,29 +785,71 @@ export function buildCommands(app) {
         }
       };
       const failed = (e, what) => out(e?.name === 'AbortError' ? c.dim('Cancelled.') : c.red(`${what}: ${e.message}`));
-      try {
-        try {
-          await busy('Connecting to the browser', () => s.connect(args.trim(), app.runtime.config.env, (b) => {
-            app.status = `Allow the connection in ${b.label} ("Allow remote debugging?" → Allow) · Esc cancels`;
-            app.screen.schedule();
-          }));
-        } catch (e) { failed(e, 'Cannot use the browser'); return; }
-        const browser = s.browser;
-        const tabs = [...s.tabs.values()];
-        if (!browser || !tabs.length) { out(c.dim(browser ? `${browser.label} has no tabs open.` : 'The connection to the browser was lost.')); return; }
-        const title = (t, n) => truncate(String(t.title || '(no title)').replace(/\s+/g, ' '), n);
-        const chosen = await app.showDialog(new SelectDialog({
-          title: `Tabs in ${browser.label}`,
-          question: 'The Browser tool works in the tab you pick, and its id goes into your message.',
-          options: tabs.map((t) => ({ value: t.targetId, label: `${padEnd(t.id, 8)} ${title(t, 70)}${t === s.current ? c.dim(' (selected)') : ''}`, description: safeUrl(t.url || '') })),
-          selected: Math.max(0, tabs.indexOf(s.current)),
+      // The instance to connect to: the one matching `ask` (a kind, or words of its profile directory), or the user's
+      // pick when several are there. null: none, or the user closed the list.
+      const chooseBrowser = async (ask) => {
+        let all;
+        try { all = await busy('Looking for browsers', () => browserInstances()); } catch (e) { failed(e, 'Cannot list the browsers'); return null; }
+        const q = ask.toLowerCase();
+        const list = q ? all.filter((i) => i.name === q || `${i.label} ${i.dir}`.toLowerCase().includes(q)) : all;
+        if (!list.length) {
+          out(c.red(`${q ? `No browser matching "${ask}" allows` : 'No browser allows'} remote debugging now. Turn it on in yours at edge://inspect/#remote-debugging (Chrome: chrome://inspect/#remote-debugging) and allow it for this browser instance.`));
+          return null;
+        }
+        if (list.length === 1) return list[0];
+        const connected = list.find((i) => s.connected && sameBrowser(i, s.browser));
+        const key = await app.showDialog(new SelectDialog({
+          title: 'Which browser?',
+          question: 'These allow remote debugging now; each asks once per connection to allow it.',
+          options: list.map((i) => ({ value: i.dir || i.url, label: `${i.label}${i === connected ? c.dim(' (connected)') : ''}`, description: `${i.dir}${i.port ? ` · port ${i.port}` : ''}` })),
+          selected: Math.max(0, list.indexOf(connected)),
         }));
-        if (!chosen) return;
-        const tab = s.tabs.get(chosen);
-        if (!tab) { out(c.red('That tab was closed meanwhile.')); return; }
-        try { await busy('Selecting the tab', () => s.select(tab)); } catch (e) { failed(e, `Could not select ${tab.id}`); return; }
-        app.editor.insert(`[Browser tab ${tab.id} in ${browser.label}: ${JSON.stringify(title(tab, 60))}] `);
-        out(c.dim(`${tab.id} is the Browser tool's tab now, and its id is in your message.`));
+        return key ? list.find((i) => (i.dir || i.url) === key) : null;
+      };
+      try {
+        const ask = args.trim();
+        let target = null;
+        if (ask || !s.connected) {
+          target = await chooseBrowser(ask);
+          if (!target) return;
+        }
+        for (;;) {
+          if (target) {
+            const connecting = target;
+            target = null;
+            try {
+              await busy('Connecting to the browser', () => s.connect(connecting, app.runtime.config.env, (b) => {
+                app.status = `Allow the connection in ${b.label} ("Allow remote debugging?" → Allow) · Esc cancels`;
+                app.screen.schedule();
+              }));
+            } catch (e) { failed(e, 'Cannot use the browser'); return; }
+          }
+          const browser = s.browser;
+          const tabs = [...s.tabs.values()];
+          if (!browser) { out(c.dim('The connection to the browser was lost.')); return; }
+          const title = (t, n) => truncate(String(t.title || '(no title)').replace(/\s+/g, ' '), n);
+          const chosen = await app.showDialog(new SelectDialog({
+            title: `Tabs in ${browser.label}`,
+            question: 'The Browser tool works in the tab you pick, and its id goes into your message.',
+            options: [
+              ...tabs.map((t) => ({ value: t.targetId, label: `${padEnd(t.id, 8)} ${title(t, 70)}${t === s.current ? c.dim(' (selected)') : ''}`, description: safeUrl(t.url || '') })),
+              { value: '__browser__', label: c.dim('Another browser or profile…') },
+            ],
+            selected: Math.max(0, tabs.indexOf(s.current)),
+          }));
+          if (!chosen) return;
+          if (chosen === '__browser__') {
+            target = await chooseBrowser('');
+            if (!target) return;
+            continue;
+          }
+          const tab = s.tabs.get(chosen);
+          if (!tab) { out(c.red('That tab was closed meanwhile.')); return; }
+          try { await busy('Selecting the tab', () => s.select(tab)); } catch (e) { failed(e, `Could not select ${tab.id}`); return; }
+          app.editor.insert(`[Browser tab ${tab.id} in ${browser.label}: ${JSON.stringify(title(tab, 60))}] `);
+          out(c.dim(`${tab.id} is the Browser tool's tab now, and its id is in your message.`));
+          return;
+        }
       } finally {
         app.sendWhatWaited(); // what was typed while it connected
       }

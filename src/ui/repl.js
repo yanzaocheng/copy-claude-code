@@ -28,6 +28,7 @@ import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { shutdownInterpreters } from '../tools/code.js';
+import { browserSession } from '../browser/session.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn, imageSize } from '../utils/images.js';
@@ -1034,6 +1035,9 @@ export class App {
       changedDirectory: Boolean(request.cwd),
       // where the agent's shell is (a `cd` in Bash moves it): the next process goes on there, not at the project's root
       agentCwd: request.cwd ? null : this.agent.cwd,
+      // the browser instance in use (one picked with /tabs may be any of several): the next process connects to it
+      // again, where the tab ids in the conversation are still its tabs'
+      browser: browserSession.preferred || null,
       sessionId: this.store.id,
       sessionFile: moved?.file || this.store.file,
       modelOverride: cfg.modelOverride,
@@ -1094,6 +1098,7 @@ export class App {
         try { if (fs.statSync(state.agentCwd).isDirectory()) this.agent.cwd = state.agentCwd; } catch { /* gone: the project's root */ }
       }
     }
+    if (state.browser && typeof state.browser === 'object' && typeof state.browser.dir === 'string') browserSession.preferred = state.browser;
     if (typeof state.draft === 'string' && state.draft) this.editor.restoreDraft(state.draft, state.draftCursor, state.draftParts);
     // Fullscreen starts on an empty screen: without what the process before showed (an older version, or one
     // that ran classic), the conversation is drawn again from the session.

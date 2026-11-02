@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { Cdp, CdpError, abortError } from './cdp.js';
 import { closeRenderer } from './render.js';
 import { CONFIG_DIR } from '../config.js';
+import { runText } from '../utils/shell.js';
 
 export const browserLimits = {
   connectMs: 120_000, // the user may take a while to click Allow
@@ -148,19 +149,150 @@ async function ownEndpoint(signal) {
 
 const howToTurnOn = (b) => `${b.label} does not allow remote debugging now. The user turns it on at ${b.inspect} (allow remote debugging for this browser instance; ${b.label} then asks once per session to allow the connection). Or use browser: "own".`;
 
-// The browser to connect to: `spec` (the call's browser field), else CLAUDE_PRO_BROWSER, else the first known
-// browser that allows remote debugging, else claude-pro's own when it is running.
-export async function resolveBrowser(spec, env, signal) {
+// ---- Every browser instance that allows remote debugging
+//
+// A browser started with a profile directory of its own (--user-data-dir: an app that opens its window in Edge, a
+// second profile kept apart) is another instance, with its own tabs and its own DevToolsActivePort in that
+// directory, which the usual places do not have: /tabs edge listed the user's main Edge and not the one their
+// mail was open in. The running browsers' command lines say where each one keeps its profile.
+
+const samePath = (a, b) => {
+  const x = path.resolve(String(a));
+  const y = path.resolve(String(b));
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+};
+
+export const sameBrowser = (a, b) => Boolean(a && b) && ((a.dir && b.dir) ? samePath(a.dir, b.dir) : a.url === b.url);
+
+// A browser process's --user-data-dir ("..." around the value, or around the whole argument), or null.
+export function userDataDirOf(command) {
+  const s = String(command || '');
+  const m = /"--user-data-dir=([^"]*)"/.exec(s) || /--user-data-dir="([^"]*)"/.exec(s) || /--user-data-dir=(\S+)/.exec(s);
+  return m?.[1] || null;
+}
+
+// Where a browser installed at `exe` keeps its profile when it is not given one. Windows: the <vendor>\<product> of its
+// <vendor>\<product>\Application\<exe>, under LOCALAPPDATA, then "User Data" (Microsoft\Edge, Google\Chrome,
+// BraveSoftware\Brave-Browser, and their Beta, Dev and Canary installs alike). Elsewhere: the usual place of its kind.
+export function defaultUserDataDir(exe, kind, { env = process.env, home = os.homedir() } = {}) {
+  if (process.platform !== 'win32') return knownBrowsers().find((b) => b.name === kind)?.dir || null;
+  const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const appDir = path.dirname(exe);
+  if (path.basename(appDir).toLowerCase() !== 'application') return null;
+  const product = path.dirname(appDir);
+  const rel = product.toLowerCase().startsWith(`${local.toLowerCase()}${path.sep}`)
+    ? path.relative(local, product) // installed for the user (Chromium, a per-user Chrome)
+    : path.join(path.basename(path.dirname(product)), path.basename(product));
+  return path.join(local, rel, 'User Data');
+}
+
+const kindOf = (exe) => {
+  const name = path.basename(String(exe || '')).toLowerCase();
+  if (/^msedge(\.exe)?$/.test(name) || /microsoft edge/i.test(exe)) return 'edge';
+  if (/^brave(\.exe)?$/.test(name) || /brave/i.test(exe)) return 'brave';
+  if (/chromium/i.test(exe)) return 'chromium';
+  if (/^chrome(\.exe)?$/.test(name) || /google chrome/i.test(exe)) return 'chrome';
+  return null;
+};
+
+// The running browsers' main processes: [{kind, dir}], the profile directory each one runs on.
+async function runningBrowserDirs() {
+  if (process.platform === 'win32') {
+    const script = '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process -Filter "Name=\'msedge.exe\' OR Name=\'chrome.exe\' OR Name=\'brave.exe\'" | Where-Object { $_.CommandLine -notmatch \'--type=\' } | Select-Object Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress';
+    const out = await runText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 15_000, maxChars: 4_000_000 });
+    let rows = [];
+    try { const j = out ? JSON.parse(out.replace(/^\uFEFF/, '')) : []; rows = Array.isArray(j) ? j : [j]; } catch { /* none */ }
+    return rows.map((r) => {
+      const exe = r.ExecutablePath || String(r.CommandLine || '').match(/^"([^"]+)"|^(\S+)/)?.slice(1).find(Boolean) || '';
+      const kind = kindOf(exe);
+      const dir = userDataDirOf(r.CommandLine) || (kind ? defaultUserDataDir(exe, kind) : null);
+      return kind && dir ? { kind, dir: path.resolve(dir) } : null;
+    }).filter(Boolean);
+  }
+  const out = await runText('ps', ['-axo', 'args='], { timeout: 10_000, maxChars: 4_000_000 });
+  return String(out || '').split('\n').filter((l) => l.trim() && !/--type=/.test(l)).map((l) => {
+    const kind = kindOf(l.trim().split(/\s+--/)[0]);
+    const dir = kind ? userDataDirOf(l) || defaultUserDataDir(l, kind) : null;
+    return kind && dir ? { kind, dir: path.resolve(dir) } : null;
+  }).filter(Boolean);
+}
+
+const portOf = (url) => Number(/:(\d+)\//.exec(url || '')?.[1]) || null;
+
+// Where `dir` is, for a label: from LOCALAPPDATA or the home directory when it is under one.
+function shortDir(dir) {
+  for (const base of [process.env.LOCALAPPDATA, os.homedir()].filter(Boolean)) {
+    const rel = path.relative(base, dir);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel;
+  }
+  return dir;
+}
+
+// An instance found at `dir`, for /tabs and the Browser tool: {name, label, dir, url, port, isDefault, own?}.
+function instance(kind, dir, url) {
+  if (kind === 'own' || samePath(dir, OWN.dir)) return { ...OWN, dir: OWN.dir, url, port: portOf(url), own: true };
+  const base = knownBrowsers().find((b) => b.name === kind) || { name: kind || 'chrome', label: 'Chromium browser', inspect: 'chrome://inspect/#remote-debugging' };
+  const isDefault = Boolean(base.dir) && samePath(dir, base.dir);
+  return { ...base, dir, url, port: portOf(url), isDefault, label: isDefault ? base.label : `${base.label} · ${shortDir(dir)}` };
+}
+
+// The browser instances that allow remote debugging now, each once: the usual profiles of Edge, Chrome, Brave and
+// Chromium first, then the running ones on profile directories of their own, then claude-pro's own browser. The
+// process list takes about a second on Windows (PowerShell); without it, the usual places only.
+export async function browserInstances() {
+  const candidates = knownBrowsers().map((b) => ({ kind: b.name, dir: b.dir }));
+  try { candidates.push(...await runningBrowserDirs()); } catch { /* the usual places only */ }
+  candidates.push({ kind: 'own', dir: OWN.dir });
+  const seen = new Set();
+  const unique = candidates.filter((c) => {
+    const key = process.platform === 'win32' ? c.dir.toLowerCase() : c.dir;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const found = await Promise.all(unique.map(async (c) => {
+    const url = await readEndpoint(c.dir);
+    return url ? instance(c.kind, c.dir, url) : null;
+  }));
+  return found.filter(Boolean);
+}
+
+// The instance the session used last (picked with /tabs, or the one before a restart), when it is still there and
+// the call asks for no browser in particular or for one of its kind (`w`, the call's own browser field: the user's
+// pick wins over the configured default): its tab ids are the ones the conversation knows.
+async function preferredTarget(preferred, w) {
+  if (!preferred?.dir) return null;
+  if (w && w !== 'auto' && w !== preferred.name) return null;
+  const url = await readEndpoint(preferred.dir);
+  return url ? instance(preferred.own ? 'own' : preferred.name, preferred.dir, url) : null;
+}
+
+// The browser to connect to: the one used last when it is still there (see preferredTarget), else `spec` (the
+// call's browser field), else CLAUDE_PRO_BROWSER, else the first known browser that allows remote debugging, else
+// one on a profile directory of its own, else claude-pro's own when it is running. `spec` may also be a profile
+// directory.
+export async function resolveBrowser(spec, env, signal, preferred = null) {
   const wanted = String(spec || env?.CLAUDE_PRO_BROWSER || '').trim();
   const w = wanted.toLowerCase();
+  if (w === 'off') throw new BrowserError('the browser is turned off for claude-pro (CLAUDE_PRO_BROWSER=off)');
+  const again = await preferredTarget(preferred, String(spec || '').trim().toLowerCase());
+  if (again) return again;
   if (w && w !== 'auto') {
-    if (w === 'off') throw new BrowserError('the browser is turned off for claude-pro (CLAUDE_PRO_BROWSER=off)');
     if (w === 'own') return { ...OWN, dir: OWN.dir, url: await ownEndpoint(signal), own: true };
     const known = knownBrowsers().find((b) => b.name === w);
     if (known) {
       const url = await readEndpoint(known.dir);
-      if (!url) throw new BrowserError(howToTurnOn(known));
-      return { ...known, url };
+      if (url) return { ...known, url, port: portOf(url), isDefault: true };
+      // not in its usual profile: one running on a profile directory of its own
+      const others = (await browserInstances()).filter((i) => i.name === w);
+      if (others.length === 1) return others[0];
+      if (others.length > 1) throw new BrowserError(`${known.label} allows remote debugging in ${others.length} profile directories: ${others.map((i) => i.dir).join('; ')}. Pass the one meant as browser (the user can pick one with /tabs)`);
+      throw new BrowserError(howToTurnOn(known));
+    }
+    if (/[\\/]/.test(wanted) && fs.existsSync(wanted) && fs.statSync(wanted).isDirectory()) {
+      const url = await readEndpoint(wanted);
+      if (!url) throw new BrowserError(`no browser with remote debugging runs on ${wanted} now`);
+      return instance(kindOf(wanted) || 'chrome', path.resolve(wanted), url);
     }
     const url = await explicitEndpoint(wanted, signal);
     if (url) {
@@ -173,9 +305,11 @@ export async function resolveBrowser(spec, env, signal) {
   const found = [];
   for (const b of knownBrowsers()) {
     const url = await readEndpoint(b.dir);
-    if (url) found.push({ ...b, url });
+    if (url) found.push({ ...b, url, port: portOf(url), isDefault: true });
   }
   if (found.length) return { ...found[0], others: found.slice(1).map((b) => b.name) };
+  const elsewhere = (await browserInstances()).filter((i) => !i.own);
+  if (elsewhere.length) return { ...elsewhere[0], others: elsewhere.slice(1).map((i) => i.dir) };
   const own = await readEndpoint(OWN.dir);
   if (own) return { ...OWN, dir: OWN.dir, url: own, own: true };
   const installed = knownBrowsers().filter((b) => fs.existsSync(b.dir));
@@ -244,6 +378,7 @@ class BrowserSession {
   constructor() {
     this.cdp = null;
     this.browser = null;
+    this.preferred = null; // {name, dir, own}: the instance to connect to again (see resolveBrowser)
     this.lock = Promise.resolve();
     this.signal = null;
     this.reset();
@@ -270,17 +405,21 @@ class BrowserSession {
     return next;
   }
 
+  // `spec`: what the call asked for (see resolveBrowser), or an instance from browserInstances (/tabs).
   async connect(spec, env, onWaiting) {
+    const given = spec && typeof spec === 'object' ? spec : null;
     if (this.connected) {
-      const w = String(spec || '').trim().toLowerCase();
-      if (!w || w === this.browser.name) return null;
+      const w = given ? '' : String(spec || '').trim().toLowerCase();
+      if (given ? sameBrowser(given, this.browser) : (!w || w === this.browser.name || (this.browser.dir && /[\\/]/.test(w) && samePath(w, this.browser.dir)))) return null;
       this.close(); // another browser was asked for
     }
-    const target = await resolveBrowser(spec, env, this.signal);
+    const target = given || await resolveBrowser(spec, env, this.signal, this.preferred);
     const cdp = await Cdp.connect(target.url, { signal: this.signal, timeoutMs: browserLimits.connectMs, onWaiting: target.own ? null : () => onWaiting?.(target) });
     this.reset();
     this.cdp = cdp;
     this.browser = target;
+    // the one to go back to after a reconnect or a restart (App keeps it in its restart state)
+    this.preferred = target.dir ? { name: target.own ? 'own' : target.name, dir: target.dir, own: Boolean(target.own) } : null;
     cdp.on((method, params, sessionId) => this.onEvent(method, params, sessionId));
     await cdp.send('Target.setDiscoverTargets', { discover: true }, { signal: this.signal });
     const { targetInfos } = await cdp.send('Target.getTargets', {}, { signal: this.signal });
