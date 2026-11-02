@@ -4,8 +4,18 @@
 
 import { quickQuery, streamMessage } from '../api.js';
 import { localDate } from '../context.js';
+import { renderPage, CHECK_TITLE } from '../browser/render.js';
+import { safeUrl } from '../browser/session.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+const HEADERS = {
+  'User-Agent': UA,
+  Accept: 'text/html,text/markdown,text/plain,application/json;q=0.9,*/*;q=0.8',
+  // the languages a browser says it reads: without them a site may pick one by the address (ai.google.dev sent its
+  // Portuguese page)
+  'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+};
+const MAX_REDIRECTS = 20; // as browsers
 const cache = new Map(); // url -> {at, text, status, bytes}; only successful responses
 
 // Limits, in one object so tests can shrink them.
@@ -108,9 +118,62 @@ export function htmlToMarkdown(html, baseUrl) {
   return (title ? `# ${decodeEntities(title.trim())}\n\n` : '') + s;
 }
 
-async function fetchText(url, signal) {
-  const hit = cache.get(url);
-  if (hit && Date.now() - hit.at < webLimits.cacheMs) return hit;
+// The cookies of one fetch, kept across its redirects as a browser keeps them (for their host or domain, path,
+// https only when secure, until they expire). Redirects followed without them can go round for good: ai.google.dev
+// sends a visitor to a sign-in check that sets a cookie and sends it back, and without the cookie it starts again
+// ("redirect count exceeded").
+export class CookieJar {
+  constructor() { this.cookies = []; }
+
+  store(url, setCookies) {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    for (const line of setCookies) {
+      const [pair, ...attrs] = line.split(';');
+      const eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      const cookie = { name: pair.slice(0, eq).trim(), value: pair.slice(eq + 1).trim(), domain: host, hostOnly: true, path: null, secure: false, expires: null };
+      for (const attr of attrs) {
+        const i = attr.indexOf('=');
+        const key = (i < 0 ? attr : attr.slice(0, i)).trim().toLowerCase();
+        const val = i < 0 ? '' : attr.slice(i + 1).trim();
+        if (key === 'domain' && val) { cookie.domain = val.replace(/^\./, '').toLowerCase(); cookie.hostOnly = false; }
+        else if (key === 'path' && val.startsWith('/')) cookie.path = val;
+        else if (key === 'secure') cookie.secure = true;
+        else if (key === 'max-age' && /^-?\d+$/.test(val)) cookie.expires = Date.now() + Number(val) * 1000;
+        else if (key === 'expires' && cookie.expires === null && !Number.isNaN(Date.parse(val))) cookie.expires = Date.parse(val);
+      }
+      // not for another site, nor for a whole top-level domain (Domain=com)
+      if (!cookie.hostOnly && (!cookie.domain.includes('.') || (host !== cookie.domain && !host.endsWith(`.${cookie.domain}`)))) continue;
+      cookie.path ??= u.pathname.lastIndexOf('/') > 0 ? u.pathname.slice(0, u.pathname.lastIndexOf('/')) : '/';
+      this.cookies = this.cookies.filter((c) => !(c.name === cookie.name && c.domain === cookie.domain && c.path === cookie.path));
+      if (cookie.expires === null || cookie.expires > Date.now()) this.cookies.push(cookie);
+    }
+  }
+
+  header(url) {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    const now = Date.now();
+    return this.cookies
+      .filter((c) => (c.hostOnly ? host === c.domain : host === c.domain || host.endsWith(`.${c.domain}`))
+        && (u.pathname === c.path || u.pathname.startsWith(c.path.endsWith('/') ? c.path : `${c.path}/`))
+        && (!c.secure || u.protocol === 'https:')
+        && (c.expires === null || c.expires > now))
+      .sort((a, b) => b.path.length - a.path.length)
+      .map((c) => `${c.name}=${c.value}`)
+      .join('; ');
+  }
+}
+
+// The text of a page without its title line and blanks: how much it shows.
+const shownChars = (text) => text.replace(/^# .*\n?/, '').replace(/\s+/g, '').length;
+// A page that its scripts fill in: an empty element they mount the app into, or a note asking for JavaScript.
+const APP_SHELL = /<(div|main|section)\b[^>]*\bid\s*=\s*["']?(?:root|app|__next|__nuxt|svelte|q-app)["']?[^>]*>\s*<\/\1>|<app-root\b[^>]*>\s*<\/app-root>|<noscript[^>]*>[\s\S]{0,500}?(?:enable|requires?|needs?|turn on)\b[\s\S]{0,60}?javascript|<noscript[^>]*>[\s\S]{0,300}?(?:启用|开启|需要)\s*javascript/i;
+
+// A plain request, its redirects followed with their cookies: {status, statusText, text, html, scripts, check,
+// binary, bytes, finalUrl, type}. `check`: a browser check page (Cloudflare's "Just a moment...").
+async function fetchPlain(url, signal) {
   const ctrl = new AbortController();
   // A timeout must be reported as one, and must not look like the user's interrupt.
   let timedOut = false;
@@ -118,26 +181,102 @@ async function fetchText(url, signal) {
   const onAbort = () => ctrl.abort();
   if (signal?.aborted) ctrl.abort(); else signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'text/html,text/markdown,text/plain,application/json;q=0.9,*/*;q=0.8' }, redirect: 'follow', signal: ctrl.signal });
-    const buf = await readCapped(res, webLimits.maxBodyBytes);
-    const type = res.headers.get('content-type') || '';
-    const base = { at: Date.now(), status: res.status, statusText: res.statusText, bytes: buf.length, finalUrl: res.url, type };
-    // Binary content (a PDF, an image, an archive) is not shown as text.
-    if (BINARY_TYPE.test(type) || buf.subarray(0, 8000).includes(0)) return { ...base, text: '', binary: true };
-    let text = decodeBody(buf, type);
-    if (/html/i.test(type) || /^\s*<(!doctype|html)/i.test(text)) text = htmlToMarkdown(text, res.url);
-    const r = { ...base, text };
-    // Only a successful page is remembered: a 503 or a 404 must not be served for the next 15 minutes
-    // after the server has recovered.
-    if (res.ok) remember(url, r);
-    return r;
+    const jar = new CookieJar();
+    let current = url;
+    for (let hops = 0; ; hops++) {
+      const cookie = jar.header(current);
+      const res = await fetch(current, { headers: cookie ? { ...HEADERS, Cookie: cookie } : HEADERS, redirect: 'manual', signal: ctrl.signal });
+      jar.store(current, res.headers.getSetCookie?.() ?? []);
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+      if (location) {
+        try { await res.body?.cancel(); } catch { /* done */ }
+        const next = new URL(location, current).href;
+        if (hops >= MAX_REDIRECTS) throw Object.assign(new Error(`too many redirects (more than ${MAX_REDIRECTS}; they go round between ${safeUrl(current)} and ${safeUrl(next)})`), { code: 'TOO_MANY_REDIRECTS' });
+        current = next;
+        continue;
+      }
+      const buf = await readCapped(res, webLimits.maxBodyBytes);
+      const type = res.headers.get('content-type') || '';
+      const base = { at: Date.now(), status: res.status, statusText: res.statusText, bytes: buf.length, finalUrl: current, type };
+      // Binary content (a PDF, an image, an archive) is not shown as text.
+      if (BINARY_TYPE.test(type) || buf.subarray(0, 8000).includes(0)) return { ...base, text: '', binary: true };
+      const body = decodeBody(buf, type);
+      const html = /html/i.test(type) || /^\s*<(!doctype|html)/i.test(body);
+      const title = html ? decodeEntities(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(body)?.[1]?.trim() || '') : '';
+      return {
+        ...base, html, title,
+        text: html ? htmlToMarkdown(body, current) : body,
+        scripts: html && /<script\b/i.test(body),
+        shell: html && APP_SHELL.test(body),
+        check: res.headers.get('cf-mitigated') === 'challenge' || (html && CHECK_TITLE.test(title)),
+      };
+    }
   } catch (e) {
-    if (timedOut && !signal?.aborted) throw new Error(`timed out after ${Number((webLimits.timeoutMs / 1000).toFixed(1))}s`);
+    if (timedOut && !signal?.aborted) throw Object.assign(new Error(`timed out after ${Number((webLimits.timeoutMs / 1000).toFixed(1))}s`), { code: 'TIMEOUT' });
     throw e;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
   }
+}
+
+// Why a page that a plain request got is opened in a headless browser too, or null: a browser check page, a server
+// that refuses what is not a browser (403 "Access Denied", 429, 503), or a page whose text its scripts write (an
+// app's empty shell, or next to no text at all with scripts; not a small page that has a script, as example.com).
+function browserReason(page) {
+  if (page.binary) return null;
+  if (page.check) return 'check';
+  if ([403, 429, 503].includes(page.status)) return 'refused';
+  if (page.html && page.status < 300 && page.scripts) {
+    const shown = shownChars(page.text);
+    if (shown < 50 || (page.shell && shown < 1000)) return 'script';
+  }
+  return null;
+}
+
+// Whether a request that failed may work in a browser: redirects that go round, a connection reset or refused at
+// its TLS handshake (servers that tell a browser by it), a name or route the browser's proxy settings reach. Not
+// when nothing listens there, nor after the request took its whole time already.
+const browserMayOpen = (err) => !['ECONNREFUSED', 'TIMEOUT'].includes(err?.code || err?.cause?.code);
+
+// A page for WebFetch: a plain request first (fast and cheap), and the headless browser (browser/render.js) when
+// that does not get the page (see browserReason). `rendered`: the browser's page; `blocked`: a page the browser did
+// not get past either (a check that wants a person, or next to nothing shown after a refusal).
+async function fetchPage(url, signal) {
+  const hit = cache.get(url);
+  if (hit && Date.now() - hit.at < webLimits.cacheMs) return hit;
+  let plain = null;
+  let failure = null;
+  try { plain = await fetchPlain(url, signal); } catch (e) {
+    if (signal?.aborted) throw e;
+    failure = e;
+  }
+  const web = /^https?:$/.test(new URL(url).protocol);
+  const why = !web ? null : plain ? browserReason(plain) : browserMayOpen(failure) ? 'failed' : null;
+  let page = plain;
+  if (why) {
+    let rendered = null;
+    try { rendered = await renderPage(url, { signal }); } catch (e) {
+      if (signal?.aborted) throw e;
+      if (!plain) throw Object.assign(new Error(`${failure.cause?.message || failure.message}; a headless browser could not open it either (${e.message})`), { code: failure.code });
+    }
+    if (rendered) {
+      const text = htmlToMarkdown(rendered.html, rendered.finalUrl);
+      const r = {
+        at: Date.now(), status: rendered.status, statusText: rendered.statusText, bytes: Buffer.byteLength(rendered.html),
+        finalUrl: rendered.finalUrl, type: 'text/html', html: true, title: rendered.title, text, rendered: true,
+        refusedStatus: plain && why !== 'script' ? plain.status : null,
+      };
+      if (rendered.challenge) page = { ...r, blocked: 'check' };
+      else if ((why === 'check' || why === 'refused') && r.status < 400 && shownChars(text) < 200) page = { ...r, blocked: 'empty' };
+      else if (why !== 'script' || shownChars(text) > shownChars(plain.text)) page = r;
+    }
+  }
+  if (!page) throw failure; // nothing listens there, or it took the whole time already
+  // Only a successful page is remembered: a 503 or a 404 must not be served for the next 15 minutes after the
+  // server has recovered.
+  if (page.status >= 200 && page.status < 300 && !page.binary && !page.blocked) remember(url, page);
+  return page;
 }
 
 export function makeWebFetchTool(config) {
@@ -169,13 +308,24 @@ Usage notes:
       let url;
       try { url = new URL(input.url); } catch { return { isError: true, content: `Invalid URL: ${input.url}` }; }
       let page;
-      try { page = await fetchText(url.href, ctx.signal); } catch (e) {
+      try { page = await fetchPage(url.href, ctx.signal); } catch (e) {
         if (ctx.signal?.aborted) throw e;
         return { isError: true, content: `Failed to fetch ${url.href}: ${e.cause?.message || e.message}` };
       }
       const size = page.bytes > 1024 ? `${(page.bytes / 1024).toFixed(1)}KB` : `${page.bytes}B`;
-      const display = { summary: `Received ${size} (${page.status} ${page.statusText || ''})`.trim() };
-      if (page.status >= 400) return { isError: true, content: `HTTP ${page.status} ${page.statusText} fetching ${url.href}\n\n${page.text.slice(0, 2000)}`, display };
+      const display = { summary: `Received ${size} (${`${page.status} ${page.statusText || ''}`.trim()}${page.rendered ? ', in a headless browser' : ''})` };
+      const useBrowser = 'Open it with the Browser tool: in the user\'s browser, which may be logged in or past the check already, or with browser: "own", where the user can pass the check if it asks.';
+      if (page.blocked === 'check') {
+        return { isError: true, content: `${url.href} shows a browser check ("${page.title || 'Just a moment...'}") that a headless browser does not get past: it wants a person. ${useBrowser}`, display };
+      }
+      if (page.blocked === 'empty') {
+        const ended = page.finalUrl && page.finalUrl !== url.href ? ` (it ended at ${safeUrl(page.finalUrl)})` : '';
+        return { isError: true, content: `${url.href} turned a plain request away (HTTP ${page.refusedStatus}) and showed next to nothing in a headless browser either${ended}: it may want a login or a check by a person. ${useBrowser}\n\n${page.text.slice(0, 1000)}`, display };
+      }
+      if (page.status >= 400) {
+        const hint = [401, 403, 429, 503].includes(page.status) ? `\n\n(${page.rendered ? 'A headless browser got this too. ' : ''}If the page opens in a browser for the user, with a login or a check, use the Browser tool.)` : '';
+        return { isError: true, content: `HTTP ${page.status} ${page.statusText} fetching ${url.href}${hint}\n\n${page.text.slice(0, 2000)}`, display };
+      }
       if (page.binary) {
         return { isError: true, content: `${page.finalUrl || url.href} is not text (${page.type || 'binary data'}, ${size}), so WebFetch cannot read it. If you need the file, download it with curl in Bash.`, display };
       }

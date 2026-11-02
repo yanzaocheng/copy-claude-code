@@ -185,7 +185,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 | 单个工具结果上限（超出落盘） | 50000 字符 | 100000 字符 |
 | `Read` 一次最多 | 2000 行、每行 2000 字符、总共 12 万字符 | 10000 行、每行 20000 字符、总共 40 万字符；加 `allow_large: true`不限行数和长度，只要上下文在自动压缩之前还放得下（同一批并行读取共用这份余量），放不下就拒绝并写明差多少 |
 | `Glob` / `Grep` 默认返回条数 | 100 / 250 | 1000 / 1000 |
-| `WebFetch` | 用当前会话选择的主模型做摘要（最多 4096 token），自动把 http 升成 https | `raw: true` 直接拿转换后的全文；摘要使用当前会话模型，上限 16000 token、页面上限 40 万字符；按原样请求 URL，localhost 和内网也可以 |
+| `WebFetch` | 用当前会话选择的主模型做摘要（最多 4096 token），自动把 http 升成 https | `raw: true` 直接拿转换后的全文；摘要使用当前会话模型，上限 16000 token、页面上限 40 万字符；按原样请求 URL，localhost 和内网也可以；跳转之间保存 Cookie（不再出现 redirect count exceeded）；被反爬拦截（403、验证页）或内容要靠 JS 渲染时，自动改用无头 Chrome/Edge 打开（临时配置，不带你的 Cookie）；Cloudflare 人机验证、需要登录的页面会提示改用 Browser 工具 |
 | 子 agent | 不能再派子 agent | 嵌套到 2 层 |
 | `Bash` 的标准输入 | 一律关闭 | 可以用 `stdin` 参数喂入文本（回答提示、给脚本传数据） |
 | 提示词里的限制 | “尽量少输出”“除非必要不要建文件”“不要强推/改 git 配置/amend” | 回答长度按任务需要；需要就建文件（测试、脚本、配置）；用户要求时可以做上述 git 操作 |

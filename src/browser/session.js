@@ -9,6 +9,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { Cdp, CdpError, abortError } from './cdp.js';
+import { closeRenderer } from './render.js';
 import { CONFIG_DIR } from '../config.js';
 
 export const browserLimits = {
@@ -104,7 +105,7 @@ function onPath(cmd) {
 }
 
 // Chrome before Edge: Edge signs a new profile in with the Windows account and syncs that account's data into it.
-function browserExecutables() {
+export function browserExecutables() {
   if (process.platform === 'win32') {
     const pf = process.env.PROGRAMFILES || 'C:\\Program Files';
     const pf86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
@@ -768,9 +769,11 @@ export const safeUrl = (u) => {
 
 export const browserSession = new BrowserSession();
 
-// For a process that ends by itself (claude-pro -p): an open connection would keep it alive.
+// For a process that ends by itself (claude-pro -p): an open connection would keep it alive, and so would the
+// pipe of WebFetch's headless browser (render.js).
 export function closeBrowser() {
   browserSession.close();
+  closeRenderer();
 }
 
 export { CdpError };
