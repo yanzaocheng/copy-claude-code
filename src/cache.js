@@ -1,7 +1,7 @@
 // Prompt caching, the way Claude Code does it (https://code.claude.com/docs/en/prompt-caching):
 //   - cache_control markers go on the tools, the system prompt and the newest message (see api.js);
 //   - there are two TTL buckets: "main" is the conversation itself, "other" is everything else
-//     (sub-agents, compaction, side queries). Each is 5 minutes by default, or 1 hour when asked for;
+//     (sub-agents, compaction, side queries). The conversation defaults to 1 hour, everything else to 5 minutes;
 //   - the whole thing can be switched off;
 //   - what the API reports (cache_read_input_tokens, cache_creation_input_tokens) is tracked here, so
 //     that /cost can say how much of the input came from the cache and why a request missed it.

@@ -48,9 +48,9 @@ claude-pro 只支持 codex-gateway。交互式启动时如果没有网关登录�
 
 ```powershell
 claude-pro /login
-claude-pro --provider gateway
-claude-pro --provider gateway --model opus
-claude-pro --provider gateway -p "用 Read 工具读取 package.json，告诉我项目版本"
+claude-pro
+claude-pro --model opus
+claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 ```
 
 登录得到的 key 保存在 `~/.claude-pro/gateway.json`（Windows 对应 `%USERPROFILE%\.claude-pro\gateway.json`），不会读取 Claude CLI 或 Codex CLI 的登录文件。
@@ -71,14 +71,31 @@ claude-pro --provider gateway -p "用 Read 工具读取 package.json，告诉我
 
 网关 key 只来自 `/login`：登录后保存在 `~/.claude-pro/gateway.json`，不用手动填写，也没有环境变量或 `.env` 文件可以设置它（没有浏览器的机器可以把另一台登录过的电脑的 `gateway.json` 拷过去）。
 
-其他配置（网关地址、模型等）写在 settings.json 的 `env` 里，用命令改：
+一般只需要 `/login`、`/model`、`/effort`、`/tui` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
 
-```bash
-claude-pro config list
-claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
+```json
+{
+  "model": "opus",
+  "effort": "auto",
+  "tui": "fullscreen",
+  "promptCacheTtl": "1h",
+  "subagentPromptCacheTtl": "5m"
+}
 ```
 
-从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`、进程环境变量、命令行参数。会话中用 `/config`、`/model`、`/effort` 修改。`--provider` 仅接受 `gateway`，其他 provider 已移除。
+也可以用命令修改：
+
+```bash
+claude-pro config list                       # 普通设置，含默认值
+claude-pro config set model sonnet
+claude-pro config set promptCacheTtl 1h
+claude-pro config list --advanced            # 另外显示高级配置
+claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
+```
+
+会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择，`/tui` 记到顶层 `tui`；`--model`、`--effort` 可覆盖本次启动。
+
+设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_PRO_TUI`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。provider 固定为 `gateway`，已删除 `--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口。
 
 ## 持久化系统提示词
 
@@ -97,7 +114,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 每次请求都要把整个对话发给模型，用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
 
-- 网关对话用 1 小时缓存（停顿一会儿回来不用整段重写）；子 agent、压缩等用 5 分钟。改缓存时长、关闭缓存的设置见 `claude-pro config list`。
+- 网关对话默认用 1 小时缓存（停顿一会儿回来不用整段重写）；子 agent、压缩等默认用 5 分钟。顶层 `promptCacheTtl`、`subagentPromptCacheTtl` 修改时长；`DISABLE_PROMPT_CACHING` 总开关见 `claude-pro config list --advanced`。旧的强制 5 分钟、启用 1 小时和按模型关闭缓存的变量不再生效。
 - 页脚的 `◷ 12m` 是缓存还能保留多久；变红表示已过期，下一条消息会把整个对话重新写入缓存。`/cost` 显示命中率和没命中的原因。
 - 缓存还热时 `/model`、`/effort` 会先确认（切换会让缓存失效）；离开一个多小时回来时，清掉较早的工具结果，少重写一些。
 - 人不在时自动保温（Claude 模型）：缓存到期前 5 分钟把上一个请求重发一次，只要 1 个输出 token。读缓存会让它再保留一小时，花费是整段重写的 1/40（Opus 上 15 万 token 的对话：约 $0.03，重写约 $1.20）。一次停顿最多保温 8 小时，`CLAUDE_PRO_CACHE_KEEPALIVE_HOURS` 可以改（0 关闭）。`/cost` 显示刷新次数和花费。GPT 模型不需要：网关上的 GPT 缓存停顿几个小时后通常还在。
@@ -106,14 +123,14 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 
 ## 运行时 Trace：用真实数据优化模型和工具
 
-默认在每个会话写入独立的隐私保护 JSONL：`~/.claude-pro/projects/<项目>/traces/<session-id>.jsonl`。Trace 只保存 turn/request/tool/compaction/verification 的计数、耗时、token 数、缓存 fingerprint 和参数结构，不保存 API key、cookie、token、密码、完整 prompt、工具输入或工具输出。大输出只记录大小和是否落盘；单个文件默认 20 MB，超出后轮换为 `.1`；30 天没再写入的 trace 在启动时清理（`CLAUDE_PRO_TRACE_DIR` 指定的目录除外）。
+默认在每个会话写入独立的隐私保护 JSONL：`~/.claude-pro/projects/<项目>/traces/<session-id>.jsonl`。Trace 只保存 turn/request/tool/compaction/verification 的计数、耗时、token 数、缓存 fingerprint 和参数结构，不保存 API key、cookie、token、密码、完整 prompt、工具输入或工具输出。大输出只记录大小和是否落盘；单个文件固定 20 MiB，超出后轮换为 `.1`；30 天没再写入的 trace 在启动时清理。
 
 ```text
 /trace       # 当前会话的请求、工具、缓存、压缩和验证汇总
 /trace 20    # 另外显示最近 20 条结构化事件
 ```
 
-可用配置：`CLAUDE_PRO_TRACE=0` 关闭，`CLAUDE_PRO_TRACE_DIR` 指定目录，`CLAUDE_PRO_TRACE_MAX_SIZE` 调整单文件上限。`/cost` 也会显示轻量工具成功率和验证次数。Trace 是 best-effort，写入失败不会影响 Agent 主循环。
+可用高级配置：`CLAUDE_PRO_TRACE=0` 关闭。目录固定为上述项目 Trace 目录，旧 `CLAUDE_PRO_TRACE_DIR`、`CLAUDE_PRO_TRACE_MAX_SIZE` 不再生效。`/cost` 也会显示轻量工具成功率和验证次数。Trace 是 best-effort，写入失败不会影响 Agent 主循环。
 
 ## 限流：自动暂停，到点自动恢复
 
@@ -131,7 +148,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 交互式会话运行在一个很薄的**监督进程**（`src/supervisor.js`，只用 Node 内置模块）之下，所以程序可以自己重启、加载自己刚改过的代码，不需要你退出再启动：
 
 - **模型自己重启**：改完 `src/`、`bin/` 里的代码后，模型调用 `Restart` 工具。它先在一个临时进程里把新代码完整启动一遍（所有模块能加载、界面能画出来、工具定义和系统提示词合法）——**启动不起来就不重启**，把错误还给模型去修，修好再调用；通过后在**本回合结束时**重启，对话、待办列表、`/model`、`/effort`、排队的消息、输入框里没发出去的草稿、`/rewind` 检查点都带过去，新进程里模型收到一条"已重启"的提示后接着做（可用 `then` 指定重启后先验证什么）。只在**源码仓库**（有 `.git` 的克隆，包括 `npm link` 到它）里这样做：从 npm 装的副本没有版本控制、下次更新会被覆盖，那里不给模型 `Restart` 工具，系统提示词改成"不要改自己的文件，绕过问题并在最后说明缺陷，方便用户反馈"。
-- **改了源码自动重启**：一个回合结束（或空闲）时，如果 `src/`、`bin/` 下的文件变过，就自动做同样的检查并重启。检查不通过只提示错误、不重启。按 Esc 打断的那一回合不会触发。`CLAUDE_PRO_AUTO_RESTART=0` 关闭。
+- **改了源码自动重启**：一个回合结束（或空闲）时，如果 `src/`、`bin/` 下的文件变过，就自动做同样的检查并重启。检查不通过只提示错误、不重启。按 Esc 打断的那一回合不会触发。源码自动重启固定开启，旧 `CLAUDE_PRO_AUTO_RESTART` 不再生效。
 - **手动**：`/restart`（别名 `/reload`），`/restart force` 跳过检查并无视后台任务。
 - 后台 agent / 后台 shell 会被重启杀掉，所以有它们在跑时拒绝重启（可 `force`）。5 分钟内重启超过 5 次视为死循环，拒绝。
 - 重启之间终端保持原样（不退回 shell 提示符，原始模式不关），重启时敲的键不会丢；标签标题也不闪。
@@ -175,7 +192,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 - **检查点与 `/rewind`（或在空输入框连按两次 `Esc`）**：每条提问都会建一个检查点，Write / Edit / MultiEdit / NotebookEdit 修改文件前会先保存原样。菜单按时间列出这次会话的提问（最新的在最下面、默认选中），选一条后可以：**Restore code and conversation**（代码和对话都回到这条之前）、**Restore conversation**（只回退对话，文件不动）、**Restore code**（只恢复文件，对话不动）、**Summarize from here**（这条及之后的对话压缩成摘要，腾出上下文）、**Summarize up to here**（这条之前的压缩成摘要，之后的原样保留）、**Never mind**（回到列表）。回退对话或"Summarize from here"后，那条提问的原文（完整的，不截断）回填到输入框，可以改了再发，相当于删掉不想要的那段对话重新来。`/clear` 之后，菜单最上面多一项 `/resume <id> (previous session)`，可以回到 `/clear` 之前的对话（本进程内有效）。**Bash 命令造成的改动不会被记录**，所以模型被要求优先用文件工具改文件。
 - **想要护栏时用 hooks**：`PreToolUse` 钩子仍然可以拦截任何工具调用，由你自己定规则（见下）。
 
-**已经放开的限制**（都可以用环境变量改回去）：
+**已经放开的限制**（Bash 默认超时、最长超时和输出上限固定为下表数值，不再读取旧配置；单次调用仍可指定超时）：
 
 | 项目 | 以前 | 现在 |
 |---|---|---|
@@ -200,10 +217,10 @@ claude-pro config set CLAUDE_PRO_GATEWAY_MODEL sonnet
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
 - `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
-- **全屏模式（默认）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开只保留反色选择，不会自动复制；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时只有 `Ctrl+C` 会复制。**输入框里**单击把光标移到那里，拖动、双击、三击选中正在写的文字，`Ctrl+C` 复制（不会打断任务，也不清空输入框）；选中后打字不会替换选中的文字。**引用追问**（像 ChatGPT 的“向 ChatGPT 提问”）：选中对话里的内容后按 `Ctrl+Q`（终端占用了 `Ctrl+Q` 时用 `Alt+Q`），选中的内容就以 `[Quote #1 +12 lines]` 插进输入框，光标停在下一行，直接写追问。发给模型的是选中的原文，加上它所在的那条工具调用、回复或消息的首行（`<quote source="⏺ Read(src/api.js)">…</quote>`），模型就知道问的是哪一段、哪个文件；对话里只显示引用的前三行。可以连续引用好几段，退格一次删掉整个引用。`Ctrl+V` 粘贴剪贴板文字（剪贴板里只有图片时作为图片附加），`Alt+V` 优先附加剪贴板图片；右键不执行复制或粘贴。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记住（`CLAUDE_PRO_TUI`）
+- **全屏模式（默认）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开只保留反色选择，不会自动复制；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时只有 `Ctrl+C` 会复制。**输入框里**单击把光标移到那里，拖动、双击、三击选中正在写的文字，`Ctrl+C` 复制（不会打断任务，也不清空输入框）；选中后打字不会替换选中的文字。**引用追问**（像 ChatGPT 的“向 ChatGPT 提问”）：选中对话里的内容后按 `Ctrl+Q`（终端占用了 `Ctrl+Q` 时用 `Alt+Q`），选中的内容就以 `[Quote #1 +12 lines]` 插进输入框，光标停在下一行，直接写追问。发给模型的是选中的原文，加上它所在的那条工具调用、回复或消息的首行（`<quote source="⏺ Read(src/api.js)">…</quote>`），模型就知道问的是哪一段、哪个文件；对话里只显示引用的前三行。可以连续引用好几段，退格一次删掉整个引用。`Ctrl+V` 粘贴剪贴板文字（剪贴板里只有图片时作为图片附加），`Alt+V` 优先附加剪贴板图片；右键不执行复制或粘贴。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记到 `settings.json` 顶层的 `tui`
 - `ctrl+c` 或连按两次 `Esc` 清掉的草稿不会丢：在空输入框按 `↑` 找回（连同粘贴的文本和图片），中间发过别的消息也可以
 - `@` 同时补全文件和本机/远程会话：文件引用走 `Read` 工具，等于模型自己读了这个文件。最多带前 2000 行（被截断时会明确告诉模型，并把该文件记为"只读了一部分"，之后 `Write` 不会去覆盖没给它看过的行）；图片作为图片附加；二进制文件和超过 512KB 的文本会被跳过并提示原因；`@目录` 列出目录内容；行首 `@会话 任务` 把任务发给另一会话
-- 上下文用量接近阈值时自动压缩（`CLAUDE_CODE_AUTO_COMPACT_WINDOW`），也可手动 `/compact`
+- 上下文用到上游输入上限的 100% 时自动压缩，不再读取 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`；子 agent 定义的 `autoCompactWindow` 仍有效，也可手动 `/compact`
 - 会话自动保存到 `~/.claude-pro/projects/`，`claude-pro -c` 继续上次，`claude-pro -r` 选择历史会话
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。

@@ -439,7 +439,7 @@ export class Agent {
       cache: {
         bucket: cacheBucket,
         messages: Boolean(cacheMessages),
-        caching: !this.config.promptCachingDisabled(model?.id || model),
+        caching: !this.config.promptCachingDisabled(),
         ttl: this.config.cacheTtl(cacheBucket),
       },
       compaction_id: compactionId,

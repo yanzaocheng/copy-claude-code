@@ -1,10 +1,10 @@
-// Configuration loading. Mirrors Claude Code's environment variables so the same
-// settings work here. Sources, lowest precedence first:
+// Ordinary settings live at the top level of settings.json; optional advanced keys live in its env block.
+// Sources, lowest precedence first:
 //   1. built-in defaults
-//   2. ~/.claude-pro/settings.json            ("env" block)
-//   3. <project>/.claude-pro/settings.json    ("env" block)
+//   2. ~/.claude-pro/settings.json
+//   3. <project>/.claude-pro/settings.json
 //   4. <project>/.claude-pro/settings.local.json
-//   5. process environment
+//   5. process environment (advanced keys only)
 //   6. command line flags (--model, --effort ...)
 // The model and effort chosen with /model and /effort are remembered apart from these (see
 // rememberChoice) and win over 1-5. The gateway key comes from /login alone (gateway.json, see
@@ -26,40 +26,31 @@ export const APP_NAME = 'claude-pro';
 export const GATEWAY_DEFAULT_URL = 'https://gw.predix.icu';
 export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).version;
 
-// Every key we understand, with a short description (shown by /config).
+// The ordinary settings /config shows. `legacy`: the old spelling accepted in settings.json.env and by config
+// commands, but no longer read from the process environment. Writes use only the ordinary spelling.
+export const BASIC_SETTINGS = {
+  model: { default: 'opus', legacy: 'CLAUDE_PRO_GATEWAY_MODEL', description: 'Default model; /model and --model override it' },
+  effort: { default: 'auto', legacy: 'CLAUDE_CODE_EFFORT_LEVEL', description: 'Reasoning effort; /effort and --effort override it' },
+  tui: { default: 'fullscreen', legacy: 'CLAUDE_PRO_TUI', description: 'fullscreen or default; /tui switches and remembers it' },
+  promptCacheTtl: { default: '1h', legacy: 'CLAUDE_CODE_PROMPT_CACHE_TTL', description: 'Conversation prompt cache: 5m or 1h' },
+  subagentPromptCacheTtl: { default: '5m', legacy: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', description: 'Sub-agent, compaction and side-query prompt cache: 5m or 1h' },
+};
+
+// Advanced keys, shown only by /config advanced (or config list --advanced). Settings files may also carry
+// unrelated env entries; those are left alone, but are not advertised as configuration of this program.
 export const KNOWN_KEYS = {
-  CLAUDE_PRO_PROVIDER: 'Authentication backend: gateway only (codex-gateway account, /login)',
   CLAUDE_PRO_GATEWAY_URL: `codex-gateway address (default https://gw.predix.icu)`,
-  CLAUDE_PRO_GATEWAY_MODEL: 'Model with the gateway provider (default: opus; also sonnet, haiku, gpt-6.1-sol)',
   CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online on the gateway\'s web page whenever this computer is logged in, and sessions on your other computers can send it tasks (@computer/name)',
   CLAUDE_PRO_REMOTE_COMMANDS: 'Set to 0 to make this computer\'s sessions read-only on the gateway\'s web page: it can watch them, but not send them messages, answer their questions, stop them, switch model or effort, or change their directory (default: on; read when a session goes online)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
-  CLAUDE_PRO_TUI: 'fullscreen (default: the input box fixed at the bottom, the conversation scrolled inside) or default (classic: it scrolls in the terminal); /tui switches',
-  CLAUDE_PRO_AUTO_RESTART: 'Restart by itself when a turn ends and claude-pro\'s own source files changed (default 1; 0 = only on /restart or the Restart tool)',
 
-  CLAUDE_CODE_EFFORT_LEVEL: 'Reasoning effort: none|minimal|low|medium|high|xhigh|max (sent as output_config.effort)',
-  CLAUDE_CODE_AUTO_COMPACT_WINDOW: 'Context size (tokens) used for auto-compaction calculations',
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 48000; lowered automatically if the gateway allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',
-  CLAUDE_CODE_PROMPT_CACHE_TTL: 'Prompt cache TTL of the conversation itself: 5m or 1h (default: 1h with the gateway; 1h writes cost more, they pay off when you pause for more than 5 minutes). Also the promptCacheTtl setting',
-  CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: 'Prompt cache TTL of everything else (sub-agents, compaction, side queries): 5m (default) or 1h. Also the subagentPromptCacheTtl setting',
-  ENABLE_PROMPT_CACHING_1H: 'Set to 1 to request the 1-hour TTL for both (the two TTL variables above win over it)',
-  FORCE_PROMPT_CACHING_5M: 'Set to 1 to force the 5-minute TTL for both, over every other TTL setting',
   CLAUDE_PRO_CACHE_KEEPALIVE_HOURS: 'Claude models with the 1-hour TTL: while you are away, refresh the conversation\'s prompt cache shortly before it runs out (a read costs 1/40 of a rewrite), for a pause of up to this many hours (default 8; 0 turns it off)',
   DISABLE_PROMPT_CACHING: 'Set to 1 to send no cache_control markers at all (prompt caching off for every model)',
-  DISABLE_PROMPT_CACHING_HAIKU: 'Set to 1 to turn prompt caching off for the model the haiku alias resolves to',
-  DISABLE_PROMPT_CACHING_SONNET: 'Set to 1 to turn prompt caching off for the model the sonnet alias resolves to',
-  DISABLE_PROMPT_CACHING_OPUS: 'Set to 1 to turn prompt caching off for the model the opus alias resolves to',
-  DISABLE_PROMPT_CACHING_FABLE: 'Set to 1 to turn prompt caching off for Fable models',
   API_TIMEOUT_MS: 'Request timeout in milliseconds',
   CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests (0 = no retries at all, which also turns off the rate limit wait)',
   CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: 'Longest total time to wait for a rate limit (e.g. the 5-hour window) to reset before continuing by itself (default 21600000 = 6 hours; 0 = report the error instead of waiting)',
-  CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS: 'First wait before retrying a request refused as overloaded (529); doubled at each retry (default 1000)',
-  CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS: 'Longest wait between retries of an overloaded (529) request (default 32000)',
-  CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS: 'How long to keep retrying an overloaded (529) API once the usual retries are used up, before reporting the error (default: CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 hours; 0 = give up after the retries)',
-  BASH_DEFAULT_TIMEOUT_MS: 'Default timeout for Bash commands (default 600000 = 10 minutes)',
-  BASH_MAX_TIMEOUT_MS: 'Maximum timeout the model may request for Bash commands (default 3600000 = 1 hour)',
-  BASH_MAX_OUTPUT_LENGTH: 'Max characters of Bash output returned to the model; the full text is saved to a file (default 60000)',
   CLAUDE_CODE_GIT_BASH_PATH: 'Windows: path to bash.exe (Git Bash)',
   CLAUDE_PRO_RIPGREP_PATH: 'Path to ripgrep (rg) for Grep and @-file suggestions; "off" forces the built-in JS scanner (default: rg from PATH, else the JS scanner)',
   CLAUDE_PRO_BROWSER: 'The browser the Browser tool drives: auto (default: the first of Edge, Chrome, Brave, Chromium whose remote debugging is turned on, at edge://inspect/#remote-debugging and the like), edge, chrome, brave, chromium, own (claude-pro\'s own Chrome profile, nothing to allow), a DevTools address (ws://…, http://host:port, a port), or off (no Browser tool)',
@@ -68,9 +59,62 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
   CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the current model for the current topic after each message (the tab title then shows the first message of the session)',
   CLAUDE_PRO_TRACE: 'Set to 0 to disable the privacy-preserving runtime JSONL trace (enabled by default)',
-  CLAUDE_PRO_TRACE_DIR: 'Directory for runtime trace files (default: the project session directory)',
-  CLAUDE_PRO_TRACE_MAX_SIZE: 'Maximum size of one runtime trace file in bytes before rotating it (default 20 MB)',
 };
+
+function basicValue(key, value) {
+  if (typeof value !== 'string') throw new Error(`${key} must be a string.`);
+  const text = value.trim();
+  if (key === 'model') {
+    if (!text) throw new Error('model must not be empty.');
+    return text;
+  }
+  const normalized = text.toLowerCase();
+  if (key === 'effort' && ['auto', 'default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(normalized)) return normalized;
+  if (key === 'tui' && ['fullscreen', 'default'].includes(normalized)) return normalized;
+  if ((key === 'promptCacheTtl' || key === 'subagentPromptCacheTtl') && normalizeTtl(normalized)) return normalized;
+  throw new Error(`Invalid ${key}: ${text}. ${BASIC_SETTINGS[key].description}.`);
+}
+
+// The supported spelling, or an error instead of saving a setting that will do nothing.
+export function configKey(key) {
+  if (Object.hasOwn(BASIC_SETTINGS, key) || Object.hasOwn(KNOWN_KEYS, key)) return key;
+  const alias = Object.entries(BASIC_SETTINGS).find(([, spec]) => spec.legacy === key);
+  if (alias) return alias[0];
+  throw new Error(`Unknown setting: ${key}. Use /config for ordinary settings or /config advanced for advanced settings.`);
+}
+
+// Shared by the terminal and slash commands, so both list and write the same settings.
+export function configEntries(config, { advanced = false } = {}) {
+  const keys = [...Object.keys(BASIC_SETTINGS), ...(advanced ? Object.keys(KNOWN_KEYS) : [])];
+  return keys.map((key) => ({ key, value: config.setting(key), source: config.sources[key] || 'default', description: BASIC_SETTINGS[key]?.description || KNOWN_KEYS[key] }));
+}
+
+export function writeConfigSetting(file, key, value) {
+  key = configKey(key);
+  const basic = BASIC_SETTINGS[key];
+  const normalized = basic ? basicValue(key, value) : String(value);
+  updateSettingsFile(file, (json) => {
+    if (basic) {
+      json[key] = normalized;
+      if (json.env) { delete json.env[basic.legacy]; if (!Object.keys(json.env).length) delete json.env; }
+    } else json.env = { ...(json.env || {}), [key]: normalized };
+  });
+  return key;
+}
+
+export function unsetConfigSetting(file, key) {
+  // Unknown env names may still be removed, including settings that this program no longer reads.
+  try { key = configKey(key); } catch { /* old or unrelated env name */ }
+  updateSettingsFile(file, (json) => {
+    const basic = Object.hasOwn(BASIC_SETTINGS, key) ? BASIC_SETTINGS[key] : null;
+    if (basic) delete json[key];
+    if (json.env) {
+      delete json.env[basic?.legacy || key];
+      if (!Object.keys(json.env).length) delete json.env;
+    }
+  });
+  return key;
+}
 
 function readJson(file) {
   try {
@@ -108,16 +152,17 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   for (const [scope, file] of Object.entries(files)) {
     const json = readJson(file);
     if (!json) continue;
-    // Claude Code's settings for the prompt cache TTL. They stay settings (the variables rank above them, whichever
-    // file they come from; see Config.cacheTtl); a later file's setting replaces an earlier one's.
-    if (json.promptCacheTtl !== undefined) settings.promptCacheTtl = json.promptCacheTtl;
-    if (json.subagentPromptCacheTtl !== undefined) settings.subagentPromptCacheTtl = json.subagentPromptCacheTtl;
     set(json.env, file);
+    for (const [key, spec] of Object.entries(BASIC_SETTINGS)) {
+      // A top-level field wins over its legacy spelling in the same file; later files win over earlier ones.
+      const value = json[key] ?? json.env?.[spec.legacy];
+      if (value == null) continue;
+      try { settings[key] = basicValue(key, value); sources[key] = file; } catch { /* invalid: use the earlier value or default */ }
+    }
     if (json.mcpServers) Object.assign(settings.mcpServers, json.mcpServers);
     for (const [event, entries] of Object.entries(json.hooks || {})) {
       if (Array.isArray(entries)) (settings.hooks[event] ||= []).push(...entries);
     }
-    if (json.model) { env.CLAUDE_PRO_GATEWAY_MODEL = json.model; sources.CLAUDE_PRO_GATEWAY_MODEL = `${file} (model)`; }
     settings[scope] = json;
   }
   // Project level .mcp.json, same format as Claude Code.
@@ -128,9 +173,9 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   for (const k of Object.keys(KNOWN_KEYS)) if (process.env[k] !== undefined && process.env[k] !== '') fromProcess[k] = process.env[k];
   set(fromProcess, 'process environment');
 
-  if (flags.provider) { env.CLAUDE_PRO_PROVIDER = flags.provider; sources.CLAUDE_PRO_PROVIDER = '--provider flag'; }
-  if (flags.model) { env.CLAUDE_PRO_GATEWAY_MODEL = flags.model; sources.CLAUDE_PRO_GATEWAY_MODEL = '--model flag'; }
-  if (flags.effort) { env.CLAUDE_CODE_EFFORT_LEVEL = flags.effort; sources.CLAUDE_CODE_EFFORT_LEVEL = '--effort flag'; }
+  for (const key of ['model', 'effort']) {
+    if (flags[key]) { settings[key] = basicValue(key, flags[key]); sources[key] = `--${key} flag`; }
+  }
 
   return new Config(env, sources, settings, cwd);
 }
@@ -164,11 +209,6 @@ export class Config {
     this.verifyOverride = null; // set by /verify or --verify during a session
   }
 
-  get provider() {
-    const value = (this.env.CLAUDE_PRO_PROVIDER || 'gateway').trim().toLowerCase();
-    if (value !== 'gateway') throw new Error(`Only the gateway provider is supported. Set CLAUDE_PRO_PROVIDER=gateway (received ${value}).`);
-    return 'gateway';
-  }
   get gatewayUrl() { return (this.env.CLAUDE_PRO_GATEWAY_URL || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, ''); }
   get endpointLabel() { return `${this.gatewayUrl} (codex-gateway)`; }
 
@@ -196,12 +236,18 @@ export class Config {
   }
 
   // The selected model: the configured default unless /model has overridden it for this session.
-  get configuredModelSpec() { return this.env.CLAUDE_PRO_GATEWAY_MODEL || 'opus'; }
+  get configuredModelSpec() { return this.setting('model'); }
+  get configuredEffort() { return this.setting('effort'); }
+
+  setting(key) {
+    const spec = BASIC_SETTINGS[key];
+    return spec ? this.settings[key] ?? spec.default : this.env[key];
+  }
   get modelSpec() { return this.modelOverride || this.configuredModelSpec; }
   get model() { return this.resolveModel(this.modelSpec); }
 
   get effort() {
-    const v = (this.effortBoost ?? this.effortOverride ?? this.env.CLAUDE_CODE_EFFORT_LEVEL ?? '').trim().toLowerCase();
+    const v = (this.effortBoost ?? this.effortOverride ?? this.configuredEffort).trim().toLowerCase();
     return v && v !== 'auto' && v !== 'default' ? v : null;
   }
 
@@ -214,53 +260,33 @@ export class Config {
   get thinkingBudget() {
     return this.env.MAX_THINKING_TOKENS === undefined ? null : int(this.env.MAX_THINKING_TOKENS, null);
   }
-  // Prompt cache TTL for a request bucket, by Claude Code's rules: "main" is the conversation itself, "other"
-  // is everything else (sub-agents, compaction, side queries). In order: FORCE_PROMPT_CACHING_5M; the bucket's
-  // own variable or setting; ENABLE_PROMPT_CACHING_1H; then the gateway default: the conversation's own
-  // requests use 1 hour and everything else uses 5 minutes.
+  // The conversation uses the main TTL (default 1h); sub-agents, compaction and side queries use the other (5m).
   cacheTtl(bucket = 'main') {
-    if (isOn(this.env.FORCE_PROMPT_CACHING_5M)) return '5m';
-    // an invalid value is ignored, and the next rule applies (as in Claude Code)
-    const own = bucket === 'main'
-      ? normalizeTtl(this.env.CLAUDE_CODE_PROMPT_CACHE_TTL) || normalizeTtl(this.settings?.promptCacheTtl)
-      : normalizeTtl(this.env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL) || normalizeTtl(this.settings?.subagentPromptCacheTtl);
+    const own = normalizeTtl(this.setting(bucket === 'main' ? 'promptCacheTtl' : 'subagentPromptCacheTtl'));
     if (own) return own;
-    if (isOn(this.env.ENABLE_PROMPT_CACHING_1H)) return '1h';
     // The gateway too: measured on its usage records (533 Opus requests), pauses of 5 to 60 minutes rewrote the whole
     // conversation 9 times at 1.25x, $14.77; writing every turn at 2x instead costs $2.80 more.
     return bucket === 'main' ? '1h' : '5m';
   }
-  // DISABLE_PROMPT_CACHING turns it off for everything; the per-model variables only for the model that
-  // their alias resolves to (a different version pinned as the model keeps its caching), wherever it runs.
-  promptCachingDisabled(modelId) {
-    if (isOn(this.env.DISABLE_PROMPT_CACHING)) return true;
-    for (const alias of ['haiku', 'sonnet', 'opus']) {
-      if (!isOn(this.env[`DISABLE_PROMPT_CACHING_${alias.toUpperCase()}`])) continue;
-      const target = this.aliasTarget(alias);
-      if (target && this.resolveModel(target).id === modelId) return true;
-    }
-    return isOn(this.env.DISABLE_PROMPT_CACHING_FABLE) && /fable/i.test(modelId || '');
-  }
+  promptCachingDisabled() { return isOn(this.env.DISABLE_PROMPT_CACHING); }
   get apiTimeout() { return int(this.env.API_TIMEOUT_MS, 600_000); }
   get maxRetries() { return int(this.env.CLAUDE_PRO_MAX_RETRIES, 6); }
   get rateLimitMaxWait() { return Math.max(0, int(this.env.CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS, 6 * 3_600_000)); }
   // A rate limit that does not say when it resets is tried again at most this far apart.
   get rateLimitPoll() { return 300_000; }
   // An overloaded API (529): the backoff, and how long to keep trying once the retries are used up (see planRetry).
-  get overloadedRetryBaseDelay() { return Math.max(100, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS, 1000)); }
-  get overloadedRetryMaxDelay() { return Math.max(this.overloadedRetryBaseDelay, int(this.env.CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS, 32_000)); }
-  get overloadedMaxWait() { return Math.max(0, int(this.env.CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS, this.rateLimitMaxWait)); }
+  get overloadedRetryBaseDelay() { return 1000; }
+  get overloadedRetryMaxDelay() { return 32_000; }
+  get overloadedMaxWait() { return this.rateLimitMaxWait; }
 
-  // Automatic compaction is always on, at 100% of this input window (no percentage or output reserve). An explicit
-  // compact-window setting is capped by the model window; `own` is a sub-agent's autoCompactWindow instead.
+  // Always at the full input window; only sub-agent definitions may ask for a smaller window.
   compactWindow(model = this.model, own = 0) {
-    const configured = own > 0 ? own : int(this.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, 0);
-    return configured > 0 ? Math.min(configured, model.contextWindow) : model.contextWindow;
+    return own > 0 ? Math.min(own, model.contextWindow) : model.contextWindow;
   }
 
-  get bashDefaultTimeout() { return int(this.env.BASH_DEFAULT_TIMEOUT_MS, 600_000); }
-  get bashMaxTimeout() { return int(this.env.BASH_MAX_TIMEOUT_MS, 3_600_000); }
-  get bashMaxOutput() { return int(this.env.BASH_MAX_OUTPUT_LENGTH, 60_000); }
+  get bashDefaultTimeout() { return 600_000; }
+  get bashMaxTimeout() { return 3_600_000; }
+  get bashMaxOutput() { return 60_000; }
   // Tool results longer than this are saved to a file and only a preview is sent.
   get maxToolResultChars() { return 100_000; }
   // Clearing old tool results after a long pause (see Agent.clearAfterIdle): the gateway prompt cache has
@@ -293,11 +319,6 @@ export class Config {
     const value = this.env.CLAUDE_PRO_TRACE;
     return value === undefined || !/^(0|false|no|off)$/i.test(String(value).trim());
   }
-  get traceDir() {
-    const value = String(this.env.CLAUDE_PRO_TRACE_DIR || '').trim();
-    return value ? path.resolve(this.cwd, value) : null;
-  }
-  get traceMaxBytes() { return Math.max(100_000, int(this.env.CLAUDE_PRO_TRACE_MAX_SIZE, 20 * 1024 * 1024)); }
 
 }
 

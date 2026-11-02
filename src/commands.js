@@ -5,7 +5,7 @@ import path from 'node:path';
 import { c, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
-import { loadConfig, settingsFiles, updateSettingsFile, rememberChoice, applyRememberedChoices, KNOWN_KEYS, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
+import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { loginWithBrowser, gatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
@@ -59,7 +59,7 @@ export async function effortChoices(cfg) {
     try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
   }
   const levels = effortLevels(id, info);
-  const configured = (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '').trim().toLowerCase() || 'auto';
+  const configured = cfg.configuredEffort;
   const fallback = defaultEffort(id, cfg);
   return {
     levels,
@@ -323,7 +323,7 @@ export function buildCommands(app) {
 
   add({
     name: 'config',
-    argHint: '[set KEY VALUE | unset KEY] [--project|--local]',
+    argHint: '[advanced | set KEY VALUE | unset KEY] [--project|--local]',
     description: 'Show or change configuration (API URL, models, effort, …)',
     run(args) {
       const parts = args.split(/\s+/).filter(Boolean);
@@ -332,26 +332,28 @@ export function buildCommands(app) {
       const file = settingsFiles(app.cwd)[scope];
       if (rest[0] === 'set' && rest[1] && rest.length >= 3) {
         const value = rest.slice(2).join(' ');
-        updateSettingsFile(file, (json) => { json.env = { ...(json.env || {}), [rest[1]]: value }; });
+        const key = writeConfigSetting(file, rest[1], value);
         reloadConfig();
-        out([`Set ${c.bold(rest[1])} in ${file}`, ...(app.runtime.config.sources[rest[1]] !== file ? [c.yellow(`Note: overridden by ${app.runtime.config.sources[rest[1]]}`)] : [])]);
+        out([`Set ${c.bold(key)} in ${file}`, ...(app.runtime.config.sources[key] !== file ? [c.yellow(`Note: overridden by ${app.runtime.config.sources[key]}`)] : [])]);
         return;
       }
       if (rest[0] === 'unset' && rest[1]) {
-        updateSettingsFile(file, (json) => { if (json.env) delete json.env[rest[1]]; });
+        const key = unsetConfigSetting(file, rest[1]);
         reloadConfig();
-        out(`Removed ${c.bold(rest[1])} from ${file}`);
+        out(`Removed ${c.bold(key)} from ${file}`);
         return;
       }
       const cfg = app.runtime.config;
-      const lines = [c.bold('Configuration') + c.dim('  (precedence: ~/.claude-pro/settings.json < .claude-pro/settings.json < .claude-pro/settings.local.json < shell env < flags)'), ''];
-      for (const k of Object.keys(KNOWN_KEYS)) {
-        const v = cfg.env[k];
-        if (v === undefined) continue;
-        lines.push(`${padEnd(k, 34)} ${c.bold(v)}  ${c.dim(cfg.sources[k] || '')}`);
+      const advanced = rest[0] === 'advanced' || rest.includes('--advanced');
+      const lines = [c.bold(advanced ? 'Configuration · advanced' : 'Configuration'), ''];
+      for (const entry of configEntries(cfg, { advanced })) {
+        lines.push(`${padEnd(entry.key, 28)} ${c.bold(String(entry.value ?? '(default)'))}  ${c.dim(entry.source)}`);
+        if (advanced) lines.push(c.dim(`  ${entry.description}`));
       }
-      lines.push('', c.dim('Other keys: ' + Object.keys(KNOWN_KEYS).filter((k) => cfg.env[k] === undefined).join(', ')));
-      lines.push('', `${c.dim('Change with')} /config set KEY VALUE [--project|--local] ${c.dim('or edit')} ${settingsFiles(app.cwd).user}`);
+      lines.push('', c.dim('Precedence: user settings < project settings < local settings; shell env applies only to advanced keys; --model/--effort win.'));
+      if (cfg.modelOverride || cfg.effortOverride) lines.push(c.dim('The choices made with /model and /effort override the configured defaults above.'));
+      if (!advanced) lines.push(c.dim('More controls: /config advanced'));
+      lines.push('', `${c.dim('Change with')} /config set KEY VALUE [--project|--local] ${c.dim('or edit')} ${file}`);
       log(lines, '');
     },
   });
@@ -429,7 +431,7 @@ export function buildCommands(app) {
       }
       if (choice !== 'auto' && choice !== 'default' && !levels.includes(choice)) { out(c.red(`${id} does not take effort "${choice}". Use one of: ${levels.join(', ')}, auto, default`)); return; }
       const forget = choice === 'default';
-      const wanted = (forget ? (cfg.env.CLAUDE_CODE_EFFORT_LEVEL || '') : choice).trim().toLowerCase();
+      const wanted = (forget ? cfg.configuredEffort : choice).trim().toLowerCase();
       const next = wanted && wanted !== 'auto' && wanted !== 'default' ? wanted : null;
       if (next !== cfg.effort && !(await confirmCacheLoss('Changing the effort'))) { out(c.dim('The effort was not changed.')); return; }
       cfg.effortOverride = forget ? null : choice;
@@ -438,8 +440,7 @@ export function buildCommands(app) {
     },
   });
 
-  // After a login: the configuration read again, with the remembered /model and /effort. (It wrote
-  // CLAUDE_PRO_PROVIDER=gateway into the settings files at every login, from when there were other providers.)
+  // After a login: the configuration read again, with the remembered /model and /effort.
   const afterLogin = () => {
     const cfg = app.runtime.config;
     const model = cfg.model.id;
@@ -537,7 +538,7 @@ export function buildCommands(app) {
         row('Version', VERSION),
         row('Session ID', app.store.id),
         row('cwd', app.cwd),
-        row('Provider', cfg.provider),
+        row('Provider', 'gateway'),
         row('Endpoint', cfg.endpointLabel),
         row('Auth', gatewayLogin(cfg.gatewayUrl) ? `gateway key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)')),
         row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
@@ -546,7 +547,7 @@ export function buildCommands(app) {
           ? 'command line override'
           : savedPrompt?.text != null ? `${savedPrompt.name} (saved)` : savedPrompt?.error ? `${savedPrompt.name} (missing; using built-in)` : 'built-in default'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
-        row('Prompt cache', cfg.promptCachingDisabled(cfg.model.id) ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
+        row('Prompt cache', cfg.promptCachingDisabled() ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', `at ${formatTokens(cfg.compactWindow())} tokens (100% of window)`),
         row('Access', 'full (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
@@ -765,7 +766,7 @@ export function buildCommands(app) {
       }
       if (want !== 'fullscreen' && want !== 'default') { out(c.red('Use /tui fullscreen or /tui default.')); return; }
       const file = settingsFiles(app.cwd).user;
-      updateSettingsFile(file, (json) => { json.env = { ...(json.env || {}), CLAUDE_PRO_TUI: want }; });
+      writeConfigSetting(file, 'tui', want);
       reloadConfig();
       app.screen.setFull(want === 'fullscreen');
       out(want === 'fullscreen'

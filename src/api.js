@@ -175,7 +175,7 @@ function withoutCodexThinking(messages) {
 export function buildParams(config, { model, system, messages, tools, maxTokens, effort, cacheBucket = 'main', cacheMessages = true }) {
   const wanted = maxTokens || config.maxOutputTokens;
   const refused = cacheRefused.get(cacheKey(config, model.id));
-  const caching = !config.promptCachingDisabled(model.id);
+  const caching = !config.promptCachingDisabled();
   const ttl = refused?.has('ttl') ? '5m' : config.cacheTtl(cacheBucket);
   const mark = (place) => (caching && !refused?.has(place) ? { ...cacheControl(ttl) } : null);
   const systemMark = mark('system');

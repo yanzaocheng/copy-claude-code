@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { VERSION, KNOWN_KEYS, loadConfig, settingsFiles, updateSettingsFile, applyRememberedChoices } from './config.js';
+import { VERSION, loadConfig, settingsFiles, configKey, configEntries, writeConfigSetting, unsetConfigSetting, applyRememberedChoices } from './config.js';
 import { loadGatewayModels } from './gateway.js';
 import { resolvePath } from './utils/paths.js';
 import { SessionStore } from './session.js';
@@ -14,7 +14,6 @@ Options:
   -p, --print                      Print the response and exit (useful for pipes)
   -c, --continue                   Continue the most recent conversation in this directory
   -r, --resume [sessionId]         Resume a conversation (picker if no id given)
-  --provider <backend>            gateway only (the codex-gateway account)
   --model <model>                  Model for this session (name or alias: opus, sonnet, haiku)
   --effort <level>                 Reasoning effort: none|minimal|low|medium|high|xhigh|max
   --output-format <format>         text | json | stream-json (with --print)
@@ -35,7 +34,7 @@ are accepted and ignored, and so are --plan (there is no plan mode: ask for a pl
 --remote-control (--rc): a session is online at the gateway whenever this computer is logged in to it.
 
 Commands:
-  claude-pro config list                  Show effective configuration and where each value comes from
+  claude-pro config list [--advanced]     Show ordinary settings (add --advanced for optional controls)
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
 Interactive prompt commands:
@@ -63,7 +62,6 @@ function parseArgs(argv) {
         if (argv[i + 1] && !argv[i + 1].startsWith('-') && /^[0-9a-f-]{8,}$/i.test(argv[i + 1])) flags.resumeId = next();
         break;
       case '--model': flags.model = next(); break;
-      case '--provider': flags.provider = next(); break;
       case '--effort': flags.effort = next(); break;
       case '--plan': break; // no plan mode any more: asking for a plan in the message does it
       case '--permission-mode': next(); break;
@@ -90,45 +88,52 @@ function parseArgs(argv) {
 }
 
 async function configCommand(args, cwd) {
-  const [sub, key, ...rest] = args;
-  const scopeFlag = rest.find((r) => r === '--project' || r === '--local') || (key === '--project' || key === '--local' ? key : null);
+  const [sub = 'list', ...tail] = args;
+  const scopeFlag = tail.includes('--project') ? '--project' : tail.includes('--local') ? '--local' : null;
+  const advanced = sub === 'advanced' || tail.includes('--advanced');
+  const [key, ...rest] = tail.filter((r) => !['--project', '--local', '--advanced'].includes(r));
   const files = settingsFiles(cwd);
   const file = scopeFlag === '--project' ? files.project : scopeFlag === '--local' ? files.local : files.user;
-  if (!sub || sub === 'list' || sub === 'get') {
-    const cfg = loadConfig({ cwd });
-    const remembered = applyRememberedChoices(cfg);
-    const keys = sub === 'get' && key ? [key] : Object.keys(KNOWN_KEYS);
-    for (const k of keys) {
-      const v = cfg.env[k];
-      if (v === undefined && sub !== 'get') continue;
-      console.log(`${k}=${v ?? ''}${cfg.sources[k] ? `    # ${cfg.sources[k]}` : ''}`);
-    }
-    if (sub !== 'get') {
-      await loadGatewayModels(cfg); // the model's window may come from the gateway's model list (see Config.resolveModel)
-      console.log(`\nprovider: ${cfg.provider} (${cfg.endpointLabel})`);
-      console.log(`model: ${cfg.model.label} (context ${cfg.model.contextWindow.toLocaleString()})${cfg.effort ? `, effort ${cfg.effort}` : ''}`);
-      if (remembered.model || remembered.effort) {
-        const what = Object.entries(remembered).map(([k, v]) => `${k} ${v}`).join(', ');
-        console.log(`chosen with /model, /effort: ${what} (kept in ${files.user}; wins over the settings above, --model/--effort win over it)`);
+  try {
+    if (sub === 'list' || sub === 'advanced' || sub === 'get') {
+      const cfg = loadConfig({ cwd });
+      const remembered = applyRememberedChoices(cfg);
+      if (sub === 'get' && key) {
+        const name = configKey(key);
+        console.log(`${name}=${cfg.setting(name) ?? ''}${cfg.sources[name] ? `    # ${cfg.sources[name]}` : ''}`);
+      } else {
+        for (const entry of configEntries(cfg, { advanced })) {
+          console.log(`${entry.key}=${entry.value ?? '(default)'}    # ${entry.source}${advanced ? ` · ${entry.description}` : ''}`);
+        }
       }
-      console.log(`auto-compact at ${cfg.compactWindow().toLocaleString()} tokens (100% of window)`);
+      if (sub !== 'get') {
+        await loadGatewayModels(cfg);
+        console.log(`\ngateway: ${cfg.endpointLabel}`);
+        console.log(`model: ${cfg.model.label} (context ${cfg.model.contextWindow.toLocaleString()})${cfg.effort ? `, effort ${cfg.effort}` : ''}`);
+        if (remembered.model || remembered.effort) {
+          const what = Object.entries(remembered).map(([k, v]) => `${k} ${v}`).join(', ');
+          console.log(`chosen with /model, /effort: ${what} (kept in ${files.user}; wins over the settings above, --model/--effort win over it)`);
+        }
+        console.log(`auto-compact at ${cfg.compactWindow().toLocaleString()} tokens (100% of window)`);
+        if (!advanced) console.log('More controls: claude-pro config list --advanced');
+      }
+      return 0;
     }
-    return 0;
-  }
-  if (sub === 'set') {
-    const value = rest.filter((r) => r !== '--project' && r !== '--local').join(' ');
-    if (!key || !value) { console.error('Usage: claude-pro config set <KEY> <VALUE> [--project|--local]'); return 2; }
-    if (!KNOWN_KEYS[key]) console.error(`note: ${key} is not a known key; saving anyway`);
-    updateSettingsFile(file, (json) => { json.env = { ...(json.env || {}), [key]: value }; });
-    console.log(`Set ${key} in ${file}`);
-    return 0;
-  }
-  if (sub === 'unset') {
-    updateSettingsFile(file, (json) => { if (json.env) delete json.env[key]; });
-    console.log(`Removed ${key} from ${file}`);
-    return 0;
-  }
-  console.error(`Unknown config command: ${sub}`);
+    if (sub === 'set') {
+      const value = rest.join(' ');
+      if (!key || !value) { console.error('Usage: claude-pro config set <KEY> <VALUE> [--project|--local]'); return 2; }
+      const name = writeConfigSetting(file, key, value);
+      console.log(`Set ${name} in ${file}`);
+      return 0;
+    }
+    if (sub === 'unset') {
+      if (!key) { console.error('Usage: claude-pro config unset <KEY> [--project|--local]'); return 2; }
+      const name = unsetConfigSetting(file, key);
+      console.log(`Removed ${name} from ${file}`);
+      return 0;
+    }
+    console.error(`Unknown config command: ${sub}`);
+  } catch (e) { console.error(e.message); }
   return 2;
 }
 

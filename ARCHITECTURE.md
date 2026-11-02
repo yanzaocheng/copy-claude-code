@@ -72,7 +72,7 @@ sequenceDiagram
 
 重启流程（[`src/restart.js`](src/restart.js)、`App.requestRestart/restartNow`）：
 
-1. 触发：`Restart` 工具（模型）、`/restart`（用户）、源码监视（`fs.watch` 递归监视 `src/` 和 `bin/`，去抖 400ms，回合结束/空闲时处理）。启动时记下每个 `.js`/`.json` 的内容摘要，事件来了只有内容真的变了（或文件新增、删除）才算：Windows 的 `fs.watch` 连"最后访问时间"更新也报（系统默认开启，读文件时最多每小时更新一次，例如另一个窗口启动、npm 打包），以前会触发无谓的重启。只有 npm 安装的副本（`installedByNpm()`）才把磁盘上更新的 `package.json` 版本当作"别的窗口装了新版本"；源码仓库里改版本号是在发版。
+1. 触发：`Restart` 工具（模型）、`/restart`（用户）、源码监视（`fs.watch` 递归监视 `src/` 和 `bin/`，去抖 400ms，回合结束/空闲时处理）。源码自动重启固定开启，不再读取 `CLAUDE_PRO_AUTO_RESTART`。启动时记下每个 `.js`/`.json` 的内容摘要，事件来了只有内容真的变了（或文件新增、删除）才算：Windows 的 `fs.watch` 连"最后访问时间"更新也报（系统默认开启，读文件时最多每小时更新一次，例如另一个窗口启动、npm 打包），以前会触发无谓的重启。只有 npm 安装的副本（`installedByNpm()`）才把磁盘上更新的 `package.json` 版本当作"别的窗口装了新版本"；源码仓库里改版本号是在发版。
 2. 先 `runSelfCheck()`：起一个临时进程 `claude-pro --self-check`（[`src/selfcheck.js`](src/selfcheck.js)）：import 所有入口模块，在假终端里启动真正的 `App`（建 runtime、画欢迎框和输入框）。它用 `selfCheck` 选项而不是测试用的 `noProcessExit`：除了不结束进程，启动路径和真实会话一样（全屏渲染、peers/上线的判断都会走到），只用 `CLAUDE_PRO_PEERS=0`、`CLAUDE_PRO_ONLINE=0` 关掉对外的副作用，也不向网关取模型列表；否则只在真实启动时才执行的代码出错，自检查不出来（0.5.2 后的一次重启就这样崩在一个未导入的常量上）。然后检查每个工具名/描述/`input_schema`、系统提示词。不通过就不重启，错误返回给模型/用户。
 3. 工具触发的重启推迟到**本回合结束**（那条 tool_result 和模型的收尾回复必须先写进会话，否则恢复后会有没有结果的 tool_use）。用户 Esc 打断则取消待定的重启。
 4. `restartNow()` 把状态写进 `CLAUDE_PRO_RESTART_FILE`（会话 id/文件、`modelOverride`、`effortOverride`、模式、todos、草稿和光标、排队消息、检查点、最近的重启时间、给模型的提示）后以 75 退出；终端交接时不关原始模式、不关括号粘贴、不弹标题栈。
@@ -82,7 +82,7 @@ sequenceDiagram
 
 ### 3.1.2 远程控制
 
-登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），`CLAUDE_PRO_ONLINE=0` 只给自检和测试用；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/login` 保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），高级配置 `CLAUDE_PRO_ONLINE=0` 可关闭远程发布，也用于自检和测试；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/login` 保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
 
 - **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒）。
 
@@ -162,24 +162,32 @@ sequenceDiagram
 
 ### 5.1 配置优先级
 
-[`src/config.js`](src/config.js) 从低到高合并：
+[`src/config.js`](src/config.js) 的设置文件从低到高合并：
 
 1. 内置默认值；
 2. `~/.claude-pro/settings.json`；
 3. 当前项目 `.claude-pro/settings.json`；
-4. 当前项目 `.claude-pro/settings.local.json`；
-5. 进程环境变量；
-6. 命令行 flags。
+4. 当前项目 `.claude-pro/settings.local.json`。
 
-安装目录的 `.env` 不再读取，网关 key 也不在这些来源里：它只来自 `/login` 保存的 `gateway.json`（2026-10-30 去掉了 `.env` 和 `CLAUDE_PRO_GATEWAY_API_KEY`）。
+五个普通设置保存在文件顶层：`model`（默认 `opus`）、`effort`（`auto`）、`tui`（`fullscreen`）、`promptCacheTtl`（`1h`）、`subagentPromptCacheTtl`（`5m`）。`/model`、`/effort` 仍记住选择，`/tui` 写顶层 `tui`，`--model`、`--effort` 优先覆盖本次启动。
 
-provider 固定为 `gateway`。`--provider api`、`--provider claude-code` 和 `--provider codex` 会被拒绝；旧的 API、Claude CLI 和 Codex CLI 凭据不会参与配置解析。模型使用 `CLAUDE_PRO_GATEWAY_MODEL`，也可以用 `/model` 或 `--model` 临时覆盖。
+旧 `settings.json.env` 中的五个名字仅作只读兼容别名：`CLAUDE_PRO_GATEWAY_MODEL` → `model`、`CLAUDE_CODE_EFFORT_LEVEL` → `effort`、`CLAUDE_PRO_TUI` → `tui`、`CLAUDE_CODE_PROMPT_CACHE_TTL` → `promptCacheTtl`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` → `subagentPromptCacheTtl`。每个文件先解析自己的顶层字段和别名（顶层优先），再按上述文件层级覆盖；不再从进程环境读取这五个旧名。经 `config set` 或 `/config set` 设置旧别名时，写成同文件的顶层新字段并移除旧别名。
+
+其余 19 个原参数保留为高级配置，仍从 `settings.json.env` 读取，并兼容优先级更高的进程环境；有对应命令行参数时，命令行优先。它们覆盖网关地址、上线/远程操作/机器名、输出上限和 thinking 预算、`DISABLE_PROMPT_CACHING` 总开关、保活小时数、网络超时/重试次数/最大等待、Git Bash/rg/browser/python 路径、验证命令、关闭自动记忆/话题标题和 Trace 开关。测试隔离、监督进程等内部环境变量不属于这次精简的用户配置，仍保留。
+
+`/config`、CLI `config list` 默认只显示五个普通字段（含默认值）；`/config advanced`、CLI `config list --advanced` 另外显示高级项。`config set model sonnet` 等写普通顶层，其余高级项写 `env`；`/config set/unset` 保留 `--project`、`--local` 作用域选项。
 
 ```powershell
 node bin/claude-pro.js config list
-node bin/claude-pro.js config set CLAUDE_PRO_GATEWAY_MODEL sonnet
-node bin/claude-pro.js --provider gateway --model opus
+node bin/claude-pro.js config set model sonnet
+node bin/claude-pro.js config set promptCacheTtl 1h
+node bin/claude-pro.js config list --advanced
+node bin/claude-pro.js --model opus
 ```
+
+安装目录的 `.env` 不再读取，网关 key 也不在这些来源里：它只来自 `/login` 保存的 `gateway.json`（2026-10-30 去掉了 `.env` 和 `CLAUDE_PRO_GATEWAY_API_KEY`）。provider 固定为 `gateway`，`--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口已删除；旧的 API、Claude CLI 和 Codex CLI 凭据不会参与配置解析。
+
+以下策略固定默认，旧配置值不再生效：主会话按上游输入上限的 100% 自动压缩（子 agent frontmatter 的 `autoCompactWindow` 保留）；不再提供强制 5 分钟、启用 1 小时或按模型关闭提示词缓存的开关；过载重试基础/最大延迟固定为 1000/32000ms，旧重试 watchdog 最大等待改用 `CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`；Bash 默认/最长超时为 600000/3600000ms、输出上限 60000 字符（单次工具调用仍可指定超时）；源码自动重启固定开启；Trace 固定写项目 `traces/` 目录、单文件 20 MiB。
 
 ### 5.2 gateway 请求路径
 
@@ -269,9 +277,9 @@ X-Claude-Code-Session-Id: <session id>
 实现在 [`src/cache.js`](src/cache.js)（TTL 规则、`cache_control` 构造、命中统计）、`buildParams()` / `streamMessage()`（标记与降级）和 `Agent`（用量记录、压缩）：
 
 - **断点**：最后一个工具、系统提示词、最新消息的最后一个块，共 3 个。gateway 请求只有 claude-pro 自己生成的 system prompt block。`quickQuery()`（WebFetch 摘要、标题等一次性请求）传 `cacheMessages: false`，消息不标记：整页内容只发一次，写缓存只会多收 1.25 倍。
-- **TTL 桶**：`buildParams(…, { cacheBucket })`，`main`（主 agent 的每轮请求）和 `other`（子 agent、压缩、`quickQuery`）。`Config.cacheTtl(bucket)` 的优先级：`FORCE_PROMPT_CACHING_5M` → 桶自己的变量/设置（`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`，设置项 `promptCacheTtl`、`subagentPromptCacheTtl`）→ `ENABLE_PROMPT_CACHING_1H` → 默认值：gateway 的 `main` 桶是 1 小时，`other` 桶是 5 分钟。变量优先于设置项，无论来自哪个文件（设置项单独保存在 `config.settings`，不写进 env）；无效的值被忽略。5 分钟不发 `ttl` 字段；端点不认 `ttl` 时退回 5 分钟（见上）；一个请求里所有标记同一个 TTL（API 要求长 TTL 在前）。
-- **配置直接传给网关**：gateway 使用配置文件和环境变量中的 effort、自动压缩窗口、最大输出和 thinking 预算。
-- **开关**：`Config.promptCachingDisabled(modelId)`，`DISABLE_PROMPT_CACHING` 和按别名/模型的变体；关闭时请求里没有任何 `cache_control`。
+- **TTL 桶**：`buildParams(…, { cacheBucket })`，`main`（主 agent 的每轮请求）和 `other`（子 agent、压缩、`quickQuery`）。`Config.cacheTtl(bucket)` 分别使用顶层 `promptCacheTtl`、`subagentPromptCacheTtl`，默认 1 小时/5 分钟；文件层级与旧 `env` 别名兼容规则见 5.1。`FORCE_PROMPT_CACHING_5M`、`ENABLE_PROMPT_CACHING_1H` 不再生效，两个旧 TTL 名也不再从进程环境读取。5 分钟不发 `ttl` 字段；端点不认 `ttl` 时退回 5 分钟（见上）；一个请求里所有标记同一个 TTL（API 要求长 TTL 在前）。
+- **配置与请求**：effort 来自普通设置或会话/命令行选择；最大输出和 thinking 预算仍支持高级配置和进程环境。自动压缩窗口在本地按上游输入上限计算，不再读取全局窗口变量。
+- **开关**：`DISABLE_PROMPT_CACHING` 是保留的高级总开关；关闭时请求里没有任何 `cache_control`。旧 `DISABLE_PROMPT_CACHING_HAIKU`、`DISABLE_PROMPT_CACHING_SONNET`、`DISABLE_PROMPT_CACHING_OPUS`、`DISABLE_PROMPT_CACHING_FABLE` 不再生效。
 - **压缩**：`Agent.requestSummary()` 发的是对话自己的请求（同一模型、系统提示词、工具、effort、思考设置），摘要指令作为最后一条用户消息的末尾块，属于 `other` 桶。得不到摘要（模型调工具）或 prompt too long 时退回 `SUMMARY_SYSTEM` + 无 effort 的普通请求，这一次不计为 miss。压缩完成后 `refreshSystemPrompt()` 让系统提示词在下一次请求时重建。**不要给压缩请求加 `tool_choice`、改 effort 或 `max_tokens` 与 thinking 的关系**：这些会改变缓存键。调用了工具的回复、被输出上限截断且没写完 `</summary>` 的回复都不算摘要（`Agent.summaryOf()`），会退回普通请求；仍不行则报错并保留对话。子 agent 自己的压缩不会让主对话的检查点失效。压缩之后不会再有请求以这段历史开头，所以只在能从缓存读到它时才给消息加标记：`Agent.cacheExpired()` 确定缓存已过期时（本进程上次请求的 `expiresAt`；恢复/重启的对话用最后一条消息的时间加主对话 TTL，不知道就当没过期），以及退回的普通请求，都传 `cacheMessages: false`，历史按普通输入计费（4 美元/M），不按缓存写入（5 美元/M）；工具和系统提示词的标记保留，下一轮还要读。
 - **系统提示词不在会话中途变化**：`runtime.systemPrompt()` 构建一次并保持。保存记忆、`/config set` 只调用 `deferSystemPromptRefresh()`（`systemPromptStale`），`/clear`、压缩、`/model` 调用 `invalidateSystemPrompt()`。日期和 git 状态是一份快照（`takeEnvSnapshot()`），主提示词和子 agent 提示词共用，所以同类型子 agent 反复启动的前缀相同。
 - **恢复**：`SessionStore.setSystemPrompt()` 把当时的系统提示词写进会话文件（`meta` 记录，最新的生效）；`runtime.resumeSystemPrompt()` 在恢复时继续使用它（模型不同、或本次 `--append-system-prompt` 文本不同则不用），`Agent.resetConversation()` 清掉 `recordedSystem`，所以 `/clear` 之后的新会话文件也会写入（即使文本相同），日期不同则通过 `Agent.addReminder()` 在下一条用户消息末尾附一条提醒（在已缓存部分之后，不破坏缓存）。
@@ -315,7 +323,7 @@ flowchart TD
 - `Write`、`Edit`、`MultiEdit`、`NotebookEdit` 在执行前写入检查点；Bash 造成的文件变化不在检查点覆盖范围内。
 - 超大的工具结果保存到 `tool-results` 文件，只把预览和路径发回模型，避免挤占上下文。
 - 配置 `CLAUDE_PRO_VERIFY_COMMAND`、`--verify` 或 `/verify` 后，完成文件修改的回合会执行验证命令；失败输出会再次交给模型修复，最多执行 3 轮（`verifyMaxRounds`）。
-- 到达上下文阈值或收到 prompt-too-long 错误时，使用 `compact()` 生成摘要，并通过 reset 记录替换旧消息；摘要请求复用对话自己的提示词缓存（6.5）。自动压缩始终开启，阈值为 `Config.compactWindow()` 的 100%：默认直接使用网关 `/v1/models` 为该模型返回的 `max_input_tokens`，GPT 和 Claude 都不再乘比例或额外扣除输出额度。页脚也显示这个输入上限，不使用包含输出的 `context_window`。显式设置的压缩窗口（包括子 agent 的窗口）仍生效，但没有关闭开关或百分比覆盖参数。另一个模型报的 token 数（切换模型后）不触发压缩，等当前模型的第一次请求量出来。压缩的提示词和替代对话的那条消息在 [`src/compaction.js`](src/compaction.js)：它不在 `prompts.js` 里，改它不会变 `PROMPT_CODE_VERSION`，运行中的对话不用重建系统提示词。用户自己的消息不进摘要，而是像 Codex 一样逐字保留：`keptUserMessages()`（agent.js）取用户打的字（不含提醒、通知、其他会话的消息、bash 模式、中断标记，图片记作 `[image]`）和上次摘要保留的那些，最新的在估算 2 万 tokens 内整条保留，再早一条从中间截短，更早的丢掉；它们放在摘要后面的 `<user-messages>` 段里（放在后面，`<work-state>` 才是文本里的第一个），下一次压缩用 `keptUserMessagesIn()` 读回。摘要本身只写 work-state 装不下的交接信息，不再复述用户消息。自动压缩失败时（`compactOnTheWay`），只要请求还放得下，这一轮照常继续；连续失败 `MAX_COMPACT_FAILURES`（3）次后本对话不再自动压缩，直到 `/compact` 成功或 `/clear`。prompt-too-long 时的压缩失败仍然报错结束这一轮。
+- 到达上下文阈值或收到 prompt-too-long 错误时，使用 `compact()` 生成摘要，并通过 reset 记录替换旧消息；摘要请求复用对话自己的提示词缓存（6.5）。自动压缩始终开启，阈值为 `Config.compactWindow()` 的 100%：默认直接使用网关 `/v1/models` 为该模型返回的 `max_input_tokens`，GPT 和 Claude 都不再乘比例或额外扣除输出额度。页脚也显示这个输入上限，不使用包含输出的 `context_window`。不再读取全局 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`，只有子 agent frontmatter 的 `autoCompactWindow` 仍可覆盖其自身窗口，没有关闭开关或百分比覆盖参数。另一个模型报的 token 数（切换模型后）不触发压缩，等当前模型的第一次请求量出来。压缩的提示词和替代对话的那条消息在 [`src/compaction.js`](src/compaction.js)：它不在 `prompts.js` 里，改它不会变 `PROMPT_CODE_VERSION`，运行中的对话不用重建系统提示词。用户自己的消息不进摘要，而是像 Codex 一样逐字保留：`keptUserMessages()`（agent.js）取用户打的字（不含提醒、通知、其他会话的消息、bash 模式、中断标记，图片记作 `[image]`）和上次摘要保留的那些，最新的在估算 2 万 tokens 内整条保留，再早一条从中间截短，更早的丢掉；它们放在摘要后面的 `<user-messages>` 段里（放在后面，`<work-state>` 才是文本里的第一个），下一次压缩用 `keptUserMessagesIn()` 读回。摘要本身只写 work-state 装不下的交接信息，不再复述用户消息。自动压缩失败时（`compactOnTheWay`），只要请求还放得下，这一轮照常继续；连续失败 `MAX_COMPACT_FAILURES`（3）次后本对话不再自动压缩，直到 `/compact` 成功或 `/clear`。prompt-too-long 时的压缩失败仍然报错结束这一轮。
 - 工具结果只放必要的内容：Edit 只回一行和改动的行号范围（不再附带 `cat -n` 片段）；Read 一次最多返回 40 万字符，截断时写明最后显示的是哪一行。
 
 ## 8. 工具与扩展点

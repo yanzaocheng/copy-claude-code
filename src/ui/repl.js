@@ -1126,7 +1126,7 @@ export class App {
   // Follow the program's own source: once a turn is over (or at once when idle) a change to it is loaded by
   // a restart, if the new code starts.
   startSourceWatch() {
-    if (!canRestart() || /^(0|false|no|off)$/i.test(this.config.env.CLAUDE_PRO_AUTO_RESTART || '')) return;
+    if (!canRestart()) return;
     this.sourceWatch = watchSource(INSTALL_DIR, (file) => {
       this.sourceChanged = file || true;
       // another window (or npm) installed a new version: say so, and load it once this session is idle. In a
@@ -1273,10 +1273,9 @@ export class App {
 
   // ---------------------------------------------------------------- input
 
-  // Fullscreen (see screen.js) unless CLAUDE_PRO_TUI=default, as Claude Code's /tui: the input box fixed at the
-  // bottom of the window, the conversation scrolled inside the program. Not in the tests that drive the App.
+  // Fullscreen unless settings.tui selects the classic renderer; a driven test defaults to classic.
   fullscreenWanted() {
-    const mode = String(this.config.env.CLAUDE_PRO_TUI || (this.driven ? 'default' : 'fullscreen')).toLowerCase();
+    const mode = this.driven && this.config.settings.tui == null ? 'default' : this.config.setting('tui');
     return mode === 'fullscreen' && this.stdout.isTTY !== false;
   }
 

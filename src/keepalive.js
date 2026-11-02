@@ -41,7 +41,7 @@ export class CacheKeepAlive {
     const cfg = a.config;
     if (a.isSubagent || a.busy > 0 || !(this.hours > 0)) return false;
     const id = a.model?.id || '';
-    if (!/^claude-/i.test(id) || cfg.promptCachingDisabled(id)) return false;
+    if (!/^claude-/i.test(id) || cfg.promptCachingDisabled()) return false;
     if (!a.cache.isWarm(now) || a.cache.ttl !== '1h' || (a.cache.expected || 0) < MIN_TOKENS) return false;
     // A raised effort ends with the next user request, and with it this entry (the effort is part of its key).
     if (cfg.effortBoost && !cfg.effortBoostKeepNext) return false;

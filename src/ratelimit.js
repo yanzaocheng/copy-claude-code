@@ -161,10 +161,8 @@ function limitMessage(err, rl, state, budget, now, why) {
 //  - a short announced wait: a few quick retries, counted like any other;
 //  - nothing announced: back off 1s, 2s, 4s ... up to rateLimitPoll (5 minutes) between attempts, within the budget.
 //
-// An overloaded API (529, overloaded_error) backs off from CLAUDE_CODE_OVERLOADED_RETRY_BASE_DELAY_MS (1s) to
-// CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS (32s), as in Claude Code. When the usual retries are used up it does not
-// give up but pauses and tries again at the longest delay, like Claude Code's unattended retry mode, for at most
-// overloadedMaxWait (CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS, by default the rate limit budget) in all.
+// An overloaded API (529, overloaded_error) backs off from 1s to 32s. When the usual retries are used up it does not
+// give up but pauses and tries again at the longest delay, within the same wait budget as a rate limit.
 export function planRetry(err, state, config, { now = Date.now(), rand = Math.random, allowWait = true } = {}) {
   if (!err.retryable) return { action: 'throw' };
   const maxRetries = config.maxRetries;

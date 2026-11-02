@@ -21,12 +21,12 @@ import { loadActivePrompt } from './prompt-profiles.js';
 
 export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const config = loadConfig({ cwd, flags });
-  const trace = new RuntimeTrace({ cwd, sessionId, enabled: config.traceEnabled, dir: config.traceDir, maxBytes: config.traceMaxBytes });
+  const trace = new RuntimeTrace({ cwd, sessionId, enabled: config.traceEnabled });
   applyRememberedChoices(config, flags); // what /model and /effort chose last time
   if (flags.verify) config.verifyOverride = flags.verify;
   pruneToolResults(cwd);
   pruneCheckpoints(cwd);
-  if (!config.traceDir) pruneTraces(cwd); // a directory of the user's own is theirs to keep
+  pruneTraces(cwd);
   pruneStaleShellFiles();
   // Full access: nothing is ever asked.
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));
