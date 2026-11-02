@@ -178,9 +178,8 @@ export class Config {
     return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
   }
 
-  // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}. The window is the one the
-  // gateway gives the model (its model list, once loaded: DeepSeek, GLM and Kimi K3 have 1M there, gpt-6.1-sol 500k,
-  // hy3 192k), else what is known of the model here; [1m] asks for 1M.
+  // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}. The window is the model's
+  // max_input_tokens from the gateway's model list, once loaded, else what is known of it here; [1m] asks for 1M.
   resolveModel(spec) {
     let name = (spec || '').trim() || 'sonnet';
     let oneM = false;
@@ -265,10 +264,9 @@ export class Config {
     const window = this.compactWindow(model, own);
     const pct = int(this.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 0);
     if (pct > 0 && pct <= 100) return Math.floor(window * pct / 100);
-    // A GPT window counts input only (the output has a limit of its own), so the room left only has to cover what the
-    // estimate of the latest tool results misses: compact at 90%, Codex's default for every model (450k of
-    // gpt-6.1-sol's 500k, 244.8k of 272k).
-    if (/^gpt-/i.test(model.id)) return Math.floor(window * 0.9);
+    // GPT's window is the upstream's maximum input, with output already accounted for. Use it whole: no additional
+    // 90% margin (an imprecise estimate that exceeds the limit is handled by compacting on the error).
+    if (/^gpt-/i.test(model.id)) return window;
     // Leave room for the summary itself and the next response (replies rarely come close to the
     // max_tokens ceiling, so the reserve is capped; an overflow is handled by compacting on the error).
     return Math.floor(window - Math.min(window * 0.2, Math.max(20_000, Math.min(this.maxOutputTokens, 64_000))));
