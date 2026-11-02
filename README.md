@@ -259,6 +259,19 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 } }
 ```
 
+## 浏览器：指定要操作的标签页
+
+`Browser` 工具操作你自己的 Edge/Chrome（带着你的登录状态），也可以用 claude-pro 自己的浏览器（`browser: "own"`）。先在 Edge 的 `edge://inspect/#remote-debugging`（Chrome 是 `chrome://inspect/#remote-debugging`）里打开允许远程调试；之后每个 claude-pro 进程第一次连接时，浏览器会弹窗问一次是否允许。
+
+**用 `/tabs` 指定标签页**（指定浏览器时用 `/tabs edge`）：列出浏览器里所有标签页和它们的 ID，用方向键选一个，回车：
+
+- 这个标签页成为 Browser 工具当前操作的标签页，并在浏览器里切到前台；
+- 输入框里插入 `[Browser tab t3f9a in Microsoft Edge: "(1) 收件箱 | …"]`，接着写要它做什么就行，模型不用再列出标签页查找、匹配。
+
+标签页 ID 是 `t` 加浏览器内部 ID 的前几位，只要标签页没关就不变：重新连接或 claude-pro 重启后，同一个 ID 还是同一个标签页，所以也可以直接在消息里写“用 t3f9a”。标签页关了，ID 就失效并报错，不会落到别的标签页上。
+
+默认自动选第一个开了远程调试的浏览器（按 Edge、Chrome、Brave、Chromium 的顺序）；要固定用某一个，`/config set CLAUDE_PRO_BROWSER edge`。
+
 ## 非交互模式
 
 ```bash

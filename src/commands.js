@@ -20,6 +20,7 @@ import { activePromptName, listPromptProfiles, loadActivePrompt, promptDirectory
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
+import { browserSession, safeUrl } from './browser/session.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);
@@ -751,6 +752,63 @@ export function buildCommands(app) {
           ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
           : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login; /status says why it is not).'),
       ]);
+    },
+  });
+
+  // The tab the Browser tool is to work in, picked by the user instead of looked for by the model: the tabs of the
+  // browser with their ids, from the same connection the tool uses (so the ids are the tool's), and the one picked is
+  // selected there and named in the message being written. Its id stays that tab's after a reconnect or a restart
+  // (BrowserSession.relabel), so the agent goes straight to it.
+  add({
+    name: 'tabs',
+    aliases: ['tab'],
+    argHint: '[edge|chrome|brave|chromium|own]',
+    description: 'Pick a tab of your browser for the Browser tool: it is selected, and its id goes into your message',
+    async run(args) {
+      // the agent's own browser calls go to the selected tab: not changed under it while it works
+      if (app.isTurnRunning()) { out(c.dim('The agent is working and may be using the browser: /tabs once the turn is done (or Esc).')); return; }
+      if (app.runtime.tasks.running().length) { out(c.dim('Background agents are running and may be using the browser: /tabs once they are done (/tasks).')); return; }
+      const s = browserSession;
+      // Esc cancels while it waits: the browser may ask the user to allow the connection first
+      const busy = async (status, fn) => {
+        app.busy = true;
+        app.status = status;
+        app.turnStart = Date.now();
+        app.controller = new AbortController();
+        try { return await s.run(app.controller.signal, fn); } finally {
+          app.busy = false;
+          app.status = null;
+          app.controller = null;
+          app.screen.schedule();
+        }
+      };
+      const failed = (e, what) => out(e?.name === 'AbortError' ? c.dim('Cancelled.') : c.red(`${what}: ${e.message}`));
+      try {
+        try {
+          await busy('Connecting to the browser', () => s.connect(args.trim(), app.runtime.config.env, (b) => {
+            app.status = `Allow the connection in ${b.label} ("Allow remote debugging?" → Allow) · Esc cancels`;
+            app.screen.schedule();
+          }));
+        } catch (e) { failed(e, 'Cannot use the browser'); return; }
+        const browser = s.browser;
+        const tabs = [...s.tabs.values()];
+        if (!browser || !tabs.length) { out(c.dim(browser ? `${browser.label} has no tabs open.` : 'The connection to the browser was lost.')); return; }
+        const title = (t, n) => truncate(String(t.title || '(no title)').replace(/\s+/g, ' '), n);
+        const chosen = await app.showDialog(new SelectDialog({
+          title: `Tabs in ${browser.label}`,
+          question: 'The Browser tool works in the tab you pick, and its id goes into your message.',
+          options: tabs.map((t) => ({ value: t.targetId, label: `${padEnd(t.id, 8)} ${title(t, 70)}${t === s.current ? c.dim(' (selected)') : ''}`, description: safeUrl(t.url || '') })),
+          selected: Math.max(0, tabs.indexOf(s.current)),
+        }));
+        if (!chosen) return;
+        const tab = s.tabs.get(chosen);
+        if (!tab) { out(c.red('That tab was closed meanwhile.')); return; }
+        try { await busy('Selecting the tab', () => s.select(tab)); } catch (e) { failed(e, `Could not select ${tab.id}`); return; }
+        app.editor.insert(`[Browser tab ${tab.id} in ${browser.label}: ${JSON.stringify(title(tab, 60))}] `);
+        out(c.dim(`${tab.id} is the Browser tool's tab now, and its id is in your message.`));
+      } finally {
+        app.sendWhatWaited(); // what was typed while it connected
+      }
     },
   });
 

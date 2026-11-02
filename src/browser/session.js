@@ -251,7 +251,7 @@ class BrowserSession {
 
   reset() {
     this.tabs = new Map(); // targetId -> tab
-    this.byId = new Map(); // t1 -> tab
+    this.byId = new Map(); // t3f9a -> tab (see relabel)
     this.sessions = new Map(); // sessionId -> tab
     this.nextTab = 1;
     this.current = null;
@@ -306,13 +306,29 @@ class BrowserSession {
     if (info.type !== 'page') return null;
     let tab = this.tabs.get(info.targetId);
     if (!tab) {
-      tab = { id: `t${this.nextTab++}`, targetId: info.targetId, ours: false, sessionId: null, frameId: null, net: new Map(), lastNet: 0, loading: false, navigations: 0, dialog: null, dialogWaiters: new Set(), lines: null };
+      const hex = /^[0-9a-f]{8,}$/i.test(info.targetId) ? info.targetId.toLowerCase() : null;
+      tab = { id: hex ? null : `t${this.nextTab++}`, hex, targetId: info.targetId, ours: false, sessionId: null, frameId: null, net: new Map(), lastNet: 0, loading: false, navigations: 0, dialog: null, dialogWaiters: new Set(), lines: null };
       this.tabs.set(info.targetId, tab);
-      this.byId.set(tab.id, tab);
+      this.relabel();
     }
     tab.title = info.title || '';
     if (info.url) tab.url = info.url;
     return tab;
+  }
+
+  // A tab's id is "t" and the start of its own id in the browser (its targetId, which it keeps while it is open),
+  // 4 hex digits or as many more as it takes to tell it from the other open tabs. Numbers given in the order of a
+  // connection (t1, t2...) started again at every reconnect and restart of claude-pro, so that an id in the
+  // conversation (one the user picked with /tabs, say) could then be another tab, the one the agent would click in
+  // or close. These ids mean the same tab in every connection and every session (see tab).
+  relabel() {
+    const hexTabs = [...this.tabs.values()].filter((t) => t.hex);
+    for (const tab of hexTabs) {
+      let len = 4;
+      while (len < tab.hex.length && hexTabs.some((o) => o !== tab && o.hex.startsWith(tab.hex.slice(0, len)))) len++;
+      tab.id = `t${tab.hex.slice(0, len)}`;
+    }
+    this.byId = new Map([...this.tabs.values()].map((t) => [t.id, t]));
   }
 
   onEvent(method, params, sessionId) {
@@ -341,7 +357,7 @@ class BrowserSession {
       const tab = this.tabs.get(params.targetId);
       if (!tab) return;
       this.tabs.delete(params.targetId);
-      this.byId.delete(tab.id);
+      this.relabel();
       if (tab.sessionId) this.sessions.delete(tab.sessionId);
       if (this.current === tab) {
         this.current = null;
@@ -405,13 +421,20 @@ class BrowserSession {
     return this.untilDialog(tab, this.send(tab, method, params));
   }
 
+  // A tab by its id. One shown earlier may be longer or shorter than the tab's id now (another tab with the same
+  // start was opened or closed meanwhile): any start of a tab's own id that only one open tab has is that tab's.
   tab(id) {
     if (id) {
-      const tab = this.byId.get(String(id).trim());
-      if (!tab) throw new BrowserError(`no tab ${id}: list them with tabs`);
-      return tab;
+      const want = String(id).trim().toLowerCase();
+      const exact = this.byId.get(want);
+      if (exact) return exact;
+      const start = /^t([0-9a-f]{4,})$/.exec(want)?.[1];
+      const hits = start ? [...this.tabs.values()].filter((t) => t.hex?.startsWith(start)) : [];
+      if (hits.length === 1) return hits[0];
+      if (hits.length > 1) throw new BrowserError(`${id} could be any of ${hits.length} tabs now: ${hits.map((t) => `${t.id} ${String(t.title || '').slice(0, 40)}`).join('; ')}; pass the longer id`);
+      throw new BrowserError(`no tab ${id} (it was closed, or the id is from another browser): switch by words of its title or address, or list them with tabs`);
     }
-    if (!this.current) throw new BrowserError('no tab is selected: open (url) a new one, or tabs and then switch (tab) to the one the user means');
+    if (!this.current) throw new BrowserError('no tab is selected: switch (tab: its id, or words of its title or address) to the one the user means, or open (url) a new one');
     return this.current;
   }
 
@@ -477,7 +500,7 @@ class BrowserSession {
     if (!tab.ours && !force) throw new BrowserError(`${tab.id} is one of the user's tabs, not one you opened: close it only when the user asks for it, with force: true`);
     await this.cdp.send('Target.closeTarget', { targetId: tab.targetId }, { signal: this.signal });
     this.tabs.delete(tab.targetId);
-    this.byId.delete(tab.id);
+    this.relabel();
     if (tab.sessionId) this.sessions.delete(tab.sessionId);
     if (this.current === tab) this.current = null;
   }

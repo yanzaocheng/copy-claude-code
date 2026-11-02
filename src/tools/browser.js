@@ -102,12 +102,12 @@ function named(tab, ref) {
   return `${line.ref} ${cut(line.text.replace(/^- /, '').replace(/ \[[^\]]+\]/g, '').replace(/: [^"\]]*$/, ''), 80)}`;
 }
 
-// A tab by id (t3) or by words of its title or address.
+// A tab by id (t3f9a; see BrowserSession.relabel) or by words of its title or address.
 function findTab(spec) {
   const s = browserSession;
   const want = String(spec ?? '').trim();
   if (!want) throw new BrowserError('switch needs tab: an id from tabs, or words of its title or address');
-  if (/^t\d+$/.test(want)) return s.tab(want);
+  if (/^t(?:\d+|[0-9a-f]{4,})$/i.test(want)) return s.tab(want);
   const q = want.toLowerCase();
   const hits = [...s.tabs.values()].filter((t) => `${t.title} ${t.url}`.toLowerCase().includes(q));
   if (hits.length === 1) return hits[0];
