@@ -32,8 +32,9 @@ const effortLevels = (modelId, modelInfo = null) => {
 };
 
 // What /model offers (and the remote page, see App.remoteOptions): [{value, label, description}] in plain text, the
-// default first. `value` is what /model <value> takes. The gateway's list of models is asked for (4 seconds at
-// most); without an answer gpt-6.1-sol stands for its GPT models.
+// default first. `value` is what /model <value> takes. The gateway's list of models is asked for anew each time (4
+// seconds at most), so a model it has just added is there without a restart; without an answer the list it gave
+// last, else gpt-6.1-sol for its GPT models.
 export async function modelChoices(cfg) {
   const configured = cfg.configuredModelSpec;
   const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).id}` }];
@@ -41,7 +42,7 @@ export async function modelChoices(cfg) {
   // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
   const login = gatewayLogin(cfg.gatewayUrl);
   let served = null;
-  try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) }); } catch { /* offline: the fallback below */ }
+  try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true }); } catch { /* offline: the fallback below */ }
   const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
   for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
     if (aliased.has(m.id)) continue;
@@ -57,7 +58,7 @@ export async function effortChoices(cfg) {
   let info = null;
   if (isGpt(id)) {
     const login = gatewayLogin(cfg.gatewayUrl);
-    try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000) })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
+    try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
   }
   const levels = effortLevels(id, info);
   const configured = cfg.configuredEffort;

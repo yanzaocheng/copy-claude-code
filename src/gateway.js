@@ -68,39 +68,74 @@ export async function fetchGatewayAccount({ url, apiKey }, { fetchImpl = globalT
   return body.account;
 }
 
-// The models the gateway serves (GET /v1/models), fetched once per gateway and key. The reasoning fields are
-// optional so older gateways still work; when present they are kept with the model for /effort and requests. Each
-// model's max_input_tokens is its window (see Config.resolveModel).
-// The first request waits for it, so it gives up after a few seconds, and after a failure it is not asked again for
-// a minute: a gateway whose /v1/models fails must not slow down every request.
-const modelLists = new Map();
+// The models the gateway serves (GET /v1/models), kept per gateway and key. The reasoning fields are optional so
+// older gateways still work; when present they are kept with the model for /effort and requests. Each model's
+// max_input_tokens is its window (see Config.resolveModel).
+// The first request waits for the list, so it gives up after a few seconds, and after a failure it is not asked again
+// for a minute: a gateway whose /v1/models fails must not slow down every request. A list older than
+// MODELS_MAX_AGE_MS is still answered at once, and a new one is fetched behind it; `fresh` (the /model and /effort
+// pickers, the remote page's options) asks the gateway now and falls back to the kept list when it does not answer.
+// The list used to be kept for the life of the process: a model the gateway added (or dropped) showed up in /model
+// only after a restart.
+const modelLists = new Map(); // key -> {list, at}
 const modelListFailures = new Map(); // key -> {at, error}
+const modelListFetches = new Map(); // key -> the request in flight, shared by its callers
 const MODELS_TIMEOUT_MS = 5000;
 const MODELS_RETRY_MS = 60_000;
-export async function fetchGatewayModels({ url, apiKey }, { fetchImpl = globalThis.fetch, signal, timeoutMs = MODELS_TIMEOUT_MS } = {}) {
-  const key = `${normalizeGatewayUrl(url)}\n${apiKey}`;
-  if (modelLists.has(key)) return modelLists.get(key);
+const MODELS_MAX_AGE_MS = 10 * 60_000;
+
+const listKey = ({ url, apiKey }) => `${normalizeGatewayUrl(url)}\n${apiKey}`;
+
+// One GET /v1/models at a time per key. It carries only its own timeout: a caller that gives up (its signal) leaves
+// it running for the others and the cache (see untilAborted).
+function requestModels(key, { url, apiKey }, { fetchImpl, timeoutMs }) {
+  if (modelListFetches.has(key)) return modelListFetches.get(key);
+  const base = normalizeGatewayUrl(url);
+  const pending = gatewayJson(`${base}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) }, fetchImpl)
+    .then((body) => {
+      const list = (body.data || []).filter((m) => typeof m?.id === 'string').map((m) => ({
+        ...m,
+        supported_reasoning_levels: (Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : Array.isArray(m.reasoning_levels) ? m.reasoning_levels : [])
+          .map((r) => typeof r === 'string' ? r : r?.effort || r?.name).filter(Boolean),
+        default_reasoning_level: typeof m.default_reasoning_level === 'string' ? m.default_reasoning_level
+          : m.default_reasoning_level?.effort || m.default_effort || null,
+      }));
+      modelLists.set(key, { list, at: Date.now() });
+      modelListFailures.delete(key);
+      noteServedModels(base, list);
+      return list;
+    }, (e) => {
+      modelListFailures.set(key, { at: Date.now(), error: e });
+      throw e;
+    })
+    .finally(() => modelListFetches.delete(key));
+  modelListFetches.set(key, pending);
+  return pending;
+}
+
+const untilAborted = (promise, signal) => (!signal ? promise : new Promise((resolve, reject) => {
+  const onAbort = () => reject(signal.reason ?? Object.assign(new Error('aborted'), { name: 'AbortError' }));
+  if (signal.aborted) return onAbort();
+  signal.addEventListener('abort', onAbort, { once: true });
+  promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+}));
+
+export async function fetchGatewayModels(login, { fetchImpl = globalThis.fetch, signal, timeoutMs = MODELS_TIMEOUT_MS, fresh = false } = {}) {
+  const key = listKey(login);
+  const kept = modelLists.get(key);
   const failed = modelListFailures.get(key);
-  if (failed && Date.now() - failed.at < MODELS_RETRY_MS) throw failed.error;
-  const timeout = AbortSignal.timeout(timeoutMs);
-  let body;
+  const failedLately = failed && Date.now() - failed.at < MODELS_RETRY_MS;
+  if (kept && !fresh) {
+    if (Date.now() - kept.at >= MODELS_MAX_AGE_MS && !failedLately) requestModels(key, login, { fetchImpl, timeoutMs }).catch(() => {});
+    return kept.list;
+  }
+  if (failedLately && !fresh) throw failed.error;
   try {
-    body = await gatewayJson(`${normalizeGatewayUrl(url)}/v1/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout }, fetchImpl);
+    return await untilAborted(requestModels(key, login, { fetchImpl, timeoutMs }), signal);
   } catch (e) {
-    if (!signal?.aborted) modelListFailures.set(key, { at: Date.now(), error: e });
+    if (kept) return kept.list; // the gateway does not answer now: the list it gave last
     throw e;
   }
-  modelListFailures.delete(key);
-  const list = (body.data || []).filter((m) => typeof m?.id === 'string').map((m) => ({
-    ...m,
-    supported_reasoning_levels: (Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : Array.isArray(m.reasoning_levels) ? m.reasoning_levels : [])
-      .map((r) => typeof r === 'string' ? r : r?.effort || r?.name).filter(Boolean),
-    default_reasoning_level: typeof m.default_reasoning_level === 'string' ? m.default_reasoning_level
-      : m.default_reasoning_level?.effort || m.default_effort || null,
-  }));
-  modelLists.set(key, list);
-  noteServedModels(normalizeGatewayUrl(url), list);
-  return list;
 }
 
 // The gateway's model list for a configuration, for the synchronous code that reads it: buildParams (a GPT model's
@@ -114,7 +149,7 @@ export async function loadGatewayModels(config, signal) {
 
 export function cachedGatewayModel(login, modelId) {
   if (!login?.url || !login?.apiKey) return null;
-  return modelLists.get(`${normalizeGatewayUrl(login.url)}\n${login.apiKey}`)?.find((m) => m.id === modelId) || null;
+  return modelLists.get(listKey(login))?.list.find((m) => m.id === modelId) || null;
 }
 
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
