@@ -21,7 +21,7 @@ Options:
   --append-system-prompt <text>    Append text to the system prompt
   --system-prompt <text>           Replace the system prompt
   --system-prompt-file <file>      Replace the system prompt with the contents of a file
-  --verbose                        Show thinking and full tool output
+  --verbose                        Show detailed tool output
   --no-mcp                         Do not start MCP servers
   --name <name>                    Name this session, as /rename does (other sessions reach it with @name)
   -v, --version                    Print version

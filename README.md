@@ -214,7 +214,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 **工具**：`Bash`（持久 cwd、超时、后台运行、可喂 stdin）、`BashOutput`、`KillShell`、`Read`（行号、图片、ipynb）、`Write`、`MultiEdit`（一次调用改一个文件的多处，按顺序，要么全改要么全不改）、`Edit`（old_string 必须与文件当前内容唯一匹配：没 Read 过、或读后被命令改过的文件也能直接改，结果里会注明；replace_all 和 `Write` 仍要先读、并检测外部修改；只是时间戳变了、内容没变不算修改；保留 CRLF/BOM 和文件编码：UTF-8、带 BOM 的 UTF-16、GBK）、`NotebookEdit`、`Glob`、`Grep`（有 ripgrep 用 rg，否则用内置 JS 搜索：异步不卡界面，遵循 `.gitignore`/`.ignore`、`!` 排除 glob、`^`/`$` 行锚点、多行匹配、上下文行；PATH 上没有 rg 时自动用 VS Code 自带的 rg.exe，也可用 `CLAUDE_PRO_RIPGREP_PATH` 指定；与 rg 不同的是它始终跳过 `node_modules` 等目录，除非 glob 里点名；模型误传的 `file_path` 当作 `path`，grep 的 `-l`/`-c` 当作输出模式）、`WebFetch`（也能读 x.com 上的单条帖子）、`WebSearch`（在网关上用当前会话选择的主模型自带的搜索，返回标题、链接、日期和带 [n] 出处标记的摘要；`allowed_domains: ["x.com"]` 搜 X 上的帖子，`["github.com"]` 搜 GitHub；当前模型不可用时才退回抓取 DuckDuckGo/Bing 网页）、`TodoWrite`、`Task`（子 agent）、`TaskOutput`、`TaskStop`、`Skill`、`AskUserQuestion`，以及 MCP 工具。
 
 **交互**
-- 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），思考过程折叠显示（`ctrl+o` 展开）
+- 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），所有模型返回的思考过程始终展开显示，恢复会话时也会显示已保存的思考；`/verbose` 只切换工具输出详细度和压缩摘要，不影响思考显示
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
 - `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
 - **全屏模式（默认）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开只保留反色选择，不会自动复制；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时只有 `Ctrl+C` 会复制。**输入框里**单击把光标移到那里，拖动、双击、三击选中正在写的文字，`Ctrl+C` 复制（不会打断任务，也不清空输入框）；选中后打字不会替换选中的文字。**引用追问**（像 ChatGPT 的“向 ChatGPT 提问”）：选中对话里的内容后按 `Ctrl+Q`（终端占用了 `Ctrl+Q` 时用 `Alt+Q`），选中的内容就以 `[Quote #1 +12 lines]` 插进输入框，光标停在下一行，直接写追问。发给模型的是选中的原文，加上它所在的那条工具调用、回复或消息的首行（`<quote source="⏺ Read(src/api.js)">…</quote>`），模型就知道问的是哪一段、哪个文件；对话里只显示引用的前三行。可以连续引用好几段，退格一次删掉整个引用。`Ctrl+V` 粘贴剪贴板文字（剪贴板里只有图片时作为图片附加），`Alt+V` 优先附加剪贴板图片；右键不执行复制或粘贴。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记到 `settings.json` 顶层的 `tui`
@@ -293,7 +293,6 @@ claude-pro -p "只调研，给出重构方案，不要改文件"     # 只出方
 | `ctrl+q` / `alt+q` | 全屏有选中文字时把它引用进输入框，在下一行写追问；模型会收到原文和它所在的工具调用或回复 |
 | `ctrl+v` | 粘贴剪贴板文字（只有图片时附加图片） |
 | `alt+v` | 附加剪贴板图片（没有图片时粘贴文字） |
-| `ctrl+o` | 切换详细输出（思考过程、完整工具输出） |
 | `ctrl+t` | 显示/隐藏 todo 列表 |
 | `ctrl+l` | 清屏重绘 |
 | `PgUp` / `PgDn`、滚轮、`Ctrl+Home` / `Ctrl+End` | 全屏模式下滚动对话 / 到开头 / 回到最新 |

@@ -1056,8 +1056,7 @@ export function buildCommands(app) {
 
   add({
     name: 'verbose',
-    aliases: ['thinking'],
-    description: 'Toggle verbose output (thinking, full tool results)',
+    description: 'Toggle detailed tool output and compaction summaries',
     run() {
       app.verbose = !app.verbose;
       out(`Verbose mode ${app.verbose ? 'on' : 'off'}`);

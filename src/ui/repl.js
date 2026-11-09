@@ -1455,11 +1455,6 @@ export class App {
     }
     if (key.ctrl && key.name === 'f') { this.openFind(); return; }
     if (this.finder) { this.findKey(str, key); this.screen.schedule(); return; }
-    if (key.ctrl && key.name === 'o') {
-      this.verbose = !this.verbose;
-      this.notice(this.verbose ? 'Verbose mode on: showing thinking and full tool output' : 'Verbose mode off', 'info');
-      return;
-    }
     if (key.ctrl && key.name === 't') { this.showTodos = !this.showTodos; this.screen.schedule(); return; }
     if (key.ctrl && key.name === 'l') { if (this.screen.full) this.screen.repaint(); else this.screen.clearScreen(); return; }
     if (key.ctrl && key.name === 'd' && !this.editor.text) { this.keyboardExit(); return; }
@@ -1639,7 +1634,7 @@ export class App {
   shortcutsHelp() {
     const rows = [
       ['! for bash mode', 'double tap esc to clear input'],
-      ['/ for commands', 'ctrl + o to toggle verbose output'],
+      ['/ for commands', '/verbose for detailed tool output'],
       ['@ for files and sessions', 'ctrl + f to find in the conversation'],
       ['PgUp/PgDn, wheel to scroll', 'ctrl + home/end to the top/bottom'],
       ['# to memorize', 'ctrl + t to toggle todos'],
@@ -2061,6 +2056,7 @@ export class App {
         const bash = m.role === 'user' && b.type === 'text' ? bashModeLines(b.text) : null;
         if (bash) this.screen.log(bash, '');
         else if (m.role === 'user' && b.type === 'text' && !b.text.startsWith('<system-reminder>')) this.screen.log(renderUserMessage(shownQuotes(b.text).slice(0, 2000), this.width));
+        if (m.role === 'assistant' && b.type === 'thinking' && b.thinking) this.screen.log(renderMarkdown(b.thinking, { width: this.width - 1, firstPrefix: c.dim('✻ '), indent: '  ', style: (s) => c.dim(c.italic(s)) }), '');
         if (m.role === 'assistant' && b.type === 'text') this.screen.log(renderMarkdown(b.text, { width: this.width - 1, firstPrefix: `${DOT} `, indent: '  ' }), '');
         if (m.role === 'assistant' && b.type === 'tool_use') {
           const tool = toolMap.get(b.name) || { name: b.name };
@@ -2126,7 +2122,7 @@ export class App {
           this.remote?.emit({ t: 'start', kind: 'text' });
         } else if (ev.block.type === 'thinking') {
           this.remote?.emit({ t: 'start', kind: 'thinking' });
-          this.thinking = { start: Date.now(), text: '', md: this.verbose ? new MarkdownStream({ width: w, firstPrefix: c.dim('✻ '), indent: '  ', style: (s) => c.dim(c.italic(s)) }) : null };
+          this.thinking = new MarkdownStream({ width: w, firstPrefix: c.dim('✻ '), indent: '  ', style: (s) => c.dim(c.italic(s)) });
         } else if (ev.block.type === 'tool_use') {
           this.flushThinking();
           this.pendingToolBlocks.set(ev.index, { name: ev.block.name, partial: '' });
@@ -2143,12 +2139,9 @@ export class App {
       case 'thinking':
         this.turnTokens += estimateTokens(ev.text);
         if (this.thinking) {
-          this.thinking.text += ev.text;
           this.remote?.emit({ t: 'delta', kind: 'thinking', text: ev.text });
-          if (this.thinking.md) {
-            const lines = this.thinking.md.write(ev.text);
-            if (lines.length) this.logLocal({ soon: true }, lines);
-          }
+          const lines = this.thinking.write(ev.text);
+          if (lines.length) this.logLocal({ soon: true }, lines);
         }
         break;
       case 'tool_input': {
@@ -2208,14 +2201,9 @@ export class App {
     if (!t) return;
     this.thinking = null;
     this.remote?.emit({ t: 'stop' });
-    if (t.md) {
-      const lines = t.md.end();
-      if (lines.length) this.logLocal(lines);
-      this.logLocal('');
-    } else if (t.text.trim()) {
-      const secs = Math.max(1, Math.round((Date.now() - t.start) / 1000));
-      this.logLocal(c.dim(c.italic(`✻ Thought for ${secs}s (ctrl+o to show thinking)`)), '');
-    }
+    const lines = t.end();
+    if (lines.length) this.logLocal(lines);
+    if (t.emittedAny) this.logLocal('');
   }
 
   flushStreaming() {
@@ -2436,12 +2424,7 @@ export class App {
         const partial = this.md.partial();
         lines.push(...partial.slice(-Math.floor(this.screen.height / 2)));
       }
-      if (this.thinking?.md) lines.push(...this.thinking.md.partial().slice(-3));
-      else if (this.thinking && this.thinking.text) {
-        const text = this.thinking.text.trimEnd();
-        const last = text.slice(text.lastIndexOf('\n') + 1); // not split(): this runs every frame on all of it
-        lines.push(c.dim(c.italic(truncate(`✻ ${last}`, w))));
-      }
+      if (this.thinking) lines.push(...this.thinking.partial().slice(-Math.floor(this.screen.height / 2)));
       for (const [, p] of this.pendingToolBlocks) {
         // The start of the input is enough for a one-line preview (a streaming Bash heredoc can be very long).
         const m = /"(?:file_path|command|pattern|url|description|query)"\s*:\s*"((?:\\.|[^"\\])*)/.exec(p.partial.slice(0, 4000));
