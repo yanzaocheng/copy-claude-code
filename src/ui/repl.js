@@ -21,7 +21,7 @@ import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { gatewayLogin, loadGatewayModels, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands, modelChoices, effortChoices } from '../commands.js';
-import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
+import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, reloadTiming, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { listDirectory, recentDirectories } from '../utils/dirs.js';
 import { ripgrepPath } from '../utils/shell.js';
@@ -268,6 +268,8 @@ export class App {
     this.restarts = []; // when this session was restarted lately (carried over by each restart)
     this.restartRequest = null; // {reason, then, continueTurn}: restart as soon as nothing is running
     this.sourceChanged = null; // the program's own source changed since it was last checked
+    this.sourceChangedInTurn = false; // ...while a turn of this session ran: its own work, most likely
+    this.sourceQuietAt = 0; // a change made elsewhere is loaded once the source has been left alone until then
     this.reloading = false;
     this.skipAutoReload = false;
     this.peers = null; // this session as seen by the other sessions on the machine (see peers.js)
@@ -472,6 +474,7 @@ export class App {
     this.exiting = true;
     this.controller?.abort();
     clearInterval(this.spinnerTimer);
+    clearTimeout(this.reloadTimer);
     this.sourceWatch?.close();
     shutdownBackgroundShells();
     shutdownInterpreters();
@@ -1147,12 +1150,18 @@ export class App {
     });
   }
 
-  // Follow the program's own source: once a turn is over (or at once when idle) a change to it is loaded by
-  // a restart, if the new code starts.
+  // Follow the program's own source: a change to it is loaded by a restart, if the new code starts. A change made
+  // while a turn of this session runs is its own work, and is loaded when the turn is over. One that arrives while
+  // the session is idle was made elsewhere (another session working on the program, an editor), one step of a
+  // change that is not finished: it is loaded once the source has been left alone for a few minutes. (Loaded at
+  // once, every edit of one session made each of the other open sessions check and restart, into a half-made
+  // change: 8 of them, a dozen times in a day's work.)
   startSourceWatch() {
     if (!canRestart()) return;
     this.sourceWatch = watchSource(INSTALL_DIR, (file) => {
       this.sourceChanged = file || true;
+      if (this.isTurnRunning()) this.sourceChangedInTurn = true;
+      else this.sourceQuietAt = Date.now() + reloadTiming.quietMs + Math.random() * reloadTiming.spreadMs; // (not all sessions at the same moment)
       // another window (or npm) installed a new version: say so, and load it once this session is idle. In a
       // source checkout a newer version in package.json is a release being made, not an install.
       const disk = installedVersion();
@@ -1169,8 +1178,18 @@ export class App {
     if (!this.sourceChanged || this.updating || this.reloading || this.isTurnRunning() || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
     if (this.skipAutoReload) { this.skipAutoReload = false; return; } // the user just interrupted: not now
     if (this.restartBlockers().length) return; // looked at again whenever the program is next idle
+    clearTimeout(this.reloadTimer);
+    const wait = this.updateRestart || this.sourceChangedInTurn ? 0 : this.sourceQuietAt - Date.now(); // (an installed version is complete)
+    if (wait > 0) {
+      this.reloadTimer = setTimeout(() => this.maybeAutoReload(), wait + 50);
+      this.reloadTimer.unref?.();
+      this.screen.schedule();
+      return;
+    }
     const changed = this.sourceChanged;
+    const inTurn = this.sourceChangedInTurn;
     this.sourceChanged = null;
+    this.sourceChangedInTurn = false;
     this.reloading = true;
     this.flash(this.updateRestart ? `Updated to ${this.updateRestart}: checking it starts, then restarting…` : 'Source changed: checking the new code…');
     let check;
@@ -1180,7 +1199,7 @@ export class App {
       this.notice(`The program's source changed but the new code does not start, so it was not restarted:\n${check.output.split('\n').slice(0, 12).join('\n')}\nFix it; the restart follows by itself (or run /restart).`, 'warn');
       return;
     }
-    if (this.isTurnRunning() || this.dialogs.length) { this.sourceChanged = changed; return; } // something started meanwhile: later
+    if (this.isTurnRunning() || this.dialogs.length) { this.sourceChanged = changed; this.sourceChangedInTurn = inTurn; return; } // something started meanwhile: later
     const r = this.requestRestart({ reason: this.updateRestart ? `updated to ${APP_NAME} ${this.updateRestart}` : 'source changed', force: true });
     // refused (too many restarts in a row): say so, or later changes would go unloaded without a word
     if (!r.ok) this.notice(`The program's source changed, but it was not restarted to load it: ${r.message.replace(/ That looks like a loop:.*$/, '')} A change after that window loads it, or /restart once it has passed.`, 'warn');
@@ -2532,6 +2551,7 @@ export class App {
     if (!flash) {
       if (this.updating) left += c.dim(' · ') + c.blue(`⇣ updating ${APP_NAME} to ${this.updating}…`);
       else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`↻ ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
+      else if (this.sourceChanged && !this.sourceChangedInTurn && !this.restartRequest && !this.reloading && !this.working() && this.sourceQuietAt > Date.now()) left += c.dim(' · ') + c.dim('↻ source changed: restarts once it is left alone (/restart: now)');
       else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when @${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
     }
     const cfg = this.config;

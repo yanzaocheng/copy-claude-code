@@ -13,6 +13,9 @@ export { RESTART_EXIT_CODE };
 
 export const MAX_RESTARTS = 5; // more than this many within RESTART_WINDOW_MS is a loop, not a workflow
 export const RESTART_WINDOW_MS = 5 * 60_000;
+// A change of the source that an idle session sees is loaded once the source has not changed for quietMs (plus up to
+// spreadMs, so that the sessions of a machine do not all check and restart at the same moment): see App.startSourceWatch.
+export const reloadTiming = { quietMs: 3 * 60_000, spreadMs: 10_000 };
 
 // True in a session that runs under the supervisor, so that it can restart.
 export function canRestart(env = process.env) {
