@@ -550,7 +550,7 @@ export function buildCommands(app) {
           : savedPrompt?.text != null ? `${savedPrompt.name} (saved)` : savedPrompt?.error ? `${savedPrompt.name} (missing; using built-in)` : 'built-in default'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
         row('Prompt cache', cfg.promptCachingDisabled() ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
-        row('Auto-compact', `at ${formatTokens(cfg.compactWindow())} tokens (100% of window)`),
+        row('Auto-compact', `at ${formatTokens(cfg.compactWindow())} tokens (the window, less room for the summary)`),
         row('Access', 'full (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
         row('Shell', `${app.runtime.shell.name} ${c.dim(app.runtime.shell.path)}`),

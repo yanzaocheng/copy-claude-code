@@ -279,9 +279,14 @@ export class Config {
   get overloadedRetryMaxDelay() { return 32_000; }
   get overloadedMaxWait() { return this.rateLimitMaxWait; }
 
-  // Always at the full input window; only sub-agent definitions may ask for a smaller window.
+  // At the model's input window (only sub-agent definitions may ask for a smaller one), less the room the compaction
+  // itself takes: its request is the conversation with the instruction at its end, and its reply (the summary and
+  // the thinking before it) counts against the window too. With no room left, the summary request of a
+  // conversation at the window was refused as too long and the conversation sent again without its cache (895k
+  // tokens of plain input on Opus, 2026-11-02; a request that fits reads them from the cache at a twentieth).
   compactWindow(model = this.model, own = 0) {
-    return own > 0 ? Math.min(own, model.contextWindow) : model.contextWindow;
+    const window = own > 0 ? Math.min(own, model.contextWindow) : model.contextWindow;
+    return window - Math.min(40_000, Math.round(window * 0.05));
   }
 
   get bashDefaultTimeout() { return 600_000; }

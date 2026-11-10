@@ -761,7 +761,7 @@ export class Agent {
         if (err.promptTooLong && !compactedForError && this.messages.length > 2) {
           compactedForError = true;
           this.io.notice?.('Context limit reached; compacting conversation…', 'warn');
-          const outcome = await this.compactOnTheWay(signal, { required: true });
+          const outcome = await this.compactOnTheWay(signal, { required: true, overflow: err });
           if (outcome?.interrupted) return tracedReturn(outcome);
           continue;
         }
@@ -889,10 +889,10 @@ export class Agent {
   // A compaction that fails does not fail the turn when the request still fits (the threshold leaves room
   // below the model's limit): the turn goes on without it, and {failed: true} is returned. After
   // MAX_COMPACT_FAILURES in a row it is left off (see shouldAutoCompact). `required`: the request is already
-  // too long, so there is nothing to go on with, and the error is thrown.
-  async compactOnTheWay(signal, { required = false } = {}) {
+  // too long (`overflow`: the error that said so), so there is nothing to go on with, and the error is thrown.
+  async compactOnTheWay(signal, { required = false, overflow = null } = {}) {
     try {
-      await this.compact({ signal, auto: true });
+      await this.compact({ signal, auto: true, overflow });
       return null;
     } catch (err) {
       if (isAbort(err) || signal?.aborted) return this.handleInterrupt();
@@ -1190,7 +1190,8 @@ export class Agent {
     }
   }
 
-  async summaryRequest(messages, { signal, onEvent, compactionId = null }) {
+  // `overflow`: the error of the turn's request when the compaction is made because that was too long.
+  async summaryRequest(messages, { signal, onEvent, compactionId = null, overflow = null }) {
     const cacheMessages = !this.cacheExpired();
     const call = (request, options = {}) => {
       const useMessages = request.cacheMessages === undefined ? cacheMessages : request.cacheMessages;
@@ -1204,29 +1205,48 @@ export class Agent {
         ...options,
       });
     };
-    try {
-      const res = await call({ system: this.currentSystem() });
-      if (Agent.summaryOf(res)) return res;
-    } catch (err) {
-      if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
-    }
-    const plain = (msgs) => call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false, messages: msgs }, { cacheOverride: { caching: false } });
-    let tooLong;
-    try {
-      return await plain(messages);
-    } catch (err) {
+    // A refusal for length says how long the request was and what fits (Anthropic's does). With our own estimate of
+    // the same messages that tells of a smaller request whether it can fit, without sending it: each refusal of a
+    // conversation at the window took 5 to 25 seconds to upload (5 in a row, 2026-11-06).
+    let tooLong = null;
+    let over = null; // {tokens, limit, estimate} of the last request refused for its length
+    const refused = (err, msgs) => {
       if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
       tooLong = err;
+      if (err.promptTokens > 0 && err.promptLimit > 0) over = { tokens: err.promptTokens, limit: err.promptLimit, estimate: Math.max(1, estimateTokens(msgs)) };
+    };
+    const cannotFit = (msgs) => over != null && estimateTokens(msgs) * (over.tokens / over.estimate) > over.limit * 1.05;
+    if (overflow?.promptTooLong) refused(overflow, messages); // the same request with the instruction at its end is too long as well
+    else {
+      try {
+        const res = await call({ system: this.currentSystem() });
+        if (Agent.summaryOf(res)) return res;
+      } catch (err) {
+        refused(err, messages);
+      }
     }
-    // The history alone is over the window (one turn of very large results can do it): the summary is made from
-    // less, old tool results first (as idle clearing does), then the oldest turns. Without this every later
-    // request failed too, and only /clear or /rewind got the conversation going again.
+    // null: it does not fit
+    const plain = async (msgs) => {
+      if (cannotFit(msgs)) return null;
+      try {
+        return await call({ system: SUMMARY_SYSTEM, effort: null, cacheMessages: false, messages: msgs }, { cacheOverride: { caching: false } });
+      } catch (err) {
+        refused(err, msgs);
+        return null;
+      }
+    };
+    let res = await plain(messages);
+    if (res) return res;
+    // The history alone is over the window (one turn of very large results can do it, or a model that counts the
+    // conversation in more tokens than the one before it): the summary is made from less, old tool results and
+    // inputs first (as idle clearing does), then the oldest turns. Without this every later request failed too,
+    // and only /clear or /rewind got the conversation going again.
     let smaller = clearOldToolResults(messages, { keep: 3, atLeast: 0, cwd: this.cwd })?.messages || messages;
     for (let i = 0; i < 4 && smaller; i++) {
-      try {
-        return await plain(smaller);
-      } catch (err) {
-        if (isAbort(err) || signal?.aborted || !err.promptTooLong) throw err;
+      res = await plain(smaller);
+      if (res) {
+        if (i > 0) this.io.notice?.(`The conversation was too long for the model to summarize whole (${tooLong.promptTokens ? `${Math.round(tooLong.promptTokens / 1000)}k tokens, ${Math.round(tooLong.promptLimit / 1000)}k fit` : 'over its window'}): the summary was made without the oldest ${messages.length - smaller.length + 1} of its ${messages.length} messages. Your own messages are kept as they were.`, 'warn');
+        return res;
       }
       smaller = withoutOldestHalf(smaller);
     }
@@ -1278,7 +1298,7 @@ export class Agent {
   }
 
   // Summarise the conversation and replace it with the summary.
-  async compact({ signal, auto = false, instructions = '' } = {}) {
+  async compact({ signal, auto = false, instructions = '', overflow = null } = {}) {
     if (this.messages.length === 0) return null;
     const compactionId = `compact_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const compactionStartedAt = Date.now();
@@ -1290,7 +1310,7 @@ export class Agent {
     const messages = repairToolResults(normalizeMessages([...this.messages, { role: 'user', content: [{ type: 'text', text: compactPrompt(instructions) }] }])).messages;
     let res;
     try {
-      res = await this.requestSummary(messages, { signal, compactionId, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
+      res = await this.requestSummary(messages, { signal, compactionId, overflow, onEvent: (ev) => this.io.compactProgress?.(ev, this) });
     } catch (err) {
       this.trace?.compact({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, auto, before_context_tokens: beforeContextTokens, duration_ms: Date.now() - compactionStartedAt, error: err });
       this.io.compactEnd?.(null, this, err);

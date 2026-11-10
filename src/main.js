@@ -114,7 +114,7 @@ async function configCommand(args, cwd) {
           const what = Object.entries(remembered).map(([k, v]) => `${k} ${v}`).join(', ');
           console.log(`chosen with /model, /effort: ${what} (kept in ${files.user}; wins over the settings above, --model/--effort win over it)`);
         }
-        console.log(`auto-compact at ${cfg.compactWindow().toLocaleString()} tokens (100% of window)`);
+        console.log(`auto-compact at ${cfg.compactWindow().toLocaleString()} tokens (the window, less room for the summary)`);
         if (!advanced) console.log('More controls: claude-pro config list --advanced');
       }
       return 0;

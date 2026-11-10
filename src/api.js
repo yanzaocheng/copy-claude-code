@@ -207,11 +207,14 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
 }
 
 export class APIError extends Error {
-  constructor(message, { status, retryable, promptTooLong, retryAfterMs = null, rateLimit = null, overloaded = false } = {}) {
+  constructor(message, { status, retryable, promptTooLong, promptTokens = 0, promptLimit = 0, retryAfterMs = null, rateLimit = null, overloaded = false } = {}) {
     super(message);
     this.status = status;
     this.retryable = retryable;
     this.promptTooLong = promptTooLong;
+    // Anthropic says how long it was and what fits ("prompt is too long: 1003873 tokens > 1000000 maximum"); 0: not said
+    this.promptTokens = promptTokens;
+    this.promptLimit = promptLimit;
     this.overloaded = overloaded; // 529 / overloaded_error: waited out with its own backoff (see planRetry)
     this.retryAfterMs = retryAfterMs; // what the server's Retry-After header asked for
     this.rateLimit = rateLimit; // what the rate limit headers say (see ratelimit.js)
@@ -232,7 +235,8 @@ function describeError(err, config) {
   const retryable = !promptTooLong && (!status || status === 408 || status === 409 || status === 429 || status >= 500);
   const header = typeof err?.headers?.get === 'function' ? err.headers.get('retry-after') : err?.headers?.['retry-after'];
   const overloaded = status === 529 || (err?.error?.error?.type || err?.error?.type) === 'overloaded_error';
-  return new APIError(msg, { status, retryable, promptTooLong, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()), overloaded });
+  const sizes = promptTooLong ? /(\d+) tokens > (\d+) maximum/.exec(msg) : null;
+  return new APIError(msg, { status, retryable, promptTooLong, promptTokens: Number(sizes?.[1]) || 0, promptLimit: Number(sizes?.[2]) || 0, retryAfterMs: parseRetryAfter(header), rateLimit: parseRateLimit(err?.headers, timing.now()), overloaded });
 }
 
 // Our own aborts are named AbortError and the SDK's is an APIUserAbortError. The message test only
