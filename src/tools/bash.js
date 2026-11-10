@@ -62,7 +62,7 @@ export function makeBashTool(config) {
     name: 'Bash',
     description: `Executes a given ${isCmd ? 'cmd.exe' : 'bash'} command with an optional timeout. The working directory persists between commands; shell state (variables, functions) does not.
 
-This tool is for terminal operations like git, npm, docker, running builds and tests. For file work use the dedicated tools instead of shell commands: Read, not cat/head/tail; Edit, not sed/awk; Write, not echo or heredoc redirection; Glob and Grep, not find and grep. A script is fine for a mechanical change across many files, once you know git can bring them back (Bash changes are not checkpointed).
+This tool is for terminal operations like git, npm, docker, running builds and tests. For file work use the dedicated tools instead of shell commands: Read, not cat/head/tail; Edit, not sed/awk; Write, not echo or heredoc redirection; Glob and Grep, not find and grep. An edit made with Edit, MultiEdit or Write can be undone with /rewind and is shown to the user as a diff; one made by a command (a script that rewrites the file, sed -i) is neither. To edit and then build or test in one step, put the edit calls and the Bash call in the same response: they run in that order. A script is fine for a mechanical change across many files, once you know git can bring them back.
 
 Usage notes:
 - Quote file paths that contain spaces with double quotes.

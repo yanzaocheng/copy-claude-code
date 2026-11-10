@@ -1010,14 +1010,28 @@ export class Agent {
       else batches.push({ parallel: safe, items: [tu] });
     }
     this.io.toolBatchStart?.(toolUses, this);
+    // The model is told that the calls of one response run in the order given, so that an edit and the command that
+    // builds or tests it can come together (it wrote scripts through Bash to get both into one call, and those
+    // edits are not checkpointed). A command after an edit that failed would run on the file as it was: left out.
+    let failedEdit = null;
     for (const batch of batches) {
       if (stop || interrupted) break;
       const run = async (tu) => {
         try {
+          const tool = map.get(tu.name);
+          if (failedEdit && tool && !tool.readOnly && !tool.editsFiles) {
+            const message = `Not run: the ${failedEdit} call before it in this response failed, and this call may depend on that edit. Make the edit, then send this call again.`;
+            const skipped = this.trace?.toolStart({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, name: tu.name, input: tu.input, parallel: false, toolUseId: tu.id });
+            this.trace?.toolEnd(skipped, { skipped: true, error: true, error_type: 'skipped' });
+            this.io.toolRejected?.(tu, tool, message, this);
+            results.set(tu, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: message });
+            return;
+          }
           const r = await this.runOne(tu, signal, map, { parallel: batch.parallel });
           // Key by the tool-use object, not its provider id. A malformed provider response
           // can repeat an id; one duplicate must not overwrite the other result.
           results.set(tu, r.block);
+          if (r.block.is_error && tool?.editsFiles) failedEdit ||= tu.name;
           if (r.stop) stop = true;
         } catch (err) {
           if (isAbort(err) || signal?.aborted) {
