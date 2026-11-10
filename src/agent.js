@@ -406,6 +406,7 @@ export class Agent {
     this.postCompactTokens = undefined; // undefined: never compacted; null: compacted, awaiting measurement
     this.compactFailures = 0; // automatic compactions that failed in a row
     this.lastActivityAt = 0; // when the last message was added (ms since epoch; 0: unknown), see clearAfterIdle
+    this.pauseControl = null; // of the turn's request in flight: has wake() while it is paused for a rate limit (see callModel)
     this.busy = 0; // turns and summaries in progress: while there are any, the cache needs no refresh
     this.keepAlive = isSubagent ? null : new CacheKeepAlive(this); // the prompt cache kept warm while idle
   }
@@ -486,7 +487,7 @@ export class Agent {
     });
   }
 
-  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {}, waitForRateLimit = true, afterPause = null } = {}) {
+  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {}, waitForRateLimit = true, afterPause = null, pauseControl = null } = {}) {
     const handle = this.traceRequestStart({ kind, messages: request.messages, cacheBucket, cacheMessages, compactionId });
     // A bug in what shows or traces the stream must not fail the request: it had no HTTP status, so it was taken
     // for a network error and the request was sent (and billed) again, up to the retry limit, failing the same way
@@ -501,7 +502,7 @@ export class Agent {
       }
     };
     try {
-      const res = await streamMessage(this.config, request, { signal, onEvent: forward, waitForRateLimit, afterPause });
+      const res = await streamMessage(this.config, request, { signal, onEvent: forward, waitForRateLimit, afterPause, pauseControl });
       if (handlerError) this.io.notice?.(`Showing the reply failed (${handlerError.message}); the reply itself is complete.`, 'warn');
       const observed = cacheOverride ? { ...res, cache: { ...res.cache, ...cacheOverride } } : res;
       const recorded = this.recordUsage(observed, kind === 'summary' || kind === 'keepalive' ? kind : 'turn');
@@ -646,6 +647,16 @@ export class Agent {
   cacheExpired(now = Date.now()) {
     if (this.cache.expected != null) return now >= this.cache.expiresAt;
     return this.lastActivityAt > 0 && now - this.lastActivityAt >= TTL_MS[this.config.cacheTtl('main')];
+  }
+
+  // Is a request of this agent's turn paused for a rate limit right now (and can be sent on at once)?
+  get pausedForLimit() { return typeof this.pauseControl?.wake === 'function'; }
+
+  // End that pause now: the request is sent again at once, to the model chosen meanwhile. False when none is paused.
+  wakePause() {
+    if (!this.pausedForLimit) return false;
+    this.pauseControl.wake();
+    return true;
   }
 
   // The conversation's last request again, for a refresh of its cache entry (keepalive.js): the messages before
@@ -934,13 +945,16 @@ export class Agent {
 
   async callModel(signal) {
     await this.lightenImages();
-    const system = this.currentSystem();
     // The system prompt is kept with the conversation, so that a resumed one can continue behind the same
     // prompt (and so with the cache it has) instead of a freshly built one.
-    if (!this.isSubagent && system !== this.recordedSystem) {
-      this.recordedSystem = system;
-      this.io.systemPrompt?.(system, this);
-    }
+    const noteSystem = (text) => {
+      if (!this.isSubagent && text !== this.recordedSystem) {
+        this.recordedSystem = text;
+        this.io.systemPrompt?.(text, this);
+      }
+      return text;
+    };
+    const system = noteSystem(this.currentSystem());
     // The repair goes into the request only, done again (the same way) for every request: storing it in place of
     // the conversation merged and inserted messages, which moved the messages the checkpoints point at, so a
     // /rewind after a restart cut the conversation in the wrong place.
@@ -950,7 +964,7 @@ export class Agent {
       for (const id of fresh) this.recoveredToolIds.add(id);
       this.io.notice?.('Recovered an unfinished tool call in the conversation; continuing with an interrupted result.', 'warn');
     }
-    const request = {
+    let request = {
       model: this.model,
       system,
       messages: repaired.messages,
@@ -958,18 +972,33 @@ export class Agent {
       cacheBucket: this.isSubagent ? 'other' : 'main',
       ...(this.effort ? { effort: this.effort } : {}),
     };
-    const res = await this.streamAgentRequest(request, {
-      signal,
-      kind: 'turn',
-      cacheBucket: request.cacheBucket,
-      onEvent: (ev) => this.io.streamEvent?.(ev, this),
-      // A pause for a rate limit lasts hours, and the prompt cache one: the request repeated after it wrote the
-      // whole conversation again, as it stood (6 times in 11 days, 310k to 890k tokens each, out of the limit that
-      // had just been reset). What a return after such a pause clears is cleared here too, before it is repeated.
-      afterPause: () => (this.clearAfterIdle(Date.now(), { pause: true })
-        ? { ...request, messages: repairToolResults(normalizeMessages(this.messages)).messages }
-        : null),
-    });
+    // While the request is paused for a rate limit, the user may choose another model to go on with (/model, see
+    // wakePause): the main agent's turns only, which are what the user waits for.
+    const pauseControl = this.isSubagent ? null : {};
+    this.pauseControl = pauseControl;
+    let res;
+    try {
+      res = await this.streamAgentRequest(request, {
+        signal,
+        kind: 'turn',
+        cacheBucket: request.cacheBucket,
+        onEvent: (ev) => this.io.streamEvent?.(ev, this),
+        pauseControl,
+        // A pause for a rate limit lasts hours, and the prompt cache one: the request repeated after it wrote the
+        // whole conversation again, as it stood (6 times in 11 days, 310k to 890k tokens each, out of the limit
+        // that had just been reset). What a return after such a pause clears is cleared here too, before it is
+        // repeated. And the model is the one of now: the user may have changed it to get on.
+        afterPause: () => {
+          const model = this.model;
+          const cleared = this.clearAfterIdle(Date.now(), { pause: true });
+          if (!cleared && model.id === request.model.id) return null;
+          request = { ...request, model, system: noteSystem(this.currentSystem()), messages: repairToolResults(normalizeMessages(this.messages)).messages };
+          return request;
+        },
+      });
+    } finally {
+      if (this.pauseControl === pauseControl) this.pauseControl = null;
+    }
     this.lastContextTokens = contextTokens(res.usage);
     this.usageModel = request.model.id;
     this.tokensSinceUsage = 0;

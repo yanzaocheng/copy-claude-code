@@ -245,7 +245,7 @@ export function describePause(ev, now = Date.now()) {
 // announced for the same pause (null at the first one). Polling repeats every few minutes and the
 // announced reset moves a little between waits: those only continue the pause already announced,
 // unless the reset moved by more than two minutes.
-export const resumeText = (ev) => (ev?.overloaded ? 'The API is answering again; continuing.' : 'The limit has cleared; continuing.');
+export const resumeText = (ev) => (ev?.woken ? 'Going on with the model you chose.' : ev?.overloaded ? 'The API is answering again; continuing.' : 'The limit has cleared; continuing.');
 
 export function shouldAnnounce(prev, ev) {
   if (!prev) return true;

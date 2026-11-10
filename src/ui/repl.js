@@ -881,7 +881,7 @@ export class App {
     // the same pattern and message; this holds when it does not (another gateway, or one that misses them).
     if (TERMINAL_ONLY.test(value)) throw new Error('结束、重启会话和更新 claude-pro 只能在终端里操作');
     if (this.exiting) throw new Error('The session is ending.');
-    if (this.isTurnRunning() && value.trim().startsWith('/')) throw new Error('Commands wait until the current task is done (or stopped).');
+    if (this.isTurnRunning() && value.trim().startsWith('/') && !this.modelSwitchAtPause(value.trim())) throw new Error('Commands wait until the current task is done (or stopped).');
     if (this.dialogs.length && !this.isTurnRunning()) throw new Error('A question is open: answer it first.');
     const queued = this.isTurnRunning();
     this.onSubmit(value, value, pictures);
@@ -1575,7 +1575,7 @@ export class App {
     if (this.screen.scrolledUp) this.screen.scrollBy('bottom'); // what was sent, and what comes of it, is in view
     appendHistory(this.cwd, raw, parts);
     if (this.sendTypedToPeer(text)) return;
-    if (this.isTurnRunning()) {
+    if (this.isTurnRunning() && !this.modelSwitchAtPause(text)) {
       if (text.startsWith('/')) { this.notice('Wait for the current task to finish (or press Esc) before running commands.', 'warn'); return; }
       this.queue.push({ text: value, images, ...(display ? { display } : {}) });
       this.screen.schedule();
@@ -1599,6 +1599,13 @@ export class App {
       return;
     }
     this.startTurn(value, { display });
+  }
+
+  // /model while the turn's request is paused for a rate limit: the one command that runs in a turn. The request
+  // then goes on with the model chosen instead of waiting hours for the limit of the other (the user had to stop
+  // the turn, change the model and say "go on" for that).
+  modelSwitchAtPause(text) {
+    return /^\/model(?:\s|$)/i.test(text) && this.agent.pausedForLimit;
   }
 
   // `@name message`: the message goes to that session, as a task for it. A session on another computer of the
@@ -2192,7 +2199,7 @@ export class App {
     // Say it once; later waits of the same pause only move the countdown (unless the reset moved a lot).
     const prev = this.rateWait;
     this.rateWait = { resumeAt: ev.resumeAt, label: ev.label, polling: ev.polling, overloaded: Boolean(ev.overloaded) };
-    if (shouldAnnounce(prev, ev)) this.notice(`${describePause(ev)} Esc cancels.`, 'warn');
+    if (shouldAnnounce(prev, ev)) this.notice(`${describePause(ev)} Esc cancels${!ev.overloaded && this.agent.pauseControl ? '; /model goes on with another model at once' : ''}.`, 'warn');
     this.screen.schedule();
   }
 

@@ -265,12 +265,14 @@ function charge(config, requested, served, usage) {
 //   {type:'rate_limit_resume', waitedMs}   the repeated request was accepted: the pause is over
 //   {type:'reset'}                      partial output from a failed attempt must be discarded
 // `waitForRateLimit: false` reports a rate limit as an error instead of waiting for it (side queries
-// where nobody wants to sit through a pause). `afterPause()` is called when a pause for a rate limit (or an
+// where nobody wants to sit through a pause). `afterPause({woken})` is called when a pause for a rate limit (or an
 // overloaded API) is over, before the request is repeated: it may return the request to go on with instead (the
-// conversation made smaller once its prompt cache has run out), or null for the same one.
+// conversation made smaller once its prompt cache has run out, or another model), or null for the same one.
+// `pauseControl`: an object that gets a wake() function while such a pause lasts; calling it ends the pause at
+// once (the user chose another model to go on with), and afterPause is told so.
 // Returns {message, usage, stopReason, model, cost, cache}.
 // What each request costs (an interrupted one too) goes to config.onCost, the conversation's running total.
-export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true, afterPause = null } = {}) {
+export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true, afterPause = null, pauseControl = null } = {}) {
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
   // Load gateway model metadata before the synchronous parameter builder; the cache is keyed by gateway and key,
   // so changing accounts or gateway URLs cannot leak a model's effort levels into another context. A gateway that
@@ -286,6 +288,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
   const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0, overloaded: 0, overloadedWaitMs: 0 };
   let paused = null; // the plan of the pause in progress (see planRetry)
+  let woken = false; // the pause was ended by pauseControl.wake()
   for (;;) {
     let emitted = false;
     const startedAt = Date.now(); // the cache TTL counts from the start of the request, not from the end of the reply
@@ -298,7 +301,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       if (paused) {
         const overloaded = paused.overloaded;
         paused = null;
-        onEvent({ type: 'rate_limit_resume', waitedMs: overloaded ? retryState.overloadedWaitMs : retryState.waitedMs, ...(overloaded ? { overloaded } : {}) });
+        onEvent({ type: 'rate_limit_resume', waitedMs: overloaded ? retryState.overloadedWaitMs : retryState.waitedMs, ...(overloaded ? { overloaded } : {}), ...(woken ? { woken } : {}) });
       }
       let stopReason = null;
       let stopped = false;
@@ -438,9 +441,14 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
             ? { overloaded: true, waitedMs: retryState.overloadedWaitMs, maxWaitMs: config.overloadedMaxWait }
             : { waitedMs: retryState.waitedMs, maxWaitMs: config.rateLimitMaxWait }),
         });
-        await sleepUntil(plan.resumeAt, signal);
+        woken = await sleepThroughPause(plan.resumeAt, signal, pauseControl);
+        if (woken) { // what was not waited does not count against the time the session may wait
+          const left = Math.max(0, plan.resumeAt - timing.now());
+          if (plan.overloaded) retryState.overloadedWaitMs = Math.max(0, retryState.overloadedWaitMs - left);
+          else retryState.waitedMs = Math.max(0, retryState.waitedMs - left);
+        }
         retryState.attempt = 0; // the pause is a fresh start: quick retries made before it do not count after it
-        const next = afterPause?.();
+        const next = afterPause?.({ woken });
         if (next) params = buildParams(config, next);
       } else {
         onEvent({ type: 'retry', attempt: plan.attempt, error: err, delayMs: plan.delayMs, maxRetries: plan.maxRetries });
@@ -448,6 +456,26 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       }
     }
   }
+}
+
+// Sleep until `deadline`, or until control.wake() is called (true then). The user's interrupt still throws.
+async function sleepThroughPause(deadline, signal, control) {
+  if (!control) { await sleepUntil(deadline, signal); return false; }
+  const ac = new AbortController();
+  const onAbort = () => ac.abort();
+  if (signal?.aborted) ac.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  let woken = false;
+  control.wake = () => { woken = true; ac.abort(); };
+  try {
+    await sleepUntil(deadline, ac.signal);
+  } catch (err) {
+    if (!woken || signal?.aborted) throw err;
+  } finally {
+    control.wake = null;
+    signal?.removeEventListener('abort', onAbort);
+  }
+  return woken;
 }
 
 // One-shot, non-streaming helper for small side queries (summaries, titles, web page extraction).

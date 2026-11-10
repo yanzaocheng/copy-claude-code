@@ -396,12 +396,16 @@ export function buildCommands(app) {
       const forget = choice === '__default__' || choice === 'default';
       const next = cfg.resolveModel(forget ? cfg.configuredModelSpec : choice).id;
       const changed = next !== cfg.model.id;
-      if (changed && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
+      // (Not asked at a pause for a rate limit: the cache runs out while waiting for the limit as well.)
+      if (changed && !app.agent.pausedForLimit && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
       cfg.modelOverride = forget ? null : choice;
       if (changed) app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
       await loadGatewayModels(cfg); // the window shown may come from the gateway's model list (see Config.resolveModel)
-      out(`Model set to ${c.bold(cfg.model.label)} ${c.dim(`(${formatTokens(cfg.model.contextWindow)} context)`)}${kept}${changed ? c.dim(' · restored conversation remains in context for the next request') : ''}`);
+      // A turn paused for the other model's rate limit goes on with this one now (the one case in which /model runs
+      // during a turn, see App.modelSwitchAtPause).
+      const resumed = changed && app.agent.wakePause();
+      out(`Model set to ${c.bold(cfg.model.label)} ${c.dim(`(${formatTokens(cfg.model.contextWindow)} context)`)}${kept}${resumed ? c.dim(' · the paused request goes on with it now') : changed ? c.dim(' · restored conversation remains in context for the next request') : ''}`);
     },
   });
 
