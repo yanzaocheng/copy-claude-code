@@ -261,9 +261,12 @@ function charge(config, requested, served, usage) {
 //   {type:'rate_limit_resume', waitedMs}   the repeated request was accepted: the pause is over
 //   {type:'reset'}                      partial output from a failed attempt must be discarded
 // `waitForRateLimit: false` reports a rate limit as an error instead of waiting for it (side queries
-// where nobody wants to sit through a pause). Returns {message, usage, stopReason, model, cost, cache}.
+// where nobody wants to sit through a pause). `afterPause()` is called when a pause for a rate limit (or an
+// overloaded API) is over, before the request is repeated: it may return the request to go on with instead (the
+// conversation made smaller once its prompt cache has run out), or null for the same one.
+// Returns {message, usage, stopReason, model, cost, cache}.
 // What each request costs (an interrupted one too) goes to config.onCost, the conversation's running total.
-export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true } = {}) {
+export async function streamMessage(config, request, { signal, onEvent = () => {}, waitForRateLimit = true, afterPause = null } = {}) {
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
   // Load gateway model metadata before the synchronous parameter builder; the cache is keyed by gateway and key,
   // so changing accounts or gateway URLs cannot leak a model's effort levels into another context. A gateway that
@@ -271,7 +274,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   await loadGatewayModels(config, signal);
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
   const client = await getClient(config);
-  const params = buildParams(config, request);
+  let params = buildParams(config, request);
   // The gateway keeps a conversation on the upstream account that served it, where its prompt cache is; the
   // session id names the conversation, in the header Claude Code sends it in.
   const options = { signal, ...(config.sessionId ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) };
@@ -433,6 +436,8 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         });
         await sleepUntil(plan.resumeAt, signal);
         retryState.attempt = 0; // the pause is a fresh start: quick retries made before it do not count after it
+        const next = afterPause?.();
+        if (next) params = buildParams(config, next);
       } else {
         onEvent({ type: 'retry', attempt: plan.attempt, error: err, delayMs: plan.delayMs, maxRetries: plan.maxRetries });
         await sleepUntil(plan.resumeAt, signal);

@@ -66,18 +66,46 @@ export function persistLargeOutput(root, id, text) {
 // user's answers and the like stay whatever their age.
 export const IDLE_CLEARING = { idleMs: 65 * 60_000, keep: 5, atLeast: 20_000 };
 export const CLEARED = '[Old tool result content cleared]';
-const CLEARABLE_TOOLS = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'MultiEdit', 'Write']);
+// (Browser: an old snapshot or screenshot shows a page as it no longer is; REPL and Processes print like a command.)
+const CLEARABLE_TOOLS = new Set(['Read', 'Bash', 'BashOutput', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Edit', 'MultiEdit', 'Write', 'Browser', 'REPL', 'Processes']);
 const MIN_CLEAR_TOKENS = 100; // a smaller result is left as it is: clearing it gains next to nothing
+// What the model itself wrote into old tool calls goes the same way: after the results were cleared it was the
+// larger half of a long conversation (traces 2026-10-31..11-10: files written, edits and inline scripts made up
+// about half of the largest ones; one was still 549k tokens after a 38-hour pause). The start of each long text
+// stays, so that it can still be told what the call was; a file's content is on disk.
+const CLEARABLE_INPUTS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'REPL']);
+const INPUT_CLEARING = { longerThan: 1200, keep: 300 }; // characters of one text of a tool call
+
+// A tool call's input with its long texts cut to their start; the same object when none is long.
+function shortInput(value) {
+  if (typeof value === 'string') {
+    if (value.length <= INPUT_CLEARING.longerThan) return value;
+    return `${value.slice(0, INPUT_CLEARING.keep)}\n[Old tool input cleared: ${value.length - INPUT_CLEARING.keep} more characters]`;
+  }
+  if (Array.isArray(value)) {
+    const out = value.map(shortInput);
+    return out.some((v, i) => v !== value[i]) ? out : value;
+  }
+  if (value && typeof value === 'object') {
+    let changed = false;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) { out[k] = shortInput(v); if (out[k] !== v) changed = true; }
+    return changed ? out : value;
+  }
+  return value;
+}
 
 const isThinking = (b) => b.type === 'thinking' || b.type === 'redacted_thinking';
 const resultText = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.filter((b) => b.type === 'text').map((b) => b.text).join('\n') : '');
 
-// Clear the results of all but the last `keep` clearable tool calls, if that takes out at least `atLeast` tokens
-// (else null). The thinking goes too, all of it: once a tool result before it has changed, the API takes earlier
+// Clear the results of all but the last `keep` clearable tool calls, and the long texts in the inputs of all but
+// the last `keep` calls that have such (CLEARABLE_INPUTS), if that takes out at least `atLeast` tokens (else
+// null). The thinking goes too, all of it: once a tool result before it has changed, the API takes earlier
 // thinking for tampered with, and rejects the request. `save(id, text)` keeps a cleared output in a file and
 // returns its path, so that what a command printed can still be looked up; a file read is read again instead.
-// Returns {messages (a new list: the old one is not changed), results (how many were cleared), tokens (about
-// how many went, thinking included), forget (the files whose Read results went, and of which no Read is left)}.
+// Returns {messages (a new list: the old one is not changed), results and inputs (how many were cleared), tokens
+// (about how many went, thinking included), forget (the files the model no longer sees the text of: their Read
+// results or what was written to them went, and nothing newer shows them)}.
 export function clearOldToolResults(messages, { keep = IDLE_CLEARING.keep, atLeast = IDLE_CLEARING.atLeast, save = () => null, cwd = process.cwd() } = {}) {
   const uses = new Map(); // tool_use id -> the tool_use block
   for (const m of messages) if (m.role === 'assistant' && Array.isArray(m.content)) for (const b of m.content) if (b.type === 'tool_use') uses.set(b.id, b);
@@ -92,6 +120,14 @@ export function clearOldToolResults(messages, { keep = IDLE_CLEARING.keep, atLea
     if (t < MIN_CLEAR_TOKENS) continue;
     clear.add(b);
     tokens += t;
+  }
+  const calls = [...uses.values()].filter((b) => CLEARABLE_INPUTS.has(b.name));
+  const shorter = new Map(); // tool_use block -> its input with the long texts cut
+  for (const b of calls.slice(0, Math.max(0, calls.length - keep))) {
+    const input = shortInput(b.input);
+    if (input === b.input) continue;
+    shorter.set(b, input);
+    tokens += Math.max(0, estimateTokens(b.input) - estimateTokens(input));
   }
   if (tokens < atLeast) return null;
   const fileOf = (b) => {
@@ -109,9 +145,13 @@ export function clearOldToolResults(messages, { keep = IDLE_CLEARING.keep, atLea
   const out = messages.map((m) => {
     if (!Array.isArray(m.content)) return m;
     if (m.role === 'assistant') {
-      if (!m.content.some(isThinking)) return m;
+      for (const b of m.content) {
+        if (b.type !== 'tool_use' || b.name !== 'Write' || !fileOf({ tool_use_id: b.id })) continue;
+        (shorter.has(b) ? gone : shown).add(fileOf({ tool_use_id: b.id }));
+      }
+      if (!m.content.some((b) => isThinking(b) || shorter.has(b))) return m;
       for (const b of m.content) if (isThinking(b)) tokens += estimateTokens(b.thinking ?? b.data ?? '');
-      const content = m.content.filter((b) => !isThinking(b));
+      const content = m.content.filter((b) => !isThinking(b)).map((b) => (shorter.has(b) ? { ...b, input: shorter.get(b) } : b));
       return { ...m, content: content.length ? content : [{ type: 'text', text: '(no content)' }] };
     }
     for (const b of m.content) {
@@ -122,7 +162,7 @@ export function clearOldToolResults(messages, { keep = IDLE_CLEARING.keep, atLea
     if (!m.content.some((b) => clear.has(b))) return m;
     return { ...m, content: m.content.map((b) => (clear.has(b) ? { ...b, content: placeholder(b) } : b)) };
   });
-  return { messages: out, results: clear.size, tokens, forget: [...gone].filter((f) => !shown.has(f)) };
+  return { messages: out, results: clear.size, inputs: shorter.size, tokens, forget: [...gone].filter((f) => !shown.has(f)) };
 }
 
 // A summary request's messages with the older half of the turns left out: the first message (the task, or the
@@ -446,7 +486,7 @@ export class Agent {
     });
   }
 
-  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {}, waitForRateLimit = true } = {}) {
+  async streamAgentRequest(request, { signal, kind = 'turn', cacheBucket = 'main', cacheMessages = true, cacheOverride = null, compactionId = null, onEvent = () => {}, waitForRateLimit = true, afterPause = null } = {}) {
     const handle = this.traceRequestStart({ kind, messages: request.messages, cacheBucket, cacheMessages, compactionId });
     // A bug in what shows or traces the stream must not fail the request: it had no HTTP status, so it was taken
     // for a network error and the request was sent (and billed) again, up to the retry limit, failing the same way
@@ -461,7 +501,7 @@ export class Agent {
       }
     };
     try {
-      const res = await streamMessage(this.config, request, { signal, onEvent: forward, waitForRateLimit });
+      const res = await streamMessage(this.config, request, { signal, onEvent: forward, waitForRateLimit, afterPause });
       if (handlerError) this.io.notice?.(`Showing the reply failed (${handlerError.message}); the reply itself is complete.`, 'warn');
       const observed = cacheOverride ? { ...res, cache: { ...res.cache, ...cacheOverride } } : res;
       const recorded = this.recordUsage(observed, kind === 'summary' || kind === 'keepalive' ? kind : 'turn');
@@ -578,8 +618,9 @@ export class Agent {
   // (MAX_THINKING_TOKENS: thinking.type "enabled") the API wants its last assistant message to start with its
   // thinking, which cannot stay once a result before it has changed: then nothing is cleared. Adaptive thinking,
   // the default and the only mode of the 5.x models, has no such rule: all thinking may go, that turn's too.
+  // `pause`: called in the middle of a turn, after a pause for a rate limit (see callModel): the same holds then.
   // Returns what clearOldToolResults did, or null.
-  clearAfterIdle(now = Date.now()) {
+  clearAfterIdle(now = Date.now(), { pause = false } = {}) {
     if (this.isSubagent || !this.config.clearAfterIdle || !this.lastActivityAt) return null;
     const idle = now - this.lastActivityAt;
     if (idle <= IDLE_CLEARING.idleMs) return null;
@@ -593,7 +634,9 @@ export class Agent {
     this.replaceMessages(out.messages); // into the session file too: a resumed conversation goes on with the short one
     for (const file of out.forget) this.fileState.delete(file); // the model no longer sees it: Read before Edit/Write
     this.lastContextTokens = Math.max(0, this.lastContextTokens - out.tokens);
-    this.io.notice?.(`Back after ${Math.round(idle / 60_000)} minutes, with the prompt cache expired: cleared ${out.results} old tool results and the earlier thinking (about ${Math.round(out.tokens / 1000)}k tokens). The last ${IDLE_CLEARING.keep} results are kept; files are read again when needed.`);
+    const s = (n) => (n === 1 ? '' : 's');
+    const what = [out.results ? `${out.results} old tool result${s(out.results)}` : '', out.inputs ? `the long texts of ${out.inputs} old tool call${s(out.inputs)}` : '', 'the earlier thinking'].filter(Boolean);
+    this.io.notice?.(`${pause ? 'Going on' : 'Back'} after ${Math.round(idle / 60_000)} minutes, with the prompt cache expired: cleared ${what.slice(0, -1).join(', ')} and ${what.at(-1)} (about ${Math.round(out.tokens / 1000)}k tokens). The last ${IDLE_CLEARING.keep} are kept; files are read again when needed.`);
     return out;
   }
 
@@ -920,6 +963,12 @@ export class Agent {
       kind: 'turn',
       cacheBucket: request.cacheBucket,
       onEvent: (ev) => this.io.streamEvent?.(ev, this),
+      // A pause for a rate limit lasts hours, and the prompt cache one: the request repeated after it wrote the
+      // whole conversation again, as it stood (6 times in 11 days, 310k to 890k tokens each, out of the limit that
+      // had just been reset). What a return after such a pause clears is cleared here too, before it is repeated.
+      afterPause: () => (this.clearAfterIdle(Date.now(), { pause: true })
+        ? { ...request, messages: repairToolResults(normalizeMessages(this.messages)).messages }
+        : null),
     });
     this.lastContextTokens = contextTokens(res.usage);
     this.usageModel = request.model.id;
