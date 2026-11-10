@@ -142,18 +142,38 @@ function appendHistory(cwd, text, parts = null) {
   } catch { /* ignore */ }
 }
 
+// The files of the working directory, for the completion after an `@`. Listed when an `@` is first typed, not at
+// the start, and never more than MAX_FILES of them: the listing is stopped there. (It ran at every start and
+// restart and went through the whole directory before keeping the first 50,000: in a home directory of 1.3
+// million files that was 10 seconds of ripgrep on every core and 45 MB, for every session open there, each time
+// the program's source changed.) `onLoaded` is called when a listing is in, so that the completion is drawn again.
+const MAX_FILES = 50_000;
 class FileIndex {
-  constructor(cwd, getConfig = () => null) { this.cwd = cwd; this.getConfig = getConfig; this.files = []; this.at = 0; this.loading = false; }
+  constructor(cwd, getConfig = () => null, onLoaded = () => {}) {
+    Object.assign(this, { cwd, getConfig, onLoaded, files: [], at: 0, took: 0, loading: false });
+  }
   refresh() {
-    if (this.loading || Date.now() - this.at < 30_000) return;
+    // listed again after 30 seconds, or later where the listing itself takes long
+    if (this.loading || Date.now() - this.at < Math.max(30_000, this.took * 30)) return;
     this.loading = true;
-    const done = (list) => { this.files = list.slice(0, 50_000); this.at = Date.now(); this.loading = false; };
+    const started = Date.now();
+    const done = (list) => {
+      Object.assign(this, { files: list.slice(0, MAX_FILES), at: Date.now(), took: Date.now() - started, loading: false });
+      this.onLoaded();
+    };
     const rg = ripgrepPath(this.getConfig());
     if (rg) {
       const child = spawn(rg, ['--files', '--hidden', '--glob', '!.git'], { cwd: this.cwd, windowsHide: true });
       let out = '';
+      let lines = 0;
       child.stdout.setEncoding('utf8'); // a Chinese file name can be split between two chunks
-      child.stdout.on('data', (d) => { if (out.length < 10_000_000) out += d; });
+      child.stdout.on('data', (d) => {
+        if (lines >= MAX_FILES) return;
+        out += d;
+        for (let i = d.indexOf('\n'); i !== -1; i = d.indexOf('\n', i + 1)) lines++;
+        if (lines >= MAX_FILES) child.kill();
+      });
+      // (stopped in the middle of a name: the list is cut to MAX_FILES whole ones in done)
       child.on('close', () => done(out.split(/\r?\n/).filter(Boolean).map((f) => f.replace(/\\/g, '/'))));
       child.on('error', () => done([]));
     } else {
@@ -162,7 +182,7 @@ class FileIndex {
         try {
           for await (const f of fs.promises.glob('**/*', { cwd: this.cwd, exclude: (p) => /(^|[\\/])(node_modules|\.git)$/.test(p) })) {
             list.push(f.replace(/\\/g, '/'));
-            if (list.length > 50_000) break;
+            if (list.length > MAX_FILES) break;
           }
         } catch { /* ignore */ }
         done(list);
@@ -267,7 +287,7 @@ export class App {
     this.remotePeersLoading = null;
     this.remotePeersTimer = null;
     this.cost = 0; // what this conversation's requests have cost so far (USD at list prices): the footer and /cost
-    this.fileIndex = new FileIndex(cwd, () => this.runtime?.config);
+    this.fileIndex = new FileIndex(cwd, () => this.runtime?.config, () => { this.editor?.refreshSuggestions(); this.screen?.schedule(); });
     this.store = new SessionStore(cwd);
     SessionStore.onError = (e, store) => this.notice(`Could not save the conversation to ${store.file} (${e.code || e.message}): it is written again whole before a restart, but /resume may miss what was not saved.`, 'warn');
     // What the terminal prints goes to the remote page too, except what it is told about as events.
@@ -365,7 +385,6 @@ export class App {
     else if (!gatewayLogin(this.config.gatewayUrl)) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
-    this.fileIndex.refresh();
     this.startSourceWatch();
     if (!this.driven) {
       // Updates are deliberately manual: /update checks npm and installs the selected release.
@@ -1536,7 +1555,7 @@ export class App {
     });
     const items = [...peers, ...fileItems];
     if (!items.length) {
-      if (!q && m.index === 0 && !m[1] && !quiet) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer (/login to the gateway reaches your other computers)');
+      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer (/login to the gateway reaches your other computers)');
       return null;
     }
     return { items, from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
