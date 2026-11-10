@@ -11,6 +11,28 @@ import { decodeText as decodeFile } from '../utils/encoding.js';
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'dist-newstyle']);
 
+// How long a search may take. A search of a home directory or a drive (a million files and more) does not end in
+// any useful time: in a month of traces 31 calls took 50 minutes together, a Grep up to 14 minutes, with the turn
+// waiting. Past the limit the search stops and gives what it found, saying that it is not all (Claude Code stops
+// ripgrep after 20 seconds).
+export const searchLimits = { ms: 30_000 };
+const stoppedNote = (what) => `(The search was stopped after ${Math.round(searchLimits.ms / 1000)} s without finishing, so ${what} Search a narrower path${what.includes('match') ? ', or add a glob or type' : ' or use a more specific pattern'}.)`;
+
+// When each file was last changed (ms; null: it cannot be read), without blocking: statSync for 20,000 files held
+// the program for a second.
+async function mtimes(files) {
+  const out = new Array(files.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < files.length) {
+      const i = next++;
+      try { out[i] = (await fs.promises.stat(files[i])).mtimeMs; } catch { /* vanished */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(32, files.length) }, worker));
+  return out;
+}
+
 export const GlobTool = {
   name: 'Glob',
   readOnly: true,
@@ -43,21 +65,24 @@ export const GlobTool = {
       const name = path.basename(p);
       return IGNORED_DIRS.has(name) && !explicit.includes(name);
     };
-    const files = [];
+    let files = [];
+    let stopped = false;
     const start = Date.now();
     try {
-      for (const abs of await globFiles(base, pattern, { skip: exclude, signal: ctx.signal, max: 20_000 })) {
-        try { files.push({ abs, mtime: fs.statSync(abs).mtimeMs }); } catch { /* vanished */ }
-      }
+      const walked = await globFiles(base, pattern, { skip: exclude, signal: ctx.signal, max: 20_000, deadline: start + searchLimits.ms });
+      stopped = walked.stopped;
+      const times = await mtimes(walked.files);
+      files = walked.files.map((abs, i) => ({ abs, mtime: times[i] })).filter((f) => f.mtime !== null);
     } catch (e) {
       return { isError: true, content: `Glob failed: ${e.message}` };
     }
     files.sort((a, b) => b.mtime - a.mtime);
     const limit = 1000;
     const shown = files.slice(0, limit).map((f) => f.abs);
-    let content = shown.length ? shown.join('\n') : 'No files found';
+    let content = shown.length ? shown.join('\n') : stopped ? 'No files found so far' : 'No files found';
     if (files.length > limit) content += `\n(Results are truncated: showing ${limit} of ${files.length}. Consider using a more specific path or pattern.)`;
-    return { content, display: { summary: `Found ${files.length} file${files.length === 1 ? '' : 's'} in ${Date.now() - start}ms` } };
+    if (stopped) content += `\n${stoppedNote('there may be more files than these.')}`;
+    return { content, display: { summary: `Found ${files.length} file${files.length === 1 ? '' : 's'} in ${Date.now() - start}ms${stopped ? ' (stopped: not finished)' : ''}` } };
   },
 };
 
@@ -65,8 +90,9 @@ export const GlobTool = {
 // dot directories too: fs.glob leaves those out of * and ** and has no option for them, so "**/*.yml" missed
 // .github/workflows/ci.yml, which Grep (searching hidden files) found. `skip(name)`: a directory not to go into. The
 // walk starts at the pattern's fixed leading directories, and goes no deeper than its segments without a "**". A
-// linked directory is not entered (it can make a loop).
-async function globFiles(base, pattern, { skip, signal, max }) {
+// linked directory is not entered (it can make a loop). Directories are read several at a time; past `deadline`
+// (ms since epoch) the walk ends with what it has. Returns {files, stopped: it ended at the deadline}.
+async function globFiles(base, pattern, { skip, signal, max, deadline = Infinity }) {
   const parts = pattern.replace(/^(?:\.\/)+/, '').split('/');
   const fixed = [];
   while (parts.length > 1 && !/[*?[\]{}]/.test(parts[0])) fixed.push(parts.shift());
@@ -74,22 +100,40 @@ async function globFiles(base, pattern, { skip, signal, max }) {
   const re = globToRegExp(rest, process.platform === 'win32');
   const maxDepth = /\*\*|[{}]/.test(rest) ? Infinity : parts.length;
   const found = [];
+  let stopped = false;
+  const done = () => signal?.aborted || found.length >= max || (stopped ||= Date.now() > deadline);
+  // at most this many directories are being read at once
+  let reading = 0;
+  const waiting = []; // a stack: the deepest directories first, which keeps it short in a wide tree
+  const readDir = async (dir) => {
+    if (reading >= 16) await new Promise((go) => waiting.push(go));
+    reading++;
+    try {
+      return done() ? null : await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    } finally {
+      reading--;
+      waiting.pop()?.();
+    }
+  };
   const walk = async (dir, rel, depth) => {
-    if (signal?.aborted || found.length >= max) return;
-    let entries;
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+    const entries = await readDir(dir);
+    if (!entries) return;
+    const below = [];
     for (const e of entries) {
-      if (found.length >= max) return;
+      if (done()) break;
       const r = rel ? `${rel}/${e.name}` : e.name;
       const abs = path.join(dir, e.name);
       let isFile = e.isFile();
       if (e.isSymbolicLink()) { try { isFile = (await fs.promises.stat(abs)).isFile(); } catch { /* a broken link */ } }
-      if (isFile) { if (re.test(r)) found.push(abs); }
-      else if (e.isDirectory() && depth < maxDepth && !skip(e.name)) await walk(abs, r, depth + 1);
+      if (isFile) { if (re.test(r) && found.length < max) found.push(abs); }
+      else if (e.isDirectory() && depth < maxDepth && !skip(e.name)) below.push(walk(abs, r, depth + 1));
     }
+    await Promise.all(below);
   };
   await walk(path.join(base, ...fixed), '', 1);
-  return found;
+  return { files: found, stopped: stopped && !signal?.aborted };
 }
 
 // rg --type names (plus a few aliases) → file extensions, for the JS scanner.
@@ -272,10 +316,13 @@ const decodeText = (buf) => decodeFile(buf, { writable: false })?.text ?? null;
 
 const clip = (line) => (line.length > MAX_COLUMNS ? `${line.slice(0, MAX_COLUMNS)} [... omitted end of long line]` : line);
 
-function runRg(bin, args, cwd, signal) {
+// `timeoutMs`: rg is stopped then, and what it had found by then is given, with `timedOut`.
+function runRg(bin, args, cwd, signal, timeoutMs = searchLimits.ms) {
   return new Promise((resolve) => {
     const child = spawn(bin, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
     // Decoded as a stream (a Chinese path or line can be split between two chunks), and rg is stopped once
     // there is more than will ever be shown instead of scanning on.
     child.stdout.setEncoding('utf8');
@@ -288,8 +335,13 @@ function runRg(bin, args, cwd, signal) {
     child.stderr.on('data', (d) => { if (err.length < 100_000) err += d; });
     const onAbort = () => child.kill();
     signal?.addEventListener('abort', onAbort, { once: true });
-    child.on('close', (code) => { signal?.removeEventListener('abort', onAbort); resolve({ code, out, err }); });
-    child.on('error', (e) => { signal?.removeEventListener('abort', onAbort); resolve({ code: 2, out: '', err: e.message, spawnError: true }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      // the last line may have been cut where rg was stopped
+      resolve(timedOut ? { code: 0, out: out.slice(0, out.lastIndexOf('\n') + 1), err, timedOut } : { code, out, err });
+    });
+    child.on('error', (e) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); resolve({ code: 2, out: '', err: e.message, spawnError: true }); });
   });
 }
 
@@ -441,6 +493,7 @@ Usage:
     const mode = input.output_mode || 'files_with_matches';
     let lines = null;
     let note = '';
+    let stopped = false;
     const rg = ripgrepPath(ctx.config);
     if (rg) {
       // --crlf lets `$` match before \r\n, so line-end anchors also work in Windows (CRLF) files.
@@ -462,11 +515,14 @@ Usage:
       if (!r.spawnError) {
         if (r.code === 2 && !r.out) return { isError: true, content: `ripgrep error: ${r.err.trim()}` };
         lines = r.out.split(/\r?\n/).filter(Boolean);
+        stopped = Boolean(r.timedOut);
       }
     }
     if (!lines) {
       try {
-        const found = await jsGrep(input, base, mode, ctx.signal);
+        const limit = AbortSignal.timeout(searchLimits.ms);
+        const found = await jsGrep(input, base, mode, ctx.signal ? AbortSignal.any([ctx.signal, limit]) : limit);
+        stopped = limit.aborted && !ctx.signal?.aborted;
         lines = found.lines;
         if (found.skipped) note = `\n\n(${found.skipped} file${found.skipped === 1 ? '' : 's'} larger than ${MAX_FILE_BYTES / 1024 / 1024}MB not searched; install ripgrep to search them)`;
       } catch (e) {
@@ -474,9 +530,10 @@ Usage:
       }
     }
     if (mode === 'files_with_matches') {
-      lines = lines.map((f) => ({ f, t: (() => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } })() }))
-        .sort((a, b) => b.t - a.t).map((x) => x.f);
+      const times = await mtimes(lines);
+      lines = lines.map((f, i) => ({ f, t: times[i] ?? 0 })).sort((a, b) => b.t - a.t).map((x) => x.f);
     }
+    if (stopped) note += `\n\n${stoppedNote('there may be more matches than these.')}`;
     const total = lines.length;
     const offset = Math.max(0, input.offset || 0);
     const limit = input.head_limit === 0 ? Infinity : (input.head_limit || 1000);
@@ -484,16 +541,17 @@ Usage:
     let content;
     let summary;
     if (mode === 'files_with_matches') {
-      content = total ? `Found ${total} file${total === 1 ? '' : 's'}\n${page.join('\n')}` : 'No files found';
+      content = total ? `Found ${total} file${total === 1 ? '' : 's'}\n${page.join('\n')}` : stopped ? 'No files found so far' : 'No files found';
       summary = `Found ${total} file${total === 1 ? '' : 's'}`;
     } else if (mode === 'count') {
       const sum = lines.reduce((n, l) => n + (parseInt(l.split(':').pop(), 10) || 0), 0);
-      content = total ? page.join('\n') + `\n\nFound ${sum} total occurrences across ${total} files.` : 'No matches found';
+      content = total ? page.join('\n') + `\n\nFound ${sum} total occurrences across ${total} files.` : stopped ? 'No matches found so far' : 'No matches found';
       summary = `Found ${sum} match${sum === 1 ? '' : 'es'} in ${total} file${total === 1 ? '' : 's'}`;
     } else {
-      content = total ? page.join('\n') : 'No matches found';
+      content = total ? page.join('\n') : stopped ? 'No matches found so far' : 'No matches found';
       summary = `Found ${total} line${total === 1 ? '' : 's'}`;
     }
+    if (stopped) summary += ' (stopped: not finished)';
     if (total > offset + page.length) content += `\n\n(Showing ${page.length} of ${total} results. Use offset/head_limit to page, or narrow the search.)`;
     return { content: content + note, display: { summary } };
   },
