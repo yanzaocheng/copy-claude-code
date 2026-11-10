@@ -237,7 +237,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 
 **后台子 agent**：模型可以用 `Task` 的 `run_in_background: true` 把子 agent 放到后台，自己继续干别的。子 agent 完成后，结果会作为 `<task-notification>` 自动送回；如果当时主 agent 空闲，会自动开启新的一轮来处理结果。`TaskOutput` 用于提前等待结果，`TaskStop` 用于取消；`/tasks` 列出所有后台 agent，`/tasks kill agent_1` 停止其中一个。`-p` 模式会等所有后台 agent 结束后再退出。
 
-**自动验证循环**：如果项目有明确的测试入口，claude-pro 会自动发现并使用 `package.json` 的 `test`/`check`/`verify`/`lint` 脚本，或 `pytest`、`cargo test`、`go test ./...`、`make test`。也可以显式设置验证命令（例如 `--verify "npm run check"`、会话中 `/verify npm run check`，或 `CLAUDE_PRO_VERIFY_COMMAND`）；显式配置优先，`/verify off` 可关闭自动发现。只要某一轮改过文件，模型结束前就会自动运行验证命令。失败的输出会发回给模型继续修复，直到通过，最多 3 轮。没有改文件的轮次不会触发验证。
+**验证循环（默认关闭）**：需要时显式设置验证命令（例如 `--verify "npm run check"`、会话中 `/verify npm run check`，或 `CLAUDE_PRO_VERIFY_COMMAND`），`/verify off` 关闭；程序不再自己去找项目的测试脚本来跑。设置之后，只要某一轮改过文件，模型结束前就会自动运行验证命令。失败的输出会发回给模型继续修复，直到通过，最多 3 轮。没有改文件的轮次不会触发验证。
 
 **大输出落盘**：工具结果超过 10 万字符时，全文会保存到 `~/.claude-pro/projects/<项目>/tool-results/`，只把预览和文件路径发给模型，模型可以再用 `Read`/`Grep` 按需查看。Bash 输出被截断时同样会保存全文。超过 7 天的旧文件在启动时自动清理。
 
