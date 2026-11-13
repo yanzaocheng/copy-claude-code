@@ -21,17 +21,16 @@ export function findShell(config) {
   const candidates = [];
   if (isWin) {
     if (config?.env.CLAUDE_CODE_GIT_BASH_PATH) candidates.push(config.env.CLAUDE_CODE_GIT_BASH_PATH);
-    try {
-      const where = spawnSync('where', ['git'], { encoding: 'utf8', windowsHide: true });
-      for (const line of (where.stdout || '').split(/\r?\n/).filter(Boolean)) {
-        // ...\Git\cmd\git.exe or ...\Git\bin\git.exe or ...\Git\mingw64\bin\git.exe
-        let dir = path.dirname(line.trim());
-        for (let i = 0; i < 3; i++) {
-          candidates.push(path.join(dir, 'bin', 'bash.exe'));
-          dir = path.dirname(dir);
-        }
+    // Where git is on the PATH, looked up here (`where git` in a process of its own took 75 ms of every start):
+    // ...\Git\cmd\git.exe or ...\Git\bin\git.exe or ...\Git\mingw64\bin\git.exe
+    for (const entry of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+      if (!['git.exe', 'git.cmd'].some((name) => fs.existsSync(path.join(entry, name)))) continue;
+      let dir = entry;
+      for (let i = 0; i < 3; i++) {
+        candidates.push(path.join(dir, 'bin', 'bash.exe'));
+        dir = path.dirname(dir);
       }
-    } catch { /* ignore */ }
+    }
     candidates.push('C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe');
     for (const c of candidates) {
       if (c && fs.existsSync(c)) return (shellCache = { path: c, kind: 'bash', name: 'bash (Git Bash)' });
