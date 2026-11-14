@@ -13,7 +13,7 @@ import { isAbort } from './api.js';
 import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
-import { autoMemoryDir, pruneToolResults, pruneCheckpoints, pruneTraces, projectDir } from './session.js';
+import { autoMemoryDir, sweepOldData, projectDir } from './session.js';
 import { loadAutoMemoryIndex, takeEnvSnapshot, takeEnvSnapshotAsync, localDate } from './context.js';
 import { canRestart } from './restart.js';
 import { RuntimeTrace } from './trace.js';
@@ -24,9 +24,15 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const trace = new RuntimeTrace({ cwd, sessionId, enabled: config.traceEnabled });
   applyRememberedChoices(config, flags); // what /model and /effort chose last time
   if (flags.verify) config.verifyOverride = flags.verify;
-  pruneToolResults(cwd);
-  pruneCheckpoints(cwd);
-  pruneTraces(cwd);
+  // Old conversations and what goes with them, in the background a while after the start (not in the self-check's
+  // throwaway process, nor a test's: CLAUDE_PRO_CONFIG_DIR points elsewhere then anyway)
+  if (process.env.CLAUDE_PRO_SELF_CHECK !== '1') {
+    setTimeout(() => {
+      sweepOldData({ days: config.setting('cleanupPeriodDays'), keep: [sessionId, config.sessionId] })
+        .then((done) => { if (done.files) trace.append('cleanup', { conversations: done.conversations, files: done.files, bytes: done.bytes }); })
+        .catch(() => {});
+    }, 15_000).unref();
+  }
   pruneStaleShellFiles();
   // Full access: nothing is ever asked.
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));

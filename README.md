@@ -71,7 +71,7 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 
 网关 key 只来自 `/login`：登录后保存在 `~/.claude-pro/gateway.json`，不用手动填写，也没有环境变量或 `.env` 文件可以设置它（没有浏览器的机器可以把另一台登录过的电脑的 `gateway.json` 拷过去）。
 
-一般只需要 `/login`、`/model`、`/effort`、`/tui` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
+一般只需要 `/login`、`/model`、`/effort`、`/tui` 和 settings。六个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
 
 ```json
 {
@@ -79,9 +79,12 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
   "effort": "auto",
   "tui": "fullscreen",
   "promptCacheTtl": "1h",
-  "subagentPromptCacheTtl": "5m"
+  "subagentPromptCacheTtl": "5m",
+  "cleanupPeriodDays": 30
 }
 ```
+
+`cleanupPeriodDays` 和 Claude Code 的同名设置一样：会话最后一次使用超过这么多天就删除（连同它的 trace，此后 `/resume` 里也看不到），每次启动后在后台清理所有项目，一台机器一小时最多一次；保存的大块工具输出最多留 7 天、`/rewind` 快照最多 14 天，项目记忆从不删。最小 1，想长期保留就设 `3650` 之类的大数。这一项只从 `~/.claude-pro/settings.json` 读，项目里的设置文件改不了它。
 
 也可以用命令修改：
 
@@ -93,7 +96,7 @@ claude-pro config list --advanced            # 另外显示高级配置
 claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 ```
 
-会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择，`/tui` 记到顶层 `tui`；`--model`、`--effort` 可覆盖本次启动。
+会话中 `/config` 默认只显示这六项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择，`/tui` 记到顶层 `tui`；`--model`、`--effort` 可覆盖本次启动。
 
 设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_PRO_TUI`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。provider 固定为 `gateway`，已删除 `--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口。
 

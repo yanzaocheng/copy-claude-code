@@ -88,46 +88,59 @@ export function toolResultsDir(cwd) {
   return path.join(projectDir(cwd), 'tool-results');
 }
 
-// Delete saved tool output older than maxAgeMs (best effort, run at startup).
-export function pruneToolResults(cwd, maxAgeMs = 7 * 24 * 3600_000) {
-  const dir = toolResultsDir(cwd);
-  let entries = [];
-  try { entries = fs.readdirSync(dir); } catch { return; }
-  const cutoff = Date.now() - maxAgeMs;
-  for (const name of entries) {
-    const file = path.join(dir, name);
-    try { if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true }); } catch { /* ignore */ }
-  }
-}
-
-// Delete the traces (see trace.js) of conversations not traced for maxAgeMs: one file a conversation, up to 40 MB
-// with its rotation, kept for good before (best effort, run at startup).
-export function pruneTraces(cwd, maxAgeMs = 30 * 24 * 3600_000) {
-  const dir = path.join(projectDir(cwd), 'traces');
-  let entries = [];
-  try { entries = fs.readdirSync(dir); } catch { return; }
-  const cutoff = Date.now() - maxAgeMs;
-  for (const name of entries) {
-    const file = path.join(dir, name);
-    try { if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true }); } catch { /* ignore */ }
-  }
-}
-
 // Where /rewind keeps file snapshots: one sub-directory per run of the program.
 export function checkpointsDir(cwd) {
   return path.join(projectDir(cwd), 'checkpoints');
 }
 
-// Delete snapshot directories of old runs (best effort, run at startup).
-export function pruneCheckpoints(cwd, maxAgeMs = 14 * 24 * 3600_000) {
-  const dir = checkpointsDir(cwd);
-  let entries = [];
-  try { entries = fs.readdirSync(dir); } catch { return; }
-  const cutoff = Date.now() - maxAgeMs;
-  for (const name of entries) {
-    const sub = path.join(dir, name);
-    try { if (fs.statSync(sub).mtimeMs < cutoff) fs.rmSync(sub, { recursive: true, force: true }); } catch { /* ignore */ }
+// Delete what is older than `days` (the cleanupPeriodDays setting, as in Claude Code: 30 by default), in every
+// project: conversations not written to since (they no longer appear in /resume), their traces, saved tool outputs
+// (at most 7 days) and /rewind snapshots (at most 14 days). The memory is never touched. Conversations were kept
+// for good before: 646 MB in 176 files in a month (2026-11-11), of which only the current project's tool outputs,
+// snapshots and traces were deleted, and only when a session started there. Runs in the background, at most once
+// an hour on the machine (`marker`); `keep`: conversation ids not to delete whatever their age. Returns what went.
+export async function sweepOldData({ days, keep = [], root = path.join(CONFIG_DIR, 'projects'), now = Date.now() } = {}) {
+  const done = { conversations: 0, files: 0, bytes: 0 };
+  if (!(days >= 1)) return done;
+  const marker = path.join(root, '.last-sweep');
+  try { if (now - fs.statSync(marker).mtimeMs < 3600_000) return done; } catch { /* never swept */ }
+  try { fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(marker, ''); } catch { return done; }
+  const day = 24 * 3600_000;
+  const keepIds = new Set(keep.filter(Boolean));
+  const fsp = fs.promises;
+  const list = async (dir) => { try { return await fsp.readdir(dir, { withFileTypes: true }); } catch { return []; } };
+  const old = async (file, maxAgeMs) => { try { return now - (await fsp.stat(file)).mtimeMs > maxAgeMs; } catch { return false; } };
+  const remove = async (file, isDir = false) => {
+    try {
+      const size = isDir ? 0 : (await fsp.stat(file)).size;
+      await fsp.rm(file, { recursive: isDir, force: true });
+      done.files++;
+      done.bytes += size;
+      return true;
+    } catch { return false; }
+  };
+  for (const project of await list(root)) {
+    if (!project.isDirectory()) continue;
+    const dir = path.join(root, project.name);
+    for (const e of await list(dir)) {
+      const id = e.name.replace(/\.jsonl$/, '');
+      if (!e.isFile() || id === e.name || keepIds.has(id)) continue;
+      if (await old(path.join(dir, e.name), days * day) && (await remove(path.join(dir, e.name)))) done.conversations++;
+    }
+    for (const e of await list(path.join(dir, 'traces'))) { // a conversation's trace is written with it
+      const f = path.join(dir, 'traces', e.name);
+      if (!keepIds.has(e.name.replace(/\.jsonl(\.\d+)?$/, '')) && (await old(f, days * day))) await remove(f);
+    }
+    for (const e of await list(path.join(dir, 'tool-results'))) {
+      const f = path.join(dir, 'tool-results', e.name);
+      if (await old(f, Math.min(days, 7) * day)) await remove(f);
+    }
+    for (const e of await list(path.join(dir, 'checkpoints'))) { // one directory per run of the program
+      const f = path.join(dir, 'checkpoints', e.name);
+      if (await old(f, Math.min(days, 14) * day)) await remove(f, true);
+    }
   }
+  return done;
 }
 
 // Persistent, model-maintained memory for this project (MEMORY.md + topic files).

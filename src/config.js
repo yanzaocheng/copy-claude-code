@@ -33,6 +33,9 @@ export const BASIC_SETTINGS = {
   tui: { default: 'fullscreen', legacy: 'CLAUDE_PRO_TUI', description: 'fullscreen or default; /tui switches and remembers it' },
   promptCacheTtl: { default: '1h', legacy: 'CLAUDE_CODE_PROMPT_CACHE_TTL', description: 'Conversation prompt cache: 5m or 1h' },
   subagentPromptCacheTtl: { default: '5m', legacy: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', description: 'Sub-agent, compaction and side-query prompt cache: 5m or 1h' },
+  // `userOnly`: read from ~/.claude-pro/settings.json only. It deletes the data of every project, so a project's
+  // settings file (it comes with the repository) must not lower it.
+  cleanupPeriodDays: { default: 30, userOnly: true, description: 'Days a conversation is kept after it was last used (then deleted with its traces, as in Claude Code; at least 1)' },
 };
 
 // Advanced keys, shown only by /config advanced (or config list --advanced). Settings files may also carry
@@ -61,6 +64,11 @@ export const KNOWN_KEYS = {
 };
 
 function basicValue(key, value) {
+  if (key === 'cleanupPeriodDays') {
+    const days = typeof value === 'number' ? value : /^\s*\d+\s*$/.test(String(value)) ? Number(value) : NaN;
+    if (Number.isInteger(days) && days >= 1) return days;
+    throw new Error(`Invalid ${key}: ${value}. A whole number of days, at least 1 (e.g. 3650 to keep conversations for years).`);
+  }
   if (typeof value !== 'string') throw new Error(`${key} must be a string.`);
   const text = value.trim();
   if (key === 'model') {
@@ -92,6 +100,7 @@ export function writeConfigSetting(file, key, value) {
   key = configKey(key);
   const basic = BASIC_SETTINGS[key];
   const normalized = basic ? basicValue(key, value) : String(value);
+  if (basic?.userOnly && path.resolve(file) !== path.resolve(userSettingsFile())) throw new Error(`${key} is read from ${userSettingsFile()} only.`);
   updateSettingsFile(file, (json) => {
     if (basic) {
       json[key] = normalized;
@@ -153,8 +162,9 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
     if (!json) continue;
     set(json.env, file);
     for (const [key, spec] of Object.entries(BASIC_SETTINGS)) {
+      if (spec.userOnly && scope !== 'user') continue;
       // A top-level field wins over its legacy spelling in the same file; later files win over earlier ones.
-      const value = json[key] ?? json.env?.[spec.legacy];
+      const value = json[key] ?? (spec.legacy ? json.env?.[spec.legacy] : undefined);
       if (value == null) continue;
       try { settings[key] = basicValue(key, value); sources[key] = file; } catch { /* invalid: use the earlier value or default */ }
     }
