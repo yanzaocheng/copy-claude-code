@@ -2418,7 +2418,8 @@ export class App {
   // ---------------------------------------------------------------- live region
 
   spinnerLine() {
-    const frame = SPINNER[Math.floor(Date.now() / 120) % SPINNER.length];
+    // (as wide as the widest frame: where the terminal draws some of them in two cells, the text behind moved back and forth)
+    const frame = padEnd(SPINNER[Math.floor(Date.now() / 120) % SPINNER.length], Math.max(...SPINNER.map(stringWidth)));
     if (this.rateWait) {
       const w = this.rateWait;
       const left = humanDuration(w.resumeAt - Date.now()); // the same wording as the notice above it

@@ -29,7 +29,7 @@
 // of a restart) goes on right below the output.
 
 import { PassThrough } from 'node:stream';
-import { ESC, wrapLine, termWidth, truncate, stringWidth, stripAnsi, graphemes, graphemeWidth, setTerminalWidths } from './ansi.js';
+import { ESC, wrapLine, termWidth, truncate, stringWidth, stripAnsi, graphemes, graphemeWidth, setTerminalWidths, ambiguousGroups } from './ansi.js';
 
 const SYNC_START = '\x1b[?2026h';
 const SYNC_END = '\x1b[?2026l';
@@ -137,17 +137,45 @@ export function mouseFilter(stdin, onMouse) {
   return out;
 }
 const CPR = /\x1b\[(\d+);(\d+)R/g; // the terminal's answer to DSR 6: row;column
-const WIDTH_PROBES = process.platform === 'win32' ? Array.from('·…↑↓←→↻⇣⏎◷⇄•◦⏺⎿✻✢✳✶✽✉⚠') : [];
+// Windows: the symbols the interface is drawn with are measured at start-up (see queryCursorRow), as its terminals
+// do not agree on their widths. The first FONT_SIZED of them are East Asian Ambiguous characters: a terminal that
+// draws one of those in two cells sizes all such characters by its font, and is asked about all of them.
+const UI_PROBES = process.platform === 'win32' ? Array.from('·…↑↓←→↻⇣⏎◷⇄•◦⏺⎿✻✢✳✶✽✉⚠') : [];
+const FONT_SIZED = 6;
+const AMBIGUOUS_TIMEOUT_MS = 1500; // some 200 to 400 answers: 0.2 ms each in the Windows 11 console, 0.5 on a server
 
-// Ask the terminal where the cursor is (DSR 6): resolves with its row (1-based), or null when it does not answer.
-// On Windows, also measure the UI symbols whose width varies between conhosts/fonts. All probes start at column
-// one, fit on this row, and are erased before restoring the cursor. Run before anything else reads raw `stdin`;
-// keys typed meanwhile are put back byte for byte, without the terminal's replies.
+// Ask the terminal where the cursor is (DSR 6): resolves with its row (1-based), or null when it does not answer
+// within `timeout`. Run before anything else reads `stdin`, with the terminal in raw mode; what else arrives
+// meanwhile (keys typed during start-up) is put back for the key reader, byte for byte.
+//
+// On Windows the widths of characters are measured too (setTerminalWidths): each one is written at the start of the
+// cursor's row and the cursor's column asked for, and the row is erased afterwards. The interface's own symbols
+// first; then, only where the terminal sizes ambiguous characters by its font (the console with a Chinese font: ·
+// … “ ” — × ① in two cells), all of those: text with them in it was wrapped and padded as if they took one cell,
+// which broke rows in two and left the footer on screen twice. Those are some 800 characters, so neighbours are
+// written together first: one answer does for all of them when they are all one cell wide or all two, which most
+// are, and only the others are then asked about one by one. A batch that is not answered whole in time is not used.
 export function queryCursorRow(stdin, out, timeout = 300) {
   return new Promise((resolve) => {
     let buf = Buffer.alloc(0);
-    let timer = null, probing = false, finished = false;
+    let timer = null, finished = false, batch = 0;
+    const sent = []; // what was written to be measured (a character, or neighbours), in the order of the answers
+    let answered = 0; // how many of them have an answer: counted when a whole batch is in
     const replies = () => [...buf.toString('latin1').matchAll(CPR)];
+    const cells = (matches, i) => Number(matches[1 + i][2]) - 1;
+    // The width of each character of `text`, which took `n` cells: 0 when they are not all one or all two cells wide.
+    const uniform = (text, n) => (n === text.length ? 1 : n === 2 * text.length ? 2 : 0);
+    // What to measure next, decided by the answers so far.
+    const next = (matches) => {
+      batch++;
+      if (batch === 1) return UI_PROBES.length && !(out.columns && out.columns < 3) ? UI_PROBES : [];
+      if (batch === 2) {
+        if (!UI_PROBES.slice(0, FONT_SIZED).some((_, i) => cells(matches, i) === 2)) return [];
+        return ambiguousGroups(Math.max(1, Math.min(40, Math.floor(((out.columns || 80) - 2) / 2)))); // a piece fits the row at two cells each
+      }
+      if (batch === 3) return sent.flatMap((text, i) => (text.length > 1 && !uniform(text, cells(matches, i)) ? [...text] : []));
+      return [];
+    };
     const done = () => {
       if (finished) return;
       finished = true;
@@ -156,30 +184,39 @@ export function queryCursorRow(stdin, out, timeout = 300) {
       stdin.pause();
       const matches = replies();
       const first = matches[0];
-      if (probing) {
-        const widths = matches.slice(1).map((m, i) => [WIDTH_PROBES[i], Number(m[2]) - 1]);
-        if (matches.length === WIDTH_PROBES.length + 1 && matches.every((m) => m[1] === first[1]) && widths.every(([, w]) => w === 1 || w === 2)) setTerminalWidths(widths);
-        try { out.write('\r' + ESC.right(Number(first[2]) - 1) + ESC.showCursor + SYNC_END); } catch { /* terminal closed */ }
+      if (sent.length) {
+        const answers = matches.slice(1, 1 + answered);
+        // (an answer from another row: the screen moved meanwhile, and nothing that was measured is trusted)
+        if (answers.every((m) => m[1] === first[1])) {
+          const widths = [];
+          answers.forEach((m, i) => {
+            const width = uniform(sent[i], Number(m[2]) - 1);
+            if (width) for (const char of sent[i]) widths.push([char, width]);
+          });
+          setTerminalWidths(widths);
+        }
+        try { out.write('\r' + ESC.right(Number(first[2]) - 1) + ESC.showCursor + SYNC_END); } catch { /* the terminal is gone */ }
       }
       // latin1 keeps a one-to-one mapping of bytes, including keys/pastes split in the middle of a UTF-8 character.
       const rest = Buffer.from(buf.toString('latin1').replace(CPR, ''), 'latin1');
       if (rest.length) stdin.unshift(rest);
       resolve(first ? Number(first[1]) : null);
     };
+    const measure = (texts, ms) => {
+      const start = sent.length ? '' : SYNC_START + ESC.hideCursor;
+      sent.push(...texts);
+      clearTimeout(timer);
+      timer = setTimeout(done, ms);
+      try { out.write(start + texts.map((text) => '\r' + text + '\x1b[6n').join('') + '\r\x1b[K'); } catch { done(); }
+    };
     const onData = (d) => {
       buf = Buffer.concat([buf, Buffer.isBuffer(d) ? d : Buffer.from(String(d), 'utf8')]);
       const matches = replies();
-      if (!matches.length) return;
-      if (!WIDTH_PROBES.length || (out.columns && out.columns < 3)) { done(); return; }
-      if (probing) {
-        if (matches.length >= WIDTH_PROBES.length + 1) done();
-        return;
-      }
-      probing = true;
-      clearTimeout(timer);
-      timer = setTimeout(done, timeout);
-      const probes = WIDTH_PROBES.map((char) => '\r' + char + '\x1b[6n').join('');
-      try { out.write(SYNC_START + ESC.hideCursor + probes + '\r\x1b[K'); } catch { done(); }
+      if (matches.length < 1 + sent.length) return; // the first answer is the cursor's position
+      answered = sent.length;
+      const more = next(matches);
+      if (more.length) measure(more, batch === 1 ? timeout : AMBIGUOUS_TIMEOUT_MS);
+      else done();
     };
     timer = setTimeout(done, timeout);
     stdin.on('data', onData);
