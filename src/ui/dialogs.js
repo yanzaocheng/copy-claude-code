@@ -1,19 +1,19 @@
 // Modal dialogs rendered in the live region: selection menus (questions, the model and session pickers, /rewind),
 // with a typed answer of their own when they offer "Other".
 
-import { c, padEnd, stringWidth, truncate, wordWrap } from './ansi.js';
+import { c, glyphs, padEnd, stringWidth, truncate, wordWrap } from './ansi.js';
 import { Editor } from './editor.js';
 
 function box(lines, width, color) {
   const w = Math.max(20, width - 1);
   const inner = w - 4;
-  const out = [color('╭' + '─'.repeat(w - 2) + '╮')];
+  const out = [color(glyphs.topLeft + '─'.repeat(w - 2) + glyphs.topRight)];
   for (const l of lines) {
     for (const part of stringWidth(l) > inner ? wordWrap(l, inner) : [l]) {
       out.push(color('│') + ' ' + padEnd(part, inner) + ' ' + color('│'));
     }
   }
-  out.push(color('╰' + '─'.repeat(w - 2) + '╯'));
+  out.push(color(glyphs.bottomLeft + '─'.repeat(w - 2) + glyphs.bottomRight));
   return out;
 }
 
@@ -112,7 +112,7 @@ export class SelectDialog {
       const o = this.options[i];
       const sel = i === this.selected;
       const mark = this.multi ? (this.checked.has(i) ? c.green('[✔] ') : '[ ] ') : '';
-      const label = `${sel ? '❯' : ' '} ${i + 1}. ${mark}${o.label}`;
+      const label = `${sel ? glyphs.pointer : ' '} ${i + 1}. ${mark}${o.label}`;
       lines.push(sel ? this.color(truncate(label, inner)) : truncate(label, inner));
       if (o.description) lines.push(c.dim('      ' + truncate(o.description, inner - 6)));
     }

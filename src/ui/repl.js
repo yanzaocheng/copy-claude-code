@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { c, ESC, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
+import { c, ESC, glyphs, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
 import { Screen, queryCursorRow, mouseFilter } from './screen.js';
 import { Editor, topBorder, shownQuotes } from './editor.js';
 import { SelectDialog } from './dialogs.js';
@@ -1132,7 +1132,7 @@ export class App {
       this.seedOutput = [line];
       return;
     }
-    this.screen.log(c.dim(`↻ Restarted${state.reason ? `: ${state.reason}` : ''}${state.continueWith ? ' · continuing' : ''}`), '');
+    this.screen.log(c.dim(`${glyphs.restart} Restarted${state.reason ? `: ${state.reason}` : ''}${state.continueWith ? ' · continuing' : ''}`), '');
   }
 
   // The turn that goes on after a restart: the note for the model, and what the user had queued meanwhile.
@@ -1293,7 +1293,7 @@ export class App {
     const row = (s) => c.claude('│') + ' ' + padEnd(truncate(s, inner), inner) + ' ' + c.claude('│');
     const model = cfg.model;
     const lines = [
-      c.claude('╭' + '─'.repeat(w - 2) + '╮'),
+      c.claude(glyphs.topLeft + '─'.repeat(w - 2) + glyphs.topRight),
       row(`${c.claude('✻')} Welcome to ${c.bold(APP_NAME)}! ${c.dim(`v${VERSION} · a command line coding agent`)}`),
       row(''),
       row(c.dim('  /help for help, /status for your current setup')),
@@ -1301,7 +1301,7 @@ export class App {
       row(c.dim(`  cwd:    ${this.cwd}`)),
       row(c.dim(`  model:  ${model.label}${cfg.effort ? ` · effort ${cfg.effort}` : ''} · ${formatTokens(model.contextWindow)} context`)),
       row(c.dim(`  backend: ${cfg.endpointLabel}`)),
-      c.claude('╰' + '─'.repeat(w - 2) + '╯'),
+      c.claude(glyphs.bottomLeft + '─'.repeat(w - 2) + glyphs.bottomRight),
     ];
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
     if (!gatewayLogin(cfg.gatewayUrl)) lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
@@ -1769,8 +1769,8 @@ export class App {
     const content = f.selected && shown ? c.inverse(shown) : shown;
     const lines = [
       topBorder(boxW, c.yellow, title),
-      c.yellow('│') + ' ' + c.yellow('⌕') + ' ' + padEnd(content, textW) + ' ' + c.yellow('│'),
-      c.yellow('╰' + '─'.repeat(boxW - 2) + '╯'),
+      c.yellow('│') + ' ' + c.yellow(glyphs.find) + ' ' + padEnd(content, textW) + ' ' + c.yellow('│'),
+      c.yellow(glyphs.bottomLeft + '─'.repeat(boxW - 2) + glyphs.bottomRight),
     ];
     return { lines, cursor: { row: 1, col: 4 + stringWidth(before) } };
   }
@@ -2532,7 +2532,7 @@ export class App {
   // cache use.
   cacheClock() {
     const clock = this.agent?.cache.clock();
-    return !clock ? '' : clock.cold ? c.red('◷') : c.dim(`◷ ${clock.minutes}m`);
+    return !clock ? '' : clock.cold ? c.red(glyphs.clock) : c.dim(`${glyphs.clock} ${clock.minutes}m`);
   }
 
   footer(w) {
@@ -2542,7 +2542,7 @@ export class App {
     else if (flash) left = (flash.kind === 'warn' ? c.yellow : c.dim)('  ' + truncate(flash.text, w - 4));
     else if (this.screen.full && this.screen.selection) left = c.dim('  ctrl+c to copy · ctrl+q to quote it in your message');
     else if (this.editor.selection) left = c.dim('  ctrl+c to copy · esc to clear');
-    else if (this.restartRequest) left = c.dim('  ↻ restarting when this turn ends');
+    else if (this.restartRequest) left = c.dim(`  ${glyphs.restart} restarting when this turn ends`);
     else if (this.editor.mode === 'bash') left = c.magenta('  ! for bash mode');
     else if (this.editor.mode === 'memory') left = c.blue('  # to memorize');
     else left = c.dim('  ? for shortcuts');
@@ -2550,9 +2550,9 @@ export class App {
       left += c.dim(' · ') + c.green(`⇄ ${this.remote.viewers} watching`);
     }
     if (!flash) {
-      if (this.updating) left += c.dim(' · ') + c.blue(`⇣ updating ${APP_NAME} to ${this.updating}…`);
-      else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`↻ ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
-      else if (this.sourceChanged && !this.sourceChangedInTurn && !this.restartRequest && !this.reloading && !this.working() && this.sourceQuietAt > Date.now()) left += c.dim(' · ') + c.dim('↻ source changed: restarts once it is left alone (/restart: now)');
+      if (this.updating) left += c.dim(' · ') + c.blue(`${glyphs.update} updating ${APP_NAME} to ${this.updating}…`);
+      else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`${glyphs.restart} ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
+      else if (this.sourceChanged && !this.sourceChangedInTurn && !this.restartRequest && !this.reloading && !this.working() && this.sourceQuietAt > Date.now()) left += c.dim(' · ') + c.dim(`${glyphs.restart} source changed: restarts once it is left alone (/restart: now)`);
       else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when @${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
     }
     const cfg = this.config;

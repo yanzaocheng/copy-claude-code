@@ -1,6 +1,6 @@
 // The prompt input box: multi-line editing, history, paste handling and completions.
 
-import { c, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './ansi.js';
+import { c, glyphs, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './ansi.js';
 
 const PASTE_THRESHOLD_CHARS = 800;
 const PASTE_THRESHOLD_LINES = 8;
@@ -27,11 +27,12 @@ export function shownQuotes(text) {
 
 // "╭─ left ───── right ─╮", the parts cut short to fit (the start of the directory goes first).
 export function topBorder(boxW, color, title) {
-  const plain = () => color('╭' + '─'.repeat(boxW - 2) + '╮');
+  const plain = () => color(glyphs.topLeft + '─'.repeat(boxW - 2) + glyphs.topRight);
   if (!title || (!title.left && !title.right)) return plain();
   const room = boxW - 6; // the corners, a dash at each end and a space each side of a part
   const right = title.right ? truncate(title.right, Math.max(0, Math.floor(room / 3))).replace(/\x1b\[0m$/, '') : '';
-  const rightW = right ? stringWidth(right) + 2 : 0;
+  const rightPart = right ? `${glyphs.lineGap}${right} ` : '';
+  const rightW = stringWidth(rightPart);
   let left = title.left || '';
   const leftRoom = room - rightW - (right && left ? 1 : 0) - 2;
   if (leftRoom < 4) left = '';
@@ -42,10 +43,9 @@ export function topBorder(boxW, color, title) {
   }
   if (!left && !right) return plain();
   const leftPart = left ? ` ${left} ` : '';
-  const rightPart = right ? ` ${right} ` : '';
   const dashes = boxW - 4 - stringWidth(leftPart) - stringWidth(rightPart);
   if (dashes < 1) return plain();
-  return color('╭─') + c.dim(leftPart) + color('─'.repeat(dashes)) + (right ? c.blue(rightPart) : '') + color('─╮');
+  return color(glyphs.topLeft + '─') + c.dim(leftPart) + color('─'.repeat(dashes)) + (right ? c.blue(rightPart) : '') + color('─' + glyphs.topRight);
 }
 
 // Start of the line the cursor is on. (lastIndexOf with a negative start still looks at index 0, so a
@@ -615,7 +615,7 @@ export class Editor {
     const below = laid.length - top - shown;
     const hidden = [top ? `↑ ${top} more rows` : '', below ? `↓ ${below} more rows` : ''].filter(Boolean).join(' · ');
     const label = hidden && boxW > stringWidth(hidden) + 6 ? ` ${hidden} ` : '';
-    lines.push(color('╰─') + c.dim(label) + color('─'.repeat(boxW - 3 - stringWidth(label)) + '╯'));
+    lines.push(color(glyphs.bottomLeft + '─') + c.dim(label) + color('─'.repeat(boxW - 3 - stringWidth(label)) + glyphs.bottomRight));
     // `text`: where the text is in `lines` (its first row, how many, the column it starts at), for the mouse
     return { lines, cursor: active ? { row: r - top + 1, col: 4 + col } : null, text: { row: 1, rows: shown, col: 4 } };
   }

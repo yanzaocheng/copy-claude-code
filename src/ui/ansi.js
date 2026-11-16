@@ -153,7 +153,19 @@ export function setTerminalWidths(widths) {
   for (const [char, width] of widths) {
     if (width === 1 || width === 2) terminalWidths.set(char.codePointAt(0), width);
   }
+  Object.assign(glyphs, terminalWidths.get(0xb7) === 2 ? FONT_GLYPHS : GLYPHS);
 }
+
+// The interface's symbols that not every terminal can draw, by what they are for. The Windows console that sizes
+// characters by its Chinese font (the one that draws · in two cells) has no glyph for some of them and draws an
+// empty box two cells wide instead, over the character behind it, and it draws a round corner half a cell to the
+// right, so that a left one stands under the border's line, not at its end. There they are characters that
+// font has; their widths differ (※ and ⊙ take two cells), so what is drawn with them is measured, not counted.
+// `lineGap` is what stands between a border's line and coloured text behind it: that console draws ─ two cells
+// wide, and the last one of a line covers a space that differs from it only in colour.
+const GLYPHS = { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', clock: '◷', restart: '↻', update: '⇣', find: '⌕', track: '░', pointer: '❯', lineGap: ' ' };
+const FONT_GLYPHS = { topLeft: '┌', topRight: '┐', bottomLeft: '└', bottomRight: '┘', clock: '⊙', restart: '※', update: '↓', find: '/', track: '─', pointer: '>', lineGap: '  ' };
+export const glyphs = { ...GLYPHS };
 
 export function codePointWidth(cp) {
   if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0;
