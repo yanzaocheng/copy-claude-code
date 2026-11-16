@@ -29,7 +29,7 @@
 // of a restart) goes on right below the output.
 
 import { PassThrough } from 'node:stream';
-import { ESC, wrapLine, termWidth, truncate, stringWidth, stripAnsi, graphemes, graphemeWidth } from './ansi.js';
+import { ESC, wrapLine, termWidth, truncate, stringWidth, stripAnsi, graphemes, graphemeWidth, setTerminalWidths } from './ansi.js';
 
 const SYNC_START = '\x1b[?2026h';
 const SYNC_END = '\x1b[?2026l';
@@ -136,32 +136,54 @@ export function mouseFilter(stdin, onMouse) {
   });
   return out;
 }
-const CPR = /\x1b\[(\d+);(\d+)R/; // the terminal's answer to DSR 6: row;column
+const CPR = /\x1b\[(\d+);(\d+)R/g; // the terminal's answer to DSR 6: row;column
+const WIDTH_PROBES = process.platform === 'win32' ? Array.from('·…↑↓←→↻⇣⏎◷⇄•◦⏺⎿✻✢✳✶✽✉⚠') : [];
 
-// Ask the terminal where the cursor is (DSR 6): resolves with its row (1-based), or null when it does not answer
-// within `timeout`. Run before anything else reads `stdin`, with the terminal in raw mode; what else arrives
-// meanwhile (keys typed during start-up) is put back for the key reader.
+// Ask the terminal where the cursor is (DSR 6): resolves with its row (1-based), or null when it does not answer.
+// On Windows, also measure the UI symbols whose width varies between conhosts/fonts. All probes start at column
+// one, fit on this row, and are erased before restoring the cursor. Run before anything else reads raw `stdin`;
+// keys typed meanwhile are put back byte for byte, without the terminal's replies.
 export function queryCursorRow(stdin, out, timeout = 300) {
   return new Promise((resolve) => {
     let buf = Buffer.alloc(0);
-    let timer = null;
-    const done = (row) => {
+    let timer = null, probing = false, finished = false;
+    const replies = () => [...buf.toString('latin1').matchAll(CPR)];
+    const done = () => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       stdin.off('data', onData);
       stdin.pause();
-      const m = CPR.exec(buf.toString('latin1')); // latin1: one character a byte, so the index is a byte index
-      const rest = m ? Buffer.concat([buf.subarray(0, m.index), buf.subarray(m.index + m[0].length)]) : buf;
+      const matches = replies();
+      const first = matches[0];
+      if (probing) {
+        const widths = matches.slice(1).map((m, i) => [WIDTH_PROBES[i], Number(m[2]) - 1]);
+        if (matches.length === WIDTH_PROBES.length + 1 && matches.every((m) => m[1] === first[1]) && widths.every(([, w]) => w === 1 || w === 2)) setTerminalWidths(widths);
+        try { out.write('\r' + ESC.right(Number(first[2]) - 1) + ESC.showCursor + SYNC_END); } catch { /* terminal closed */ }
+      }
+      // latin1 keeps a one-to-one mapping of bytes, including keys/pastes split in the middle of a UTF-8 character.
+      const rest = Buffer.from(buf.toString('latin1').replace(CPR, ''), 'latin1');
       if (rest.length) stdin.unshift(rest);
-      resolve(row);
+      resolve(first ? Number(first[1]) : null);
     };
     const onData = (d) => {
       buf = Buffer.concat([buf, Buffer.isBuffer(d) ? d : Buffer.from(String(d), 'utf8')]);
-      const m = CPR.exec(buf.toString('latin1'));
-      if (m) done(Number(m[1]));
+      const matches = replies();
+      if (!matches.length) return;
+      if (!WIDTH_PROBES.length || (out.columns && out.columns < 3)) { done(); return; }
+      if (probing) {
+        if (matches.length >= WIDTH_PROBES.length + 1) done();
+        return;
+      }
+      probing = true;
+      clearTimeout(timer);
+      timer = setTimeout(done, timeout);
+      const probes = WIDTH_PROBES.map((char) => '\r' + char + '\x1b[6n').join('');
+      try { out.write(SYNC_START + ESC.hideCursor + probes + '\r\x1b[K'); } catch { done(); }
     };
-    timer = setTimeout(() => done(null), timeout);
+    timer = setTimeout(done, timeout);
     stdin.on('data', onData);
-    try { out.write('\x1b[6n'); } catch { done(null); }
+    try { out.write('\x1b[6n'); } catch { done(); }
   });
 }
 
@@ -186,6 +208,7 @@ export class Screen {
   // pin: keep the live region on the last rows of the screen (see the top of this file).
   constructor(out = process.stdout, { pin = true } = {}) {
     this.out = out;
+    this.dimensions = this.readSize();
     this.pin = pin;
     this.pinned = null; // rows from the top of the live region to the bottom of the screen; null: not known
     this.full = false; // fullscreen: see the top of this file
@@ -220,6 +243,12 @@ export class Screen {
     this.titleInherited = false; // the process before this one in the session already saved the shell's title
     this.exitTitle = '';
     out.on('resize', () => this.onResize());
+    // RDP display changes can leave Node's columns/rows cache behind. Check the native size even while idle;
+    // finding a change takes the same debounced full-repaint path as a normal resize event.
+    if (process.platform === 'win32' && out.isTTY && out._handle?.getWindowSize) {
+      this.sizeTimer = setInterval(() => this.checkSize(), 250);
+      this.sizeTimer.unref();
+    }
   }
 
   // Keep the terminal's title (the label of its tab or window) following `provider()`. `exitTitle` is what
@@ -242,8 +271,28 @@ export class Screen {
     return (first ? TITLE_PUSH : '') + `\x1b]0;${text}\x07`;
   }
 
-  get width() { return Math.max(20, this.out.columns || termWidth()); }
-  get height() { return Math.max(10, this.out.rows || 30); }
+  readSize() {
+    const fallback = [this.out.columns || this.dimensions?.[0] || termWidth(), this.out.rows || this.dimensions?.[1] || 30];
+    if (process.platform === 'win32' && this.out.isTTY && this.out._handle?.getWindowSize) {
+      try {
+        const size = [0, 0];
+        if (!this.out._handle.getWindowSize(size) && size.every((n) => Number.isInteger(n) && n > 0)) return size;
+      } catch { /* closed or unsupported handle: keep the last valid size */ }
+      return this.dimensions || fallback;
+    }
+    return fallback;
+  }
+
+  checkSize() {
+    if (this.closed) return false;
+    const size = this.readSize();
+    if (size[0] === this.dimensions[0] && size[1] === this.dimensions[1]) return false;
+    this.onResize(size);
+    return true;
+  }
+
+  get width() { return Math.max(20, this.dimensions[0]); }
+  get height() { return Math.max(10, this.dimensions[1]); }
   // True from a size change until the repaint that follows it.
   get resizing() { return this.resizeTimer !== null; }
 
@@ -707,9 +756,10 @@ export class Screen {
   // Draw the screen: the conversation above, the live region on the last rows, the cursor in the input box.
   draw({ full = false } = {}) {
     if (this.closed || !this.full) return;
+    if (this.checkSize() || this.resizing) return;
     if (this.scheduled) { clearTimeout(this.scheduled); this.scheduled = null; }
     const cols = this.width;
-    const screenRows = Math.max(1, this.out.rows || this.height);
+    const screenRows = Math.max(1, this.dimensions[1]);
     if (!this.scroll) this.scrollLiveRows = null;
     else if (full) this.scrollLiveRows = null; // a resize changes wrapping; capture the new live layout below
     let layout = this.layoutLive(cols);
@@ -841,7 +891,7 @@ export class Screen {
     const end = input ? starts[input.row + input.rows] : undefined;
     const box = end !== undefined && end - starts[input.row] === input.rows ? { top: starts[input.row], rows: input.rows, col: input.col } : null;
     // Cap to the terminal height so there is always a way back to the top.
-    const maxRows = Math.max(1, Math.min(this.height, this.out.rows || this.height) - 1);
+    const maxRows = Math.max(1, this.dimensions[1] - 1);
     if (rows.length > maxRows) {
       const dropped = rows.length - maxRows;
       rows.splice(0, dropped);
@@ -864,8 +914,9 @@ export class Screen {
     return buf;
   }
 
-  onResize() {
+  onResize(size = this.readSize()) {
     if (this.closed) return;
+    this.dimensions = size;
     const now = Date.now();
     if (!this.resizeSince) this.resizeSince = now;
     clearTimeout(this.resizeTimer);
@@ -876,7 +927,7 @@ export class Screen {
   settleResize() {
     this.resizeTimer = null;
     this.resizeSince = 0;
-    this.repaint();
+    if (!this.checkSize()) this.repaint();
   }
 
   // Write the whole viewport again after a resize: the newest static lines that fit, then the live region,
@@ -888,6 +939,7 @@ export class Screen {
   // What was on screen above our output (a short session: the shell that started us) is overwritten.
   repaint() {
     if (this.closed) return;
+    this.dimensions = this.readSize();
     if (this.full) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
@@ -901,7 +953,7 @@ export class Screen {
     this.resizeTimer = null;
     this.resizeSince = 0;
     const cols = this.width;
-    const screenRows = Math.max(1, this.out.rows || this.height);
+    const screenRows = Math.max(1, this.dimensions[1]);
     this.takeStatic();
     const layout = this.layoutLive(cols);
     const room = Math.max(0, screenRows - layout.rows.length);
@@ -933,7 +985,7 @@ export class Screen {
 
   flush() {
     if (this.closed) return;
-    if (this.resizing) return; // the repaint after the resize writes everything that is waiting
+    if (this.checkSize() || this.resizing) return; // the repaint after the resize writes everything that is waiting
     if (this.full) { this.takeStatic(); this.draw(); return; }
     if (this.scheduled) { clearTimeout(this.scheduled); this.scheduled = null; }
     const cols = this.width;
@@ -1004,6 +1056,7 @@ export class Screen {
       this.flush();
     }
     this.closed = true;
+    clearInterval(this.sizeTimer);
     clearTimeout(this.resizeTimer);
     // Give the tab back its old label: a terminal with a title stack restores it, and one without is
     // left with a neutral one rather than a title that still looks like a program that is running.

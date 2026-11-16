@@ -96,11 +96,20 @@ function inRanges(cp, ranges) {
   return false;
 }
 
+// Some Windows conhosts render symbols such as ·, … and ↓ in two cells even in UTF-8. Use the cursor
+// advances measured at startup instead of guessing from the code page (or changing the user's console settings).
+const terminalWidths = new Map();
+export function setTerminalWidths(widths) {
+  terminalWidths.clear();
+  for (const [char, width] of widths) {
+    if (width === 1 || width === 2) terminalWidths.set(char.codePointAt(0), width);
+  }
+}
+
 export function codePointWidth(cp) {
   if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0;
   if (inRanges(cp, ZERO)) return 0;
-  if (inRanges(cp, WIDE)) return 2;
-  return 1;
+  return terminalWidths.get(cp) ?? (inRanges(cp, WIDE) ? 2 : 1);
 }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
