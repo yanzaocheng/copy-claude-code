@@ -16,7 +16,6 @@ import { estimateTokens } from './agent.js';
 import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS } from './api.js';
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath, normalizeDir, resolvePath } from './utils/paths.js';
-import { activePromptName, listPromptProfiles, loadActivePrompt, promptDirectory, promptNameForText, savePrompt, setActivePrompt } from './prompt-profiles.js';
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { canRestart, runSelfCheck } from './restart.js';
@@ -116,91 +115,6 @@ export function buildCommands(app) {
       cancelValue: 'no',
     }));
     return choice === 'yes';
-  };
-
-  const unquotePromptArgument = (args) => {
-    const value = String(args ?? '').trim();
-    return /^(["'])[\s\S]*\1$/.test(value) ? value.slice(1, -1).trim() : value;
-  };
-
-  // `/prompt` accepts either an existing file or literal text. Files are copied into the user's prompt directory so
-  // changing or deleting the source later does not change the prompt used by future sessions.
-  const readPromptArgument = (args) => {
-    const value = unquotePromptArgument(args);
-    if (!value) throw new Error('Usage: /prompt <file|text>');
-    const file = resolvePath(value, app.cwd);
-    let stat = null;
-    try { stat = fs.statSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    if (stat) {
-      if (!stat.isFile()) throw new Error(`Prompt source is not a file: ${file}`);
-      const text = fs.readFileSync(file, 'utf8');
-      if (!text.trim()) throw new Error(`Prompt source is empty: ${file}`);
-      return { name: path.basename(file), text, source: file };
-    }
-    return { name: promptNameForText(value), text: value, source: null };
-  };
-
-  const promptChanged = (name, text = undefined) => {
-    const currentName = activePromptName();
-    if (currentName !== name) return true;
-    if (text === undefined) return false;
-    return loadActivePrompt()?.text !== text;
-  };
-
-  const activatePrompt = async (name, { text, saved = null } = {}) => {
-    const changed = promptChanged(name, text);
-    if (!changed) {
-      out(`System prompt is already ${name ? c.bold(name) : c.bold('the built-in default')}.`);
-      return false;
-    }
-    if (!(await confirmCacheLoss('Changing the system prompt'))) {
-      out(c.dim('The system prompt was not changed.'));
-      return false;
-    }
-    const stored = saved ? savePrompt(saved.name, saved.text, { activate: true }) : null;
-    if (!saved) setActivePrompt(name);
-    // A prompt choice is persistent, but also takes effect for the next request in this session. The cache check
-    // above is the same safeguard used by /model and /effort when changing request-level cache inputs.
-    app.runtime.invalidateSystemPrompt();
-    const label = name ? c.bold(name) : c.bold('the built-in default');
-    const location = stored ? ` · copied to ${displayPath(stored.file, app.cwd)}` : '';
-    out(`System prompt set to ${label}${location} · kept for later sessions${promptDirectory() ? c.dim(` (${promptDirectory()})`) : ''}`);
-    return true;
-  };
-
-  const choosePrompt = async (args = '') => {
-    const wanted = unquotePromptArgument(args);
-    const profiles = listPromptProfiles();
-    const current = activePromptName();
-    if (wanted) {
-      if (/^(default|none|off)$/i.test(wanted)) return activatePrompt(null);
-      const found = profiles.find((p) => p.name === wanted) || profiles.find((p) => p.name.toLowerCase() === wanted.toLowerCase());
-      if (!found) {
-        out(c.red(`No saved prompt named "${wanted}". Use /prompts to choose one, or /prompt <file|text> to save it.`));
-        return false;
-      }
-      return activatePrompt(found.name);
-    }
-    if (!profiles.length) {
-      out(c.dim(`No saved prompts. Use /prompt <file|text> to create one (saved in ${promptDirectory()}).`));
-      return false;
-    }
-    const options = [
-      { label: `Built-in default${current ? '' : c.dim(' (active)')}`, value: '__default__', description: 'Use claude-pro\'s normal system prompt' },
-      ...profiles.map((p) => ({
-        label: `${p.name}${p.name === current ? c.dim(' (active)') : ''}`,
-        value: p.name,
-        description: p.preview || `${p.size} bytes`,
-      })),
-    ];
-    const selected = await app.showDialog(new SelectDialog({
-      title: 'Select system prompt',
-      question: `Saved prompts in ${promptDirectory()}`,
-      options,
-      selected: Math.max(0, current ? options.findIndex((o) => o.value === current) : 0),
-    }));
-    if (selected === null || selected === undefined) return false;
-    return activatePrompt(selected === '__default__' ? null : selected);
   };
 
   add({
@@ -360,27 +274,6 @@ export function buildCommands(app) {
   });
 
   add({
-    name: 'prompt',
-    aliases: ['promt'],
-    argHint: '<file|text>',
-    argRequired: true,
-    description: 'Save and use a system prompt from a file or literal text (kept for later sessions)',
-    async run(args) {
-      if (!unquotePromptArgument(args)) return choosePrompt('');
-      const source = readPromptArgument(args);
-      return activatePrompt(source.name, { text: source.text, saved: source });
-    },
-  });
-
-  add({
-    name: 'prompts',
-    aliases: ['promits', 'promts'],
-    argHint: '[name|default]',
-    description: 'Choose a saved system prompt, or return to the built-in default',
-    run(args) { return choosePrompt(args); },
-  });
-
-  add({
     name: 'model',
     argHint: '[model]',
     description: 'Set the AI model (kept for later sessions; /model default forgets it)',
@@ -535,7 +428,6 @@ export function buildCommands(app) {
     run() {
       const cfg = app.runtime.config;
       const mem = memoryFiles(app.cwd);
-      const savedPrompt = loadActivePrompt();
       const mcp = app.runtime.mcp.status();
       const row = (k, v) => `${c.dim(padEnd(k, 18))} ${v}`;
       log([
@@ -548,9 +440,7 @@ export function buildCommands(app) {
         row('Auth', gatewayLogin(cfg.gatewayUrl) ? `gateway key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)')),
         row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
         row('Effort', cfg.effort || 'auto'),
-        row('System prompt', app.flags.systemPrompt !== undefined
-          ? 'command line override'
-          : savedPrompt?.text != null ? `${savedPrompt.name} (saved)` : savedPrompt?.error ? `${savedPrompt.name} (missing; using built-in)` : 'built-in default'),
+        row('System prompt', app.flags.systemPrompt !== undefined ? 'command line override' : 'built-in default'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
         row('Prompt cache', cfg.promptCachingDisabled() ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', `at ${formatTokens(cfg.compactWindow())} tokens (the window, less room for the summary)`),

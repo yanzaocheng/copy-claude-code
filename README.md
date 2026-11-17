@@ -99,18 +99,9 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 
 设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。provider 固定为 `gateway`，已删除 `--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口。
 
-## 持久化系统提示词
+## 系统提示词
 
-可以把整个系统提示词保存到用户配置中，之后关闭并重新启动仍然使用：
-
-```text
-/prompt path/to/prompt.md       # 读取文件，并复制到 ~/.claude-pro/prompts/
-/prompt "回答要简洁，先给结论"     # 也可以直接保存一段文字
-/prompts                         # 选择已保存的提示词
-/prompts default                 # 切回内置默认提示词
-```
-
-`/promt` 和 `/promits` 也作为常见拼写兼容。当前选择保存在 `~/.claude-pro/settings.json` 的 `prompts.active` 中，提示词内容保存在 `~/.claude-pro/prompts/`，不会依赖原始文件；`/status` 会显示当前选择。切换提示词会立即用于下一次请求，提示词缓存仍然有效时会先询问，因为下一次请求需要重新写入对话。命令行的 `--system-prompt` 和 `--system-prompt-file` 优先级更高，只覆盖本次启动。
+默认使用内置的系统提示词。只想改这一次启动时，用启动参数（和官方 Claude Code 一样）：`--append-system-prompt "..."` 在默认提示词后面追加，`--system-prompt "..."` 或 `--system-prompt-file 文件` 整个替换（工具说明也会一起换掉）。长期的规则写进 CLAUDE.md 或记忆（消息以 `#` 开头）。
 
 ## 提示词缓存：自动的，尽量少花钱
 

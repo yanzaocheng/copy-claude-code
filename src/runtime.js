@@ -17,7 +17,6 @@ import { autoMemoryDir, sweepOldData, projectDir } from './session.js';
 import { loadAutoMemoryIndex, takeEnvSnapshot, takeEnvSnapshotAsync, localDate } from './context.js';
 import { canRestart } from './restart.js';
 import { RuntimeTrace } from './trace.js';
-import { loadActivePrompt } from './prompt-profiles.js';
 
 export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const config = loadConfig({ cwd, flags });
@@ -85,12 +84,9 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   runtime.systemPrompt = () => {
     if (!promptCache) {
       const autoMemory = config.autoMemoryEnabled ? { dir: memoryDir, index: loadAutoMemoryIndex(memoryDir) } : null;
-      const savedPrompt = flags.systemPrompt === undefined ? loadActivePrompt() : null;
       promptCache = flags.systemPrompt !== undefined
         ? flags.systemPrompt
-        : savedPrompt?.text != null
-          ? savedPrompt.text
-          : mainSystemPrompt({ cwd, model: config.model, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, snapshot: snapshotFor(cwd) });
+        : mainSystemPrompt({ cwd, model: config.model, shellName: shell.name, extra: flags.appendSystemPrompt || '', autoMemory, mcpInstructions: mcp.promptInstructions(), selfRestart: selfEdit, installedCopy: !SOURCE_CHECKOUT, snapshot: snapshotFor(cwd) });
       promptStale = false;
     }
     return promptCache;
