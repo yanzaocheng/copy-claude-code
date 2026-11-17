@@ -857,7 +857,9 @@ class BrowserSession {
   }
 
   async evaluate(tab, script, ref) {
-    const isFn = /^\s*(async\s+)?(function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)/.test(script);
+    // a function is called; one that calls itself already ((() => {…})()) is an expression, not called again
+    const iife = /^\s*\(/.test(script) && /\)\s*\(\s*\)\s*;?\s*$/.test(script);
+    const isFn = !iife && /^\s*(async\s+)?(function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)/.test(script);
     let r;
     if (ref) {
       const objectId = await this.objectId(tab, refId(ref), ref);
