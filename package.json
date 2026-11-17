@@ -1,6 +1,6 @@
 {
   "name": "@yanzc/claude-pro",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "claude-pro: a command line coding agent for the codex-gateway. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
   "repository": {
