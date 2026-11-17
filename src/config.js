@@ -30,7 +30,6 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'packag
 export const BASIC_SETTINGS = {
   model: { default: 'opus', legacy: 'CLAUDE_PRO_GATEWAY_MODEL', description: 'Default model; /model and --model override it' },
   effort: { default: 'auto', legacy: 'CLAUDE_CODE_EFFORT_LEVEL', description: 'Reasoning effort; /effort and --effort override it' },
-  tui: { default: 'fullscreen', legacy: 'CLAUDE_PRO_TUI', description: 'fullscreen or default; /tui switches and remembers it' },
   promptCacheTtl: { default: '1h', legacy: 'CLAUDE_CODE_PROMPT_CACHE_TTL', description: 'Conversation prompt cache: 5m or 1h' },
   subagentPromptCacheTtl: { default: '5m', legacy: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', description: 'Sub-agent, compaction and side-query prompt cache: 5m or 1h' },
   // `userOnly`: read from ~/.claude-pro/settings.json only. It deletes the data of every project, so a project's
@@ -77,7 +76,6 @@ function basicValue(key, value) {
   }
   const normalized = text.toLowerCase();
   if (key === 'effort' && ['auto', 'default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(normalized)) return normalized;
-  if (key === 'tui' && ['fullscreen', 'default'].includes(normalized)) return normalized;
   if ((key === 'promptCacheTtl' || key === 'subagentPromptCacheTtl') && normalizeTtl(normalized)) return normalized;
   throw new Error(`Invalid ${key}: ${text}. ${BASIC_SETTINGS[key].description}.`);
 }

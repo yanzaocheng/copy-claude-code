@@ -1316,10 +1316,10 @@ export class App {
 
   // ---------------------------------------------------------------- input
 
-  // Fullscreen unless settings.tui selects the classic renderer; a driven test defaults to classic.
+  // Always fullscreen on a terminal (there is no other mode to choose). Output that is no terminal (isTTY false: a
+  // test's fake terminal that asks for it) is written as it comes, with the input box after it.
   fullscreenWanted() {
-    const mode = this.driven && this.config.settings.tui == null ? 'default' : this.config.setting('tui');
-    return mode === 'fullscreen' && this.stdout.isTTY !== false;
+    return this.stdout.isTTY !== false;
   }
 
   // Fullscreen: the wheel scrolls the conversation (3 rows a notch); a drag,
@@ -1350,7 +1350,7 @@ export class App {
   // "[Quote #1 +12 lines]"; the model gets the text and the line of the conversation it is under (see
   // Editor.insertQuote), so that it knows which part, and which file or command, the question is about.
   quoteSelection() {
-    if (!this.screen.full) { this.flash('Quoting works in fullscreen (/tui fullscreen): select text with the mouse, then ctrl+q', 'warn'); return; }
+    if (!this.screen.full) { this.flash('Quoting needs the fullscreen view: select text with the mouse, then ctrl+q', 'warn'); return; }
     const quote = this.screen.selectionQuote();
     if (!quote?.text.trim()) { this.flash('Select part of the conversation first (drag over it, or double/triple-click), then ctrl+q', 'warn'); return; }
     if (this.dialogs.length) { this.flash('Answer the open question first, then quote', 'warn'); return; }
@@ -1700,7 +1700,7 @@ export class App {
   // renderer the conversation is in the terminal's own scrollback.
 
   openFind(seed = '') {
-    if (!this.screen.full) { this.flash('ctrl+f finds in the conversation in fullscreen (/tui); here use the terminal\'s own find', 'warn'); return; }
+    if (!this.screen.full) { this.flash('ctrl+f needs the fullscreen view; here use the terminal\'s own find', 'warn'); return; }
     if (this.finder && !seed.trim()) { this.finder.selected = Boolean(this.finder.text); this.screen.schedule(); return; } // open: select what is typed
     const text = (seed.split('\n').find((l) => l.trim()) || '').trim() || this.lastFind || '';
     if (!this.finder) this.screen.openFind();

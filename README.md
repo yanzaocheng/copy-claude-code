@@ -71,13 +71,12 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 
 网关 key 只来自 `/login`：登录后保存在 `~/.claude-pro/gateway.json`，不用手动填写，也没有环境变量或 `.env` 文件可以设置它（没有浏览器的机器可以把另一台登录过的电脑的 `gateway.json` 拷过去）。
 
-一般只需要 `/login`、`/model`、`/effort`、`/tui` 和 settings。六个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
+一般只需要 `/login`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
 
 ```json
 {
   "model": "opus",
   "effort": "auto",
-  "tui": "fullscreen",
   "promptCacheTtl": "1h",
   "subagentPromptCacheTtl": "5m",
   "cleanupPeriodDays": 30
@@ -96,9 +95,9 @@ claude-pro config list --advanced            # 另外显示高级配置
 claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 ```
 
-会话中 `/config` 默认只显示这六项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择，`/tui` 记到顶层 `tui`；`--model`、`--effort` 可覆盖本次启动。
+会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择；`--model`、`--effort` 可覆盖本次启动。
 
-设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_PRO_TUI`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。provider 固定为 `gateway`，已删除 `--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口。
+设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。provider 固定为 `gateway`，已删除 `--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口。
 
 ## 持久化系统提示词
 
@@ -220,7 +219,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 - 流式 Markdown 渲染（代码高亮、表格、中文宽度对齐），所有模型返回的思考过程始终展开显示，恢复会话时也会显示已保存的思考；`/verbose` 只切换工具输出详细度和压缩摘要，不影响思考显示
 - `Esc` 中断；忙碌时输入的消息会排队并插入当前任务
 - `!` Bash 模式、`#` 写入记忆（CLAUDE.md）、`\`+回车 或 `ctrl+j` 换行、粘贴大段文本折叠为 `[Pasted text #1 +42 lines]`
-- **全屏模式（默认）**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开只保留反色选择，不会自动复制；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时只有 `Ctrl+C` 会复制。**输入框里**单击把光标移到那里，拖动、双击、三击选中正在写的文字，`Ctrl+C` 复制（不会打断任务，也不清空输入框）；选中后打字不会替换选中的文字。**引用追问**（像 ChatGPT 的“向 ChatGPT 提问”）：选中对话里的内容后按 `Ctrl+Q`（终端占用了 `Ctrl+Q` 时用 `Alt+Q`），选中的内容就以 `[Quote #1 +12 lines]` 插进输入框，光标停在下一行，直接写追问。发给模型的是选中的原文，加上它所在的那条工具调用、回复或消息的首行（`<quote source="⏺ Read(src/api.js)">…</quote>`），模型就知道问的是哪一段、哪个文件；对话里只显示引用的前三行。可以连续引用好几段，退格一次删掉整个引用。`Ctrl+V` 粘贴剪贴板文字（剪贴板里只有图片时作为图片附加），`Alt+V` 优先附加剪贴板图片；右键不执行复制或粘贴。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）。`/tui default` 切回经典模式（对话写进终端自己的滚动记录，输入框在窗口底部、靠空行顶到底），`/tui fullscreen` 切回全屏，选择会记到 `settings.json` 顶层的 `tui`
+- **全屏界面**：程序画在终端的备用屏幕上（像 vim），输入框固定在窗口最底下，不随输出或终端滚动条移动；对话在程序里滚动：鼠标滚轮（每格 3 行）、`PgUp`/`PgDn`（半屏）、`Ctrl+Home`（对话开头）、`Ctrl+End`（回到最新）。往上翻时新输出不会把画面拉回底部，底部浮着 `Jump to bottom (ctrl+End) ↓ · N new lines`，**点它**或按 `Ctrl+End` 回到底部；发消息时自动回到底部。**选中文字直接用鼠标拖**（不用按 Shift），松开只保留反色选择，不会自动复制；双击选一个词，三击选一整行；拖到对话区上下边缘会跟着滚动。选中的部分反色显示，点一下别处、按 `Esc` 或任意键就消失；有选中时只有 `Ctrl+C` 会复制。**输入框里**单击把光标移到那里，拖动、双击、三击选中正在写的文字，`Ctrl+C` 复制（不会打断任务，也不清空输入框）；选中后打字不会替换选中的文字。**引用追问**（像 ChatGPT 的“向 ChatGPT 提问”）：选中对话里的内容后按 `Ctrl+Q`（终端占用了 `Ctrl+Q` 时用 `Alt+Q`），选中的内容就以 `[Quote #1 +12 lines]` 插进输入框，光标停在下一行，直接写追问。发给模型的是选中的原文，加上它所在的那条工具调用、回复或消息的首行（`<quote source="⏺ Read(src/api.js)">…</quote>`），模型就知道问的是哪一段、哪个文件；对话里只显示引用的前三行。可以连续引用好几段，退格一次删掉整个引用。`Ctrl+V` 粘贴剪贴板文字（剪贴板里只有图片时作为图片附加），`Alt+V` 优先附加剪贴板图片；右键不执行复制或粘贴。仍可按住 Shift 拖动用终端自己的选中。退出后终端回到启动前的样子（对话不留在终端滚动记录里）
 - `ctrl+c` 或连按两次 `Esc` 清掉的草稿不会丢：在空输入框按 `↑` 找回（连同粘贴的文本和图片），中间发过别的消息也可以
 - `@` 同时补全文件和本机/远程会话：文件引用走 `Read` 工具，等于模型自己读了这个文件。最多带前 2000 行（被截断时会明确告诉模型，并把该文件记为"只读了一部分"，之后 `Write` 不会去覆盖没给它看过的行）；图片作为图片附加；二进制文件和超过 512KB 的文本会被跳过并提示原因；`@目录` 列出目录内容；行首 `@会话 任务` 把任务发给另一会话
 - 上下文用满上游输入上限时自动压缩（留出写摘要要用的余量：窗口的 5%，最多 4 万 token，这样摘要请求能读缓存而不是因超长被拒），不再读取 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`；子 agent 定义的 `autoCompactWindow` 仍有效，也可手动 `/compact`
@@ -228,7 +227,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/tui` `/cd` `/rename` `/peers` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 
@@ -287,14 +286,14 @@ claude-pro -p "只调研，给出重构方案，不要改文件"     # 只出方
 | `Enter` | 发送 |
 | `\` + `Enter` / `ctrl+j` / `alt+enter` | 换行 |
 | `Esc` | 中断当前任务；连按两次：有文字时清空输入，输入框为空时打开回退菜单（同 `/rewind`） |
-| `ctrl+c` | 全屏有选中文字时复制；否则中断 / 清空输入 / 连按两次退出 |
-| `ctrl+q` / `alt+q` | 全屏有选中文字时把它引用进输入框，在下一行写追问；模型会收到原文和它所在的工具调用或回复 |
+| `ctrl+c` | 有选中文字时复制；否则中断 / 清空输入 / 连按两次退出 |
+| `ctrl+q` / `alt+q` | 有选中文字时把它引用进输入框，在下一行写追问；模型会收到原文和它所在的工具调用或回复 |
 | `ctrl+v` | 粘贴剪贴板文字（只有图片时附加图片） |
 | `alt+v` | 附加剪贴板图片（没有图片时粘贴文字） |
 | `ctrl+t` | 显示/隐藏 todo 列表 |
 | `ctrl+l` | 清屏重绘 |
-| `PgUp` / `PgDn`、滚轮、`Ctrl+Home` / `Ctrl+End` | 全屏模式下滚动对话 / 到开头 / 回到最新 |
-| `ctrl+f` | 全屏模式下在对话里查找（像 VS Code）：输入框的位置换成查找框，边输入边高亮所有匹配（不分大小写，当前这个橙色、其余黄色），右上角显示"第几个/共几个"（`No results` 表示没有）。先跳到视图底部往上最近的一个；`Enter` 或 `↑` 跳到更早的一个，`Shift+Enter` 或 `↓` 跳到更新的一个，到头后绕回；`PgUp`/`PgDn`、滚轮照常滚动；`Esc` 关闭，画面停在当前位置（`Ctrl+End` 回到底部）。再按 `ctrl+f` 会带上上次的关键字（已选中，直接输入就替换）；先用鼠标选中文字再按，会搜选中的文字。查找时有新输出，匹配会跟着更新。经典模式（`/tui default`）的对话在终端自己的滚动缓冲里，请用终端自带的查找 |
+| `PgUp` / `PgDn`、滚轮、`Ctrl+Home` / `Ctrl+End` | 滚动对话 / 到开头 / 回到最新 |
+| `ctrl+f` | 在对话里查找（像 VS Code）：输入框的位置换成查找框，边输入边高亮所有匹配（不分大小写，当前这个橙色、其余黄色），右上角显示"第几个/共几个"（`No results` 表示没有）。先跳到视图底部往上最近的一个；`Enter` 或 `↑` 跳到更早的一个，`Shift+Enter` 或 `↓` 跳到更新的一个，到头后绕回；`PgUp`/`PgDn`、滚轮照常滚动；`Esc` 关闭，画面停在当前位置（`Ctrl+End` 回到底部）。再按 `ctrl+f` 会带上上次的关键字（已选中，直接输入就替换）；先用鼠标选中文字再按，会搜选中的文字。查找时有新输出，匹配会跟着更新。 |
 | `↑` / `↓` | 在多行输入（包括自动折行的长文字）里上下移动光标；光标在第一行时 `↑` 先移到开头、再按才翻到上一条历史消息，`↓` 在最后一行同理 |
 | `Tab` | 补全命令 / 文件 |
 
@@ -333,7 +332,7 @@ src/commands.js       斜杠命令
 
 WebSearch 依赖网关：没有网关时只能抓取 DuckDuckGo/Bing 网页，而它们常把程序当爬虫拦下（DuckDuckGo 返回 202，Bing 只按查询的第一个词搜），结果可能离题。GitHub 相关的查询，系统提示词让模型优先用 Bash 跑 `gh`（需要已安装并登录）。检查点只覆盖文件工具的修改，不覆盖 Bash 命令造成的改动。
 
-提示：全屏模式里的鼠标选择不会自动写入剪贴板；使用 `Ctrl+C` 复制、`Ctrl+V` 粘贴，`Ctrl+Q` 引用到输入框里追问。按住 Shift 的终端原生选择行为由终端自身决定。
+提示：鼠标选择不会自动写入剪贴板；使用 `Ctrl+C` 复制、`Ctrl+V` 粘贴，`Ctrl+Q` 引用到输入框里追问。按住 Shift 的终端原生选择行为由终端自身决定。
 
 ## 历史
 
