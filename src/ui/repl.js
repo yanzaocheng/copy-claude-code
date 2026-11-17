@@ -1057,8 +1057,8 @@ export class App {
       changedDirectory: Boolean(request.cwd),
       // where the agent's shell is (a `cd` in Bash moves it): the next process goes on there, not at the project's root
       agentCwd: request.cwd ? null : this.agent.cwd,
-      // the browser instance in use (one picked with /tabs may be any of several): the next process connects to it
-      // again, where the tab ids in the conversation are still its tabs'
+      // the browser instance in use (it may be any of several): the next process connects to it again, where the
+      // tab ids in the conversation are still its tabs'
       browser: browserSession.preferred || null,
       sessionId: this.store.id,
       sessionFile: moved?.file || this.store.file,

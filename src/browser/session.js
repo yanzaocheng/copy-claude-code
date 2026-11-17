@@ -154,8 +154,8 @@ const howToTurnOn = (b) => `${b.label} does not allow remote debugging now. The 
 //
 // A browser started with a profile directory of its own (--user-data-dir: an app that opens its window in Edge, a
 // second profile kept apart) is another instance, with its own tabs and its own DevToolsActivePort in that
-// directory, which the usual places do not have: /tabs edge listed the user's main Edge and not the one their
-// mail was open in. The running browsers' command lines say where each one keeps its profile.
+// directory, which the usual places do not have: looking in those only missed the Edge the user's mail was open
+// in. The running browsers' command lines say where each one keeps its profile.
 
 const samePath = (a, b) => {
   const x = path.resolve(String(a));
@@ -229,7 +229,7 @@ function shortDir(dir) {
   return dir;
 }
 
-// An instance found at `dir`, for /tabs and the Browser tool: {name, label, dir, url, port, isDefault, own?}.
+// An instance found at `dir`, for the Browser tool: {name, label, dir, url, port, isDefault, own?}.
 function instance(kind, dir, url) {
   if (kind === 'own' || samePath(dir, OWN.dir)) return { ...OWN, dir: OWN.dir, url, port: portOf(url), own: true };
   const base = knownBrowsers().find((b) => b.name === kind) || { name: kind || 'chrome', label: 'Chromium browser', inspect: 'chrome://inspect/#remote-debugging' };
@@ -258,7 +258,7 @@ export async function browserInstances() {
   return found.filter(Boolean);
 }
 
-// The instance the session used last (picked with /tabs, or the one before a restart), when it is still there and
+// The instance the session used last (the one before a restart, too), when it is still there and
 // the call asks for no browser in particular or for one of its kind (`w`, the call's own browser field: the user's
 // pick wins over the configured default): its tab ids are the ones the conversation knows.
 async function preferredTarget(preferred, w) {
@@ -287,7 +287,7 @@ export async function resolveBrowser(spec, env, signal, preferred = null) {
       // not in its usual profile: one running on a profile directory of its own
       const others = (await browserInstances()).filter((i) => i.name === w);
       if (others.length === 1) return others[0];
-      if (others.length > 1) throw new BrowserError(`${known.label} allows remote debugging in ${others.length} profile directories: ${others.map((i) => i.dir).join('; ')}. Pass the one meant as browser (the user can pick one with /tabs)`);
+      if (others.length > 1) throw new BrowserError(`${known.label} allows remote debugging in ${others.length} profile directories: ${others.map((i) => i.dir).join('; ')}. Pass the one meant as browser (ask the user which one)`);
       throw new BrowserError(howToTurnOn(known));
     }
     if (/[\\/]/.test(wanted) && fs.existsSync(wanted) && fs.statSync(wanted).isDirectory()) {
@@ -406,7 +406,7 @@ class BrowserSession {
     return next;
   }
 
-  // `spec`: what the call asked for (see resolveBrowser), or an instance from browserInstances (/tabs). The user's
+  // `spec`: what the call asked for (see resolveBrowser), or an instance from browserInstances. The user's
   // browsers are reached through the broker (broker.js), whose connection outlives this process: the user allows
   // it once, not again at every restart and in every session. Another browser asked for is found and connected to
   // before the one there is let go: a request for one that is not there (chrome, when only Edge allows it) cost
@@ -465,8 +465,8 @@ class BrowserSession {
   // A tab's id is "t" and the start of its own id in the browser (its targetId, which it keeps while it is open),
   // 4 hex digits or as many more as it takes to tell it from the other open tabs. Numbers given in the order of a
   // connection (t1, t2...) started again at every reconnect and restart of claude-pro, so that an id in the
-  // conversation (one the user picked with /tabs, say) could then be another tab, the one the agent would click in
-  // or close. These ids mean the same tab in every connection and every session (see tab).
+  // conversation could then be another tab, the one the agent would click in or close. These ids mean the same tab
+  // in every connection and every session (see tab).
   relabel() {
     const hexTabs = [...this.tabs.values()].filter((t) => t.hex);
     for (const tab of hexTabs) {
