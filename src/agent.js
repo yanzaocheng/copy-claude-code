@@ -76,6 +76,13 @@ const MIN_CLEAR_TOKENS = 100; // a smaller result is left as it is: clearing it 
 const CLEARABLE_INPUTS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'REPL']);
 const INPUT_CLEARING = { longerThan: 1200, keep: 300 }; // characters of one text of a tool call
 
+// The placeholder shortInput leaves, as the model may copy it: writing a long new text after many cleared calls, it
+// wrote one into a file in place of the rest of the text (2026-11-18, codex-gateway src/site.mjs). A file tool given
+// it does nothing and says why (runTools). The digits keep this file's own source of the message from matching.
+const CLEARED_INPUT_IN_TEXT = /\[Old tool input cleared: \d+ more characters\]/;
+const hasClearedInput = (value) => (typeof value === 'string' ? CLEARED_INPUT_IN_TEXT.test(value)
+  : Array.isArray(value) ? value.some(hasClearedInput) : value && typeof value === 'object' ? Object.values(value).some(hasClearedInput) : false);
+
 // A tool call's input with its long texts cut to their start; the same object when none is long.
 function shortInput(value) {
   if (typeof value === 'string') {
@@ -1054,6 +1061,15 @@ export class Agent {
             this.trace?.toolEnd(skipped, { skipped: true, error: true, error_type: 'skipped' });
             this.io.toolRejected?.(tu, tool, message, this);
             results.set(tu, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: message });
+            return;
+          }
+          if (tool?.editsFiles && hasClearedInput(tu.input)) {
+            const message = 'Not done: the text to write contains "[Old tool input cleared: N more characters]", the placeholder that stands in this conversation for the text of an old tool call, not text of the file. Nothing was changed. Send the call again with the whole text you mean (Read the file first if you need what is in it).';
+            const refused = this.trace?.toolStart({ turnId: this.traceTurnId, agent: this.name, depth: this.depth, name: tu.name, input: tu.input, parallel: false, toolUseId: tu.id });
+            this.trace?.toolEnd(refused, { error: true, error_type: 'cleared_input' });
+            this.io.toolRejected?.(tu, tool, message, this);
+            results.set(tu, { type: 'tool_result', tool_use_id: tu.id, is_error: true, content: message });
+            failedEdit ||= tu.name;
             return;
           }
           const r = await this.runOne(tu, signal, map, { parallel: batch.parallel });
