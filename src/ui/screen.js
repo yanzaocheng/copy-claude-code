@@ -142,7 +142,7 @@ const CPR = /\x1b\[(\d+);(\d+)R/g; // the terminal's answer to DSR 6: row;column
 // draws one of those in two cells sizes all such characters by its font, and is asked about all of them.
 const UI_PROBES = process.platform === 'win32' ? Array.from('·…↑↓←→↻⇣⏎◷⇄•◦⏺⎿✻✢✳✶✽✉⚠') : [];
 const FONT_SIZED = 6;
-const AMBIGUOUS_TIMEOUT_MS = 1500; // some 200 to 400 answers: 0.2 ms each in the Windows 11 console, 0.5 on a server
+const AMBIGUOUS_TIMEOUT_MS = 1500; // some 200 to 600 answers, each asked for after the one before: 0.3 ms each in the Windows 11 console, 0.5 in Windows 10's
 
 // Ask the terminal where the cursor is (DSR 6): resolves with its row (1-based), or null when it does not answer
 // within `timeout`. Run before anything else reads `stdin`, with the terminal in raw mode; what else arrives
@@ -155,12 +155,15 @@ const AMBIGUOUS_TIMEOUT_MS = 1500; // some 200 to 400 answers: 0.2 ms each in th
 // which broke rows in two and left the footer on screen twice. Those are some 800 characters, so neighbours are
 // written together first: one answer does for all of them when they are all one cell wide or all two, which most
 // are, and only the others are then asked about one by one. A batch that is not answered whole in time is not used.
+// Each text is written after the answer to the one before: the Windows 10 console (conhost 19041) answers with wrong
+// columns when many of them come in one write, or in writes sent without waiting.
 export function queryCursorRow(stdin, out, timeout = 300) {
   return new Promise((resolve) => {
     let buf = Buffer.alloc(0);
     let timer = null, finished = false, batch = 0;
     const sent = []; // what was written to be measured (a character, or neighbours), in the order of the answers
     let answered = 0; // how many of them have an answer: counted when a whole batch is in
+    let written = 0; // how many of them were written: the next one is, once all of those have an answer
     const replies = () => [...buf.toString('latin1').matchAll(CPR)];
     const cells = (matches, i) => Number(matches[1 + i][2]) - 1;
     // The width of each character of `text`, which took `n` cells: 0 when they are not all one or all two cells wide.
@@ -202,17 +205,24 @@ export function queryCursorRow(stdin, out, timeout = 300) {
       if (rest.length) stdin.unshift(rest);
       resolve(first ? Number(first[1]) : null);
     };
+    const writeNext = () => {
+      const start = written ? '' : SYNC_START + ESC.hideCursor;
+      const text = sent[written++];
+      try { out.write(start + '\r' + text + '\x1b[6n' + (written === sent.length ? '\r\x1b[K' : '')); } catch { done(); }
+    };
     const measure = (texts, ms) => {
-      const start = sent.length ? '' : SYNC_START + ESC.hideCursor;
       sent.push(...texts);
       clearTimeout(timer);
       timer = setTimeout(done, ms);
-      try { out.write(start + texts.map((text) => '\r' + text + '\x1b[6n').join('') + '\r\x1b[K'); } catch { done(); }
+      writeNext();
     };
     const onData = (d) => {
       buf = Buffer.concat([buf, Buffer.isBuffer(d) ? d : Buffer.from(String(d), 'utf8')]);
       const matches = replies();
-      if (matches.length < 1 + sent.length) return; // the first answer is the cursor's position
+      if (matches.length < 1 + sent.length) { // the first answer is the cursor's position
+        if (written < sent.length && matches.length >= 1 + written) writeNext();
+        return;
+      }
       answered = sent.length;
       const more = next(matches);
       if (more.length) measure(more, batch === 1 ? timeout : AMBIGUOUS_TIMEOUT_MS);
