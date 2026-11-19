@@ -122,12 +122,7 @@ func TestWorkspacePathAndConfirmedEdits(t *testing.T) {
 	if got, _ := os.ReadFile(name); !bytes.Equal(got, data) {
 		t.Fatalf("file changed without approval: %q", got)
 	}
-	s.confirm = func(preview string) string {
-		if strings.Contains(preview, "状态：已更新") {
-			return "y"
-		}
-		return ""
-	}
+	s.confirm = func(string) string { return "y" }
 	s.readOnly = true
 	if got := s.callTool(t.Context(), call); !got.Failed {
 		t.Fatal("edit ran in read-only mode")
@@ -151,43 +146,54 @@ func TestWorkspacePathAndConfirmedEdits(t *testing.T) {
 	}
 }
 
-// A command the model asks for is not run on typed-ahead or redirected input: only a person at the console
-// confirms.
-func TestCommandNeedsConsoleConfirmation(t *testing.T) {
+// By default the agent acts without asking; with "confirm": true it asks, and only a person at the
+// console can agree (typed-ahead or redirected input cancels).
+func TestCommandAutoRunsOrWaitsForConsole(t *testing.T) {
 	t.Setenv(keyEnv, "mock-key-only")
-	dir := t.TempDir()
-	var result block
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			fmt.Fprint(w, `{"data":[]}`)
-			return
+	runOnce := func(confirm bool) (dir string, result block) {
+		dir = t.TempDir()
+		calls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/models" {
+				fmt.Fprint(w, `{"data":[]}`)
+				return
+			}
+			var payload struct {
+				Messages []message `json:"messages"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if calls++; calls == 1 {
+				fmt.Fprint(w, `{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"run_command","input":{"command":"echo x> marker.txt"}}]}`)
+				return
+			}
+			result = payload.Messages[len(payload.Messages)-1].Content[0]
+			fmt.Fprint(w, `{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}`)
+		}))
+		defer server.Close()
+		in, err := os.CreateTemp(t.TempDir(), "stdin-*")
+		if err != nil {
+			t.Fatal(err)
 		}
-		var payload struct {
-			Messages []message `json:"messages"`
+		defer in.Close()
+		in.WriteString("y\na\n")
+		in.Seek(0, io.SeekStart)
+		conf := filepath.Join(t.TempDir(), configFile)
+		if confirm {
+			os.WriteFile(conf, []byte("{\"confirm\": true}"), 0600)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-		if calls++; calls == 1 {
-			fmt.Fprint(w, `{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"run_command","input":{"command":"echo x> marker.txt"}}]}`)
-			return
+		args := []string{"-config", conf, "-gateway", server.URL, "-dir", dir, "-p", "建个文件"}
+		if err := run(t.Context(), args, in, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
 		}
-		result = payload.Messages[len(payload.Messages)-1].Content[0]
-		fmt.Fprint(w, `{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}`)
-	}))
-	defer server.Close()
-	in, err := os.CreateTemp(t.TempDir(), "stdin-*")
-	if err != nil {
-		t.Fatal(err)
+		return dir, result
 	}
-	defer in.Close()
-	in.WriteString("y\na\n")
-	in.Seek(0, io.SeekStart)
-	args := []string{"-config", filepath.Join(t.TempDir(), configFile), "-gateway", server.URL, "-dir", dir, "-p", "建个文件"}
-	if err := run(t.Context(), args, in, io.Discard, io.Discard); err != nil {
-		t.Fatal(err)
+	dir, result := runOnce(false)
+	if _, err := os.Stat(filepath.Join(dir, "marker.txt")); err != nil || result.Failed {
+		t.Fatalf("default mode did not run the command: %v %+v", err, result)
 	}
+	dir, result = runOnce(true)
 	if _, err := os.Stat(filepath.Join(dir, "marker.txt")); !os.IsNotExist(err) {
-		t.Fatal("the command ran without a confirmation at the console")
+		t.Fatal("confirm mode ran the command without a confirmation at the console")
 	}
 	if !result.Failed || !strings.Contains(result.Result, "未确认") {
 		t.Fatalf("the model was not told the command was refused: %+v", result)
@@ -232,5 +238,49 @@ func TestGatewayRefusesCleartextAndRedirects(t *testing.T) {
 	defer redirect.Close()
 	if _, err := newGateway(redirect.URL, "secret").check(context.Background()); err == nil || !strings.Contains(err.Error(), "307") {
 		t.Fatalf("unexpected result: %v", err)
+	}
+}
+
+// A rate-limited gateway (HTTP 429) or an overloaded one is waited out, not shown to the user as the end.
+func TestRateLimitIsWaitedOut(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(429)
+			fmt.Fprint(w, `{"error":{"message":"rate limited"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"stop_reason":"end_turn","content":[{"type":"text","text":"到了"}]}`)
+	}))
+	defer server.Close()
+	gw := newGateway(server.URL, "k")
+	var log bytes.Buffer
+	gw.log = &log
+	answer, err := gw.ask(t.Context(), "sid", "m", "sys", nil, nil)
+	if err != nil || calls != 3 || len(answer.Content) != 1 {
+		t.Fatalf("calls %d, %v, %+v", calls, err, answer)
+	}
+	if strings.Count(log.String(), "自动重试") != 2 {
+		t.Fatalf("retries not reported:\n%s", &log)
+	}
+	if _, err := gw.ask(t.Context(), "sid", "m", "sys", nil, nil); err != nil || calls != 4 {
+		t.Fatal("a request that works once should not be retried")
+	}
+}
+
+// A wrong key or a missing balance is returned at once: retrying cannot help.
+func TestKeyErrorsAreNotRetried(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"error":{"message":"bad key"}}`)
+	}))
+	defer server.Close()
+	_, err := newGateway(server.URL, "k").check(t.Context())
+	if err == nil || calls != 1 || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("calls %d, %v", calls, err)
 	}
 }

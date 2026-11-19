@@ -104,9 +104,9 @@ func (s *session) callTool(ctx context.Context, call block) block {
 		if err != nil {
 			return finish("", err)
 		}
-		preview := fmt.Sprintf("\n== 修改文件 %s ==\n--- 原文\n%s\n+++ 改为\n%s\n输入 y 确认写入，其它输入取消：", p.name, previewText(a.Old, 20), previewText(*a.New, 20))
-		if s.ask(ctx, preview) != "y" {
-			return finish("", errors.New("用户未确认，文件未修改"))
+		preview := fmt.Sprintf("\n== 修改文件 %s ==\n--- 原文\n%s\n+++ 改为\n%s\n", p.name, previewText(a.Old, 20), previewText(*a.New, 20))
+		if s.ask(ctx, preview, "输入 y 确认写入，其它输入取消：") != "y" {
+			return finish("", errors.New("操作者未确认，文件未修改"))
 		}
 		if err := s.ws.apply(p); err != nil {
 			return finish("", err)
@@ -125,8 +125,8 @@ func (s *session) callTool(ctx context.Context, call block) block {
 			return finish("", errors.New("必须提供 content"))
 		}
 		content := crlf(*a.Content)
-		preview := fmt.Sprintf("\n== 新建文件 %s（%d 字节）==\n%s\n输入 y 确认创建，其它输入取消：", displayPath(a.Path), len(content), previewText(content, 20))
-		if s.ask(ctx, preview) != "y" {
+		preview := fmt.Sprintf("\n== 新建文件 %s（%d 字节）==\n%s\n", displayPath(a.Path), len(content), previewText(content, 20))
+		if s.ask(ctx, preview, "输入 y 确认创建，其它输入取消：") != "y" {
 			return finish("", errors.New("用户未确认，文件未创建"))
 		}
 		name, err := s.ws.create(a.Path, content)
@@ -151,16 +151,16 @@ func (s *session) callTool(ctx context.Context, call block) block {
 		if a.Timeout > 0 {
 			timeout = time.Duration(min(a.Timeout, 600)) * time.Second
 		}
+		preview := fmt.Sprintf("\n== 执行命令（目录 %s）==\n  %s\n", s.ws.dir, terminalText(command))
 		if s.allowCommands {
-			fmt.Fprintf(s.out, "· 执行命令：%s\n", terminalText(command))
+			fmt.Fprintln(s.out, preview+"（本次运行已允许执行命令）")
 		} else {
-			preview := fmt.Sprintf("\n== 执行命令（目录 %s）==\n  %s\n输入 y 执行，a 本次运行都不再询问，其它输入取消：", s.ws.dir, terminalText(command))
-			switch s.ask(ctx, preview) {
+			switch s.ask(ctx, preview, "输入 y 执行，a 本次运行都不再询问，其它输入取消：") {
 			case "a":
 				s.allowCommands = true
 			case "y":
 			default:
-				return finish("", errors.New("用户未确认，命令未执行"))
+				return finish("", errors.New("操作者未确认，命令未执行"))
 			}
 		}
 		started := time.Now()
@@ -175,9 +175,18 @@ func (s *session) callTool(ctx context.Context, call block) block {
 	}
 }
 
-// ask: an answer typed after Ctrl+C stopped the turn does not count.
-func (s *session) ask(ctx context.Context, preview string) string {
-	answer := s.confirm(preview)
+// ask shows what is about to happen, then waits for the user's answer. Auto mode (the default) answers "y"
+// itself. An answer typed after Ctrl+C stopped the turn does not count.
+func (s *session) ask(ctx context.Context, preview, question string) string {
+	fmt.Fprint(s.out, preview)
+	if s.auto {
+		fmt.Fprintln(s.out, "（自动执行）")
+		return "y"
+	}
+	if ctx.Err() != nil {
+		return ""
+	}
+	answer := s.confirm(question)
 	if ctx.Err() != nil {
 		return ""
 	}

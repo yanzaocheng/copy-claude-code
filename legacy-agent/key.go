@@ -52,6 +52,7 @@ func acquireGateway(ctx context.Context, cfg *appConfig, endpoint string, replac
 			return nil, err
 		}
 		gw := newGateway(endpoint, key)
+		gw.log = out
 		if check {
 			if err := verifyKey(ctx, gw, out); err != nil {
 				return nil, err
@@ -62,6 +63,7 @@ func acquireGateway(ctx context.Context, cfg *appConfig, endpoint string, replac
 	if key := strings.TrimSpace(cfg.APIKey); key != "" && !replace {
 		fmt.Fprintln(out, "API Key：来自配置文件 "+key)
 		gw := newGateway(endpoint, key)
+		gw.log = out
 		err := checkKeyFormat(key)
 		if err == nil {
 			err = verifyKey(ctx, gw, out)
@@ -90,6 +92,7 @@ func acquireGateway(ctx context.Context, cfg *appConfig, endpoint string, replac
 			continue
 		}
 		gw := newGateway(endpoint, key)
+		gw.log = out
 		if err = checkKeyFormat(key); err == nil {
 			err = verifyKey(ctx, gw, out)
 		}

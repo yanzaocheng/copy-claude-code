@@ -72,6 +72,7 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 	check := flags.Bool("check", false, "只检查 Key 和网络（请求模型列表，不调用模型）")
 	setKey := flags.Bool("set-key", false, "重新输入、验证并保存网关 API Key")
 	readOnly := flags.Bool("read-only", false, "只读：只能列目录和读文件，不能改文件或执行命令")
+	confirm := flags.Bool("confirm", false, "每次修改文件或执行命令前询问（默认直接执行）")
 	showVersion := flags.Bool("version", false, "显示版本号并退出")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -157,24 +158,26 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 		return err
 	}
 
-	s := &session{gateway: gw, model: *model, id: newID(), ws: ws, out: out, readOnly: *readOnly || cfg.ReadOnly}
-	s.confirm = func(preview string) string {
+	s := &session{gateway: gw, model: *model, id: newID(), ws: ws, out: out, readOnly: *readOnly || cfg.ReadOnly, auto: !*confirm && !cfg.Confirm}
+	s.confirm = func(question string) string {
 		// Only a person at the console confirms: typed-ahead or redirected input does not count.
 		if !clearConsoleInput(in) {
-			fmt.Fprintln(out, preview+"（不是交互式控制台，已取消）")
+			fmt.Fprintln(out, question+"（不是交互式控制台，已取消）")
 			return ""
 		}
 		input.Reset(in)
-		fmt.Fprint(out, preview)
+		fmt.Fprint(out, question)
 		line, err := readLine(input)
 		if err != nil {
 			return ""
 		}
 		return strings.ToLower(line)
 	}
-	mode := "可读文件、改文件、执行命令（每次修改和命令都先问你）"
+	mode := "可读文件、改文件、执行命令（自动执行，不询问）"
 	if s.readOnly {
 		mode = "只读（只能列目录和读文件）"
+	} else if !s.auto {
+		mode = "可读文件、改文件、执行命令（每次修改和命令都先问你）"
 	}
 	fmt.Fprintf(out, "模型：%s\n工作目录：%s\n权限：%s\n", terminalText(s.model), terminalText(ws.dir), mode)
 	if *prompt != "" {
@@ -279,8 +282,9 @@ type session struct {
 	ws       *workspace
 	out      io.Writer
 	readOnly bool
-	// confirm shows a preview and returns what the user typed, lowercased ("" when there is no one to ask).
-	confirm       func(preview string) string
+	// auto: act without asking (the default); otherwise confirm asks before each change or command.
+	auto          bool
+	confirm       func(question string) string
 	allowCommands bool
 	history       [][]message
 }

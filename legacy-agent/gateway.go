@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,6 +61,65 @@ type reply struct {
 type gateway struct {
 	base, key string
 	client    *http.Client
+	log       io.Writer // where "waiting and retrying" progress goes
+}
+
+func (g *gateway) logf(format string, args ...any) {
+	if g.log != nil {
+		fmt.Fprintf(g.log, format+"\n", args...)
+	}
+}
+
+// call makes one request, waiting out rate limits, overloads and network errors a few times first.
+// 401/402/404 and malformed answers come back at once: retrying them cannot help.
+func (g *gateway) call(ctx context.Context, method, path, sessionID string, payload, dest any) error {
+	const attempts = 5
+	for attempt := 1; ; attempt++ {
+		err := g.request(ctx, method, path, sessionID, payload, dest)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		wait, ok := retryWait(err, attempt)
+		if !ok {
+			return err
+		}
+		if attempt == attempts {
+			return fmt.Errorf("%w（已自动重试 %d 次仍失败，请稍后再试）", err, attempts-1)
+		}
+		g.logf("网关暂时不可用（%s），%.0f 秒后自动重试（第 %d/%d 次）…", terminalText(err.Error()), wait.Seconds(), attempt, attempts-1)
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+func retryWait(err error, attempt int) (time.Duration, bool) {
+	var se *statusErr
+	if errors.As(err, &se) {
+		switch se.status {
+		case 429, 500, 502, 503, 504, 529:
+		default:
+			return 0, false
+		}
+		if se.retryAfterSet && se.retryAfter <= 60*time.Second {
+			return se.retryAfter, true // Retry-After: 0 means "now"
+		}
+	} else {
+		// Only a connection-level failure is worth another try; a malformed answer is not.
+		var transport *url.Error
+		if !errors.As(err, &transport) {
+			return 0, false
+		}
+	}
+	wait := time.Duration(1<<(attempt-1)) * time.Second // 1, 2, 4, 8
+	return min(wait, 30*time.Second), true
 }
 
 func normalizeGateway(raw string) (string, error) {
@@ -118,7 +178,7 @@ func (g *gateway) ask(ctx context.Context, sessionID, model, system string, mess
 		Stream    bool       `json:"stream"`
 	}{model, 8192, system, messages, toolList, false}
 	var answer reply
-	err := g.request(ctx, http.MethodPost, "/v1/messages", sessionID, payload, &answer)
+	err := g.call(ctx, http.MethodPost, "/v1/messages", sessionID, payload, &answer)
 	if err == nil && (len(answer.Content) == 0 || answer.StopReason == "") {
 		err = errors.New("网关未返回可识别的模型消息")
 	}
@@ -137,7 +197,7 @@ func (g *gateway) models(ctx context.Context) ([]string, error) {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := g.request(ctx, http.MethodGet, "/v1/models", "", nil, &response); err != nil {
+	if err := g.call(ctx, http.MethodGet, "/v1/models", "", nil, &response); err != nil {
 		return nil, err
 	}
 	if response.Data == nil {
@@ -209,7 +269,9 @@ func (g *gateway) statusError(res *http.Response) error {
 	case status == 402:
 		hint = "网关账户余额不足"
 	case status == 429:
-		hint = "网关限流，请稍后重试"
+		hint = "网关限流"
+	case status == 529 || status >= 500:
+		hint = "网关或上游暂时不可用"
 	case status == 404:
 		hint = "请检查网关地址、接口和模型 ID"
 	default:
@@ -229,12 +291,27 @@ func (g *gateway) statusError(res *http.Response) error {
 			hint = "请求未成功"
 		}
 	}
-	return &statusErr{status, fmt.Sprintf("网关返回 HTTP %d：%s", status, hint)}
+	wait, hasWait := retryAfter(res)
+	return &statusErr{status, fmt.Sprintf("网关返回 HTTP %d：%s", status, hint), wait, hasWait}
+}
+
+// retryAfter reads the Retry-After header (seconds or an HTTP date).
+func retryAfter(res *http.Response) (time.Duration, bool) {
+	value := res.Header.Get("Retry-After")
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second, true
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		return time.Until(when), true
+	}
+	return 0, false
 }
 
 type statusErr struct {
-	status int
-	msg    string
+	status        int
+	msg           string
+	retryAfter    time.Duration
+	retryAfterSet bool
 }
 
 func (e *statusErr) Error() string { return e.msg }

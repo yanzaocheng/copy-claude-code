@@ -25,7 +25,9 @@ type appConfig struct {
 	WorkDir string `json:"workDir"`
 	// ReadOnly: the agent may only list and read files (no edits, no commands).
 	ReadOnly bool `json:"readOnly"`
-	path     string
+	// Confirm: ask before every file change or command (default: act without asking).
+	Confirm bool `json:"confirm"`
+	path    string
 }
 
 func defaultConfigPath() (string, error) {
