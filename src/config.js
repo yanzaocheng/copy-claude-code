@@ -15,7 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeTtl } from './cache.js';
-import { GATEWAY_PROVIDER, splitModelRef, providerModel, providerInfo, normalizeBaseUrl, connectedProviders, readConnections } from './providers.js';
+import { GATEWAY_PROVIDER, splitModelRef, providerModel, providerInfo, normalizeBaseUrl, connectedProviders, readConnections, knownModel } from './providers.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A source checkout (a git clone, also when npm links to one), as opposed to a copy installed from npm: the agent
@@ -219,14 +219,44 @@ const int = (v, d) => {
 const isOn = (v) => /^(1|true|yes)$/i.test(String(v ?? '').trim());
 
 // The input window of each model a gateway serves (max_input_tokens in its GET /v1/models, which fetchGatewayModels
-// passes on here), by gateway and model id: what resolveModel takes once the list is in.
+// passes on here), by gateway and model id: what resolveModel takes. Kept on disk too (cache/gateway-models.json, the
+// last list of each gateway), so that a new process has them before its first list arrives, and while the gateway
+// does not answer: until then a model the gateway serves with 1M showed 200k (2026-11-20).
 const servedWindows = new Map();
+const servedFile = () => path.join(CONFIG_DIR, 'cache', 'gateway-models.json');
+let servedOnDisk = null; // {url: {id: tokens}}, read once
+function readServed() {
+  if (servedOnDisk) return servedOnDisk;
+  try { servedOnDisk = JSON.parse(fs.readFileSync(servedFile(), 'utf8')); } catch { /* none kept yet */ }
+  if (!servedOnDisk || typeof servedOnDisk !== 'object') servedOnDisk = {};
+  for (const [url, models] of Object.entries(servedOnDisk)) {
+    for (const [id, tokens] of Object.entries(models || {})) {
+      if (Number.isInteger(tokens) && tokens > 0 && !servedWindows.has(`${url}\n${id}`)) servedWindows.set(`${url}\n${id}`, tokens);
+    }
+  }
+  return servedOnDisk;
+}
 export function noteServedModels(url, models) {
+  const kept = readServed();
+  const windows = {};
   for (const m of models || []) {
     const tokens = Number(m?.max_input_tokens);
-    if (typeof m?.id === 'string' && Number.isInteger(tokens) && tokens > 0) servedWindows.set(`${url}\n${m.id}`, tokens);
+    if (typeof m?.id === 'string' && Number.isInteger(tokens) && tokens > 0) {
+      servedWindows.set(`${url}\n${m.id}`, tokens);
+      windows[m.id] = tokens;
+    }
   }
+  // (written only when the list changed: it comes again every 10 minutes)
+  if (!Object.keys(windows).length || JSON.stringify(kept[url]) === JSON.stringify(windows)) return;
+  kept[url] = windows;
+  try {
+    fs.mkdirSync(path.dirname(servedFile()), { recursive: true });
+    const tmp = `${servedFile()}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(kept));
+    fs.renameSync(tmp, servedFile());
+  } catch { /* kept in memory only */ }
 }
+const servedWindow = (url, id) => { readServed(); return servedWindows.get(`${url}\n${id}`); };
 
 export class Config {
   constructor(env, sources, settings, cwd) {
@@ -301,15 +331,17 @@ export class Config {
     if (/\[1m\]$/i.test(name)) { oneM = true; name = name.replace(/\[1m\]$/i, ''); }
     const ref = splitModelRef(name);
     if (ref.provider !== GATEWAY_PROVIDER) {
-      const known = providerModel(ref.provider, ref.model);
+      const listed = providerModel(ref.provider, ref.model);
+      // (a list without windows, as DeepSeek's: what is known of the model here)
+      const known = { ...knownModel(ref.model), ...Object.fromEntries(Object.entries(listed || {}).filter(([, v]) => v != null)) };
       const claudeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(ref.model);
       return {
         id: ref.model,
         provider: ref.provider,
-        contextWindow: oneM ? 1_000_000 : known?.window || (claudeOneM ? 1_000_000 : 200_000),
+        contextWindow: oneM ? 1_000_000 : known.window || (claudeOneM ? 1_000_000 : 200_000),
         label: `${ref.provider}/${ref.model}${oneM ? '[1m]' : ''}`,
-        ...(known?.maxOutput ? { maxOutput: known.maxOutput } : {}),
-        ...(known?.price ? { price: known.price } : {}),
+        ...(known.maxOutput ? { maxOutput: known.maxOutput } : {}),
+        ...(known.price ? { price: known.price } : {}),
       };
     }
     // A name without a provider is 7bit.fun's (as before there were others), and an alias goes where Claude is (see
@@ -321,7 +353,8 @@ export class Config {
       const inner = this.resolveModel(aliased);
       return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${explicit ? '7bit/' : ''}${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
-    const served = servedWindows.get(`${this.gatewayUrl}\n${name}`);
+    // (the gateway's list, else the last one kept, else what is known of the model here)
+    const served = servedWindow(this.gatewayUrl, name) || knownModel(name)?.window;
     const label = `${GATEWAY_PROVIDER}/${name}${oneM ? '[1m]' : ''}`;
     // GPT models are served by the gateway's Codex backend, whose standard window is 272k. A request above 272k costs
     // twice as much (see pricing.js), but the user wants the gateway's window here too (2026-10-27).

@@ -140,6 +140,15 @@ export function providerModel(providerId, modelId, connections = readConnections
   return connections[providerId]?.models?.find((m) => m.id === modelId) || null;
 }
 
+// Models whose provider's list gives no window or output limit (DeepSeek's GET /models has neither), by the id they go
+// by at DeepSeek and at 7bit.fun alike: {window, maxOutput}, from DeepSeek's API documentation (as codex-gateway's
+// deepseek-models.mjs has them, checked 2026-11-06: 1M in, at most 384K out). What a list gives wins over these.
+const KNOWN_MODELS = new Map([
+  ...['deepseek-v4-pro', 'deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4.1-flash']
+    .map((id) => [id, { window: 1_000_000, maxOutput: 393_216 }]),
+]);
+export const knownModel = (modelId) => KNOWN_MODELS.get(String(modelId || '').toLowerCase()) || null;
+
 // Where a provider's requests go, for api.js: {provider, name, protocol, baseURL, key, bearer}. Throws when it is not
 // connected.
 export function providerEndpoint(id) {
@@ -308,7 +317,7 @@ export function enrichModels(listed, catalogue, modelsDevId) {
   if (listed?.length) {
     return listed.map((m) => {
       const fromCatalogue = known[m.id] ? modelFromCatalogue(m.id, known[m.id]) : { id: m.id };
-      return { ...fromCatalogue, ...Object.fromEntries(Object.entries(m).filter(([, v]) => v !== undefined)) };
+      return { ...knownModel(m.id), ...fromCatalogue, ...Object.fromEntries(Object.entries(m).filter(([, v]) => v !== undefined)) };
     });
   }
   return Object.entries(known).filter(([, e]) => e?.tool_call !== false).map(([id, e]) => modelFromCatalogue(id, e));
