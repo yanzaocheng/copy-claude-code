@@ -4,13 +4,13 @@
 
 ## 在服务器用 `cmd.exe` 测试
 
-1. 先验证服务器能连到网关，粘贴网关发给你的普通 API Key（不会回显或写入磁盘）：
+1. 先验证服务器能连到网关，首次使用时粘贴网关发给你的普通 API Key：
 
    ```bat
    claude-pro-lite.exe -check
    ```
 
-   旧版 `cmd.exe` 可以用窗口菜单的「编辑 → 粘贴」。`-check` 发 `GET /v1/models`，不请求模型。真实模型请求按网关用量计费。
+   旧版 `cmd.exe` 可以用窗口菜单的「编辑 → 粘贴」。交互式控制台只显示较长 Key 的首尾和长度（重定向输出只显示长度），通过免费的 `GET /v1/models` 验证后，将 Key 加密保存到 EXE 同目录的 `claude-pro-lite.key`。同一个 Windows 用户、同一网关地址下，下次启动自动读取，无需再输入。更换 Key 时运行 `claude-pro-lite.exe -set-key`。不要复制或分享 Key 文件；如果 EXE 同目录不可写，请把 EXE 移到可写目录。真实模型请求按网关用量计费。
 
 2. 选一个仅含测试文件的工作目录，启动后在 `你>` 后面输入任务，例如“看看 app.log 最后有什么报错”：
 
@@ -24,7 +24,7 @@
    claude-pro-lite.exe -dir "C:\agent-test" -edit
    ```
 
-默认网关 `https://7bit.fun`，默认模型 `claude-sonnet-5-5`；用 `-gateway` 和 `-model` 覆盖。用 `/exit` 退出、`/new` 清空内存中的对话。用 `-p "任务"` 运行一次。非交互方式可由调用进程传入 `CLAUDE_PRO_GATEWAY_KEY`，不要把 Key 写在命令历史或批处理文件里；程序不接受明文 Key 参数。模型请求直接往 `/v1/messages` 发送 `Authorization: Bearer …`，没有登录步骤。
+默认网关 `https://7bit.fun`，默认模型 `claude-sonnet-5-5`；用 `-gateway` 和 `-model` 覆盖。用 `/exit` 退出、`/new` 清空内存中的对话。用 `-p "任务"` 运行一次。非交互方式可由调用进程传入 `CLAUDE_PRO_GATEWAY_KEY`；该变量优先于已保存的 Key，且其值不会写入磁盘。不要把 Key 写在命令历史或批处理文件里；程序不接受明文 Key 参数。模型请求直接往 `/v1/messages` 发送 `Authorization: Bearer …`，没有登录步骤。
 
 - 默认只读，模型可自行列目录、读取文本和日志末尾。单次读取最多 24 KiB，支持 UTF-8 和带 BOM 的 UTF-16；不识别 GBK 等旧编码。编辑功能只支持现有 UTF-8 文本文件，没有任意 Shell、文件删除或后台服务。
 - **工具读到的文本会发送给你选择的网关。** 只指定不含敏感信息的工作目录，常见凭据文件名的过滤并不等于内容脱敏。

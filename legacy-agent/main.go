@@ -41,6 +41,7 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 	dir := flags.String("dir", ".", "允许 Agent 访问的工作目录")
 	prompt := flags.String("p", "", "只执行一次提问")
 	check := flags.Bool("check", false, "只请求模型列表，检查 Key 和网络，不调用模型")
+	setKey := flags.Bool("set-key", false, "重新输入、验证并保存网关 API Key")
 	edit := flags.Bool("edit", false, "允许预览并确认后修改文件（默认只读）")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -48,7 +49,8 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 		}
 		return err
 	}
-	if flags.NArg() != 0 || strings.TrimSpace(*model) == "" || (*check && *prompt != "") {
+	keyOnly := *check || *setKey
+	if flags.NArg() != 0 || strings.TrimSpace(*model) == "" || (keyOnly && (*prompt != "" || *edit)) {
 		return errors.New("参数无效；运行 claude-pro-lite.exe -h 查看用法")
 	}
 	endpoint, err := normalizeGateway(*gatewayURL)
@@ -56,11 +58,11 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 		return err
 	}
 
-	if *edit && !*check && !isConsole(in) {
+	if *edit && !isConsole(in) {
 		return errors.New("-edit 必须在交互式 Windows 控制台运行，不能重定向输入")
 	}
 	var ws *workspace
-	if !*check {
+	if !keyOnly {
 		ws, err = openWorkspace(*dir)
 		if err != nil {
 			return err
@@ -69,24 +71,11 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 	}
 	fmt.Fprintln(out, "网关："+endpoint)
 	input := bufio.NewReaderSize(in, 64<<10)
-	key := strings.TrimSpace(os.Getenv(keyEnv))
-	if key == "" {
-		key, err = promptKey(in, input, out)
-		if err != nil {
-			return err
-		}
-	}
-	if key == "" || len(key) > 4096 || strings.ContainsAny(key, "\r\n\t ") {
-		return errors.New("网关 API Key 为空或格式无效")
-	}
-	gw := newGateway(endpoint, key)
-	if *check {
-		count, err := gw.check(ctx)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "API Key 验证通过，网关返回 %d 个模型。\n", count)
-		return nil
+	gw, err := acquireGateway(ctx, endpoint, *setKey, keyOnly, "", out, func() (string, error) {
+		return promptKey(in, input, out)
+	})
+	if err != nil || keyOnly {
+		return err
 	}
 
 	fmt.Fprintf(out, "模型：%s\n工作目录：%s\n模型调用按网关计费；Agent 读取的文本将发送给网关。\n", terminalText(*model), terminalText(ws.dir))

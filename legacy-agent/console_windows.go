@@ -34,7 +34,7 @@ func promptKey(in *os.File, input *bufio.Reader, out io.Writer) (string, error) 
 		return "", fmt.Errorf("无法关闭控制台回显：%w", err)
 	}
 	defer setConsoleMode.Call(in.Fd(), uintptr(mode))
-	fmt.Fprint(out, "粘贴网关 API Key 后按回车（不显示、不保存）：")
+	fmt.Fprint(out, "粘贴网关 API Key 后按回车（验证通过后加密保存，输入时不回显）：")
 	key, err := readLine(input)
 	fmt.Fprintln(out)
 	return key, err

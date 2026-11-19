@@ -167,7 +167,7 @@ func (g *gateway) statusError(res *http.Response) error {
 	case status >= 300 && status < 400:
 		hint = "网关重定向已拒绝；请使用最终 HTTPS 地址"
 	case status == 401 || status == 403:
-		hint = "API Key 无效或无权使用此接口"
+		hint = "API Key 无效或无权使用此接口；要更换 Key，请运行 claude-pro-lite.exe -set-key"
 	case status == 402:
 		hint = "网关账户余额不足"
 	case status == 429:
