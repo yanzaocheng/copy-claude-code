@@ -1,6 +1,6 @@
 # claude-pro — 完全访问的命令行编程 Agent
 
-`claude-pro` 是一个**自己实现**的终端 AI 编程助手：模型请求默认发往 **7bit.fun 网关**（codex-gateway，负责上游模型和账户计费），也可以用 `/connect` 接上 Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义等供应商或你自己的接口，用自己的 Key。
+`claude-pro` 是一个**自己实现**的终端 AI 编程助手，**支持多家模型厂商**：用 `/connect` 接上 Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter、7bit.fun 网关或你自己的接口，各用各的 Key，可以同时连接多家、随时切换模型。7bit.fun 只是其中一家，额外提供余额、远程网页控制和跨电脑会话。
 
 最大的特点：**没有任何权限确认**。Bash 命令、文件读写、联网、MCP 工具，模型要用就直接执行，不弹窗、不问、没有 allow/deny 规则。它面向你自己的测试机器，目的是让模型的能力不被打断地发挥出来。作为补偿，每次文件修改都会做检查点，`/rewind` 可以撤销。
 
@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 网关的 Key 在网关网站「API 密钥」创建，保存到 `~/.claude-pro/gateway.json`；其他供应商的 Key 保存到 `~/.claude-pro/providers.json`。远程会话发布只走网关。
+> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 的 Key 保存在 `~/.claude-pro/gateway.json`，其他厂商的保存在 `~/.claude-pro/providers.json`。远程会话发布只在连接了 7bit.fun 时才有。
 
 ## 安装与运行
 
@@ -44,7 +44,7 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 
 ## 登录与供应商
 
-交互式启动时，如果既没有网关登录、也没有连接任何供应商，会自动打开 `/connect`（第一项是 7bit.fun 网关）；也可以手动运行：
+交互式启动时，如果还没有连接任何厂商，会自动打开 `/connect`；也可以手动运行：
 
 ```powershell
 claude-pro /connect
@@ -63,7 +63,12 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 
 ## /connect：选择供应商
 
-和 OpenCode 的 `/connect` 一样：从列表里选一家，粘贴它的 API Key，就能用它的模型。**可以同时连接多家**，它们的模型都列在 `/model` 里，名字是 `供应商/模型`（如 `deepseek/deepseek-v4-pro`、`openrouter/anthropic/claude-sonnet-4.5`），随时切换；不带前缀的名字（`opus`、`claude-opus-5-5`）仍是 7bit.fun 的，旧设置和记住的选择照常可用。
+和 OpenCode 的 `/connect` 一样：从列表里选一家，粘贴它的 API Key，就能用它的模型。**可以同时连接多家**，它们的模型都列在 `/model` 里，名字一律是 `厂商/模型`（如 `7bit/claude-opus-5-5`、`deepseek/deepseek-v4-pro`、`openrouter/anthropic/claude-sonnet-4.5`），随时切换。没连接的厂商不会出现在 `/model` 里。
+
+- **默认模型跟随已连接的厂商**：设置里没有指定 `model` 时，连了提供 Claude 的厂商（7bit.fun 或 Anthropic）就用 `opus`，否则用第一个连接的厂商在 `/connect` 时选的模型。只连了 DeepSeek 的用户，启动后直接就是 DeepSeek 的模型。
+- **`opus`、`sonnet`、`haiku` 是别名**：指向已连接的 Claude 厂商，两家都连了按 `/connect` 列表顺序取 7bit.fun；`7bit/opus` 固定指 7bit.fun 的。
+- **兼容旧写法**：不带前缀的名字（`claude-opus-5-5`、`gpt-6.2-sol`）按 7bit.fun 的模型处理，旧设置和记住的选择照常可用。
+- **断开时自动换模型**：`/disconnect` 了正在用的厂商，会换到仍连接着的厂商的默认模型。
 
 | 供应商 | 协议 | 地址 |
 |---|---|---|
@@ -100,9 +105,9 @@ Key 保存在 `~/.claude-pro/providers.json`（只有你自己能读）。`/disc
 
 ## 配置
 
-网关 key 只来自 `/connect`：粘贴后保存在 `~/.claude-pro/gateway.json`，没有环境变量或 `.env` 文件可以设置它。
+各家的 key 只来自 `/connect`（7bit.fun 的在 `~/.claude-pro/gateway.json`，其他厂商的在 `~/.claude-pro/providers.json`），没有环境变量或 `.env` 文件可以设置它们。
 
-一般只需要 `/connect`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
+一般只需要 `/connect`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值；`model` 不写时跟随已连接的厂商，见上面的 `/connect`）：
 
 ```json
 {

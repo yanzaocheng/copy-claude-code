@@ -1,5 +1,6 @@
-// The gateway provider: model requests go to a shared gateway (https://7bit.fun by default) with an API key of the
-// user's gateway account, which pays for them from its balance. The user makes the key on the gateway's web page
+// The 7bit.fun provider (the gateway, 7bit in model names): one of the providers, whose model requests go to a shared
+// gateway (https://7bit.fun by default) with an API key of the user's gateway account, which pays for them from its
+// balance. The user makes the key on the gateway's web page
 // (its user page, "API 密钥") and pastes it into /connect (7bit.fun), which checks it (GET /v1/account) and saves it.
 // (Until 2026-11-19 /login did, and before that it opened the gateway's page in the browser and took a key back
 // through a local callback server.)
@@ -7,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONFIG_DIR, GATEWAY_DEFAULT_URL, normalizeGatewayUrl, noteServedModels } from './config.js';
+import { CONFIG_DIR, GATEWAY_DEFAULT_URL, normalizeGatewayUrl, noteServedModels, readGatewayLogin, forgetGatewayLogin } from './config.js';
 
 export { GATEWAY_DEFAULT_URL, normalizeGatewayUrl };
 export const gatewayLoginFile = () => path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json');
@@ -15,15 +16,7 @@ export const gatewayLoginFile = () => path.join(process.env.CLAUDE_PRO_CONFIG_DI
 // The login /connect saved for this gateway, {url, apiKey, account, savedAt}, or null when there is none. It is where
 // the key of every gateway request comes from: there is no environment variable or .env file for it. A login saved
 // with the gateway's old address is this gateway's (see normalizeGatewayUrl), and comes back with the new one.
-export function gatewayLogin(url) {
-  try {
-    const data = JSON.parse(fs.readFileSync(gatewayLoginFile(), 'utf8'));
-    if (!data?.apiKey || (url && normalizeGatewayUrl(data.url) !== normalizeGatewayUrl(url))) return null;
-    return { ...data, url: normalizeGatewayUrl(data.url) };
-  } catch {
-    return null;
-  }
-}
+export const gatewayLogin = (url) => readGatewayLogin(url);
 
 // Where the gateway's users make their keys.
 export const gatewayKeyPage = (url) => `${normalizeGatewayUrl(url)}/user#keys`;
@@ -32,11 +25,13 @@ export function saveGatewayLogin(login) {
   const file = gatewayLoginFile();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
+  forgetGatewayLogin();
   fs.writeFileSync(tmp, JSON.stringify({ ...login, url: normalizeGatewayUrl(login.url), savedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 
 export function clearGatewayLogin() {
+  forgetGatewayLogin();
   try { fs.unlinkSync(gatewayLoginFile()); return true; } catch { return false; }
 }
 

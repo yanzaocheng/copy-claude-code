@@ -24,8 +24,8 @@ function endpointFor(config, model) {
   const provider = providerOf(model);
   if (provider === GATEWAY_PROVIDER) {
     const key = gatewayLogin(config.gatewayUrl)?.apiKey;
-    if (!key) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /connect and choose 7bit.fun (or another provider).`, { status: 401, retryable: false });
-    return { provider, name: 'the gateway', protocol: 'anthropic', baseURL: config.gatewayUrl, key, bearer: true };
+    if (!key) throw new APIError(`7bit.fun is not connected (its models: 7bit/…). Run /connect 7bit.fun, or /model for another provider's model.`, { status: 401, retryable: false });
+    return { provider, name: '7bit.fun', protocol: 'anthropic', baseURL: config.gatewayUrl, key, bearer: true };
   }
   try {
     return providerEndpoint(provider);

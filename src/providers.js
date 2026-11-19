@@ -60,33 +60,40 @@ export function validBaseUrl(url) {
 export const cleanProviderId = (name) => String(name || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30);
 export const reservedProviderId = (id) => id === GATEWAY_PROVIDER || PRESET_IDS.has(id);
 
-// {id: connection}. A connection: {apiKey, authHeader, models: [{id, name?, window?, maxOutput?, price?}], savedAt}, and
-// for the user's own providers also {custom: true, name, protocol, baseUrl}.
-export function readConnections() {
+// {id: connection}. A connection: {apiKey, authHeader, model?, models: [{id, name?, window?, maxOutput?, price?}],
+// savedAt} (model: the one chosen at /connect), and for the user's own providers also {custom: true, name, protocol,
+// baseUrl}. Read again at most once a second (the model is resolved at every frame of the footer), and at once after
+// this process changed the file; another window's change is seen within the second. Not to be changed by callers.
+const MEMO_MS = 1000;
+let memo = null; // {at, data}
+export function readConnections({ fresh = false } = {}) {
+  if (!fresh && memo && Date.now() - memo.at < MEMO_MS) return memo.data;
+  let data = {};
   try {
-    const data = JSON.parse(fs.readFileSync(providersFile(), 'utf8').replace(/^\uFEFF/, ''));
-    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
-  } catch {
-    return {};
-  }
+    const parsed = JSON.parse(fs.readFileSync(providersFile(), 'utf8').replace(/^\uFEFF/, ''));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed;
+  } catch { /* none yet, or unreadable */ }
+  memo = { at: Date.now(), data };
+  return data;
 }
 
 function writeConnections(all) {
   const file = providersFile();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
+  memo = null;
   fs.writeFileSync(tmp, JSON.stringify(all, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 
 export function saveConnection(id, connection) {
-  const all = readConnections();
+  const all = { ...readConnections({ fresh: true }) };
   all[id] = { ...connection, savedAt: new Date().toISOString() };
   writeConnections(all);
 }
 
 export function removeConnection(id) {
-  const all = readConnections();
+  const all = { ...readConnections({ fresh: true }) };
   if (!all[id]) return false;
   delete all[id];
   writeConnections(all);
@@ -105,9 +112,12 @@ export function providerInfo(id, connections = readConnections()) {
   return null;
 }
 
-// The providers that are connected now (the gateway is not among them: see gatewayLogin).
+// The providers that are connected now, in the order /connect lists them (the gateway is not among them: see
+// gatewayLogin).
 export function connectedProviders(connections = readConnections()) {
-  return Object.keys(connections).map((id) => providerInfo(id, connections)).filter((p) => p?.connection && (p.connection.apiKey || p.keyless));
+  const rank = (id) => { const i = PRESETS.findIndex((p) => p.id === id); return i < 0 ? PRESETS.length : i; };
+  return Object.keys(connections).sort((a, b) => rank(a) - rank(b))
+    .map((id) => providerInfo(id, connections)).filter((p) => p?.connection && (p.connection.apiKey || p.keyless || p.custom));
 }
 
 // "deepseek/deepseek-v4-pro" -> {provider: 'deepseek', model: 'deepseek-v4-pro'}. The part before the first / is a

@@ -15,7 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeTtl } from './cache.js';
-import { GATEWAY_PROVIDER, splitModelRef, providerModel, providerInfo, normalizeBaseUrl } from './providers.js';
+import { GATEWAY_PROVIDER, splitModelRef, providerModel, providerInfo, normalizeBaseUrl, connectedProviders, readConnections } from './providers.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A source checkout (a git clone, also when npm links to one), as opposed to a copy installed from npm: the agent
@@ -33,10 +33,27 @@ export function normalizeGatewayUrl(url) {
 }
 export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).version;
 
+// The gateway key /connect saved (gateway.json): {url, apiKey, account, savedAt} for this gateway, or null. Read again
+// at most once a second (the model is resolved at every frame of the footer), and at once after this process changed
+// the file (forgetGatewayLogin). gateway.js's gatewayLogin is this.
+let gatewayMemo = null; // {at, data}
+export function readGatewayLogin(url) {
+  if (!gatewayMemo || Date.now() - gatewayMemo.at >= 1000) {
+    let data = null;
+    try { data = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json'), 'utf8')); } catch { /* none */ }
+    gatewayMemo = { at: Date.now(), data };
+  }
+  const data = gatewayMemo.data;
+  if (!data?.apiKey || (url && normalizeGatewayUrl(data.url) !== normalizeGatewayUrl(url))) return null;
+  return { ...data, url: normalizeGatewayUrl(data.url) };
+}
+export function forgetGatewayLogin() { gatewayMemo = null; }
+
 // The ordinary settings /config shows. `legacy`: the old spelling accepted in settings.json.env and by config
 // commands, but no longer read from the process environment. Writes use only the ordinary spelling.
 export const BASIC_SETTINGS = {
-  model: { default: 'opus', legacy: 'CLAUDE_PRO_GATEWAY_MODEL', description: 'Default model; /model and --model override it' },
+  // (unset: see Config.defaultModelSpec, which follows the providers connected)
+  model: { default: 'opus', legacy: 'CLAUDE_PRO_GATEWAY_MODEL', description: 'Default model, provider/model (unset: opus where Claude is connected, else a model of the first connected provider); /model and --model override it' },
   effort: { default: 'auto', legacy: 'CLAUDE_CODE_EFFORT_LEVEL', description: 'Reasoning effort; /effort and --effort override it' },
   promptCacheTtl: { default: '1h', legacy: 'CLAUDE_CODE_PROMPT_CACHE_TTL', description: 'Conversation prompt cache: 5m or 1h' },
   subagentPromptCacheTtl: { default: '5m', legacy: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', description: 'Sub-agent, compaction and side-query prompt cache: 5m or 1h' },
@@ -225,17 +242,53 @@ export class Config {
   }
 
   get gatewayUrl() { return normalizeGatewayUrl(this.env.CLAUDE_PRO_GATEWAY_URL); }
+  // The gateway is one provider among the others (7bit in model names), connected when its key is saved.
+  get gatewayConnected() { return Boolean(readGatewayLogin(this.gatewayUrl)); }
+  providerConnected(id) { return id === GATEWAY_PROVIDER ? this.gatewayConnected : connectedProviders().some((p) => p.id === id); }
+  providerName(id) { return id === GATEWAY_PROVIDER ? '7bit.fun' : providerInfo(id)?.name || id; }
+  // Whether any provider is connected at all.
+  get anyProviderConnected() { return this.gatewayConnected || connectedProviders().length > 0; }
+
   // Where the current model's requests go, for /status and the welcome box.
   get endpointLabel() {
     const provider = this.model.provider;
-    if (provider === GATEWAY_PROVIDER) return `${this.gatewayUrl} (gateway)`;
+    const connected = this.providerConnected(provider) ? '' : ', not connected: /connect';
+    if (provider === GATEWAY_PROVIDER) return `${this.gatewayUrl} (7bit.fun${connected})`;
     const info = providerInfo(provider);
     if (!info) return `${provider} (no such provider: /connect lists them)`;
-    return `${normalizeBaseUrl(info.connection?.baseUrl || info.baseUrl, info.protocol)} (${info.name}${info.connection ? '' : ', not connected: /connect'})`;
+    return `${normalizeBaseUrl(info.connection?.baseUrl || info.baseUrl, info.protocol)} (${info.name}${connected})`;
   }
 
-  aliasTarget(alias) {
-    return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
+  // The connected provider the Claude aliases (opus, sonnet, haiku) go to: the first of 7bit.fun and Anthropic that is
+  // connected, in /connect's order; null with neither.
+  claudeProvider() {
+    if (this.gatewayConnected) return GATEWAY_PROVIDER;
+    if (connectedProviders().some((p) => p.id === 'anthropic')) return 'anthropic';
+    return null;
+  }
+
+  // What an alias names: the model of the provider that serves Claude here (Anthropic's newest of the family in the
+  // list it gave, else the same id); 7bit.fun's when it is that provider, when neither is connected (the models
+  // then cannot be reached: /connect is said), and with `gateway` (7bit/opus).
+  aliasTarget(alias, { gateway = false } = {}) {
+    const id = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias];
+    if (!id) return null;
+    if (!gateway && this.claudeProvider() === 'anthropic') {
+      const listed = readConnections().anthropic?.models?.find((m) => m.id.includes(alias));
+      return `anthropic/${listed?.id || id}`;
+    }
+    return `${GATEWAY_PROVIDER}/${id}`;
+  }
+
+  // The model when the settings name none: opus where a provider of Claude is connected, else the model chosen when the
+  // first connected provider was connected (or the first it listed); opus when nothing is connected.
+  defaultModelSpec() {
+    if (this.claudeProvider()) return 'opus';
+    for (const p of connectedProviders()) {
+      const model = p.connection.model || p.connection.models?.[0]?.id;
+      if (model) return `${p.id}/${model}`;
+    }
+    return 'opus';
   }
 
   // Resolve a model spec (alias or name, maybe with [1m]) to {id, provider, contextWindow, label}. The window is the
@@ -259,18 +312,22 @@ export class Config {
         ...(known?.price ? { price: known.price } : {}),
       };
     }
-    name = ref.model; // (7bit/claude-opus-5-5 names the gateway's model too)
-    const aliased = this.aliasTarget(name.toLowerCase());
+    // A name without a provider is 7bit.fun's (as before there were others), and an alias goes where Claude is (see
+    // aliasTarget); 7bit/<name> is 7bit.fun's in any case.
+    const explicit = /^7bit\//i.test(name);
+    name = ref.model;
+    const aliased = this.aliasTarget(name.toLowerCase(), { gateway: explicit });
     if (aliased) {
       const inner = this.resolveModel(aliased);
-      return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${name}${oneM ? '[1m]' : ''} (${inner.label})` };
+      return { ...inner, contextWindow: oneM ? 1_000_000 : inner.contextWindow, label: `${explicit ? '7bit/' : ''}${name}${oneM ? '[1m]' : ''} (${inner.label})` };
     }
     const served = servedWindows.get(`${this.gatewayUrl}\n${name}`);
+    const label = `${GATEWAY_PROVIDER}/${name}${oneM ? '[1m]' : ''}`;
     // GPT models are served by the gateway's Codex backend, whose standard window is 272k. A request above 272k costs
     // twice as much (see pricing.js), but the user wants the gateway's window here too (2026-10-27).
-    if (/^gpt-/i.test(name)) return { id: name, provider: GATEWAY_PROVIDER, contextWindow: served || 272_000, label: name };
+    if (/^gpt-/i.test(name)) return { id: name, provider: GATEWAY_PROVIDER, contextWindow: served || 272_000, label };
     const nativeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
-    return { id: name, provider: GATEWAY_PROVIDER, contextWindow: oneM ? 1_000_000 : served || (nativeOneM ? 1_000_000 : 200_000), label: `${name}${oneM ? '[1m]' : ''}` };
+    return { id: name, provider: GATEWAY_PROVIDER, contextWindow: oneM ? 1_000_000 : served || (nativeOneM ? 1_000_000 : 200_000), label };
   }
 
   // The selected model: the configured default unless /model has overridden it for this session.
@@ -279,6 +336,7 @@ export class Config {
 
   setting(key) {
     const spec = BASIC_SETTINGS[key];
+    if (key === 'model' && this.settings.model == null) return this.defaultModelSpec();
     return spec ? this.settings[key] ?? spec.default : this.env[key];
   }
   get modelSpec() { return this.modelOverride || this.configuredModelSpec; }

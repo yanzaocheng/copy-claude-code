@@ -1,10 +1,10 @@
 # copy-claude-code 架构说明
 
-本文档说明当前项目的运行时架构、请求链路、工具执行模型、会话持久化方式，以及仅使用 codex-gateway 的实现边界。文档对应仓库当前实现；代码发生变化时，应同步更新本文档。
+本文档说明当前项目的运行时架构、请求链路、工具执行模型、会话持久化方式，以及多厂商（7bit.fun 网关是其中一家）的实现边界。文档对应仓库当前实现；代码发生变化时，应同步更新本文档。
 
 ## 1. 项目定位
 
-`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。模型请求默认走 7bit.fun 网关（codex-gateway）：本地通过 `/connect`（选 7bit.fun）粘贴网关 key，网关负责上游模型、账户和计费。也可以用 `/connect` 连接其他供应商（Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter……或用户自己的接口），用各自的 key；可以同时连接多家，用哪家由模型名决定（`deepseek/deepseek-v4-pro`，不带前缀即网关）。claude-pro 不读取 Claude CLI OAuth 或 Codex CLI 登录文件。
+`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent，**支持多家模型厂商**：`/connect` 连接 Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter……、7bit.fun 网关（codex-gateway）或用户自己的接口，各用各的 key，可以同时连接多家。请求发给哪家由模型名决定（`厂商/模型`；不带前缀的旧写法按 7bit.fun 处理）；没有指定模型时，默认模型跟随已连接的厂商（`Config.defaultModelSpec`），`opus`/`sonnet`/`haiku` 指向已连接的 Claude 厂商（`Config.aliasTarget`）。7bit.fun 是其中一家，另外提供余额、远程网页控制和跨电脑会话。claude-pro 不读取 Claude CLI OAuth 或 Codex CLI 登录文件。
 
 | 后端 | 用途 | 凭据来源 | 请求目标 |
 |---|---|---|---|

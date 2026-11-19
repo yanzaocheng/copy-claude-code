@@ -7,14 +7,15 @@ import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
 
-A command line coding agent using the gateway (https://7bit.fun), or the providers connected with /connect.
+A command line coding agent for many model providers: /connect connects them (Anthropic, OpenAI, DeepSeek,
+Kimi, GLM, Qwen, OpenRouter, the 7bit.fun gateway, your own endpoint...), several at once.
 Starts an interactive session by default; use -p for non-interactive output.
 
 Options:
   -p, --print                      Print the response and exit (useful for pipes)
   -c, --continue                   Continue the most recent conversation in this directory
   -r, --resume [sessionId]         Resume a conversation (picker if no id given)
-  --model <model>                  Model for this session (opus, sonnet, haiku, a gateway model, or provider/model)
+  --model <model>                  Model for this session: provider/model (deepseek/deepseek-v4-pro), or opus, sonnet, haiku
   --effort <level>                 Reasoning effort: none|minimal|low|medium|high|xhigh|max
   --output-format <format>         text | json | stream-json (with --print)
   --verify <command>               After the agent edits files, run this (e.g. "npm test") and send failures back to fix
@@ -38,8 +39,8 @@ Commands:
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
 
-In a session, /connect connects a model provider with its API key: the gateway (7bit.fun, a key made on its
-user page, API 密钥), Anthropic, OpenAI, DeepSeek, Kimi, GLM, Qwen, OpenRouter, your own... /disconnect forgets one.
+In a session, /connect connects a model provider with its API key, /model picks a model of any connected one,
+/disconnect forgets one.
 `;
 
 function parseArgs(argv) {

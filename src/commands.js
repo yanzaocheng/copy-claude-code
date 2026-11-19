@@ -50,24 +50,33 @@ async function providerModelChoices() {
 }
 
 // What /model offers (and the remote page, see App.remoteOptions): [{value, label, description}] in plain text, the
-// default first. `value` is what /model <value> takes. The gateway's list of models is asked for anew each time (4
-// seconds at most), so a model it has just added is there without a restart; without an answer the list it gave
-// last, else gpt-6.1-sol for its GPT models. Then the models of the other connected providers (provider/model).
+// default first. `value` is what /model <value> takes. Every connected provider's models, provider/model, 7bit.fun's
+// among them (asked for anew each time, 4 seconds at most, so that a model just added is there without a restart;
+// without an answer the list given last, else gpt-6.1-sol for its GPT models); the Claude aliases where a provider of
+// Claude is connected. A provider that is not connected offers nothing.
 export async function modelChoices(cfg) {
   const configured = cfg.configuredModelSpec;
-  const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).id}` }];
-  opts.push(...['opus', 'sonnet', 'haiku'].map((a) => ({ value: a, label: a, description: `→ ${cfg.resolveModel(cfg.aliasTarget(a)).label}` })));
-  // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
-  const login = gatewayLogin(cfg.gatewayUrl);
-  let served = null;
-  const others = providerModelChoices();
-  try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true }); } catch { /* offline: the fallback below */ }
-  const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
-  for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
-    if (aliased.has(m.id)) continue;
-    opts.push({ value: m.id, label: m.id, description: isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || '' });
+  const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).label}` }];
+  const tag = (m) => `${m.provider}/${m.id}`;
+  const aliased = new Set();
+  if (cfg.claudeProvider()) {
+    for (const a of ['opus', 'sonnet', 'haiku']) {
+      const target = cfg.resolveModel(cfg.aliasTarget(a));
+      aliased.add(tag(target));
+      opts.push({ value: a, label: a, description: `→ ${target.label}` });
+    }
   }
-  opts.push(...(await others));
+  const others = providerModelChoices();
+  const login = gatewayLogin(cfg.gatewayUrl);
+  if (login) {
+    let served = null;
+    try { served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true }); } catch { /* offline: the fallback below */ }
+    for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
+      if (aliased.has(`${GATEWAY_PROVIDER}/${m.id}`)) continue;
+      opts.push({ value: `${GATEWAY_PROVIDER}/${m.id}`, label: `${GATEWAY_PROVIDER}/${m.id}`, description: ['7bit.fun', isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || ''].filter(Boolean).join(' · ') });
+    }
+  }
+  opts.push(...(await others).filter((o) => !aliased.has(o.value)));
   return opts;
 }
 
@@ -309,10 +318,12 @@ export function buildCommands(app) {
         if (!choice) return;
       }
       const forget = choice === '__default__' || choice === 'default';
-      const next = cfg.resolveModel(forget ? cfg.configuredModelSpec : choice).id;
-      const changed = next !== cfg.model.id;
-      // (Not asked at a pause for a rate limit: the cache runs out while waiting for the limit as well.)
-      if (changed && !app.agent.pausedForLimit && !(await confirmCacheLoss('Switching the model', { model: next }))) { out(c.dim('The model was not changed.')); return; }
+      const target = cfg.resolveModel(forget ? cfg.configuredModelSpec : choice);
+      const sameProvider = target.provider === cfg.model.provider;
+      const changed = target.id !== cfg.model.id || !sameProvider;
+      // (Not asked at a pause for a rate limit: the cache runs out while waiting for the limit as well. Another
+      // provider's model of the same name has no cache of this one.)
+      if (changed && !app.agent.pausedForLimit && !(await confirmCacheLoss('Switching the model', { model: sameProvider ? target.id : target.label }))) { out(c.dim('The model was not changed.')); return; }
       cfg.modelOverride = forget ? null : choice;
       if (changed) app.runtime.invalidateSystemPrompt(); // the prompt names the model; the new model starts a cache of its own anyway
       const kept = keep(cfg, { model: cfg.modelOverride }, forget);
@@ -445,6 +456,20 @@ export function buildCommands(app) {
     out(c.red(`${hostOf(url)} was not connected: the gateway refused the key three times. Check it on ${page}, then /connect again.`));
   }
 
+  // After a provider was disconnected: the model in use, when its provider is not connected any more, gives way to the
+  // default (which follows the providers still connected, see Config.defaultModelSpec). Returns what to say, or ''.
+  function fallBack() {
+    const cfg = app.runtime.config;
+    if (cfg.providerConnected(cfg.model.provider)) return '';
+    cfg.modelOverride = null;
+    try { rememberChoice({ model: null }); } catch { /* the settings file cannot be written: for this session */ }
+    app.runtime.invalidateSystemPrompt();
+    const now = cfg.model;
+    return cfg.providerConnected(now.provider)
+      ? ` The model is ${c.bold(now.label)} now (the default).`
+      : ` No connected provider serves a model now: /connect connects one.`;
+  }
+
   // Forgetting the gateway's key (7bit.fun in /disconnect; /logout until 2026-11-19): this session goes offline there,
   // and the other sessions of this computer follow within seconds (see App.syncRemote).
   function disconnectGateway() {
@@ -453,8 +478,8 @@ export function buildCommands(app) {
     const wasOnline = Boolean(app.remote);
     app.stopRemote();
     out(had
-      ? `Disconnected the gateway ${cfg.gatewayUrl}: its key is forgotten.${wasOnline ? ' This session is offline there now.' : ''}${cfg.model.provider === GATEWAY_PROVIDER ? c.dim(` ${cfg.model.label} is the gateway's: /connect, or /model for another provider's model.`) : ''}`
-      : c.dim(`The gateway ${cfg.gatewayUrl} was not connected.`));
+      ? `Disconnected 7bit.fun: its key is forgotten.${wasOnline ? ' This session is offline there now.' : ''}${fallBack()}`
+      : c.dim(`7bit.fun (${cfg.gatewayUrl}) was not connected.`));
   }
 
   // ---------------------------------------------------------------- /connect: the providers of models
@@ -504,12 +529,14 @@ export function buildCommands(app) {
     const models = enrichModels(key.listed, catalogue, info.modelsDev);
     const cfg = app.runtime.config;
     const KEEP = '__keep__';
+    // ("keep" only where the model in use can be used: with nothing else connected, one of this provider's is the model)
+    const canKeep = cfg.providerConnected(cfg.model.provider) && cfg.model.provider !== info.id;
     const choice = models.length
       ? await app.showDialog(new SelectDialog({
         title: `Connect ${info.name} · model`,
-        question: `Use one of its models now? (/model switches any time; its models are ${info.id}/<model>)`,
+        question: `${canKeep ? 'Use one of its models now?' : 'Which of its models?'} (/model switches any time; its models are ${info.id}/<model>)`,
         options: [
-          { label: `Keep using ${cfg.model.label}`, value: KEEP },
+          ...(canKeep ? [{ label: `Keep using ${cfg.model.label}`, value: KEEP }] : []),
           ...models.map((m) => ({ label: m.id, value: m.id, description: [m.name, m.window ? `${formatTokens(m.window)} context` : '', m.price ? `$${m.price.input} / $${m.price.output} per M tokens` : ''].filter(Boolean).join(' · ') })),
         ],
         otherOption: true,
@@ -540,6 +567,8 @@ export function buildCommands(app) {
       apiKey: key.apiKey,
       authHeader: info.protocol === 'openai' ? 'bearer' : authHeader || 'x-api-key',
       ...(Object.keys(quirks).length ? { quirks } : {}),
+      // the model chosen: the default when this provider is the first connected (see Config.defaultModelSpec)
+      ...(choice !== KEEP ? { model: choice } : existing?.model ? { model: existing.model } : {}),
       models: kept,
     });
     out([`${c.green('✔')} Connected ${c.bold(info.name)}${kept.length ? c.dim(` · ${kept.length} model${kept.length === 1 ? '' : 's'}`) : ''}`, c.dim(`Its models are ${info.id}/<model> in /model · /disconnect ${info.id} forgets the key.`)]);
@@ -629,15 +658,7 @@ export function buildCommands(app) {
       if (id === GATEWAY_PROVIDER || id === 'gateway' || id === '7bit.fun') { disconnectGateway(); return; }
       const info = providerInfo(id);
       if (!removeConnection(id)) { out(c.dim(`${info?.name || id} is not connected.`)); return; }
-      // The model in use was one of its models: back to the configured default.
-      let back = '';
-      if (cfg.model.provider === id) {
-        cfg.modelOverride = null;
-        try { rememberChoice({ model: null }); } catch { /* the settings file cannot be written: for this session */ }
-        app.runtime.invalidateSystemPrompt();
-        back = ` The model is ${c.bold(cfg.model.label)} again (the configured default).`;
-      }
-      out(`Disconnected ${info?.name || id}: its key is forgotten.${back}`);
+      out(`Disconnected ${info?.name || id}: its key is forgotten.${fallBack()}`);
     },
   });
 
@@ -654,10 +675,9 @@ export function buildCommands(app) {
         row('Version', VERSION),
         row('Session ID', app.store.id),
         row('cwd', app.cwd),
-        row('Provider', cfg.model.provider === GATEWAY_PROVIDER ? 'gateway' : `${providerInfo(cfg.model.provider)?.name || cfg.model.provider} ${c.dim(`(${cfg.model.provider}/…)`)}`),
+        row('Provider', `${cfg.providerName(cfg.model.provider)} ${c.dim(`(${cfg.model.provider}/…)`)}${cfg.providerConnected(cfg.model.provider) ? '' : c.red(' not connected (/connect)')}`),
         row('Endpoint', cfg.endpointLabel),
-        row('Gateway login', gatewayLogin(cfg.gatewayUrl) ? `key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.dim('none (/connect)')),
-        row('Connected', connectedProviders().map((p) => p.id).join(', ') || c.dim('no other provider (/connect)')),
+        row('Connected', [...(gatewayLogin(cfg.gatewayUrl) ? [`7bit.fun ${c.dim(`(${gatewayLogin(cfg.gatewayUrl).account?.email || 'key of this machine'}; /cost shows the balance)`)}`] : []), ...connectedProviders().map((p) => p.name)].join(', ') || c.red('no provider (/connect)')),
         row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
         row('Effort', cfg.effort || 'auto'),
         row('System prompt', app.flags.systemPrompt !== undefined ? 'command line override' : 'built-in default'),
@@ -676,14 +696,14 @@ export function buildCommands(app) {
     },
   });
 
-  // /status about the gateway: whether this session is online there (its web page) and its name for sessions on the
-  // other computers.
+  // /status about this session's name for the other sessions, and, where 7bit.fun is connected, whether it is online
+  // there (its web page) and its name on the other computers.
   function remoteLines(row) {
     const cfg = app.runtime.config;
-    const remote = app.remoteState();
     const me = app.peerLabel();
+    if (!gatewayLogin(cfg.gatewayUrl)) return [row('Name', `@${me} ${c.dim('(for the other sessions of this computer; /rename changes it)')}`)];
     return [
-      row('Remote session', remote.text),
+      row('Remote session', app.remoteState().text),
       row('Name', `@${me} ${c.dim(`(on your other computers: @${machineName(cfg.env)}/${me}; /rename changes it)`)}`),
     ];
   }
@@ -1087,8 +1107,9 @@ export function buildCommands(app) {
         `${c.green('✔')} Node ${process.versions.node}`,
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
         `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
-        `${gatewayLogin(cfg.gatewayUrl) ? c.green('✔') : cfg.model.provider === GATEWAY_PROVIDER ? c.red('✘') : c.yellow('!')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/connect 7bit.fun)'}`,
+        ...(gatewayLogin(cfg.gatewayUrl) ? [`${c.green('✔')} 7bit.fun connected ${c.dim(`(7bit/…, ${cfg.gatewayUrl})`)}`] : []),
         ...connectedProviders().map((p) => `${c.green('✔')} ${p.name} connected ${c.dim(`(${p.id}/…, ${normalizeBaseUrl(p.connection.baseUrl || p.baseUrl, p.protocol)})`)}`),
+        ...(cfg.providerConnected(cfg.model.provider) ? [] : [`${c.red('✘')} ${cfg.model.label} is a model of ${cfg.providerName(cfg.model.provider)}, which is not connected (/connect)`]),
       ];
       out(lines);
       app.busy = true;

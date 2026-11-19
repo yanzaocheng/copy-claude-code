@@ -1,7 +1,7 @@
 {
   "name": "@yanzc/claude-pro",
   "version": "0.9.8",
-  "description": "claude-pro: a command line coding agent for the codex-gateway. Full access with no permission prompts; file edits are checkpointed and can be rewound.",
+  "description": "claude-pro: a command line coding agent for many model providers (Anthropic, OpenAI, DeepSeek, Kimi, GLM, Qwen, OpenRouter, the 7bit.fun gateway, your own endpoint...). Full access with no permission prompts; file edits are checkpointed and can be rewound.",
   "type": "module",
   "repository": {
     "type": "git",
@@ -13,6 +13,9 @@
     "coding-agent",
     "cli",
     "anthropic",
+    "openai",
+    "deepseek",
+    "multi-provider",
     "ai"
   ],
   "bin": {

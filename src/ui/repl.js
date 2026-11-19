@@ -38,8 +38,8 @@ import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, 
 import { RemoteControl, transcriptItems, onlineEnabled, remoteCommandsEnabled, REMOTE_WIDTH } from '../remote.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
-// (a provider's model with its provider in front: deepseek/deepseek-v4-pro; the gateway's without)
-export const modelTag = (model) => `${model?.provider && model.provider !== '7bit' ? `${model.provider}/` : ''}${String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '')}`;
+// (every model with its provider in front: 7bit/opus-5-5, deepseek/deepseek-v4-pro)
+export const modelTag = (model) => `${model?.provider ? `${model.provider}/` : ''}${String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '')}`;
 
 // The model and effort level that requests use now, for the footer and the terminal title. The effort
 // is left out when none is sent (auto) and for a model that does not take one.
@@ -927,7 +927,8 @@ export class App {
     const cfg = this.config;
     const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
     const chosen = cfg.modelOverride || 'default';
-    const current = models.find((o) => o.value === chosen) || models.find((o) => o.value !== 'default' && cfg.resolveModel(o.value).id === cfg.model.id);
+    const same = (m) => m.id === cfg.model.id && m.provider === cfg.model.provider;
+    const current = models.find((o) => o.value === chosen) || models.find((o) => o.value !== 'default' && same(cfg.resolveModel(o.value)));
     const effortChosen = cfg.effortOverride || 'default';
     const { effort } = modelInfo(cfg);
     return {
@@ -1308,9 +1309,8 @@ export class App {
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
     // (the model in use cannot be reached: said, with what connects it)
     const provider = cfg.model.provider;
-    if (provider === '7bit' ? !gatewayLogin(cfg.gatewayUrl) : !connectedProviders().some((p) => p.id === provider)) {
-      lines.push('', c.yellow(provider === '7bit' ? ` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /connect and choose 7bit.fun (or another provider).` : ` ⚠ ${cfg.model.label} is a model of ${provider}, which is not connected. Run /connect ${provider}, or /model for another.`));
-    }
+    if (!cfg.anyProviderConnected) lines.push('', c.yellow(' ⚠ No model provider is connected. Run /connect.'));
+    else if (!cfg.providerConnected(provider)) lines.push('', c.yellow(` ⚠ ${cfg.model.label} is a model of ${cfg.providerName(provider)}, which is not connected. Run /connect ${provider === '7bit' ? '7bit.fun' : provider}, or /model for another.`));
     const mcp = this.runtime.mcp.status();
     if (mcp.length) {
       const ok = mcp.filter((m) => m.status === 'connected').length;
@@ -1580,7 +1580,7 @@ export class App {
     });
     const items = [...peers, ...fileItems];
     if (!items.length) {
-      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer (/connect 7bit.fun reaches your other computers)');
+      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer');
       return null;
     }
     return { items, from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
@@ -1596,7 +1596,7 @@ export class App {
     }
     const items = this.peerSuggestionItems(q);
     if (!items.length) {
-      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/connect 7bit.fun reaches your other computers)');
+      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer');
       return null;
     }
     return { items, from: cursor - q.length - 1, to: cursor };
