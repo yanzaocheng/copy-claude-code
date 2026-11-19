@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,16 +76,39 @@ func normalizeGateway(raw string) (string, error) {
 	return u.String(), nil
 }
 
+// The roots of the gateway's certificate (Let's Encrypt), for a Windows whose root store was never updated.
+//
+//go:embed roots.pem
+var extraRoots []byte
+
+// rootPool: Windows checks the certificate first; only if it fails are the embedded roots tried (see
+// crypto/x509 Verify with a SystemCertPool that has added certificates).
+func rootPool() *x509.CertPool {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	pool.AppendCertsFromPEM(extraRoots)
+	return pool
+}
+
+var transport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.TLSClientConfig = &tls.Config{RootCAs: rootPool(), MinVersion: tls.VersionTLS12}
+	return t
+}()
+
 func newGateway(base, key string) *gateway {
 	return &gateway{base: base, key: key, client: &http.Client{
-		Timeout: 3 * time.Minute,
+		Transport: transport,
+		Timeout:   5 * time.Minute,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}}
 }
 
-func (g *gateway) ask(ctx context.Context, sessionID, model string, messages []message, readOnly bool) (reply, error) {
+func (g *gateway) ask(ctx context.Context, sessionID, model, system string, messages []message, toolList []toolSpec) (reply, error) {
 	payload := struct {
 		Model     string     `json:"model"`
 		MaxTokens int        `json:"max_tokens"`
@@ -90,7 +116,7 @@ func (g *gateway) ask(ctx context.Context, sessionID, model string, messages []m
 		Messages  []message  `json:"messages"`
 		Tools     []toolSpec `json:"tools"`
 		Stream    bool       `json:"stream"`
-	}{model, 4096, systemPrompt, messages, tools(readOnly), false}
+	}{model, 8192, system, messages, toolList, false}
 	var answer reply
 	err := g.request(ctx, http.MethodPost, "/v1/messages", sessionID, payload, &answer)
 	if err == nil && (len(answer.Content) == 0 || answer.StopReason == "") {
@@ -100,16 +126,28 @@ func (g *gateway) ask(ctx context.Context, sessionID, model string, messages []m
 }
 
 func (g *gateway) check(ctx context.Context) (int, error) {
+	ids, err := g.models(ctx)
+	return len(ids), err
+}
+
+// models lists the model IDs the key can use (GET /v1/models, free).
+func (g *gateway) models(ctx context.Context) ([]string, error) {
 	var response struct {
-		Data []json.RawMessage `json:"data"`
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
 	}
 	if err := g.request(ctx, http.MethodGet, "/v1/models", "", nil, &response); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if response.Data == nil {
-		return 0, errors.New("网关未返回可识别的模型列表")
+		return nil, errors.New("网关未返回可识别的模型列表")
 	}
-	return len(response.Data), nil
+	ids := make([]string, 0, len(response.Data))
+	for _, m := range response.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
 }
 
 func (g *gateway) request(ctx context.Context, method, path, sessionID string, payload any, dest any) error {
@@ -167,7 +205,7 @@ func (g *gateway) statusError(res *http.Response) error {
 	case status >= 300 && status < 400:
 		hint = "网关重定向已拒绝；请使用最终 HTTPS 地址"
 	case status == 401 || status == 403:
-		hint = "API Key 无效或无权使用此接口；要更换 Key，请运行 claude-pro-lite.exe -set-key"
+		hint = "API Key 无效或无权使用此接口"
 	case status == 402:
 		hint = "网关账户余额不足"
 	case status == 429:
@@ -191,8 +229,15 @@ func (g *gateway) statusError(res *http.Response) error {
 			hint = "请求未成功"
 		}
 	}
-	return fmt.Errorf("网关返回 HTTP %d：%s", status, hint)
+	return &statusErr{status, fmt.Sprintf("网关返回 HTTP %d：%s", status, hint)}
 }
+
+type statusErr struct {
+	status int
+	msg    string
+}
+
+func (e *statusErr) Error() string { return e.msg }
 
 func (g *gateway) redact(text string) string {
 	return strings.ReplaceAll(text, g.key, "[REDACTED]")

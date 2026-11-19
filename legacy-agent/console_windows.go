@@ -1,16 +1,15 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
-	"io"
 	"os"
 	"syscall"
+	"unsafe"
 )
 
 var (
 	kernel32                = syscall.NewLazyDLL("kernel32.dll")
 	flushConsoleInputBuffer = kernel32.NewProc("FlushConsoleInputBuffer")
+	getConsoleProcessList   = kernel32.NewProc("GetConsoleProcessList")
 )
 
 func isConsole(in *os.File) bool {
@@ -23,10 +22,10 @@ func clearConsoleInput(in *os.File) bool {
 	return r != 0
 }
 
-func promptKey(in *os.File, input *bufio.Reader, out io.Writer) (string, error) {
-	if !isConsole(in) {
-		return "", fmt.Errorf("没有交互式控制台，请设置 %s 环境变量", keyEnv)
-	}
-	fmt.Fprint(out, "粘贴网关 API Key 后按回车（验证通过后加密保存）：")
-	return readLine(input)
+// ownConsole: the console window belongs to this process alone (started by double-click in Explorer), so it
+// closes when the process exits.
+func ownConsole() bool {
+	var ids [2]uint32
+	n, _, _ := getConsoleProcessList.Call(uintptr(unsafe.Pointer(&ids[0])), uintptr(len(ids)))
+	return n == 1
 }

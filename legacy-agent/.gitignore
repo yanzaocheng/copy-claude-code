@@ -1,3 +1,3 @@
 /dist/
-claude-pro-lite.key
-.claude-pro-lite-key-*
+claude-pro-lite.json
+.claude-pro-lite-config-*

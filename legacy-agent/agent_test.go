@@ -47,8 +47,8 @@ func TestRunDirectKeyAndToolLoop(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
-		if payload.Model != "mock-model" || len(payload.Tools) != 2 {
-			t.Error("configured model and default read-only tools were not sent")
+		if payload.Model != "mock-model" || len(payload.Tools) != 5 {
+			t.Errorf("configured model and the 5 tools were not sent (%d tools)", len(payload.Tools))
 		}
 		id := r.Header.Get("X-Claude-Code-Session-Id")
 		if id == "" || (sessionID != "" && id != sessionID) {
@@ -78,12 +78,13 @@ func TestRunDirectKeyAndToolLoop(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	conf := filepath.Join(t.TempDir(), configFile)
 	var out bytes.Buffer
-	if err := run(t.Context(), []string{"-gateway", server.URL, "-check"}, os.Stdin, &out, io.Discard); err != nil || !strings.Contains(out.String(), "1 个模型") {
+	if err := run(t.Context(), []string{"-config", conf, "-gateway", server.URL, "-check"}, os.Stdin, &out, io.Discard); err != nil || !strings.Contains(out.String(), "1 个模型") {
 		t.Fatalf("check: %v; %s", err, &out)
 	}
 	out.Reset()
-	args := []string{"-gateway", server.URL + "/v1/messages", "-dir", dir, "-model", "mock-model", "-p", "看日志"}
+	args := []string{"-config", conf, "-gateway", server.URL + "/v1/messages", "-dir", dir, "-model", "mock-model", "-p", "看日志"}
 	if err := run(t.Context(), args, os.Stdin, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -114,20 +115,25 @@ func TestWorkspacePathAndConfirmedEdits(t *testing.T) {
 		t.Error("accepted non-unique edit")
 	}
 	call := block{ID: "tool_1", Name: "replace_text", Input: json.RawMessage(`{"path":"demo.txt","old_text":"状态：旧\r\n","new_text":"状态：已更新\r\n"}`)}
-	s := session{ws: w, out: io.Discard, approve: func(string) bool { return false }}
-	if got := s.callTool(call); !got.Failed {
+	s := session{ws: w, out: io.Discard, confirm: func(string) string { return "n" }}
+	if got := s.callTool(t.Context(), call); !got.Failed {
 		t.Fatal("edit ran without approval")
 	}
 	if got, _ := os.ReadFile(name); !bytes.Equal(got, data) {
 		t.Fatalf("file changed without approval: %q", got)
 	}
-	s.approve = func(preview string) bool { return strings.Contains(preview, "状态：已更新") }
+	s.confirm = func(preview string) string {
+		if strings.Contains(preview, "状态：已更新") {
+			return "y"
+		}
+		return ""
+	}
 	s.readOnly = true
-	if got := s.callTool(call); !got.Failed {
+	if got := s.callTool(t.Context(), call); !got.Failed {
 		t.Fatal("edit ran in read-only mode")
 	}
 	s.readOnly = false
-	if got := s.callTool(call); got.Failed {
+	if got := s.callTool(t.Context(), call); got.Failed {
 		t.Fatalf("confirmed edit: %s", got.Result)
 	}
 	if got, _ := os.ReadFile(name); string(got) != "\ufeff状态：已更新\r\n状态：新\r\n" {
@@ -145,14 +151,46 @@ func TestWorkspacePathAndConfirmedEdits(t *testing.T) {
 	}
 }
 
-func TestEditRejectsRedirectedInput(t *testing.T) {
+// A command the model asks for is not run on typed-ahead or redirected input: only a person at the console
+// confirms.
+func TestCommandNeedsConsoleConfirmation(t *testing.T) {
+	t.Setenv(keyEnv, "mock-key-only")
+	dir := t.TempDir()
+	var result block
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
+		var payload struct {
+			Messages []message `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if calls++; calls == 1 {
+			fmt.Fprint(w, `{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_1","name":"run_command","input":{"command":"echo x> marker.txt"}}]}`)
+			return
+		}
+		result = payload.Messages[len(payload.Messages)-1].Content[0]
+		fmt.Fprint(w, `{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}`)
+	}))
+	defer server.Close()
 	in, err := os.CreateTemp(t.TempDir(), "stdin-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer in.Close()
-	if err := run(t.Context(), []string{"-edit"}, in, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "不能重定向输入") {
-		t.Fatalf("unexpected result: %v", err)
+	in.WriteString("y\na\n")
+	in.Seek(0, io.SeekStart)
+	args := []string{"-config", filepath.Join(t.TempDir(), configFile), "-gateway", server.URL, "-dir", dir, "-p", "建个文件"}
+	if err := run(t.Context(), args, in, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "marker.txt")); !os.IsNotExist(err) {
+		t.Fatal("the command ran without a confirmation at the console")
+	}
+	if !result.Failed || !strings.Contains(result.Result, "未确认") {
+		t.Fatalf("the model was not told the command was refused: %+v", result)
 	}
 }
 

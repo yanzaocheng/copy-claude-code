@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -191,6 +190,7 @@ func (w *workspace) read(raw string, tail bool) (string, error) {
 		}
 		data = []byte(string(utf16.Decode(units)))
 	} else {
+		raw := data
 		if start > 0 {
 			for len(data) > 0 && !utf8.RuneStart(data[0]) {
 				data = data[1:]
@@ -207,9 +207,16 @@ func (w *workspace) read(raw string, tail bool) (string, error) {
 				data = data[:i]
 			}
 		}
+		if bytes.IndexByte(raw, 0) >= 0 {
+			return "", errors.New("不是文本文件（含 NUL 字节）")
+		}
+		// Not UTF-8: the system ANSI code page (GBK on Chinese Windows), as most old programs write.
+		if !utf8.Valid(data) {
+			data = []byte(decodeANSI(raw))
+		}
 	}
-	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
-		return "", errors.New("只能读取 UTF-8 或带 BOM 的 UTF-16 文本；不是文本或编码不受支持")
+	if bytes.IndexByte(data, 0) >= 0 {
+		return "", errors.New("不是文本文件（含 NUL 字节）")
 	}
 	text := string(data)
 	if start > 0 {
@@ -244,8 +251,8 @@ func (w *workspace) editable(name string) ([]byte, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(data) > editBytes || !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
-		return nil, nil, errors.New("只允许修改不超过 1 MiB 的 UTF-8 文本文件")
+	if len(data) > editBytes || bytes.IndexByte(data, 0) >= 0 {
+		return nil, nil, errors.New("只允许修改不超过 1 MiB 的文本文件（UTF-16 文件不支持修改）")
 	}
 	return data, st, nil
 }
@@ -267,18 +274,62 @@ func (w *workspace) propose(raw, old, replacement string) (*proposal, error) {
 	if bytes.HasPrefix(data, utf8BOM) {
 		bom, text = data[:len(utf8BOM)], data[len(utf8BOM):]
 	}
-	i := bytes.Index(text, []byte(old))
-	if i < 0 || bytes.Contains(text[i+1:], []byte(old)) {
+	content, ansi := string(text), false
+	if !utf8.Valid(text) {
+		// The system ANSI code page (GBK): edited in Unicode, saved back in the same code page.
+		content, ansi = decodeANSI(text), true
+		if back, err := encodeANSI(content); err != nil || !bytes.Equal(back, text) {
+			return nil, errors.New("文件既不是 UTF-8，也不是系统 ANSI 编码（如 GBK），不能安全修改")
+		}
+	}
+	i := strings.Index(content, old)
+	if i < 0 || strings.Contains(content[i+1:], old) {
 		return nil, errors.New("旧文本必须在文件中恰好出现一次；请先读取并使用更精确的片段")
 	}
-	if len(data)-len(old)+len(replacement) > editBytes {
+	changed := []byte(content[:i] + replacement + content[i+len(old):])
+	if ansi {
+		if changed, err = encodeANSI(string(changed)); err != nil {
+			return nil, err
+		}
+	}
+	if len(bom)+len(changed) > editBytes {
 		return nil, errors.New("修改后文件会超过 1 MiB")
 	}
-	updated := append([]byte(nil), bom...)
-	updated = append(updated, text[:i]...)
-	updated = append(updated, replacement...)
-	updated = append(updated, text[i+len(old):]...)
+	updated := append(append([]byte(nil), bom...), changed...)
 	return &proposal{name, data, updated, info}, nil
+}
+
+// create makes a new file; it never replaces an existing one.
+func (w *workspace) create(raw, content string) (string, error) {
+	if len(content) > editBytes || strings.ContainsRune(content, 0) {
+		return "", errors.New("新文件最多 1 MiB，且不能包含 NUL")
+	}
+	parts := strings.Split(strings.ReplaceAll(raw, `\`, "/"), "/")
+	base := parts[len(parts)-1]
+	if !allowedName(base) {
+		return "", errors.New("文件名无效；只允许工作目录内的普通相对路径")
+	}
+	parent, err := w.path(strings.Join(parts[:len(parts)-1], "/"), true)
+	if err != nil {
+		return "", err
+	}
+	name := filepath.Join(parent, base)
+	f, err := w.root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return "", errors.New("文件已存在；修改已有文件请用 replace_text")
+	}
+	if err != nil {
+		return "", err
+	}
+	_, err = f.WriteString(content)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		w.root.Remove(name)
+		return "", err
+	}
+	return name, nil
 }
 
 func (w *workspace) apply(p *proposal) error {
@@ -312,107 +363,4 @@ func (w *workspace) apply(p *proposal) error {
 		return errors.New("文件在预览后发生变化，未修改")
 	}
 	return w.root.Rename(tmpName, name)
-}
-
-type toolSpec struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Schema      toolSchema `json:"input_schema"`
-}
-
-type toolSchema struct {
-	Type       string                  `json:"type"`
-	Properties map[string]toolProperty `json:"properties"`
-	Required   []string                `json:"required,omitempty"`
-	Extra      bool                    `json:"additionalProperties"`
-}
-
-type toolProperty struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
-}
-
-func tools(readOnly bool) []toolSpec {
-	path := toolProperty{"string", "Workspace-relative path. Use '.' for the root when listing."}
-	specs := []toolSpec{
-		{"list_files", "List at most 100 entries directly inside a workspace directory.", toolSchema{Type: "object", Properties: map[string]toolProperty{"path": path}}},
-		{"read_text", "Read up to 24 KiB of a UTF-8 or BOM-marked UTF-16 file. Use tail=true for the end of a log.", toolSchema{Type: "object", Properties: map[string]toolProperty{"path": path, "tail": {"boolean", "Read the end instead of the beginning."}}, Required: []string{"path"}}},
-	}
-	if !readOnly {
-		specs = append(specs, toolSpec{"replace_text", "Propose replacing one unique exact snippet in an existing UTF-8 file. Requires user confirmation. Match original line endings (including CRLF).", toolSchema{Type: "object", Properties: map[string]toolProperty{"path": path, "old_text": {"string", "Exact old text; must appear once."}, "new_text": {"string", "Replacement text."}}, Required: []string{"path", "old_text", "new_text"}}})
-	}
-	return specs
-}
-
-func (s *session) callTool(call block) block {
-	result := block{Type: "tool_result", CallID: call.ID}
-	finish := func(text string, err error) block {
-		if err != nil {
-			text, result.Failed = err.Error(), true
-			fmt.Fprintln(s.out, "工具未完成："+terminalText(text))
-		}
-		result.Result = text
-		return result
-	}
-	args := bytes.TrimSpace(call.Input)
-	if len(args) == 0 || args[0] != '{' || len(args) > 128<<10 {
-		return finish("", errors.New("工具输入无效"))
-	}
-	decode := func(dst any) error {
-		dec := json.NewDecoder(bytes.NewReader(args))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(dst); err != nil {
-			return errors.New("工具输入字段无效")
-		}
-		return nil
-	}
-	switch call.Name {
-	case "list_files":
-		var a struct{ Path string }
-		if err := decode(&a); err != nil {
-			return finish("", err)
-		}
-		fmt.Fprintf(s.out, "列出目录：%q\n", a.Path)
-		return finish(s.ws.list(a.Path))
-	case "read_text":
-		var a struct {
-			Path string
-			Tail bool
-		}
-		if err := decode(&a); err != nil {
-			return finish("", err)
-		}
-		fmt.Fprintf(s.out, "读取文本：%q\n", a.Path)
-		return finish(s.ws.read(a.Path, a.Tail))
-	case "replace_text":
-		if s.readOnly {
-			return finish("", errors.New("当前为只读模式，不能修改文件"))
-		}
-		var a struct {
-			Path string  `json:"path"`
-			Old  string  `json:"old_text"`
-			New  *string `json:"new_text"`
-		}
-		if err := decode(&a); err != nil {
-			return finish("", err)
-		}
-		if a.New == nil {
-			return finish("", errors.New("必须明确提供 new_text"))
-		}
-		p, err := s.ws.propose(a.Path, a.Old, *a.New)
-		if err != nil {
-			return finish("", err)
-		}
-		preview := fmt.Sprintf("\n待确认修改：%q\n- %q\n+ %q\n输入 y 确认写入，其它输入取消：", p.name, a.Old, *a.New)
-		if !s.approve(preview) {
-			return finish("", errors.New("操作者未确认，文件未修改"))
-		}
-		if err := s.ws.apply(p); err != nil {
-			return finish("", err)
-		}
-		fmt.Fprintln(s.out, "文件已修改。")
-		return finish("已确认并写入文件。", nil)
-	default:
-		return finish("", errors.New("不支持的工具"))
-	}
 }

@@ -1,44 +1,60 @@
 # claude-pro-lite（Windows x64）
 
-面向 Windows Server 2008 R2 SP1 x64 的免安装试用版。在新机器编译，只把 `claude-pro-lite.exe` 拷到服务器；服务器不需要安装 Go、Node、Python 或 .NET。这个程序不依赖原版 `claude-pro`，也不读写原版的登录文件。可将带版本号的 EXE 改名为 `claude-pro-lite.exe` 后使用；运行 `claude-pro-lite.exe --version` 查看内置版本。
+面向 Windows Server 2008 R2 SP1 / Windows 7 x64 的免安装简易 Agent。只需一个 EXE：服务器不需要安装 Go、Node、Python 或 .NET。不依赖原版 `claude-pro`。构建产物带版本号（`claude-pro-lite-vX.Y.Z.exe`），可改名为 `claude-pro-lite.exe` 使用；启动时第一行显示版本，`--version` 也可查看。
 
-## 在服务器用 `cmd.exe` 测试
+## 使用
 
-1. 先验证服务器能连到网关，首次使用时粘贴网关发给你的普通 API Key：
+1. 把 EXE 放到一个可写的目录，双击运行（或在 `cmd.exe` 中运行）。
+2. 首次启动会在 EXE 同级目录生成配置文件 `claude-pro-lite.json`，并显示它的完整路径。
+3. 按提示粘贴网关 API Key（输入可见）。程序先用免费的 `GET /v1/models` 验证；输错了会提示原因并让你重新输入，不会退出。验证通过后 Key 保存到配置文件，下次启动直接使用。
+4. 在 `你>` 后输入任务，例如“看看 app.log 最后有什么报错”“查一下 3306 端口被哪个进程占用”。
 
-   ```bat
-   claude-pro-lite.exe -check
-   ```
+配置文件（JSON，可用记事本修改）：
 
-   旧版 `cmd.exe` 可以用窗口菜单的「编辑 → 粘贴」。交互式控制台只显示较长 Key 的首尾和长度（重定向输出只显示长度），通过免费的 `GET /v1/models` 验证后，将 Key 加密保存到 EXE 同目录的 `claude-pro-lite.key`。同一个 Windows 用户、同一网关地址下，下次启动自动读取，无需再输入。更换 Key 时运行 `claude-pro-lite.exe -set-key`。不要复制或分享 Key 文件；如果 EXE 同目录不可写，请把 EXE 移到可写目录。真实模型请求按网关用量计费。
+```json
+{
+  "gateway": "https://7bit.fun",
+  "model": "claude-sonnet-5-5",
+  "apiKey": "",
+  "workDir": "",
+  "readOnly": false
+}
+```
 
-2. 选一个仅含测试文件的工作目录，启动后在 `你>` 后面输入任务，例如“看看 app.log 最后有什么报错”：
+- `apiKey` 以明文保存，不要分享该文件。也可以直接在这里粘贴 Key；如果 Key 不能用，启动时会提示重新输入并覆盖。
+- `workDir`：工作目录，空表示当前目录（双击时就是 EXE 所在目录）。
+- `readOnly`：设为 `true` 后只能列目录、读文件，不能改文件或执行命令。
 
-   ```bat
-   claude-pro-lite.exe -dir "C:\agent-test"
-   ```
+命令行参数会覆盖配置文件：`-gateway`、`-model`、`-dir`、`-read-only`、`-config 路径`；`-check` 只检查 Key 和网络；`-set-key` 重新输入 Key；`-p "任务"` 执行一次。环境变量 `CLAUDE_PRO_GATEWAY_KEY` 的值优先于配置文件，且不写入磁盘。
 
-   如果要测试改文件，额外加 `-edit`，并在程序显示新旧片段之后输入 `y` 才会写入。`-edit` 只支持交互式 Windows 控制台。请用副本测试：修改以同目录临时文件替换原文件，可能不保留文件单独设置的 NTFS 权限、备用数据流等元数据。
+对话中的命令：`/help`、`/new` 清空对话、`/model 模型ID` 切换并保存模型、`/models` 列出可用模型、`/config` 显示配置文件位置、`/exit` 退出。按 Ctrl+C 只停止当前回答，不会退出程序。
 
-   ```bat
-   claude-pro-lite.exe -dir "C:\agent-test" -edit
-   ```
+## Agent 能做什么
 
-默认网关 `https://7bit.fun`，默认模型 `claude-sonnet-5-5`；用 `-gateway` 和 `-model` 覆盖。用 `/exit` 退出、`/new` 清空内存中的对话。用 `-p "任务"` 运行一次。非交互方式可由调用进程传入 `CLAUDE_PRO_GATEWAY_KEY`；该变量优先于已保存的 Key，且其值不会写入磁盘。不要把 Key 写在命令历史或批处理文件里；程序不接受明文 Key 参数。模型请求直接往 `/v1/messages` 发送 `Authorization: Bearer …`，没有登录步骤。
+- 列目录、读文件（单次最多 24 KiB，可读日志末尾；支持 UTF-8、带 BOM 的 UTF-16，以及系统 ANSI 编码，中文系统即 GBK）。
+- 新建文件（LF 转为 CRLF），修改已有文件中的一段文字（UTF-8 或 GBK 文件，保持原编码）。
+- 通过 `cmd.exe` 执行命令：在工作目录中运行，标准输入为空，默认 120 秒超时（最多 600 秒）。超时或按 Ctrl+C 会结束整个进程树。命令输出按 UTF-8、UTF-16 或控制台代码页（GBK）解码。
 
-- 默认只读，模型可自行列目录、读取文本和日志末尾。单次读取最多 24 KiB，支持 UTF-8 和带 BOM 的 UTF-16；不识别 GBK 等旧编码。编辑功能只支持现有 UTF-8 文本文件，没有任意 Shell、文件删除或后台服务。
-- **工具读到的文本会发送给你选择的网关。** 只指定不含敏感信息的工作目录，常见凭据文件名的过滤并不等于内容脱敏。
-- 客户端使用 Go TLS 和 Windows 的证书信任配置。不关闭证书校验、不跟随重定向。如果 `-check` 报证书错误，检查系统时间、信任链和代理；401/403 则检查 API Key。
+每次修改文件和每条命令都会先显示内容，输入 `y` 才执行。对于命令，输入 `a` 表示本次运行不再询问。只有坐在控制台前的人能确认：预先输入或重定向的输入一律视为取消。
+
+**注意：**文件读取限制在工作目录内，但命令可以访问整台电脑，确认前请看清命令。读到的文件内容和命令输出都会发给网关；模型调用按网关用量计费。
+
+## 旧系统兼容
+
+- 用第三方 `go-legacy-win7` 工具链构建，EXE 的最低系统版本标记为 6.1（Windows 7 / Server 2008 R2）。
+- HTTPS 先用 Windows 的证书库验证。未更新根证书的旧系统验证失败时，再用内置的 Let's Encrypt ISRG Root X1/X2 根证书（`roots.pem`，已核对官方 SHA-256 指纹）验证网关证书。证书校验始终开启，不跟随重定向。
+- 配置文件和新建文件使用 CRLF 换行，旧版记事本能正常显示。读取配置文件时兼容记事本保存的 UTF-8 BOM。
+- 双击运行时，如果遇到无法继续的错误，窗口会停留并显示错误，按回车后关闭。
 
 ## 构建与验证（开发机）
 
-普通最新版 Go 不支持 Windows Server 2008 R2。此版本用第三方 [`go-legacy-win7` v1.27.4-1](https://github.com/thongtech/go-legacy-win7/releases/tag/v1.27.4-1) 构建；安装或解压只发生在开发机。Windows x64 编译器 ZIP 的发布 SHA-256 为 `f8718d445d4a65590027cca434f164d665a04ee2dde96d7a3dc0abad840b6c2d`。
+普通最新版 Go 不支持 Windows Server 2008 R2。本程序使用第三方 [`go-legacy-win7` v1.27.4-1](https://github.com/thongtech/go-legacy-win7/releases/tag/v1.27.4-1) 构建，只需在开发机安装。Windows x64 编译器 ZIP 的发布 SHA-256 为 `f8718d445d4a65590027cca434f164d665a04ee2dde96d7a3dc0abad840b6c2d`。
 
-每次出新版本先更新本目录的 `VERSION`，再运行以下命令（Git Bash，`LEGACY_GO` 为已解压的 `go.exe` 路径）。构建会同时生成 `dist/claude-pro-lite-vX.Y.Z.exe` 和同版本的 `dist/claude-pro-lite.exe`；保留旧的带版本号产物，便于区分。
+每次出新版本前，先更新本目录的 `VERSION`，再运行以下命令（Git Bash；`LEGACY_GO` 为已解压的 `go.exe` 路径）。构建会生成 `dist/claude-pro-lite-vX.Y.Z.exe`，以及内容相同的 `dist/claude-pro-lite.exe`。
 
 ```bash
 GOTOOLCHAIN=local CGO_ENABLED=0 "$LEGACY_GO" test ./...
 LEGACY_GO="$LEGACY_GO" bash build.sh
 ```
 
-测试使用本地模拟网关和临时文件，不需要真实 API Key。编译成功和在新版 Windows 运行不等于已通过 2008 R2 实机验收。
+测试使用本地模拟网关和临时文件，不需要真实 API Key。GBK 相关测试只在中文 Windows 上运行。在新版 Windows 上通过测试，不等于已在 2008 R2 实机上验收。
