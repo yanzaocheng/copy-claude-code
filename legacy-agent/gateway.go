@@ -19,15 +19,16 @@ import (
 )
 
 type block struct {
-	Type   string          `json:"type"`
-	Text   string          `json:"text,omitempty"`
-	ID     string          `json:"id,omitempty"`
-	Name   string          `json:"name,omitempty"`
-	Input  json.RawMessage `json:"input,omitempty"`
-	CallID string          `json:"tool_use_id,omitempty"`
-	Result string          `json:"content,omitempty"`
-	Failed bool            `json:"is_error,omitempty"`
-	raw    json.RawMessage
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	Thinking string          `json:"thinking,omitempty"`
+	ID       string          `json:"id,omitempty"`
+	Name     string          `json:"name,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	CallID   string          `json:"tool_use_id,omitempty"`
+	Result   string          `json:"content,omitempty"`
+	Failed   bool            `json:"is_error,omitempty"`
+	raw      json.RawMessage
 }
 
 func (b *block) UnmarshalJSON(data []byte) error {
@@ -62,6 +63,9 @@ type gateway struct {
 	base, key string
 	client    *http.Client
 	log       io.Writer // where "waiting and retrying" progress goes
+
+	// noThinking: models that rejected the thinking parameter (kept for the program's lifetime).
+	noThinking map[string]bool
 }
 
 func (g *gateway) logf(format string, args ...any) {
@@ -159,7 +163,7 @@ var transport = func() *http.Transport {
 }()
 
 func newGateway(base, key string) *gateway {
-	return &gateway{base: base, key: key, client: &http.Client{
+	return &gateway{base: base, key: key, noThinking: map[string]bool{}, client: &http.Client{
 		Transport: transport,
 		Timeout:   5 * time.Minute,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -168,17 +172,35 @@ func newGateway(base, key string) *gateway {
 	}}
 }
 
-func (g *gateway) ask(ctx context.Context, sessionID, model, system string, messages []message, toolList []toolSpec) (reply, error) {
-	payload := struct {
-		Model     string     `json:"model"`
-		MaxTokens int        `json:"max_tokens"`
-		System    string     `json:"system"`
-		Messages  []message  `json:"messages"`
-		Tools     []toolSpec `json:"tools"`
-		Stream    bool       `json:"stream"`
-	}{model, 8192, system, messages, toolList, false}
+func (g *gateway) ask(ctx context.Context, sessionID, model, system string, messages []message, toolList []toolSpec, think bool) (reply, error) {
+	params := map[string]any{
+		"model":      model,
+		"max_tokens": 8192,
+		"system":     system,
+		"messages":   messages,
+		"tools":      toolList,
+		"stream":     false,
+	}
+	if think && g.noThinking[model] {
+		think = false // this model refused the parameter before
+	}
+	if think {
+		// Asked for explicitly: without it a Claude model answers right away and its reasoning is never sent.
+		params["thinking"] = map[string]any{"type": "enabled", "budget_tokens": 4096}
+	}
 	var answer reply
-	err := g.call(ctx, http.MethodPost, "/v1/messages", sessionID, payload, &answer)
+	err := g.call(ctx, http.MethodPost, "/v1/messages", sessionID, params, &answer)
+	var se *statusErr
+	if err != nil && think && errors.As(err, &se) && se.status == 400 && strings.Contains(strings.ToLower(se.detail), "thinking") {
+		// This model does not take thinking: remember that and ask again without it.
+		if g.noThinking == nil {
+			g.noThinking = map[string]bool{}
+		}
+		g.noThinking[model] = true
+		g.logf("模型 %s 不支持思考参数，改用普通模式。", model)
+		delete(params, "thinking")
+		err = g.call(ctx, http.MethodPost, "/v1/messages", sessionID, params, &answer)
+	}
 	if err == nil && (len(answer.Content) == 0 || answer.StopReason == "") {
 		err = errors.New("网关未返回可识别的模型消息")
 	}
@@ -260,7 +282,7 @@ func (g *gateway) request(ctx context.Context, method, path, sessionID string, p
 
 func (g *gateway) statusError(res *http.Response) error {
 	status := res.StatusCode
-	var hint string
+	hint := ""
 	switch {
 	case status >= 300 && status < 400:
 		hint = "网关重定向已拒绝；请使用最终 HTTPS 地址"
@@ -274,25 +296,31 @@ func (g *gateway) statusError(res *http.Response) error {
 		hint = "网关或上游暂时不可用"
 	case status == 404:
 		hint = "请检查网关地址、接口和模型 ID"
-	default:
-		var response struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if json.NewDecoder(io.LimitReader(res.Body, 16<<10)).Decode(&response) == nil {
+	}
+	var response struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	says := json.NewDecoder(io.LimitReader(res.Body, 16<<10)).Decode(&response) == nil && response.Error.Message != ""
+	if hint == "" {
+		hint = "请求未成功"
+		if says {
 			runes := []rune(g.redact(response.Error.Message))
 			if len(runes) > 250 {
 				runes = runes[:250]
 			}
-			hint = strings.Join(strings.Fields(terminalText(string(runes))), " ")
-		}
-		if hint == "" {
-			hint = "请求未成功"
+			if detail := strings.Join(strings.Fields(terminalText(string(runes))), " "); detail != "" {
+				hint = detail
+			}
 		}
 	}
 	wait, hasWait := retryAfter(res)
-	return &statusErr{status, fmt.Sprintf("网关返回 HTTP %d：%s", status, hint), wait, hasWait}
+	detail := ""
+	if says {
+		detail = response.Error.Message // unredacted, to recognise what the model refused
+	}
+	return &statusErr{status, fmt.Sprintf("网关返回 HTTP %d：%s", status, hint), detail, wait, hasWait}
 }
 
 // retryAfter reads the Retry-After header (seconds or an HTTP date).
@@ -309,7 +337,8 @@ func retryAfter(res *http.Response) (time.Duration, bool) {
 
 type statusErr struct {
 	status        int
-	msg           string
+	msg           string // for the user: redacted
+	detail        string // as the gateway said it: used to recognise "this model takes no thinking"
 	retryAfter    time.Duration
 	retryAfterSet bool
 }

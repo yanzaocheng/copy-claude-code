@@ -18,13 +18,15 @@
   "apiKey": "",
   "workDir": "",
   "readOnly": false,
-  "confirm": false
+  "confirm": false,
+  "noThinking": false
 }
 ```
 
 - `apiKey` 以明文保存，不要分享该文件。也可以直接在这里粘贴 Key；如果 Key 不能用，启动时会提示重新输入并覆盖。
 - `workDir`：工作目录，空表示当前目录（双击时就是 EXE 所在目录）。
 - `readOnly`：设为 `true` 后只能列目录、读文件，不能改文件或执行命令。
+- `noThinking`：默认 `false`，程序会向模型请求思考过程，并以「〔思考〕」开头显示出来。设为 `true`（或加 `-no-thinking`）则不请求、不显示。
 - `confirm`：默认 `false`，改文件和执行命令都直接做，不再询问。设为 `true` 则每次修改和命令都先显示内容，输入 `y` 才执行。
 
 命令行参数会覆盖配置文件：`-gateway`、`-model`、`-dir`、`-read-only`、`-confirm`、`-config 路径`；`-check` 只检查 Key 和网络；`-set-key` 重新输入 Key；`-p "任务"` 执行一次。环境变量 `CLAUDE_PRO_GATEWAY_KEY` 的值优先于配置文件，且不写入磁盘。

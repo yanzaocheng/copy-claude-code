@@ -73,6 +73,7 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 	setKey := flags.Bool("set-key", false, "重新输入、验证并保存网关 API Key")
 	readOnly := flags.Bool("read-only", false, "只读：只能列目录和读文件，不能改文件或执行命令")
 	confirm := flags.Bool("confirm", false, "每次修改文件或执行命令前询问（默认直接执行）")
+	noThinking := flags.Bool("no-thinking", false, "不请求、不显示模型的思考过程（默认显示）")
 	showVersion := flags.Bool("version", false, "显示版本号并退出")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -158,7 +159,7 @@ func run(ctx context.Context, args []string, in *os.File, out, stderr io.Writer)
 		return err
 	}
 
-	s := &session{gateway: gw, model: *model, id: newID(), ws: ws, out: out, readOnly: *readOnly || cfg.ReadOnly, auto: !*confirm && !cfg.Confirm}
+	s := &session{gateway: gw, model: *model, id: newID(), ws: ws, out: out, readOnly: *readOnly || cfg.ReadOnly, auto: !*confirm && !cfg.Confirm, think: !*noThinking && !cfg.NoThinking}
 	s.confirm = func(question string) string {
 		// Only a person at the console confirms: typed-ahead or redirected input does not count.
 		if !clearConsoleInput(in) {
@@ -286,6 +287,7 @@ type session struct {
 	auto          bool
 	confirm       func(question string) string
 	allowCommands bool
+	think         bool
 	history       [][]message
 }
 
@@ -303,7 +305,8 @@ func (s *session) turn(ctx context.Context, prompt string) error {
 	var actions int
 	for round := 0; round < maxRounds; round++ {
 		fmt.Fprintln(s.out, "（思考中…）")
-		answer, err := s.gateway.ask(ctx, s.id, s.model, system, messages, toolList)
+		think := s.think && !s.gateway.noThinking[s.model]
+		answer, err := s.gateway.ask(ctx, s.id, s.model, system, messages, toolList, think)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -314,6 +317,10 @@ func (s *session) turn(ctx context.Context, prompt string) error {
 		var calls []block
 		for _, b := range answer.Content {
 			switch b.Type {
+			case "thinking":
+				if t := strings.TrimSpace(b.Thinking); t != "" {
+					fmt.Fprintln(s.out, "〔思考〕"+terminalText(s.gateway.redact(t)))
+				}
 			case "text":
 				if b.Text != "" {
 					fmt.Fprintln(s.out, terminalText(s.gateway.redact(b.Text)))
@@ -366,7 +373,7 @@ func (s *session) remember(turn []message) {
 	for i := len(s.history) - 1; i >= 0 && len(s.history)-i <= 8; i-- {
 		for _, m := range s.history[i] {
 			for _, b := range m.Content {
-				size += len(b.raw) + len(b.Text) + len(b.Result)
+				size += len(b.raw) + len(b.Text) + len(b.Thinking) + len(b.Result)
 			}
 		}
 		if size > 192<<10 {

@@ -27,7 +27,9 @@ type appConfig struct {
 	ReadOnly bool `json:"readOnly"`
 	// Confirm: ask before every file change or command (default: act without asking).
 	Confirm bool `json:"confirm"`
-	path    string
+	// NoThinking: do not ask the model for its reasoning (shown by default).
+	NoThinking bool `json:"noThinking"`
+	path       string
 }
 
 func defaultConfigPath() (string, error) {

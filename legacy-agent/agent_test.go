@@ -258,14 +258,14 @@ func TestRateLimitIsWaitedOut(t *testing.T) {
 	gw := newGateway(server.URL, "k")
 	var log bytes.Buffer
 	gw.log = &log
-	answer, err := gw.ask(t.Context(), "sid", "m", "sys", nil, nil)
+	answer, err := gw.ask(t.Context(), "sid", "m", "sys", nil, nil, false)
 	if err != nil || calls != 3 || len(answer.Content) != 1 {
 		t.Fatalf("calls %d, %v, %+v", calls, err, answer)
 	}
 	if strings.Count(log.String(), "自动重试") != 2 {
 		t.Fatalf("retries not reported:\n%s", &log)
 	}
-	if _, err := gw.ask(t.Context(), "sid", "m", "sys", nil, nil); err != nil || calls != 4 {
+	if _, err := gw.ask(t.Context(), "sid", "m", "sys", nil, nil, false); err != nil || calls != 4 {
 		t.Fatal("a request that works once should not be retried")
 	}
 }
@@ -283,4 +283,77 @@ func TestKeyErrorsAreNotRetried(t *testing.T) {
 	if err == nil || calls != 1 || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("calls %d, %v", calls, err)
 	}
+}
+
+// Thinking is requested, shown, and echoed back (with its signature) in the next request. A model that
+// refuses the parameter is asked again without it, once.
+func TestThinkingShownAndRefusalFallsBack(t *testing.T) {
+	t.Setenv(keyEnv, "mock-key-only")
+	var second map[string]any
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if calls++; calls == 1 {
+			if _, ok := payload["thinking"]; !ok {
+				t.Error("thinking was not requested")
+			}
+			fmt.Fprint(w, `{"stop_reason":"tool_use","content":[{"type":"thinking","thinking":"先看看日志","signature":"sig-1"},{"type":"tool_use","id":"toolu_1","name":"list_files","input":{"path":"."}}]}`)
+			return
+		}
+		second = payload
+		fmt.Fprint(w, `{"stop_reason":"end_turn","content":[{"type":"text","text":"完事"}]}`)
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	s := &session{gateway: newGateway(server.URL, "k"), model: "mock-model", ws: mustWorkspace(t), out: &out, auto: true, think: true}
+	if err := s.turn(t.Context(), "看看"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "〔思考〕先看看日志") {
+		t.Fatalf("thinking not shown:\n%s", &out)
+	}
+	msgs, _ := second["messages"].([]any)
+	assistant, _ := msgs[len(msgs)-2].(map[string]any)
+	blocks, _ := assistant["content"].([]any)
+	first, _ := blocks[0].(map[string]any)
+	if first["signature"] != "sig-1" {
+		t.Fatalf("thinking block not echoed back with its signature: %v", first)
+	}
+
+	refusals := 0
+	strict := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if _, ok := payload["thinking"]; ok {
+			refusals++
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"error":{"message":"thinking is not supported for this model"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"stop_reason":"end_turn","content":[{"type":"text","text":"好"}]}`)
+	}))
+	defer strict.Close()
+	gw := newGateway(strict.URL, "sk-test-key-long-enough-to-not-corrupt-messages")
+	gw.log = io.Discard
+	if answer, err := gw.ask(t.Context(), "sid", "plain-model", "sys", nil, nil, true); err != nil || answer.Content[0].Text != "好" || refusals != 1 || !gw.noThinking["plain-model"] {
+		t.Fatalf("no fallback without thinking: %v %d", err, refusals)
+	}
+	if _, err := gw.ask(t.Context(), "sid", "plain-model", "sys", nil, nil, true); err != nil || refusals != 1 {
+		t.Fatal("the refusal was not remembered")
+	}
+}
+
+func mustWorkspace(t *testing.T) *workspace {
+	t.Helper()
+	w, err := openWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { w.root.Close() })
+	return w
 }
