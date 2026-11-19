@@ -349,6 +349,16 @@ export function repairToolResults(messages) {
   return { messages: out, changed, recovered };
 }
 
+// The recovered tool calls (repairToolResults) worth a notice: those of the last assistant message, a turn cut off by a
+// crash or a restart, once in a process (`said`). A call the conversation has gone on past was said when it was found
+// and is repaired silently: the set of calls said is this process's, so every restart announced the same old one again
+// (2026-11-20, a Browser call cut off a day before, kept through two compactions).
+export function newlyRecovered(messages, recovered, said = new Set()) {
+  const last = messages.findLast((m) => m.role === 'assistant');
+  const lastIds = new Set(Array.isArray(last?.content) ? last.content.filter((b) => b.type === 'tool_use').map((b) => b.id) : []);
+  return recovered.filter((id) => lastIds.has(id) && !said.has(id));
+}
+
 // Minimal JSON-schema check for required fields and primitive types.
 function validateInput(schema, input) {
   if (!schema || typeof input !== 'object' || input === null) return 'Input must be an object';
@@ -966,7 +976,7 @@ export class Agent {
     // the conversation merged and inserted messages, which moved the messages the checkpoints point at, so a
     // /rewind after a restart cut the conversation in the wrong place.
     const repaired = repairToolResults(normalizeMessages(this.messages));
-    const fresh = repaired.recovered.filter((id) => !this.recoveredToolIds.has(id));
+    const fresh = newlyRecovered(this.messages, repaired.recovered, this.recoveredToolIds);
     if (fresh.length) {
       for (const id of fresh) this.recoveredToolIds.add(id);
       this.io.notice?.('Recovered an unfinished tool call in the conversation; continuing with an interrupted result.', 'warn');
