@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：只使用网关登录。在网关网站「API 密钥」创建 Key，在 `/login` 里粘贴，验证后保存到 `~/.claude-pro/gateway.json`；模型请求和远程会话发布都只发往网关。
+> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 网关的 Key 在网关网站「API 密钥」创建，保存到 `~/.claude-pro/gateway.json`；其他供应商的 Key 保存到 `~/.claude-pro/providers.json`。远程会话发布只走网关。
 
 ## 安装与运行
 
@@ -47,33 +47,27 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 交互式启动时，如果既没有网关登录、也没有连接任何供应商，会自动打开 `/connect`（第一项是 7bit.fun 网关）；也可以手动运行：
 
 ```powershell
-claude-pro /login
+claude-pro /connect
 claude-pro
 claude-pro --model opus
 claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 ```
 
-登录得到的 key 保存在 `~/.claude-pro/gateway.json`（Windows 对应 `%USERPROFILE%\.claude-pro\gateway.json`），不会读取 Claude CLI 或 Codex CLI 的登录文件。
+网关的 key 保存在 `~/.claude-pro/gateway.json`（Windows 对应 `%USERPROFILE%\.claude-pro\gateway.json`），不会读取 Claude CLI 或 Codex CLI 的登录文件。
 
-## /login：网关账户
+## 7bit.fun 网关
 
-`/login` 只有一个选项：网关。先登录 https://7bit.fun/user ，在「API 密钥」点「创建新密钥」，**勾选“用于 claude-pro”**（不勾选的 Key 也能调用模型，但网关不允许它把会话发布到远程网页、和其他电脑互发消息），然后在 `/login` 里粘贴。输入时只显示星号和长度；Key 先用 `GET /v1/account` 验证，通过后才保存，并显示账户名和余额。被拒绝时会显示网关的原话，可以再粘贴一次。
+先登录 https://7bit.fun/user ，在「API 密钥」点「创建新密钥」，然后在 claude-pro 里运行 `/connect`，选第一项 **7bit.fun**，粘贴 Key。输入时只显示星号和长度；Key 先用 `GET /v1/account` 验证，通过后才保存，并显示账户名和余额。被拒绝时会显示网关的原话，可以再粘贴一次。已经连接时再选 7bit.fun，回车保留原来的 Key，或者粘贴新的替换。`/disconnect 7bit.fun` 忘掉网关 Key，这台电脑的会话随之从网关下线。
 
-2026-11-19 起不再用浏览器跳转授权（网关的 `/cli/login` 已停用）。之前用跳转授权得到、已保存的 Key 照常可用，不需要重新登录。
+2026-11-19 起没有 `/login`、`/logout` 命令，也不再用浏览器跳转授权（网关的 `/cli/login` 已停用）。之前保存的 Key 照常可用，不需要重新连接。
 
-```text
-/login
-/logout
-/cost
-```
-
-## /connect：其他供应商
+## /connect：选择供应商
 
 和 OpenCode 的 `/connect` 一样：从列表里选一家，粘贴它的 API Key，就能用它的模型。**可以同时连接多家**，它们的模型都列在 `/model` 里，名字是 `供应商/模型`（如 `deepseek/deepseek-v4-pro`、`openrouter/anthropic/claude-sonnet-4.5`），随时切换；不带前缀的名字（`opus`、`claude-opus-5-5`）仍是 7bit.fun 的，旧设置和记住的选择照常可用。
 
 | 供应商 | 协议 | 地址 |
 |---|---|---|
-| 7bit.fun | 网关（同 `/login`） | 余额、远程网页、跨电脑会话都靠它 |
+| 7bit.fun | 网关 | 余额、远程网页、跨电脑会话都靠它 |
 | Anthropic (Claude) | Anthropic | api.anthropic.com |
 | OpenAI | OpenAI | api.openai.com/v1 |
 | DeepSeek | Anthropic | api.deepseek.com/anthropic |
@@ -106,9 +100,9 @@ Key 保存在 `~/.claude-pro/providers.json`（只有你自己能读）。`/disc
 
 ## 配置
 
-网关 key 只来自 `/login`：粘贴后保存在 `~/.claude-pro/gateway.json`，没有环境变量或 `.env` 文件可以设置它。
+网关 key 只来自 `/connect`：粘贴后保存在 `~/.claude-pro/gateway.json`，没有环境变量或 `.env` 文件可以设置它。
 
-一般只需要 `/login`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
+一般只需要 `/connect`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
 
 ```json
 {
@@ -189,7 +183,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 本地手动启动的交互式 claude-pro 会话登录网关后自动注册。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页经网关查看并操作已经在运行的本地终端会话（不能新建会话）。
 
-- **自动上线**：`/login` 成功后当前会话立即注册；之后每个交互会话启动时自动注册，断线自动重连；`/logout` 后停止远程连接。`CLAUDE_PRO_ONLINE=0` 可以关闭远程发布。
+- **自动上线**：`/connect` 连上 7bit.fun 后当前会话立即注册；之后每个交互会话启动时自动注册，断线自动重连；`/disconnect 7bit.fun` 后停止远程连接。`CLAUDE_PRO_ONLINE=0` 可以关闭远程发布。
 - **网页能看到**：会话列表、在线/离线/结束状态、模型、目录、机器名、viewer 数、transcript、流式文本和 thinking、工具调用与输出、todos、后台任务、排队消息、问题文本和连接状态。
 - **网页能做**：发消息（等同在终端输入框回车：`/命令`、`!shell`、`#记忆`、`@会话`，最多 6 张图片；忙时排队）、回答对话框（选项、多选、“其他”文字、文本框、取消）、停止（等同 Esc，同时取消等待中的问题）、切换 model/effort（发 `/model`、`/effort`）、浏览目录并 `/cd`（会话在新目录重启，网页接着看）、输入补全（`/命令`、`@文件`、`@会话`）、查看某次工具调用的完整输出（最多 1 MB，运行中的也行）。
 - **只读开关**：`CLAUDE_PRO_REMOTE_COMMANDS=0`（环境变量，或 `claude-pro config set CLAUDE_PRO_REMOTE_COMMANDS 0`）让这台电脑的会话在网页上只能看、不能操作；会话上线时读取，`/status` 会显示 read-only。
@@ -213,7 +207,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 - **`/rename 新名字`**：给当前会话改名（比如 `/rename web-server`），别的会话从此用 `@web-server` 找它；这个名字也成为对话标题（终端标签页、`/resume` 列表、网页），不再自动按话题改；`/resume` 这个对话时名字一起回来。
 - **`/peers`**：列出本机和其他电脑上在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
 - 回答会在对方这一轮做完后自动发回；对方正忙时，任务排在它当前工作之后。网关替离线的会话暂存回答（24 小时；网关重启会丢失还没送达的消息）。
-- **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时 `/logout`。
+- **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时 `/disconnect 7bit.fun`。
 
 ## 完全访问与安全网
 

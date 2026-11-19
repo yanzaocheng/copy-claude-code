@@ -361,7 +361,7 @@ export function buildCommands(app) {
     },
   });
 
-  // After a login: the configuration read again, with the remembered /model and /effort.
+  // After the gateway was connected: the configuration read again, with the remembered /model and /effort.
   const afterLogin = () => {
     const cfg = app.runtime.config;
     const model = cfg.model.id;
@@ -389,7 +389,7 @@ export function buildCommands(app) {
       app.screen.schedule();
     }
   };
-  // Logged in to the gateway: this session goes online there at once, for its web page and peer messaging. The page
+  // The gateway connected: this session goes online there at once, for its web page and peer messaging. The page
   // can steer the session too (send messages, `!` commands, /cd...) unless CLAUDE_PRO_REMOTE_COMMANDS=0: said as it
   // is, since this message called the page read-only.
   const goOnline = async () => {
@@ -403,55 +403,58 @@ export function buildCommands(app) {
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
   };
 
-  // The gateway login: a key of the user's account, made on the gateway's page and pasted here (until 2026-11-19 the
-  // browser was sent to the gateway and the key came back to a local server). A saved key that still works is used as
-  // it is. A refused one is asked for again, with what the gateway said, three times at most.
-  async function loginGateway() {
+  // Connecting the gateway (7bit.fun in /connect): a key of the user's account, made on the gateway's page and pasted
+  // here (/login did this until 2026-11-19, and before that sent the browser to the gateway). As with the other
+  // providers, a saved key is kept with Enter or replaced by pasting another; a refused one is asked for again, with
+  // what the gateway said, three times at most.
+  async function connectGateway() {
     const cfg = app.runtime.config;
     const url = cfg.gatewayUrl;
     const page = gatewayKeyPage(url);
-    const saved = gatewayLogin(url);
+    let saved = gatewayLogin(url);
     let error = null;
-    if (saved) {
-      try {
-        const account = await checking('Checking the gateway key', (signal) => fetchGatewayAccount(saved, { signal }));
-        afterLogin();
-        out([`Using the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(account), c.dim(`Top up and usage: ${page} · another key: /logout, then /login`)]);
-        await goOnline();
-        return;
-      } catch (e) {
-        if (e.name === 'AbortError') return;
-        if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
-        clearGatewayLogin();
-        error = `The saved key was refused (${e.status}${e.message ? `: ${e.message}` : ''}). Paste another.`;
-      }
-    }
     for (let attempt = 0; attempt < 3; attempt++) {
-      const key = await app.showDialog(new TextInputDialog({
-        title: `Log in to ${hostOf(url)}`,
+      const typed = await app.showDialog(new TextInputDialog({
+        title: `Connect ${hostOf(url)}`,
         body: [
-          `Make an API key on ${c.blue(page)}: 创建新密钥 (create a key), and tick 用于 claude-pro (for claude-pro) so that this computer's sessions can go online there. Then paste it here.`,
+          `Make an API key on ${c.blue(page)} (创建新密钥) and paste it here.`,
           c.dim('The key is checked with the gateway, then kept in ~/.claude-pro/gateway.json, readable by you alone.'),
         ],
         question: 'API key:',
-        placeholder: 'paste the key (Ctrl+V)',
+        placeholder: saved ? 'Enter: keep the saved key · or paste another (Ctrl+V)' : 'paste the key (Ctrl+V)',
         secret: true,
+        allowEmpty: Boolean(saved),
         error,
       }));
-      if (!key) { out(c.dim(`Not logged in. /login logs in to ${hostOf(url)}.`)); return; }
+      if (typed === null) { out(c.dim(saved ? `${hostOf(url)}: the saved key is kept.` : `${hostOf(url)} was not connected. /connect connects it.`)); return; }
       try {
-        const login = await checking('Checking the key', (signal) => loginWithKey({ url, apiKey: key, signal }));
+        let account;
+        if (typed) account = (await checking('Checking the key', (signal) => loginWithKey({ url, apiKey: typed, signal }))).balance;
+        else account = await checking('Checking the saved key', (signal) => fetchGatewayAccount(saved, { signal }));
         afterLogin();
-        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${page}`)]);
+        out([`${c.green('✔')} Connected the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(account), c.dim(`Top up and usage: ${page}`)]);
         await goOnline();
         return;
       } catch (e) {
         if (e.name === 'AbortError') return;
         if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
-        error = `The gateway refused that key (${e.status}${e.message ? `: ${e.message}` : ''}). Check it on ${page}.`;
+        if (!typed) { clearGatewayLogin(); saved = null; }
+        error = `The gateway refused ${typed ? 'that' : 'the saved'} key (${e.status}${e.message ? `: ${e.message}` : ''}). ${typed ? `Check it on ${page}.` : 'Paste another.'}`;
       }
     }
-    out(c.red(`Not logged in: the gateway refused the key three times. Check it on ${page}, then run /login again.`));
+    out(c.red(`${hostOf(url)} was not connected: the gateway refused the key three times. Check it on ${page}, then /connect again.`));
+  }
+
+  // Forgetting the gateway's key (7bit.fun in /disconnect; /logout until 2026-11-19): this session goes offline there,
+  // and the other sessions of this computer follow within seconds (see App.syncRemote).
+  function disconnectGateway() {
+    const cfg = app.runtime.config;
+    const had = clearGatewayLogin();
+    const wasOnline = Boolean(app.remote);
+    app.stopRemote();
+    out(had
+      ? `Disconnected the gateway ${cfg.gatewayUrl}: its key is forgotten.${wasOnline ? ' This session is offline there now.' : ''}${cfg.model.provider === GATEWAY_PROVIDER ? c.dim(` ${cfg.model.label} is the gateway's: /connect, or /model for another provider's model.`) : ''}`
+      : c.dim(`The gateway ${cfg.gatewayUrl} was not connected.`));
   }
 
   // ---------------------------------------------------------------- /connect: the providers of models
@@ -596,7 +599,7 @@ export function buildCommands(app) {
         }));
         if (!choice) return;
       }
-      if (choice === GATEWAY_PROVIDER || choice === 'gateway' || choice === '7bit.fun') return loginGateway();
+      if (choice === GATEWAY_PROVIDER || choice === 'gateway' || choice === '7bit.fun') return connectGateway();
       if (choice === '__custom_anthropic__') return connectCustom('anthropic');
       if (choice === '__custom_openai__') return connectCustom('openai');
       const info = providerInfo(choice, connections);
@@ -608,21 +611,22 @@ export function buildCommands(app) {
   add({
     name: 'disconnect',
     argHint: '[provider]',
-    description: 'Forget a provider\'s key (the gateway\'s: /logout)',
+    description: 'Forget a provider\'s key (7bit.fun\'s too: this computer\'s sessions go offline there)',
     async run(args) {
       const cfg = app.runtime.config;
       let id = args.trim().toLowerCase();
       if (!id) {
-        const connected = connectedProviders();
-        if (!connected.length) { out(c.dim('No provider is connected (the gateway\'s login: /logout). /connect connects one.')); return; }
+        const options = connectedProviders().map((p) => ({ label: p.name, value: p.id, description: `${p.id}/<model>` }));
+        if (gatewayLogin(cfg.gatewayUrl)) options.unshift({ label: '7bit.fun', value: GATEWAY_PROVIDER, description: 'the gateway: its models, and this computer\'s sessions online there' });
+        if (!options.length) { out(c.dim('No provider is connected. /connect connects one.')); return; }
         id = await app.showDialog(new SelectDialog({
           title: 'Disconnect a provider',
           question: 'Its key is forgotten, and its models cannot be used until it is connected again.',
-          options: connected.map((p) => ({ label: p.name, value: p.id, description: `${p.id}/<model>` })),
+          options,
         }));
         if (!id) return;
       }
-      if (id === GATEWAY_PROVIDER || id === 'gateway') { await commands.get('logout').run(''); return; }
+      if (id === GATEWAY_PROVIDER || id === 'gateway' || id === '7bit.fun') { disconnectGateway(); return; }
       const info = providerInfo(id);
       if (!removeConnection(id)) { out(c.dim(`${info?.name || id} is not connected.`)); return; }
       // The model in use was one of its models: back to the configured default.
@@ -634,31 +638,6 @@ export function buildCommands(app) {
         back = ` The model is ${c.bold(cfg.model.label)} again (the configured default).`;
       }
       out(`Disconnected ${info?.name || id}: its key is forgotten.${back}`);
-    },
-  });
-
-  add({
-    name: 'login',
-    argHint: '[gateway]',
-    description: 'Log in to the gateway with an API key of your account (/connect: other providers)',
-    async run(args) {
-      const choice = args.trim().toLowerCase();
-      if (choice && choice !== 'gateway') { out(c.red(`Unknown login method "${choice}". Only gateway login is supported.`)); return; }
-      await loginGateway();
-    },
-  });
-
-  add({
-    name: 'logout',
-    description: 'Forget the gateway login of this machine (its sessions go offline there)',
-    run() {
-      const cfg = app.runtime.config;
-      const had = clearGatewayLogin();
-      const wasOnline = Boolean(app.remote);
-      app.stopRemote(); // the other sessions of this computer follow within seconds
-      out(had
-        ? `Logged out of the gateway ${cfg.gatewayUrl}.${wasOnline ? ' This session is offline there now.' : ''} Run /login to log in again.`
-        : c.dim('There was no gateway login. Run /login to log in.'));
     },
   });
 
@@ -677,7 +656,7 @@ export function buildCommands(app) {
         row('cwd', app.cwd),
         row('Provider', cfg.model.provider === GATEWAY_PROVIDER ? 'gateway' : `${providerInfo(cfg.model.provider)?.name || cfg.model.provider} ${c.dim(`(${cfg.model.provider}/…)`)}`),
         row('Endpoint', cfg.endpointLabel),
-        row('Gateway login', gatewayLogin(cfg.gatewayUrl) ? `key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.dim('none (/login)')),
+        row('Gateway login', gatewayLogin(cfg.gatewayUrl) ? `key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.dim('none (/connect)')),
         row('Connected', connectedProviders().map((p) => p.id).join(', ') || c.dim('no other provider (/connect)')),
         row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
         row('Effort', cfg.effort || 'auto'),
@@ -885,7 +864,7 @@ export function buildCommands(app) {
         ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
           ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
-          : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/login; /status says why it is not).'),
+          : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/connect 7bit.fun; /status says why it is not).'),
       ]);
     },
   });
@@ -1108,7 +1087,7 @@ export function buildCommands(app) {
         `${c.green('✔')} Node ${process.versions.node}`,
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
         `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
-        `${gatewayLogin(cfg.gatewayUrl) ? c.green('✔') : cfg.model.provider === GATEWAY_PROVIDER ? c.red('✘') : c.yellow('!')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/login)'}`,
+        `${gatewayLogin(cfg.gatewayUrl) ? c.green('✔') : cfg.model.provider === GATEWAY_PROVIDER ? c.red('✘') : c.yellow('!')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/connect 7bit.fun)'}`,
         ...connectedProviders().map((p) => `${c.green('✔')} ${p.name} connected ${c.dim(`(${p.id}/…, ${normalizeBaseUrl(p.connection.baseUrl || p.baseUrl, p.protocol)})`)}`),
       ];
       out(lines);

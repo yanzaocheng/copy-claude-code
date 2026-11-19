@@ -281,7 +281,7 @@ export class App {
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
-    this.remoteRefused = null; // a gateway key the gateway refused: not tried again by itself (a new /login is)
+    this.remoteRefused = null; // a gateway key the gateway refused: not tried again by itself (a new /connect is)
     this.seedOutput = []; // lines the page is shown after the conversation when it starts from it (see resumeAfterRestart)
     this.selfCheck = selfCheck;
     this.sessionName = flags?.restart?.peerName || null; // this session's name when the sessions of this computer do not know it (CLAUDE_PRO_PEERS=0)
@@ -393,7 +393,7 @@ export class App {
     if (!this.driven) {
       // Updates are deliberately manual: /update checks npm and installs the selected release.
       // Do not query the registry or install/restart a running session in the background.
-      // online or offline as this computer's gateway login changes (/login or /logout in another window)
+      // online or offline as this computer's gateway login changes (/connect or /disconnect of 7bit.fun in another window)
       this.loginTimer = setInterval(() => this.syncRemote(), 10_000);
       this.loginTimer.unref?.();
     }
@@ -549,7 +549,7 @@ export class App {
       let found = resolvePeer(local, this.remotePeers, target);
       if (!found.peer && !found.error && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), target);
       if (!found.peer) {
-        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/login).';
+        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/connect 7bit.fun).';
         throw new Error(found.error || `No running session called "${String(target).replace(/^[@&＆]/, '')}". /peers lists them.${offline}`);
       }
       peer = found.peer;
@@ -684,7 +684,7 @@ export class App {
   }
 
   // Connect this session to the gateway (see remote.js): the web page and the sessions on the account's other
-  // computers reach it from then on. Needs the gateway login from /login; throws
+  // computers reach it from then on. Needs the gateway login from /connect; throws
   // {code: 'NO_GATEWAY_LOGIN'} without it. A gateway that cannot be reached now is tried again in the background;
   // one that refuses the key throws, and that key is not tried again (see syncRemote).
   startRemote({ id } = {}) {
@@ -693,7 +693,7 @@ export class App {
     return this.remoteStarting;
   }
 
-  // Online or offline as this computer's gateway login is now: after /login and /logout, and every few seconds (a
+  // Online or offline as this computer's gateway login is now: after /connect and /disconnect, and every few seconds (a
   // login or a logout in another window, another account). Resolves with the connection, or null.
   syncRemote() {
     if (this.exiting) return Promise.resolve(null);
@@ -712,7 +712,7 @@ export class App {
 
   async connectRemote({ id }) {
     const login = gatewayLogin(this.config.gatewayUrl);
-    if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login logs in)`), { code: 'NO_GATEWAY_LOGIN' });
+    if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/connect 7bit.fun connects it)`), { code: 'NO_GATEWAY_LOGIN' });
     // What the page may do here, besides watching (see remote.js): nothing with CLAUDE_PRO_REMOTE_COMMANDS=0.
     const commands = remoteCommandsEnabled(this.config.env) ? {
       send: (body) => this.remoteSend(body.text, body.images),
@@ -747,7 +747,7 @@ export class App {
         refused: () => {
           this.remoteRefused = login.apiKey;
           if (this.remote === remote) { this.remote = null; this.remotePeers = []; }
-          this.notice('The gateway refused this computer\'s key: this session is offline there now (/logout, then /login).', 'warn');
+          this.notice('The gateway refused this computer\'s key: this session is offline there now (/connect 7bit.fun to enter another key).', 'warn');
         },
       },
     });
@@ -786,8 +786,8 @@ export class App {
     }
     if (this.remoteStarting) return { text: 'connecting…' };
     const login = gatewayLogin(this.config.gatewayUrl);
-    if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/login)`) };
-    if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/logout, then /login)') };
+    if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/connect 7bit.fun)`) };
+    if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/connect 7bit.fun to enter another)') };
     if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)') };
     return { text: c.dim('offline') };
   }
@@ -1309,7 +1309,7 @@ export class App {
     // (the model in use cannot be reached: said, with what connects it)
     const provider = cfg.model.provider;
     if (provider === '7bit' ? !gatewayLogin(cfg.gatewayUrl) : !connectedProviders().some((p) => p.id === provider)) {
-      lines.push('', c.yellow(provider === '7bit' ? ` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login (or /connect for another provider).` : ` ⚠ ${cfg.model.label} is a model of ${provider}, which is not connected. Run /connect ${provider}, or /model for another.`));
+      lines.push('', c.yellow(provider === '7bit' ? ` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /connect and choose 7bit.fun (or another provider).` : ` ⚠ ${cfg.model.label} is a model of ${provider}, which is not connected. Run /connect ${provider}, or /model for another.`));
     }
     const mcp = this.runtime.mcp.status();
     if (mcp.length) {
@@ -1580,7 +1580,7 @@ export class App {
     });
     const items = [...peers, ...fileItems];
     if (!items.length) {
-      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer (/login to the gateway reaches your other computers)');
+      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer (/connect 7bit.fun reaches your other computers)');
       return null;
     }
     return { items, from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
@@ -1596,7 +1596,7 @@ export class App {
     }
     const items = this.peerSuggestionItems(q);
     if (!items.length) {
-      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/login to the gateway reaches your other computers)');
+      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer (/connect 7bit.fun reaches your other computers)');
       return null;
     }
     return { items, from: cursor - q.length - 1, to: cursor };

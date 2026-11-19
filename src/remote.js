@@ -1,7 +1,7 @@
 // Publish a local interactive session to the gateway, so that the account's browser can watch it and steer it: send
 // it messages (as if typed in its input box: /commands, !shell, #memory, pasted images), answer its questions, stop
 // it, switch model and effort, complete input, browse directories for /cd and read a tool call's whole output. The
-// session never listens on the network: it connects out to the codex-gateway with the gateway API key from /login,
+// session never listens on the network: it connects out to the codex-gateway with the gateway API key from /connect,
 // declares the commands it takes when it registers, and gets them on its command stream. With
 // CLAUDE_PRO_REMOTE_COMMANDS=0 it declares none and is read-only on the page.
 // The same connection carries the messages of the account's sessions on other computers (`@公司 ...`, see peers.js).
@@ -290,7 +290,7 @@ export class RemoteControl {
       try {
         if (!this.registered) {
           await this.register();
-          // closed while it registered (/logout, another account): the session that ended must not go online again,
+          // closed while it registered (/disconnect, another account): the session that ended must not go online again,
           // and the registration that just went through gets the bye that close() could not send yet
           if (this.closed) {
             this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'bye', restarting: false }] }, { timeout: 1500 }).catch(() => {});

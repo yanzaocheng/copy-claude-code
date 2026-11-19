@@ -1,5 +1,5 @@
 // Modal dialogs rendered in the live region: selection menus (questions, the model and session pickers, /rewind),
-// with a typed answer of their own when they offer "Other", and a text field (/login asks for a key or an address).
+// with a typed answer of their own when they offer "Other", and a text field (/connect asks for a key or an address).
 
 import { c, glyphs, padEnd, stringWidth, truncate, wordWrap } from './ansi.js';
 import { Editor } from './editor.js';

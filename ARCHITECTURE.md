@@ -4,11 +4,11 @@
 
 ## 1. 项目定位
 
-`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。模型请求默认走 7bit.fun 网关（codex-gateway）：本地通过 `/login` 粘贴网关 key，网关负责上游模型、账户和计费。也可以用 `/connect` 连接其他供应商（Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter……或用户自己的接口），用各自的 key；可以同时连接多家，用哪家由模型名决定（`deepseek/deepseek-v4-pro`，不带前缀即网关）。claude-pro 不读取 Claude CLI OAuth 或 Codex CLI 登录文件。
+`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。模型请求默认走 7bit.fun 网关（codex-gateway）：本地通过 `/connect`（选 7bit.fun）粘贴网关 key，网关负责上游模型、账户和计费。也可以用 `/connect` 连接其他供应商（Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter……或用户自己的接口），用各自的 key；可以同时连接多家，用哪家由模型名决定（`deepseek/deepseek-v4-pro`，不带前缀即网关）。claude-pro 不读取 Claude CLI OAuth 或 Codex CLI 登录文件。
 
 | 后端 | 用途 | 凭据来源 | 请求目标 |
 |---|---|---|---|
-| `gateway` | codex-gateway 账户和模型 | `/login` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://7bit.fun`（旧地址 gw.predix.icu 按 7bit.fun 读取） |
+| `gateway` | codex-gateway 账户和模型 | `/connect` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://7bit.fun`（旧地址 gw.predix.icu 按 7bit.fun 读取） |
 | `/connect` 的供应商 | 其他供应商的模型（[`src/providers.js`](src/providers.js)） | `/connect` 保存的 key（`providers.json`，只有用户自己能读） | 内置地址或用户填的地址；Anthropic 协议直接发，OpenAI 协议经 [`src/openai-chat.js`](src/openai-chat.js) 转成 Chat Completions |
 
 ## 2. 总体架构
@@ -83,9 +83,9 @@ sequenceDiagram
 
 ### 3.1.2 远程控制
 
-登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 7bit.fun）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），高级配置 `CLAUDE_PRO_ONLINE=0` 可关闭远程发布，也用于自检和测试；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/login` 保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 7bit.fun）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），高级配置 `CLAUDE_PRO_ONLINE=0` 可关闭远程发布，也用于自检和测试；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/connect`（7bit.fun）保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
 
-- **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒）。
+- **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/connect` 连上 7bit.fun 后立即调用（当前会话马上上线），`/disconnect 7bit.fun` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒）。
 
 - **协议**（Bearer = 网关 API key）：
   - `POST /v1/remote/sessions {id, name, title, cwd, host, machine, peerId, model, version, kind, commands?}` → `{id, url}`：注册。`id` 由客户端生成（`newRemoteId`，12 位 base64url），重启后沿用（`handoff()` 写进重启状态），`url` 是会话在网关用户端的页面（网页列表里用；终端不再显示它）。`commands` 声明会话接受的页面指令：`RemoteControl.commands` 按有处理函数的类型给出 `["send","interrupt","dialog","options","suggest","list","output"]`；`CLAUDE_PRO_REMOTE_COMMANDS=0`（`remoteCommandsEnabled`）时 App 不传处理函数，注册不带这个字段，网页上只读。网关只转发声明过的类型，其他的直接回页面 409；不带 `commands` 的会话（0.8.0 等旧版）网页上也是只读，新旧版本两个方向都兼容。
@@ -186,13 +186,13 @@ node bin/claude-pro.js config list --advanced
 node bin/claude-pro.js --model opus
 ```
 
-安装目录的 `.env` 不再读取，网关 key 也不在这些来源里：它只来自 `/login` 保存的 `gateway.json`（2026-10-30 去掉了 `.env` 和 `CLAUDE_PRO_GATEWAY_API_KEY`）。provider 固定为 `gateway`，`--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口已删除；旧的 API、Claude CLI 和 Codex CLI 凭据不会参与配置解析。
+安装目录的 `.env` 不再读取，网关 key 也不在这些来源里：它只来自 `/connect` 保存的 `gateway.json`（2026-10-30 去掉了 `.env` 和 `CLAUDE_PRO_GATEWAY_API_KEY`）。provider 固定为 `gateway`，`--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口已删除；旧的 API、Claude CLI 和 Codex CLI 凭据不会参与配置解析。
 
 以下策略固定默认，旧配置值不再生效：主会话按上游输入上限的 100% 自动压缩（子 agent frontmatter 的 `autoCompactWindow` 保留）；不再提供强制 5 分钟、启用 1 小时或按模型关闭提示词缓存的开关；过载重试基础/最大延迟固定为 1000/32000ms，旧重试 watchdog 最大等待改用 `CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS`；Bash 默认/最长超时为 600000/3600000ms、输出上限 60000 字符（单次工具调用仍可指定超时）；源码自动重启固定开启；Trace 固定写项目 `traces/` 目录、单文件 20 MiB。
 
 ### 5.2 gateway 请求路径
 
-`src/api.js` 每次请求从 `/login` 保存的 `gateway.json` 读取 key，通过 Anthropic Messages 格式向 `${CLAUDE_PRO_GATEWAY_URL}/v1/messages` 发送请求。模型、工具 schema、SSE 事件、重试、上下文压缩和取消逻辑都在本地 Agent 层保持不变；远程控制也复用同一个网关账户，但使用独立的 remote API 路径。
+`src/api.js` 每次请求从 `/connect` 保存的 `gateway.json` 读取 key（其他供应商见 6.2），通过 Anthropic Messages 格式向 `${CLAUDE_PRO_GATEWAY_URL}/v1/messages` 发送请求。模型、工具 schema、SSE 事件、重试、上下文压缩和取消逻辑都在本地 Agent 层保持不变；远程控制也复用同一个网关账户，但使用独立的 remote API 路径。
 
 ## 6. gateway 请求与限流
 

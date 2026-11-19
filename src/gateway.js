@@ -1,7 +1,8 @@
 // The gateway provider: model requests go to a shared gateway (https://7bit.fun by default) with an API key of the
 // user's gateway account, which pays for them from its balance. The user makes the key on the gateway's web page
-// (its user page, "API 密钥") and pastes it into /login, which checks it (GET /v1/account) and saves it. (Until
-// 2026-11-19 /login opened the gateway's page in the browser and took a key back through a local callback server.)
+// (its user page, "API 密钥") and pastes it into /connect (7bit.fun), which checks it (GET /v1/account) and saves it.
+// (Until 2026-11-19 /login did, and before that it opened the gateway's page in the browser and took a key back
+// through a local callback server.)
 // The same key puts the sessions online at the gateway (remote.js), whichever provider the model requests go to.
 
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ import { CONFIG_DIR, GATEWAY_DEFAULT_URL, normalizeGatewayUrl, noteServedModels 
 export { GATEWAY_DEFAULT_URL, normalizeGatewayUrl };
 export const gatewayLoginFile = () => path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json');
 
-// The login /login saved for this gateway, {url, apiKey, account, savedAt}, or null when there is none. It is where
+// The login /connect saved for this gateway, {url, apiKey, account, savedAt}, or null when there is none. It is where
 // the key of every gateway request comes from: there is no environment variable or .env file for it. A login saved
 // with the gateway's old address is this gateway's (see normalizeGatewayUrl), and comes back with the new one.
 export function gatewayLogin(url) {
@@ -149,7 +150,7 @@ export function nearestEffort(effort, supported) {
   return supported.reduce((best, item) => (Math.abs(EFFORT_ORDER.indexOf(item) - want) < Math.abs(EFFORT_ORDER.indexOf(best) - want) ? item : best), supported[0]);
 }
 
-// Log in with a key the user made on the gateway's page and pasted into /login: checked with the account it belongs to
+// Log in with a key the user made on the gateway's page and pasted into /connect: checked with the account it belongs to
 // (GET /v1/account) before it is saved. Resolves with the saved login and the account (its balance); throws {status}
 // when the gateway refuses the key (401/403), and the gateway's error when it cannot be reached.
 export async function loginWithKey({ url = GATEWAY_DEFAULT_URL, apiKey, fetchImpl = globalThis.fetch, signal } = {}) {

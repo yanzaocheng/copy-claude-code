@@ -38,8 +38,8 @@ Commands:
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
 
-In a session, /login logs in with an API key of your gateway account (made on its user page, API 密钥), and
-/connect connects other providers (Anthropic, OpenAI, DeepSeek, Kimi, GLM, Qwen, OpenRouter, your own...).
+In a session, /connect connects a model provider with its API key: the gateway (7bit.fun, a key made on its
+user page, API 密钥), Anthropic, OpenAI, DeepSeek, Kimi, GLM, Qwen, OpenRouter, your own... /disconnect forgets one.
 `;
 
 function parseArgs(argv) {

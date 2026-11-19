@@ -18,13 +18,13 @@ const providerOf = (model) => (model && typeof model === 'object' && model.provi
 // A model as the per-model memories below know it: the same id at two providers is two models.
 const keyOf = (model) => `${providerOf(model)}|${typeof model === 'string' ? model : model?.id}`;
 
-// Where a model's requests go and with what key: the gateway (its key from /login, as a bearer token), or a provider
+// Where a model's requests go and with what key: the gateway (its key from /connect, as a bearer token), or a provider
 // connected with /connect (see providers.js). Without one the request fails the way a refused key does.
 function endpointFor(config, model) {
   const provider = providerOf(model);
   if (provider === GATEWAY_PROVIDER) {
     const key = gatewayLogin(config.gatewayUrl)?.apiKey;
-    if (!key) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /login (or /connect for another provider).`, { status: 401, retryable: false });
+    if (!key) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /connect and choose 7bit.fun (or another provider).`, { status: 401, retryable: false });
     return { provider, name: 'the gateway', protocol: 'anthropic', baseURL: config.gatewayUrl, key, bearer: true };
   }
   try {
@@ -258,8 +258,8 @@ function describeError(err, config, ep = null) {
   const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded|exceeds the context window/i.test(msg);
   if (err instanceof APIError) return err;
   const gateway = !ep || ep.provider === GATEWAY_PROVIDER;
-  if (status === 401) msg = gateway ? `The gateway refused the key (401). Run /login to enter another. ${msg}` : `${ep.name} refused the key (401). Run /connect ${ep.provider} to enter it again. ${msg}`;
-  if (status === 402 && gateway) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (or run /login to check the balance). ${msg}`;
+  if (status === 401) msg = gateway ? `The gateway refused the key (401). Run /connect 7bit.fun to enter another. ${msg}` : `${ep.name} refused the key (401). Run /connect ${ep.provider} to enter it again. ${msg}`;
+  if (status === 402 && gateway) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (/cost shows the balance). ${msg}`;
   // A prompt over the window fails the same way every time, so it is not retried: the agent compacts at once. Through
   // the gateway a GPT overflow comes in the stream, without a 4xx: "Your input exceeds the context window of this
   // model. ... (context_length_exceeded)", and was sent 6 more times, with the waits in between, before compacting.

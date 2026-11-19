@@ -7,7 +7,7 @@
 //   5. process environment (advanced keys only)
 //   6. command line flags (--model, --effort ...)
 // The model and effort chosen with /model and /effort are remembered apart from these (see
-// rememberChoice) and win over 1-5. The gateway key comes from /login alone (gateway.json, see
+// rememberChoice) and win over 1-5. The gateway key comes from /connect alone (gateway.json, see
 // gatewayLogin): there is no variable for it, and no .env file is read.
 
 import fs from 'node:fs';
