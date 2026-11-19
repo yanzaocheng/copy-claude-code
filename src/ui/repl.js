@@ -383,7 +383,7 @@ export class App {
     }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
-    // Nothing configured yet: the gateway is the default, and its browser login starts first.
+    // Nothing configured yet: the gateway is the default, and /login asks for its key first.
     else if (!gatewayLogin(this.config.gatewayUrl)) {
       Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }

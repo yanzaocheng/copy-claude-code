@@ -3,10 +3,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { c, glyphs, padEnd, truncate } from './ui/ansi.js';
-import { SelectDialog } from './ui/dialogs.js';
+import { SelectDialog, TextInputDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithBrowser, gatewayLogin, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
@@ -77,7 +77,8 @@ export function buildCommands(app) {
   const log = (...lines) => app.screen.log(...lines);
   const out = (lines) => log(resultLines(Array.isArray(lines) ? lines : [lines]), '');
 
-  // /model and /effort choices are kept for later sessions (rememberChoice); say so, or why they are not.
+  // /model and /effort choices are kept for later sessions (rememberChoice), for the provider in use; say so, or why
+  // they are not.
   const keep = (cfg, patch, forgotten) => {
     try {
       rememberChoice(patch);
@@ -350,7 +351,22 @@ export function buildCommands(app) {
     if (cfg.model.id !== model) app.runtime.invalidateSystemPrompt();
   };
   const accountLine = (account) => `${account.name || ''}${account.email ? ` <${account.email}>` : ''} · balance ${c.bold(formatUsd(account.available_usd ?? account.balance_usd))}`;
-  let pendingLogin = null;
+  const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };
+  // A check that goes over the network (a key, a model): the footer says so meanwhile, and Esc cancels it, as /doctor's.
+  const checking = async (status, fn) => {
+    app.busy = true;
+    app.status = status;
+    app.turnStart = Date.now();
+    app.controller = new AbortController();
+    try {
+      return await fn(app.controller.signal);
+    } finally {
+      app.busy = false;
+      app.status = null;
+      app.controller = null;
+      app.screen.schedule();
+    }
+  };
   // Logged in to the gateway: this session goes online there at once, for its web page and peer messaging. The page
   // can steer the session too (send messages, `!` commands, /cd...) unless CLAUDE_PRO_REMOTE_COMMANDS=0: said as it
   // is, since this message called the page read-only.
@@ -365,46 +381,65 @@ export function buildCommands(app) {
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
   };
 
+  // The gateway login: a key of the user's account, made on the gateway's page and pasted here (until 2026-11-19 the
+  // browser was sent to the gateway and the key came back to a local server). A saved key that still works is used as
+  // it is. A refused one is asked for again, with what the gateway said, three times at most.
+  async function loginGateway() {
+    const cfg = app.runtime.config;
+    const url = cfg.gatewayUrl;
+    const page = gatewayKeyPage(url);
+    const saved = gatewayLogin(url);
+    let error = null;
+    if (saved) {
+      try {
+        const account = await checking('Checking the gateway key', (signal) => fetchGatewayAccount(saved, { signal }));
+        afterLogin();
+        out([`Using the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(account), c.dim(`Top up and usage: ${page} · another key: /logout, then /login`)]);
+        await goOnline();
+        return;
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
+        clearGatewayLogin();
+        error = `The saved key was refused (${e.status}${e.message ? `: ${e.message}` : ''}). Paste another.`;
+      }
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const key = await app.showDialog(new TextInputDialog({
+        title: `Log in to ${hostOf(url)}`,
+        body: [
+          `Make an API key on ${c.blue(page)}: 创建新密钥 (create a key), and tick 用于 claude-pro (for claude-pro) so that this computer's sessions can go online there. Then paste it here.`,
+          c.dim('The key is checked with the gateway, then kept in ~/.claude-pro/gateway.json, readable by you alone.'),
+        ],
+        question: 'API key:',
+        placeholder: 'paste the key (Ctrl+V)',
+        secret: true,
+        error,
+      }));
+      if (!key) { out(c.dim(`Not logged in. /login logs in to ${hostOf(url)}.`)); return; }
+      try {
+        const login = await checking('Checking the key', (signal) => loginWithKey({ url, apiKey: key, signal }));
+        afterLogin();
+        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${page}`)]);
+        await goOnline();
+        return;
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
+        error = `The gateway refused that key (${e.status}${e.message ? `: ${e.message}` : ''}). Check it on ${page}.`;
+      }
+    }
+    out(c.red(`Not logged in: the gateway refused the key three times. Check it on ${page}, then run /login again.`));
+  }
+
   add({
     name: 'login',
     argHint: '[gateway]',
-    description: 'Log in to the codex-gateway account in your browser',
+    description: 'Log in to the gateway with an API key of your account',
     async run(args) {
-      const cfg = app.runtime.config;
       const choice = args.trim().toLowerCase();
       if (choice && choice !== 'gateway') { out(c.red(`Unknown login method "${choice}". Only gateway login is supported.`)); return; }
-
-      const url = cfg.gatewayUrl;
-      const saved = gatewayLogin(url);
-      if (saved) {
-        try {
-          const account = await fetchGatewayAccount(saved);
-          afterLogin();
-          out([`Using the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(account), c.dim(`Top up and usage: ${url}/user · another account: /logout, then /login`)]);
-          await goOnline();
-          return;
-        } catch (e) {
-          if (e.status !== 401 && e.status !== 403) { out(c.red(`Cannot reach the gateway ${url}: ${e.message}`)); return; }
-          clearGatewayLogin();
-        }
-      }
-      pendingLogin?.abort();
-      const controller = new AbortController();
-      pendingLogin = controller;
-      try {
-        const login = await loginWithBrowser({
-          url,
-          signal: controller.signal,
-          onUrl: (page) => out([`Opening the gateway login in your browser. If it does not open, visit:`, c.blue(page), c.dim('Waiting for the browser (10 minutes at most)…')]),
-        });
-        afterLogin();
-        out([`Logged in to the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(login.balance || login.account), c.dim(`Top up and usage: ${url}/user`)]);
-        await goOnline();
-      } catch (e) {
-        if (e.name !== 'AbortError') out(c.red(`Gateway login failed: ${e.message}`));
-      } finally {
-        if (pendingLogin === controller) pendingLogin = null;
-      }
+      await loginGateway();
     },
   });
 

@@ -7,7 +7,7 @@ import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
 
-A command line coding agent using the codex-gateway.
+A command line coding agent using the gateway (https://7bit.fun).
 Starts an interactive session by default; use -p for non-interactive output.
 
 Options:
@@ -37,10 +37,8 @@ Commands:
   claude-pro config list [--advanced]     Show ordinary settings (add --advanced for optional controls)
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
-Interactive prompt commands:
-  /prompt <file|text>                     Save and use a system prompt for later sessions
-  /prompts                                Choose a saved prompt (or select default)
-  /promt, /promits                        Accepted spelling-compatible aliases
+
+In a session, /login logs in with an API key of your gateway account (made on its user page, API 密钥).
 `;
 
 function parseArgs(argv) {

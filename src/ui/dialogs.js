@@ -1,5 +1,5 @@
 // Modal dialogs rendered in the live region: selection menus (questions, the model and session pickers, /rewind),
-// with a typed answer of their own when they offer "Other".
+// with a typed answer of their own when they offer "Other", and a text field (/login asks for a key or an address).
 
 import { c, glyphs, padEnd, stringWidth, truncate, wordWrap } from './ansi.js';
 import { Editor } from './editor.js';
@@ -128,6 +128,82 @@ export class SelectDialog {
     const out = box(lines, width, this.color);
     const hint = this.footer ?? (this.multi ? 'Space to toggle · Enter to confirm · Esc to cancel' : 'Enter to confirm · Esc to cancel');
     out.push(c.dim('  ' + hint));
+    return { lines: out, cursor };
+  }
+}
+
+// One line of text to type or paste (Ctrl+V, or the terminal's paste: the App gives a dialog's `editor` the pasted
+// text). Resolves with the text, trimmed, or null (Esc). `secret`: what is typed shows as stars and its length only
+// (a key on the screen of a recorded or shared terminal is given away), and spaces and line breaks are taken out
+// (a key has none; a paste may bring one along). `allowEmpty`: Enter on an empty field answers '' (to keep what
+// was saved); without it Enter waits for text. `validate(text)`: a message to show under the field instead of
+// answering, or null. The remote page sees the dialog but cannot answer it (it has no options): the text is typed here.
+export class TextInputDialog {
+  constructor({ title, body = [], question, placeholder = '', secret = false, initial = '', allowEmpty = false, error = null, validate = null, color = c.permission }) {
+    this.title = title;
+    this.body = body;
+    this.question = question;
+    this.placeholder = placeholder;
+    this.secret = secret;
+    this.allowEmpty = allowEmpty;
+    this.error = error;
+    this.validate = validate;
+    this.color = color;
+    this.cancelValue = null;
+    this.editor = new Editor();
+    if (initial) this.editor.set(initial);
+  }
+
+  resolve(value) {
+    const cb = this.onResolve;
+    this.onResolve = null;
+    cb?.(value);
+  }
+
+  value() {
+    const text = this.editor.expanded();
+    return this.secret ? text.replace(/\s+/g, '') : text.replace(/[\r\n]+/g, ' ').trim();
+  }
+
+  handleKey(str, key = {}) {
+    if (key.name === 'escape') { this.resolve(null); return true; }
+    if (key.name === 'return' && !key.meta) {
+      const text = this.value();
+      if (!text && !this.allowEmpty) return true;
+      const problem = text ? this.validate?.(text) : null;
+      if (problem) { this.error = problem; return true; }
+      this.resolve(text);
+      return true;
+    }
+    this.error = null;
+    this.editor.handleKey(str, key);
+    return true; // modal: everything else stays here
+  }
+
+  render(width) {
+    const lines = [];
+    if (this.title) lines.push(c.bold(this.color(this.title)), '');
+    lines.push(...this.body);
+    if (this.body.length) lines.push('');
+    if (this.question) lines.push(this.question);
+    const inner = Math.max(20, width - 1) - 4;
+    let cursor = null;
+    if (this.secret) {
+      const n = this.value().length;
+      const room = Math.max(4, inner - 20);
+      const stars = n ? `${'*'.repeat(Math.min(n, room))}${n > room ? '...' : ''}` : '';
+      const row = boxRows(lines, width) + 1; // the row it takes once box() has wrapped the long ones, and the top border
+      lines.push(`> ${stars}${n ? c.dim(`  (${n} characters)`) : c.dim(this.placeholder)}`);
+      cursor = { row, col: 2 + 2 + stringWidth(stars) };
+    } else {
+      const r = this.editor.render(width - 4, { placeholder: this.placeholder });
+      const top = boxRows(lines, width) + 1;
+      lines.push(...r.lines.map((l) => truncate(l, inner)));
+      if (r.cursor) cursor = { row: top + r.cursor.row, col: 2 + r.cursor.col };
+    }
+    if (this.error) lines.push('', c.red(this.error));
+    const out = box(lines, width, this.color);
+    out.push(c.dim(`  Enter to confirm · Esc to cancel${this.secret ? ' · Ctrl+V pastes' : ''}`));
     return { lines: out, cursor };
   }
 }

@@ -8,7 +8,7 @@
 
 | 后端 | 用途 | 凭据来源 | 请求目标 |
 |---|---|---|---|
-| `gateway` | codex-gateway 账户和模型 | `/login` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://gw.predix.icu` |
+| `gateway` | codex-gateway 账户和模型 | `/login` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://7bit.fun`（旧地址 gw.predix.icu 按 7bit.fun 读取） |
 
 ## 2. 总体架构
 
@@ -82,7 +82,7 @@ sequenceDiagram
 
 ### 3.1.2 远程控制
 
-登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 gw.predix.icu）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），高级配置 `CLAUDE_PRO_ONLINE=0` 可关闭远程发布，也用于自检和测试；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/login` 保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
+登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 7bit.fun）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），高级配置 `CLAUDE_PRO_ONLINE=0` 可关闭远程发布，也用于自检和测试；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/login` 保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
 
 - **上线与下线**（`App`，[`src/ui/repl.js`](src/ui/repl.js)）：`autoStartRemote` 在启动时（不阻塞）上线：`onlineWanted()`（登录了网关、`CLAUDE_PRO_ONLINE` 不是 0；测试驱动的 App 要显式 `CLAUDE_PRO_ONLINE=1`），或者重启状态里带着 `remote.id`（沿用同一个 id）。`syncRemote()` 让在线状态跟上登录：`/login` 成功后立即调用（当前会话马上上线），`/logout` 直接 `stopRemote()`，另外每 10 秒一次（别的窗口登录/退出、换账号：key 或网关地址变了就断开，没断开的重新连）。网关拒绝的 key 记在 `remoteRefused`，同一个 key 不再自动重试（只提示一次），换了登录才再试。`/status` 用 `remoteState()` 显示状态（在线/连接中/重试中/没登录/key 被拒）。
 
@@ -244,7 +244,7 @@ Agent / WebFetch / 标题摘要
 SDK 最终调用网关提供的 Anthropic Messages 兼容接口，逻辑路径相当于：
 
 ```text
-POST https://gw.predix.icu/v1/messages
+POST https://7bit.fun/v1/messages
 Authorization: Bearer <gateway API key>
 X-Claude-Code-Session-Id: <session id>
 ```

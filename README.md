@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：只使用网关登录。`/login` 会在浏览器完成授权，再把本机专用 key 保存到 `~/.claude-pro/gateway.json`；模型请求和远程会话发布都只发往网关。
+> **认证**：只使用网关登录。在网关网站「API 密钥」创建 Key，在 `/login` 里粘贴，验证后保存到 `~/.claude-pro/gateway.json`；模型请求和远程会话发布都只发往网关。
 
 ## 安装与运行
 
@@ -44,7 +44,7 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 
 ## 网关登录
 
-claude-pro 只支持 codex-gateway。交互式启动时如果没有网关登录，会自动打开浏览器；也可以手动运行：
+claude-pro 只支持 codex-gateway（默认 https://7bit.fun）。交互式启动时如果没有网关登录，会自动打开 `/login` 让你粘贴 Key；也可以手动运行：
 
 ```powershell
 claude-pro /login
@@ -57,7 +57,9 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 
 ## /login：网关账户
 
-`/login` 只有一个选项：网关。第一次登录会在浏览器打开网关授权页，授权后 claude-pro 用一次性 code 换取本机专用 API key。
+`/login` 只有一个选项：网关。先登录 https://7bit.fun/user ，在「API 密钥」点「创建新密钥」，**勾选“用于 claude-pro”**（不勾选的 Key 也能调用模型，但网关不允许它把会话发布到远程网页、和其他电脑互发消息），然后在 `/login` 里粘贴。输入时只显示星号和长度；Key 先用 `GET /v1/account` 验证，通过后才保存，并显示账户名和余额。被拒绝时会显示网关的原话，可以再粘贴一次。
+
+2026-11-19 起不再用浏览器跳转授权（网关的 `/cli/login` 已停用）。之前用跳转授权得到、已保存的 Key 照常可用，不需要重新登录。
 
 ```text
 /login
@@ -65,11 +67,11 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 /cost
 ```
 
-网关地址默认是 `https://gw.predix.icu`，也可以通过 `CLAUDE_PRO_GATEWAY_URL` 修改。账户余额和用量在网关用户页查看。
+网关地址默认是 `https://7bit.fun`，也可以通过 `CLAUDE_PRO_GATEWAY_URL` 修改。旧地址 `https://gw.predix.icu` 是同一个网关：用它保存的登录和设置会自动按 7bit.fun 读取，不需要重新登录。账户余额和用量在网关用户页查看。
 
 ## 配置
 
-网关 key 只来自 `/login`：登录后保存在 `~/.claude-pro/gateway.json`，不用手动填写，也没有环境变量或 `.env` 文件可以设置它（没有浏览器的机器可以把另一台登录过的电脑的 `gateway.json` 拷过去）。
+网关 key 只来自 `/login`：粘贴后保存在 `~/.claude-pro/gateway.json`，没有环境变量或 `.env` 文件可以设置它。
 
 一般只需要 `/login`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值）：
 
@@ -92,7 +94,7 @@ claude-pro config list                       # 普通设置，含默认值
 claude-pro config set model sonnet
 claude-pro config set promptCacheTtl 1h
 claude-pro config list --advanced            # 另外显示高级配置
-claude-pro config set CLAUDE_PRO_GATEWAY_URL https://gw.predix.icu
+claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 ```
 
 会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择；`--model`、`--effort` 可覆盖本次启动。

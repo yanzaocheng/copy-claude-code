@@ -1,33 +1,31 @@
-// The codex-gateway provider: model requests go to a shared gateway (https://gw.predix.icu by default) with an
-// API key of the user's gateway account, which pays for them from its balance. /login starts a local callback
-// server, opens the gateway login page in the browser, and exchanges a one-time code for a key belonging to this machine
-// (see handleCli in codex-gateway's server.mjs).
+// The gateway provider: model requests go to a shared gateway (https://7bit.fun by default) with an API key of the
+// user's gateway account, which pays for them from its balance. The user makes the key on the gateway's web page
+// (its user page, "API 密钥") and pastes it into /login, which checks it (GET /v1/account) and saves it. (Until
+// 2026-11-19 /login opened the gateway's page in the browser and took a key back through a local callback server.)
+// The same key puts the sessions online at the gateway (remote.js), whichever provider the model requests go to.
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
-import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { CONFIG_DIR, GATEWAY_DEFAULT_URL, noteServedModels } from './config.js';
+import { CONFIG_DIR, GATEWAY_DEFAULT_URL, normalizeGatewayUrl, noteServedModels } from './config.js';
 
-export { GATEWAY_DEFAULT_URL };
+export { GATEWAY_DEFAULT_URL, normalizeGatewayUrl };
 export const gatewayLoginFile = () => path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json');
-const LOGIN_TIMEOUT_MS = 10 * 60_000;
-
-export const normalizeGatewayUrl = (url) => String(url || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, '');
 
 // The login /login saved for this gateway, {url, apiKey, account, savedAt}, or null when there is none. It is where
-// the key of every model and remote request comes from: there is no environment variable or .env file for it.
+// the key of every gateway request comes from: there is no environment variable or .env file for it. A login saved
+// with the gateway's old address is this gateway's (see normalizeGatewayUrl), and comes back with the new one.
 export function gatewayLogin(url) {
   try {
     const data = JSON.parse(fs.readFileSync(gatewayLoginFile(), 'utf8'));
     if (!data?.apiKey || (url && normalizeGatewayUrl(data.url) !== normalizeGatewayUrl(url))) return null;
-    return data;
+    return { ...data, url: normalizeGatewayUrl(data.url) };
   } catch {
     return null;
   }
 }
+
+// Where the gateway's users make their keys.
+export const gatewayKeyPage = (url) => `${normalizeGatewayUrl(url)}/user#keys`;
 
 export function saveGatewayLogin(login) {
   const file = gatewayLoginFile();
@@ -39,20 +37,6 @@ export function saveGatewayLogin(login) {
 
 export function clearGatewayLogin() {
   try { fs.unlinkSync(gatewayLoginFile()); return true; } catch { return false; }
-}
-
-export function openBrowser(url) {
-  try {
-    const [cmd, args] = process.platform === 'win32'
-      ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
-      : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
-    const child = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true });
-    child.on('error', () => {});
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function gatewayJson(url, init = {}, fetchImpl = globalThis.fetch) {
@@ -165,41 +149,17 @@ export function nearestEffort(effort, supported) {
   return supported.reduce((best, item) => (Math.abs(EFFORT_ORDER.indexOf(item) - want) < Math.abs(EFFORT_ORDER.indexOf(best) - want) ? item : best), supported[0]);
 }
 
-const PAGE = (title, text) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;line-height:1.6"><h2>${title}</h2><p>${text}</p></body>`;
-
-// Log in through the browser. `onUrl(url)` is told the login page's address (to show it, for when the browser
-// does not open by itself); `open` opens it. Resolves with the saved login once the key is in.
-export async function loginWithBrowser({ url = GATEWAY_DEFAULT_URL, onUrl = () => {}, open = openBrowser, signal, fetchImpl = globalThis.fetch, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
+// Log in with a key the user made on the gateway's page and pasted into /login: checked with the account it belongs to
+// (GET /v1/account) before it is saved. Resolves with the saved login and the account (its balance); throws {status}
+// when the gateway refuses the key (401/403), and the gateway's error when it cannot be reached.
+export async function loginWithKey({ url = GATEWAY_DEFAULT_URL, apiKey, fetchImpl = globalThis.fetch, signal } = {}) {
   const base = normalizeGatewayUrl(url);
-  const state = crypto.randomBytes(24).toString('base64url');
-  let settle;
-  const result = new Promise((resolve, reject) => { settle = { resolve, reject }; });
-  const server = http.createServer((req, res) => {
-    const u = new URL(req.url, 'http://127.0.0.1');
-    if (u.pathname !== '/callback') { res.writeHead(404).end(); return; }
-    const ok = u.searchParams.get('state') === state && u.searchParams.get('code');
-    res.writeHead(ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(ok ? PAGE('登录成功', '可以关掉这个页面，回到终端继续使用 claude-pro。') : PAGE('登录失败', '链接无效或已过期。请回到终端重新执行 /login。'));
-    if (ok) settle.resolve(u.searchParams.get('code'));
-  });
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const timer = setTimeout(() => settle.reject(new Error('Login timed out: the browser did not come back within 10 minutes.')), timeoutMs);
-  const onAbort = () => settle.reject(Object.assign(new Error('Login cancelled'), { name: 'AbortError' }));
-  signal?.addEventListener('abort', onAbort, { once: true });
-  try {
-    const page = `${base}/cli/login?${new URLSearchParams({ port: String(server.address().port), state, client: 'claude-pro', device: os.hostname().slice(0, 60) })}`;
-    onUrl(page);
-    Promise.resolve().then(() => open(page)).catch((e) => settle.reject(e));
-    const code = await result;
-    const token = await gatewayJson(`${base}/cli/token`, { method: 'POST', body: JSON.stringify({ code, state }) }, fetchImpl);
-    const login = { url: base, apiKey: token.api_key, account: { id: token.account?.id, name: token.account?.name, email: token.account?.email } };
-    saveGatewayLogin(login);
-    return { ...login, balance: token.account };
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
-    server.close();
-  }
+  const key = String(apiKey || '').replace(/\s+/g, '');
+  if (!key) throw new Error('no key was given');
+  const account = await fetchGatewayAccount({ url: base, apiKey: key }, { fetchImpl, signal });
+  const login = { url: base, apiKey: key, account: { id: account?.id, name: account?.name, email: account?.email } };
+  saveGatewayLogin(login);
+  return { ...login, balance: account };
 }
 
 export const formatUsd = (value) => {

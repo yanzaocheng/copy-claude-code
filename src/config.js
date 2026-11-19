@@ -22,7 +22,14 @@ export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.u
 export const SOURCE_CHECKOUT = fs.existsSync(path.join(INSTALL_DIR, '.git'));
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
 export const APP_NAME = 'claude-pro';
-export const GATEWAY_DEFAULT_URL = 'https://gw.predix.icu';
+export const GATEWAY_DEFAULT_URL = 'https://7bit.fun';
+// The gateway's earlier address (until 2026-11-19): a login or a setting saved with it means the same gateway, which
+// answers there too, so it is read as the new one and no computer has to log in again.
+const OLD_GATEWAY_URLS = new Set(['https://gw.predix.icu', 'http://gw.predix.icu']);
+export function normalizeGatewayUrl(url) {
+  const base = String(url || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, '');
+  return OLD_GATEWAY_URLS.has(base.toLowerCase()) ? GATEWAY_DEFAULT_URL : base;
+}
 export const VERSION = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).version;
 
 // The ordinary settings /config shows. `legacy`: the old spelling accepted in settings.json.env and by config
@@ -40,7 +47,7 @@ export const BASIC_SETTINGS = {
 // Advanced keys, shown only by /config advanced (or config list --advanced). Settings files may also carry
 // unrelated env entries; those are left alone, but are not advertised as configuration of this program.
 export const KNOWN_KEYS = {
-  CLAUDE_PRO_GATEWAY_URL: `codex-gateway address (default https://gw.predix.icu)`,
+  CLAUDE_PRO_GATEWAY_URL: `Gateway address (default ${GATEWAY_DEFAULT_URL})`,
   CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online on the gateway\'s web page whenever this computer is logged in, and sessions on your other computers can send it tasks (@computer/name)',
   CLAUDE_PRO_REMOTE_COMMANDS: 'Set to 0 to make this computer\'s sessions read-only on the gateway\'s web page: it can watch them, but not send them messages, answer their questions, stop them, switch model or effort, or change their directory (default: on; read when a session goes online)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
@@ -216,8 +223,8 @@ export class Config {
     this.verifyOverride = null; // set by /verify or --verify during a session
   }
 
-  get gatewayUrl() { return (this.env.CLAUDE_PRO_GATEWAY_URL || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, ''); }
-  get endpointLabel() { return `${this.gatewayUrl} (codex-gateway)`; }
+  get gatewayUrl() { return normalizeGatewayUrl(this.env.CLAUDE_PRO_GATEWAY_URL); }
+  get endpointLabel() { return `${this.gatewayUrl} (gateway)`; }
 
   aliasTarget(alias) {
     return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
