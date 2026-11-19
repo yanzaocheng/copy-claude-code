@@ -131,7 +131,7 @@ func (g *gateway) request(ctx context.Context, method, path, sessionID string, p
 	req.Header.Set("Authorization", "Bearer "+g.key)
 	req.Header.Set("Anthropic-Version", "2023-06-01")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "claude-pro-lite/0.1")
+	req.Header.Set("User-Agent", "claude-pro-lite/"+releaseVersion)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

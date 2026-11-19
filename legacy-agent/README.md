@@ -1,6 +1,6 @@
 # claude-pro-lite（Windows x64）
 
-面向 Windows Server 2008 R2 SP1 x64 的免安装试用版。在新机器编译，只把 `claude-pro-lite.exe` 拷到服务器；服务器不需要安装 Go、Node、Python 或 .NET。这个程序不依赖原版 `claude-pro`，也不读写原版的登录文件。
+面向 Windows Server 2008 R2 SP1 x64 的免安装试用版。在新机器编译，只把 `claude-pro-lite.exe` 拷到服务器；服务器不需要安装 Go、Node、Python 或 .NET。这个程序不依赖原版 `claude-pro`，也不读写原版的登录文件。可将带版本号的 EXE 改名为 `claude-pro-lite.exe` 后使用；运行 `claude-pro-lite.exe --version` 查看内置版本。
 
 ## 在服务器用 `cmd.exe` 测试
 
@@ -34,13 +34,11 @@
 
 普通最新版 Go 不支持 Windows Server 2008 R2。此版本用第三方 [`go-legacy-win7` v1.27.4-1](https://github.com/thongtech/go-legacy-win7/releases/tag/v1.27.4-1) 构建；安装或解压只发生在开发机。Windows x64 编译器 ZIP 的发布 SHA-256 为 `f8718d445d4a65590027cca434f164d665a04ee2dde96d7a3dc0abad840b6c2d`。
 
-在此目录运行（Git Bash，`LEGACY_GO` 为已解压的 `go.exe` 路径）：
+每次出新版本先更新本目录的 `VERSION`，再运行以下命令（Git Bash，`LEGACY_GO` 为已解压的 `go.exe` 路径）。构建会同时生成 `dist/claude-pro-lite-vX.Y.Z.exe` 和同版本的 `dist/claude-pro-lite.exe`；保留旧的带版本号产物，便于区分。
 
 ```bash
 GOTOOLCHAIN=local CGO_ENABLED=0 "$LEGACY_GO" test ./...
-mkdir -p dist
-GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOAMD64=v1 \
-  "$LEGACY_GO" build -trimpath -buildvcs=false -ldflags='-s -w' -o dist/claude-pro-lite.exe .
+LEGACY_GO="$LEGACY_GO" bash build.sh
 ```
 
 测试使用本地模拟网关和临时文件，不需要真实 API Key。编译成功和在新版 Windows 运行不等于已通过 2008 R2 实机验收。
