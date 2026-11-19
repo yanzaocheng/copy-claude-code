@@ -7,6 +7,7 @@ import { SelectDialog, TextInputDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnections, saveConnection, removeConnection, normalizeBaseUrl, validBaseUrl, cleanProviderId, reservedProviderId, listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels } from './providers.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
@@ -29,10 +30,29 @@ const effortLevels = (modelId, modelInfo = null) => {
   return remote.length ? remote : EFFORTS;
 };
 
+// The models of the providers connected with /connect, for /model: each provider's list asked for anew (4 seconds at
+// most), with what was kept at /connect about them (windows, prices); without an answer, the list kept then.
+async function providerModelChoices() {
+  const groups = await Promise.all(connectedProviders().map(async (info) => {
+    let listed = null;
+    try {
+      listed = (await listProviderModels({ ...info, ...info.connection, baseUrl: info.connection.baseUrl || info.baseUrl }, { timeoutMs: 4000, kinds: [info.connection.authHeader || 'x-api-key'] })).models;
+    } catch { /* the kept list */ }
+    const kept = info.connection.models || [];
+    const models = listed?.length ? listed.map((m) => ({ ...kept.find((k) => k.id === m.id), ...m })) : kept;
+    return models.map((m) => ({
+      value: `${info.id}/${m.id}`,
+      label: `${info.id}/${m.id}`,
+      description: [info.name, m.name && m.name !== m.id ? m.name : '', m.window ? `${formatTokens(m.window)} context` : ''].filter(Boolean).join(' · '),
+    }));
+  }));
+  return groups.flat();
+}
+
 // What /model offers (and the remote page, see App.remoteOptions): [{value, label, description}] in plain text, the
 // default first. `value` is what /model <value> takes. The gateway's list of models is asked for anew each time (4
 // seconds at most), so a model it has just added is there without a restart; without an answer the list it gave
-// last, else gpt-6.1-sol for its GPT models.
+// last, else gpt-6.1-sol for its GPT models. Then the models of the other connected providers (provider/model).
 export async function modelChoices(cfg) {
   const configured = cfg.configuredModelSpec;
   const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).id}` }];
@@ -40,12 +60,14 @@ export async function modelChoices(cfg) {
   // The other models the gateway serves (Fable, the GPT models, …); without an answer, gpt-6.1-sol.
   const login = gatewayLogin(cfg.gatewayUrl);
   let served = null;
+  const others = providerModelChoices();
   try { if (login) served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true }); } catch { /* offline: the fallback below */ }
   const aliased = new Set(['opus', 'sonnet', 'haiku'].map((a) => cfg.resolveModel(cfg.aliasTarget(a)).id));
   for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
     if (aliased.has(m.id)) continue;
     opts.push({ value: m.id, label: m.id, description: isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || '' });
   }
+  opts.push(...(await others));
   return opts;
 }
 
@@ -54,7 +76,7 @@ export async function modelChoices(cfg) {
 export async function effortChoices(cfg) {
   const id = cfg.model.id;
   let info = null;
-  if (isGpt(id)) {
+  if (isGpt(id) && cfg.model.provider === GATEWAY_PROVIDER) {
     const login = gatewayLogin(cfg.gatewayUrl);
     try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
   }
@@ -307,7 +329,7 @@ export function buildCommands(app) {
     get argHint() {
       const cfg = app.runtime.config;
       const login = gatewayLogin(cfg.gatewayUrl);
-      return `[${effortLevels(cfg.model.id, cachedGatewayModel(login, cfg.model.id)).join('|')}|auto|default]`;
+      return `[${effortLevels(cfg.model.id, cfg.model.provider === GATEWAY_PROVIDER ? cachedGatewayModel(login, cfg.model.id) : null).join('|')}|auto|default]`;
     },
     description: 'Set reasoning effort (output_config.effort; kept for later sessions)',
     async run(args) {
@@ -432,10 +454,193 @@ export function buildCommands(app) {
     out(c.red(`Not logged in: the gateway refused the key three times. Check it on ${page}, then run /login again.`));
   }
 
+  // ---------------------------------------------------------------- /connect: the providers of models
+
+  // A provider's key, checked by asking for its models with it (the header the key goes in is found on the way); asked
+  // again when refused, three times at most. Resolves with {apiKey, authHeader, listed}, or null (cancelled, refused,
+  // unreachable: said).
+  async function askProviderKey(info, existing) {
+    const base = normalizeBaseUrl(info.baseUrl, info.protocol);
+    let error = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const keep = Boolean(existing?.apiKey);
+      const typed = await app.showDialog(new TextInputDialog({
+        title: `Connect ${info.name}`,
+        body: [
+          info.keyPage ? `Make an API key on ${c.blue(info.keyPage)} and paste it here.` : `The API key for ${base}${info.keyless ? ' (none needed: Enter)' : ''}.`,
+          c.dim(`${info.protocol === 'openai' ? 'OpenAI Chat Completions' : 'Anthropic Messages API'} · ${base} · kept in ~/.claude-pro/providers.json, readable by you alone.`),
+        ],
+        question: 'API key:',
+        placeholder: keep ? 'Enter: keep the saved key · or paste another (Ctrl+V)' : info.keyless ? 'Enter: no key' : 'paste the key (Ctrl+V)',
+        secret: true,
+        allowEmpty: keep || Boolean(info.keyless),
+        error,
+      }));
+      if (typed === null) { out(c.dim(`${info.name} was not connected.`)); return null; }
+      const apiKey = typed || existing?.apiKey || '';
+      try {
+        const r = await checking(`Checking the key with ${info.name}`, (signal) => listProviderModels({ ...info, apiKey }, { signal }));
+        return { apiKey, authHeader: r.authHeader, listed: r.models };
+      } catch (e) {
+        if (e.name === 'AbortError') return null;
+        if (!e.refused) { out(c.red(`Cannot reach ${info.name}: ${e.message}`)); return null; }
+        error = `${info.name} refused that key: ${e.message}`;
+      }
+    }
+    out(c.red(`${info.name} was not connected: it refused the key three times.`));
+    return null;
+  }
+
+  // Connect a provider: its key, the model to use now (or none), one request to that model (the protocol, the key, the
+  // model: nothing is saved before it answers), then the connection is saved and /model switches to the model.
+  async function connectProvider(info) {
+    const existing = readConnections()[info.id];
+    const key = await askProviderKey(info, existing);
+    if (!key) return;
+    const catalogue = info.modelsDev ? await checking('Reading models.dev', (signal) => modelsDevCatalogue({ signal })).catch(() => null) : null;
+    const models = enrichModels(key.listed, catalogue, info.modelsDev);
+    const cfg = app.runtime.config;
+    const KEEP = '__keep__';
+    const choice = models.length
+      ? await app.showDialog(new SelectDialog({
+        title: `Connect ${info.name} · model`,
+        question: `Use one of its models now? (/model switches any time; its models are ${info.id}/<model>)`,
+        options: [
+          { label: `Keep using ${cfg.model.label}`, value: KEEP },
+          ...models.map((m) => ({ label: m.id, value: m.id, description: [m.name, m.window ? `${formatTokens(m.window)} context` : '', m.price ? `$${m.price.input} / $${m.price.output} per M tokens` : ''].filter(Boolean).join(' · ') })),
+        ],
+        otherOption: true,
+      }))
+      : await app.showDialog(new TextInputDialog({
+        title: `Connect ${info.name} · model`,
+        body: [`${info.name} lists no models here: name the one to use, as ${info.name} documents it.`],
+        question: 'Model:',
+      }));
+    if (choice === null || choice === undefined) { out(c.dim(`${info.name} was not connected.`)); return; }
+    // One request: to the model chosen; with "keep", to the first one listed when the endpoint is the user's own (its
+    // protocol is not known to work) or the key's header is not known yet (an Anthropic endpoint without a list).
+    let authHeader = key.authHeader;
+    let quirks = {};
+    const tryModel = choice !== KEEP ? choice : (info.custom || !authHeader) ? models[0]?.id : null;
+    if (tryModel) {
+      try {
+        ({ authHeader, quirks } = await checking(`Trying ${tryModel}`, (signal) => testProviderModel({ ...info, apiKey: key.apiKey, authHeader, model: tryModel }, { signal })));
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        out(c.red(`${info.name} was not connected: ${tryModel} answered ${e.message}`));
+        return;
+      }
+    }
+    const kept = models.length ? models : choice !== KEEP ? [{ id: choice }] : [];
+    saveConnection(info.id, {
+      ...(info.custom ? { custom: true, name: info.name, protocol: info.protocol, baseUrl: info.baseUrl } : {}),
+      apiKey: key.apiKey,
+      authHeader: info.protocol === 'openai' ? 'bearer' : authHeader || 'x-api-key',
+      ...(Object.keys(quirks).length ? { quirks } : {}),
+      models: kept,
+    });
+    out([`${c.green('✔')} Connected ${c.bold(info.name)}${kept.length ? c.dim(` · ${kept.length} model${kept.length === 1 ? '' : 's'}`) : ''}`, c.dim(`Its models are ${info.id}/<model> in /model · /disconnect ${info.id} forgets the key.`)]);
+    if (choice !== KEEP) await commands.get('model').run(`${info.id}/${choice}`);
+  }
+
+  // A provider of the user's own: a name (what its models are named after), the address, then as a built-in one.
+  async function connectCustom(protocol) {
+    const kind = protocol === 'openai' ? 'OpenAI-compatible' : 'Anthropic-compatible';
+    const name = await app.showDialog(new TextInputDialog({
+      title: `Your own provider (${kind})`,
+      body: ['A name for it: its models are named <name>/<model> in /model (letters, digits and -).'],
+      question: 'Name:',
+      validate: (text) => {
+        const id = cleanProviderId(text);
+        if (!id) return 'Letters, digits and - only.';
+        return reservedProviderId(id) ? `"${id}" is a built-in provider: pick it from the /connect list, or give another name.` : null;
+      },
+    }));
+    if (!name) return;
+    const id = cleanProviderId(name);
+    const existing = readConnections()[id];
+    const examples = protocol === 'openai' ? ['https://api.example.com/v1', 'http://localhost:1234/v1   (LM Studio)', 'http://localhost:8000/v1   (vLLM)'] : ['https://api.example.com/anthropic'];
+    const typed = await app.showDialog(new TextInputDialog({
+      title: `${name} (${kind})`,
+      body: [`The address it takes requests at (${protocol === 'openai' ? 'POST <address>/chat/completions' : 'POST <address>/v1/messages'}), for example:`, ...examples.map((e) => c.dim(`  ${e}`))],
+      question: 'Base URL:',
+      initial: existing?.baseUrl || '',
+      placeholder: 'https://…',
+      validate: (text) => (validBaseUrl(normalizeBaseUrl(text, protocol)) ? null : 'An http(s) address.'),
+    }));
+    if (!typed) return;
+    await connectProvider({ id, name: name.trim(), protocol, baseUrl: normalizeBaseUrl(typed, protocol), custom: true, keyless: true });
+  }
+
+  add({
+    name: 'connect',
+    argHint: '[provider]',
+    description: 'Connect a model provider with its API key: 7bit.fun, Anthropic, OpenAI, DeepSeek, Kimi, GLM, Qwen, your own…',
+    async run(args) {
+      const connections = readConnections();
+      const gatewayIn = Boolean(gatewayLogin(app.runtime.config.gatewayUrl));
+      let choice = args.trim().toLowerCase();
+      if (!choice) {
+        const mark = (on) => (on ? c.green('✔ ') : '  ');
+        const protocolName = (p) => (p === 'openai' ? 'OpenAI' : 'Anthropic');
+        choice = await app.showDialog(new SelectDialog({
+          title: 'Connect a provider',
+          question: 'Several can be connected at once (✔): their models are all in /model. Picking a connected one again replaces its key.',
+          options: [
+            { label: `${mark(gatewayIn)}7bit.fun`, value: GATEWAY_PROVIDER, description: 'the gateway: Claude and GPT models, balance, the web page, your other computers' },
+            ...PRESETS.map((p) => ({ label: `${mark(Boolean(connections[p.id]))}${p.name}`, value: p.id, description: `${protocolName(p.protocol)} protocol · ${hostOf(p.baseUrl)}` })),
+            ...Object.entries(connections).filter(([, conn]) => conn?.custom).map(([id, conn]) => ({ label: `${mark(true)}${conn.name || id}`, value: id, description: `your own · ${protocolName(conn.protocol)} protocol · ${hostOf(conn.baseUrl)}` })),
+            { label: '  Your own (Anthropic-compatible)', value: '__custom_anthropic__', description: 'any endpoint with POST /v1/messages' },
+            { label: '  Your own (OpenAI-compatible)', value: '__custom_openai__', description: 'any endpoint with POST /chat/completions: relays, LM Studio, vLLM…' },
+          ],
+        }));
+        if (!choice) return;
+      }
+      if (choice === GATEWAY_PROVIDER || choice === 'gateway' || choice === '7bit.fun') return loginGateway();
+      if (choice === '__custom_anthropic__') return connectCustom('anthropic');
+      if (choice === '__custom_openai__') return connectCustom('openai');
+      const info = providerInfo(choice, connections);
+      if (!info) { out(c.red(`There is no provider "${choice}". /connect lists them.`)); return; }
+      await connectProvider(info.custom ? { ...info, keyless: true } : info);
+    },
+  });
+
+  add({
+    name: 'disconnect',
+    argHint: '[provider]',
+    description: 'Forget a provider\'s key (the gateway\'s: /logout)',
+    async run(args) {
+      const cfg = app.runtime.config;
+      let id = args.trim().toLowerCase();
+      if (!id) {
+        const connected = connectedProviders();
+        if (!connected.length) { out(c.dim('No provider is connected (the gateway\'s login: /logout). /connect connects one.')); return; }
+        id = await app.showDialog(new SelectDialog({
+          title: 'Disconnect a provider',
+          question: 'Its key is forgotten, and its models cannot be used until it is connected again.',
+          options: connected.map((p) => ({ label: p.name, value: p.id, description: `${p.id}/<model>` })),
+        }));
+        if (!id) return;
+      }
+      if (id === GATEWAY_PROVIDER || id === 'gateway') { await commands.get('logout').run(''); return; }
+      const info = providerInfo(id);
+      if (!removeConnection(id)) { out(c.dim(`${info?.name || id} is not connected.`)); return; }
+      // The model in use was one of its models: back to the configured default.
+      let back = '';
+      if (cfg.model.provider === id) {
+        cfg.modelOverride = null;
+        try { rememberChoice({ model: null }); } catch { /* the settings file cannot be written: for this session */ }
+        app.runtime.invalidateSystemPrompt();
+        back = ` The model is ${c.bold(cfg.model.label)} again (the configured default).`;
+      }
+      out(`Disconnected ${info?.name || id}: its key is forgotten.${back}`);
+    },
+  });
+
   add({
     name: 'login',
     argHint: '[gateway]',
-    description: 'Log in to the gateway with an API key of your account',
+    description: 'Log in to the gateway with an API key of your account (/connect: other providers)',
     async run(args) {
       const choice = args.trim().toLowerCase();
       if (choice && choice !== 'gateway') { out(c.red(`Unknown login method "${choice}". Only gateway login is supported.`)); return; }
@@ -470,14 +675,15 @@ export function buildCommands(app) {
         row('Version', VERSION),
         row('Session ID', app.store.id),
         row('cwd', app.cwd),
-        row('Provider', 'gateway'),
+        row('Provider', cfg.model.provider === GATEWAY_PROVIDER ? 'gateway' : `${providerInfo(cfg.model.provider)?.name || cfg.model.provider} ${c.dim(`(${cfg.model.provider}/…)`)}`),
         row('Endpoint', cfg.endpointLabel),
-        row('Auth', gatewayLogin(cfg.gatewayUrl) ? `gateway key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.red('not logged in (/login)')),
+        row('Gateway login', gatewayLogin(cfg.gatewayUrl) ? `key of ${gatewayLogin(cfg.gatewayUrl).account?.email || 'this machine'} ${c.dim('(/cost shows the balance)')}` : c.dim('none (/login)')),
+        row('Connected', connectedProviders().map((p) => p.id).join(', ') || c.dim('no other provider (/connect)')),
         row('Model', `${cfg.model.label} ${c.dim(`(sent as "${cfg.model.id}", ${formatTokens(cfg.model.contextWindow)} context)`)}`),
         row('Effort', cfg.effort || 'auto'),
         row('System prompt', app.flags.systemPrompt !== undefined ? 'command line override' : 'built-in default'),
         row('Max output', formatTokens(cfg.maxOutputTokens)),
-        row('Prompt cache', cfg.promptCachingDisabled() ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model.id).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model.id).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
+        row('Prompt cache', cfg.promptCachingDisabled() ? 'off (DISABLE_PROMPT_CACHING)' : `on · TTL ${cfg.cacheTtl('main')} for the conversation, ${cfg.cacheTtl('other')} for sub-agents and compaction${cacheRefusals(cfg, cfg.model).length ? c.yellow(` · the endpoint refused: ${cacheRefusals(cfg, cfg.model).join(', ')}`) : ''}${app.runtime.systemPromptStale ? c.dim(' · memory/config changes reach the system prompt at /clear or /compact') : ''}`),
         row('Auto-compact', `at ${formatTokens(cfg.compactWindow())} tokens (the window, less room for the summary)`),
         row('Access', 'full (no permission prompts)'),
         row('Checkpoints', `${app.runtime.checkpoints.list().length} (/rewind)`),
@@ -902,7 +1108,8 @@ export function buildCommands(app) {
         `${c.green('✔')} Node ${process.versions.node}`,
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
         `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
-        `${gatewayLogin(cfg.gatewayUrl) ? c.green('✔') : c.red('✘')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/login)'}`,
+        `${gatewayLogin(cfg.gatewayUrl) ? c.green('✔') : cfg.model.provider === GATEWAY_PROVIDER ? c.red('✘') : c.yellow('!')} Gateway login for ${cfg.gatewayUrl}${gatewayLogin(cfg.gatewayUrl) ? '' : ' missing (/login)'}`,
+        ...connectedProviders().map((p) => `${c.green('✔')} ${p.name} connected ${c.dim(`(${p.id}/…, ${normalizeBaseUrl(p.connection.baseUrl || p.baseUrl, p.protocol)})`)}`),
       ];
       out(lines);
       app.busy = true;

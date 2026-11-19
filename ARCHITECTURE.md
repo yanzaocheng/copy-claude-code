@@ -4,11 +4,12 @@
 
 ## 1. 项目定位
 
-`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。模型请求只走 codex-gateway：本地通过 `/login` 得到网关 key，网关负责上游模型、账户和计费。claude-pro 不再读取 Anthropic API key、Claude CLI OAuth 或 Codex CLI 登录文件。
+`copy-claude-code`（命令名 `claude-pro`）是一个 Node.js 编写的终端 Coding Agent。模型请求默认走 7bit.fun 网关（codex-gateway）：本地通过 `/login` 粘贴网关 key，网关负责上游模型、账户和计费。也可以用 `/connect` 连接其他供应商（Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义、OpenRouter……或用户自己的接口），用各自的 key；可以同时连接多家，用哪家由模型名决定（`deepseek/deepseek-v4-pro`，不带前缀即网关）。claude-pro 不读取 Claude CLI OAuth 或 Codex CLI 登录文件。
 
 | 后端 | 用途 | 凭据来源 | 请求目标 |
 |---|---|---|---|
 | `gateway` | codex-gateway 账户和模型 | `/login` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://7bit.fun`（旧地址 gw.predix.icu 按 7bit.fun 读取） |
+| `/connect` 的供应商 | 其他供应商的模型（[`src/providers.js`](src/providers.js)） | `/connect` 保存的 key（`providers.json`，只有用户自己能读） | 内置地址或用户填的地址；Anthropic 协议直接发，OpenAI 协议经 [`src/openai-chat.js`](src/openai-chat.js) 转成 Chat Completions |
 
 ## 2. 总体架构
 
@@ -256,6 +257,10 @@ X-Claude-Code-Session-Id: <session id>
 - `messages`，保留 Anthropic 的 `tool_use` / `tool_result` 结构。
 - 工具 JSON Schema；最后一个工具带 `cache_control`（提示词缓存，见 6.5）。
 - `output_config.effort` 和可选的 thinking budget；GPT 模型的思考签名按网关 Codex 后端协议保留。
+
+`/connect` 连接的供应商（[`src/providers.js`](src/providers.js)）：请求发给**模型所属的供应商**（`config.resolveModel` 返回的 `model.provider`；`getClient(config, model)` 按供应商各建一个 SDK client）。Anthropic 协议的供应商直接收 Messages 请求，key 放在连接时测出的头里（`x-api-key` 或 `Authorization: Bearer`）。OpenAI 协议的供应商由 SDK 的自定义 `fetch`（[`src/openai-chat.js`](src/openai-chat.js) 的 `chatFetch`）把请求转成 `POST /chat/completions`、把流式回复转回 Anthropic 事件；供应商因参数拒绝时（如只收 `max_completion_tokens`、不收 `reasoning_effort`）记下来重发一次，连接时测到的会存进连接。`X-Claude-Code-Session-Id` 只发给网关。
+
+思考块不跨供应商：`streamMessage` 给每个 thinking 块记下来源（`origin`），`buildParams` 只把同一供应商的思考块发回去，并去掉 `origin` 字段（没有 `origin` 的旧块算网关的）；拿掉的思考块在当前回合里时，这一回合的请求不带 `thinking`（与网关 GPT 思考块的处理相同）。输出上限、缓存拒绝等按“供应商 + 模型”分别记忆。
 
 图片（[`src/utils/images.js`](src/utils/images.js)）：每次请求都带着整个对话，所以图片的字节数决定请求有多大（token 按像素算，与字节无关）。`fitImage` 把长边超过 1568 px 的缩到 1568；超过 `PNG_AS_JPEG_BYTES`（512 KB）的 PNG 另存一份 JPEG（质量 85，透明部分铺白），更小就用 JPEG。3D 场景、照片类截图用 PNG 几乎压不动：723×1568 的游戏截图 PNG 2.3 MB，JPEG 180 KB。没有图片库：Windows 用 PowerShell 的 System.Drawing，macOS 用 sips，其他系统用 ImageMagick。Read、粘贴/拖入的图片、所有工具结果都先经过它。已经在对话里的重 PNG（这个功能之前读的截图）由 `Agent.lightenImages()` 处理：`callModel`、`compact`、`summarizePart` 发请求前调用 `lightenImagesIn(this.messages)` 原地换成 JPEG（每批 4 个并发），有改动就 `replaceMessages` 写一条 reset 进会话文件，并告诉 `CacheStats` 接下来的整段重写是预期的；转不了或 JPEG 不更小的按数据 sha1 记住，不再每次请求都试。2026-10-12 的事故：一个对话读了 11 张 PNG 截图，请求体到了 31 MB，网关处理时内存 350–450 MB，被 pm2 的 300M 上限每 30 秒杀一次，客户端看到的是 `terminated` 和 Caddy 的 `502 (no body)`；网关和 API 对单个请求的上限都是 32 MB。
 

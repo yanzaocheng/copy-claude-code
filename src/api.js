@@ -6,32 +6,52 @@ let Anthropic = null;
 import { parseRateLimit, parseRetryAfter, planRetry, sleepUntil, timing } from './ratelimit.js';
 import { cacheControl, cachePlanOf, fingerprint } from './cache.js';
 import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gatewayDefaultEffort, nearestEffort } from './gateway.js';
+import { GATEWAY_PROVIDER, providerEndpoint, priceCost } from './providers.js';
+import { chatFetch } from './openai-chat.js';
 import { fitImagesIn } from './utils/images.js';
 import { costOf } from './pricing.js';
 
-let cached = null;
 const SIGNATURE_PREFIX = 'cgw1:';
 
-// The gateway provider's key, from /login. Without one the request fails the way a refused key does.
-function gatewayKey(config) {
-  const key = gatewayLogin(config.gatewayUrl)?.apiKey;
-  if (!key) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /login and choose the gateway.`, { status: 401, retryable: false });
-  return key;
+// The provider a model is served by: the gateway's for a model without one (and for a bare id).
+const providerOf = (model) => (model && typeof model === 'object' && model.provider) || GATEWAY_PROVIDER;
+// A model as the per-model memories below know it: the same id at two providers is two models.
+const keyOf = (model) => `${providerOf(model)}|${typeof model === 'string' ? model : model?.id}`;
+
+// Where a model's requests go and with what key: the gateway (its key from /login, as a bearer token), or a provider
+// connected with /connect (see providers.js). Without one the request fails the way a refused key does.
+function endpointFor(config, model) {
+  const provider = providerOf(model);
+  if (provider === GATEWAY_PROVIDER) {
+    const key = gatewayLogin(config.gatewayUrl)?.apiKey;
+    if (!key) throw new APIError(`Not logged in to the gateway ${config.gatewayUrl}. Run /login (or /connect for another provider).`, { status: 401, retryable: false });
+    return { provider, name: 'the gateway', protocol: 'anthropic', baseURL: config.gatewayUrl, key, bearer: true };
+  }
+  try {
+    return providerEndpoint(provider);
+  } catch (e) {
+    throw new APIError(e.message, { status: 401, retryable: false });
+  }
 }
 
-export async function getClient(config) {
+// One client per endpoint and key, kept while they stay the same. A Chat Completions provider gets a fetch that
+// translates (see openai-chat.js); the SDK above it does not know.
+const clients = new Map();
+export async function getClient(config, model = config.model) {
   Anthropic ??= (await import('@anthropic-ai/sdk')).default;
-  const authToken = gatewayKey(config);
-  const key = `${config.gatewayUrl}|${authToken}|${config.apiTimeout}`;
-  if (cached?.key === key && cached.fetch === globalThis.fetch) return cached.client;
+  const ep = endpointFor(config, model);
+  const key = `${ep.provider}|${ep.protocol}|${ep.baseURL}|${ep.bearer}|${ep.key}|${config.apiTimeout}`;
+  const kept = clients.get(ep.provider);
+  if (kept?.key === key && kept.fetch === globalThis.fetch) return kept.client;
+  // (null, not left out: the SDK would take the other one from ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)
   const client = new Anthropic({
-    baseURL: config.gatewayUrl,
-    authToken,
-    apiKey: null,
+    baseURL: ep.baseURL,
+    ...(ep.bearer ? { authToken: ep.key, apiKey: null } : { apiKey: ep.key, authToken: null }),
+    ...(ep.protocol === 'openai' ? { fetch: chatFetch(ep) } : {}),
     timeout: config.apiTimeout,
     maxRetries: 0,
   });
-  cached = { key, client, fetch: globalThis.fetch };
+  clients.set(ep.provider, { key, client, fetch: globalThis.fetch });
   return client;
 }
 
@@ -58,7 +78,7 @@ function withCacheControl(messages, mark) {
 // errors. Claude Code carries on without the marker instead of failing the request, and so does this: the
 // marker is left off from then on, so the endpoint is not asked the same thing again.
 const cacheRefused = new Map();
-const cacheKey = (config, modelId) => `${config.gatewayUrl}|${modelId}`;
+const cacheKey = (config, model) => `${providerOf(model) === GATEWAY_PROVIDER ? config.gatewayUrl : providerOf(model)}|${keyOf(model)}`;
 
 const PLACES = ['system', 'tools', 'messages'];
 const blocksAt = (params, place) => {
@@ -69,8 +89,8 @@ const blocksAt = (params, place) => {
 const hasMark = (params, place) => blocksAt(params, place).some((b) => b.cache_control);
 
 // What an endpoint has refused so far, for /status: the places (system, tools, messages) and "ttl".
-export function cacheRefusals(config, modelId) {
-  return [...(cacheRefused.get(cacheKey(config, modelId)) || [])];
+export function cacheRefusals(config, model) {
+  return [...(cacheRefused.get(cacheKey(config, model)) || [])];
 }
 
 // Take cache_control (or only its ttl) off a request after the endpoint refused it. Returns what was taken off
@@ -109,7 +129,7 @@ const thinkingStaysOn = new Set();
 
 // The effort a model uses when none is sent (docs.claude.com, "Effort"): medium on Opus 5.5 and Haiku 5.5, high on
 // the other models that take one; null for a model that takes none or is not known.
-const gatewayModelInfo = (config, id) => cachedGatewayModel(gatewayLogin(config.gatewayUrl), id);
+const gatewayModelInfo = (config, id) => (config ? cachedGatewayModel(gatewayLogin(config.gatewayUrl), id) : null);
 export function defaultEffort(modelId, config = null) {
   const id = String(modelId || '');
   if (!effortSupported(id)) return null;
@@ -155,15 +175,23 @@ export function parseMaxTokensLimit(message) {
 // budget is set; such a turn's requests leave `thinking` out until the next prompt. That is no thinking on older
 // models and adaptive thinking on those that cannot turn it off (Opus 5.5, Fable, Sonnet 5.5 refuse "disabled"),
 // which takes assistant messages without thinking.
+//
+// The same holds between providers: a provider cannot verify another's thinking, so each thinking block keeps the
+// provider it came from (`origin`, set in streamMessage; none on a block from before 2026-11-19: the gateway's), and goes
+// back to that provider alone. `origin` itself is never sent.
 const isCodexThinking = (b) => b?.type === 'thinking' && typeof b.signature === 'string' && b.signature.startsWith(SIGNATURE_PREFIX);
+const isThinking = (b) => b?.type === 'thinking' || b?.type === 'redacted_thinking';
 const isPrompt = (m) => m.role === 'user' && !(Array.isArray(m.content) && m.content.some((b) => b.type === 'tool_result'));
-function withoutCodexThinking(messages) {
+const withoutOrigin = (b) => { const { origin, ...rest } = b; return rest; };
+function withoutForeignThinking(messages, provider, toCodex) {
+  const foreign = (b) => isThinking(b) && ((b.origin || GATEWAY_PROVIDER) !== provider || (!toCodex && isCodexThinking(b)));
   const prompt = messages.findLastIndex(isPrompt);
   let inTurn = false;
   const out = messages.flatMap((m, i) => {
-    if (m.role !== 'assistant' || !Array.isArray(m.content) || !m.content.some(isCodexThinking)) return [m];
-    if (i > prompt) inTurn = true;
-    const content = m.content.filter((b) => !isCodexThinking(b));
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) return [m];
+    if (!m.content.some((b) => foreign(b) || (b && 'origin' in b))) return [m];
+    if (i > prompt && m.content.some(foreign)) inTurn = true;
+    const content = m.content.filter((b) => !foreign(b)).map(withoutOrigin);
     return content.length ? [{ ...m, content }] : [];
   });
   return { messages: out, inTurn };
@@ -173,19 +201,21 @@ function withoutCodexThinking(messages) {
 // for sub-agents, compaction and side queries (see Config.cacheTtl). `cacheMessages: false` leaves the messages
 // unmarked: for a request whose messages are never sent twice, writing them to the cache only costs more.
 export function buildParams(config, { model, system, messages, tools, maxTokens, effort, cacheBucket = 'main', cacheMessages = true }) {
-  const wanted = maxTokens || config.maxOutputTokens;
-  const refused = cacheRefused.get(cacheKey(config, model.id));
+  // (a provider model's own limit, from models.dev, when it is lower than the default)
+  const wanted = maxTokens || (model.maxOutput ? Math.min(model.maxOutput, config.maxOutputTokens) : config.maxOutputTokens);
+  const refused = cacheRefused.get(cacheKey(config, model));
   const caching = !config.promptCachingDisabled();
   const ttl = refused?.has('ttl') ? '5m' : config.cacheTtl(cacheBucket);
   const mark = (place) => (caching && !refused?.has(place) ? { ...cacheControl(ttl) } : null);
   const systemMark = mark('system');
   // GPT models are handled by the gateway's Codex backend.
-  const toCodex = /^gpt-/i.test(model.id);
+  const provider = providerOf(model);
+  const toCodex = provider === GATEWAY_PROVIDER && /^gpt-/i.test(model.id);
   let turnLostThinking = false;
-  if (!toCodex) ({ messages, inTurn: turnLostThinking } = withoutCodexThinking(messages));
+  ({ messages, inTurn: turnLostThinking } = withoutForeignThinking(messages, provider, toCodex));
   const params = {
     model: model.id,
-    max_tokens: outputCaps.has(model.id) ? Math.min(wanted, outputCaps.get(model.id)) : wanted,
+    max_tokens: outputCaps.has(keyOf(model)) ? Math.min(wanted, outputCaps.get(keyOf(model))) : wanted,
     // An empty system prompt (an empty profile chosen with /prompts) is left out: Anthropic refuses an empty text
     // block ("cache_control cannot be set for empty text blocks"), and DeepSeek and the others take none as well.
     ...(typeof system === 'string' && system.trim() ? { system: [{ type: 'text', text: system, ...(systemMark ? { cache_control: systemMark } : {}) }] } : {}),
@@ -197,7 +227,7 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
     params.tools = tools.map((t, i) => (i === tools.length - 1 && toolMark ? { ...t, cache_control: toolMark } : t));
   }
   // A GPT model with no effort set gets its default from the gateway's model metadata.
-  const eff = effortToSend(config, model.id, (effort === undefined ? config.effort : effort) || (/^gpt-/i.test(model.id) ? defaultEffort(model.id, config) : null));
+  const eff = effortToSend(config, model.id, (effort === undefined ? config.effort : effort) || (toCodex ? defaultEffort(model.id, config) : null));
   if (eff && !noEffort.has(model.id)) params.output_config = { effort: eff };
   const budget = config.thinkingBudget;
   if (budget === 0 && !thinkingStaysOn.has(model.id)) params.thinking = { type: 'disabled' };
@@ -221,14 +251,15 @@ export class APIError extends Error {
   }
 }
 
-function describeError(err, config) {
+function describeError(err, config, ep = null) {
   if (err?.name === 'AbortError' || (Anthropic && err instanceof Anthropic.APIUserAbortError)) return err;
   const status = err?.status;
   let msg = err?.error?.error?.message || err?.error?.message || err?.message || String(err);
   const promptTooLong = /prompt is too long|context length|maximum context|too many tokens|context_length_exceeded|exceeds the context window/i.test(msg);
   if (err instanceof APIError) return err;
-  if (status === 401) msg = `The gateway refused the login (401). Run /login to log in again. ${msg}`;
-  if (status === 402) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (or run /login to check the balance). ${msg}`;
+  const gateway = !ep || ep.provider === GATEWAY_PROVIDER;
+  if (status === 401) msg = gateway ? `The gateway refused the key (401). Run /login to enter another. ${msg}` : `${ep.name} refused the key (401). Run /connect ${ep.provider} to enter it again. ${msg}`;
+  if (status === 402 && gateway) msg = `The gateway account's balance is too low for this request. Top up at ${config.gatewayUrl}/user (or run /login to check the balance). ${msg}`;
   // A prompt over the window fails the same way every time, so it is not retried: the agent compacts at once. Through
   // the gateway a GPT overflow comes in the stream, without a 4xx: "Your input exceeds the context window of this
   // model. ... (context_length_exceeded)", and was sent 6 more times, with the waits in between, before compacting.
@@ -247,8 +278,9 @@ export function isAbort(err) {
 
 // USD for a request at the list prices (see pricing.js), by the model that answered, else the one asked for;
 // null when neither has a price. A cost goes to config.onCost.
-function charge(config, requested, served, usage) {
-  const cost = costOf(served, usage) ?? costOf(requested, usage);
+function charge(config, requested, served, usage, model = null) {
+  // A provider's model at the price models.dev gives it; the gateway's (and a Claude model anywhere) at pricing.js's.
+  const cost = (model?.price ? priceCost(model.price, usage) : null) ?? costOf(served, usage) ?? costOf(requested, usage);
   if (cost > 0) config.onCost?.(cost);
   return cost;
 }
@@ -277,13 +309,16 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
   // Load gateway model metadata before the synchronous parameter builder; the cache is keyed by gateway and key,
   // so changing accounts or gateway URLs cannot leak a model's effort levels into another context. A gateway that
   // does not answer costs at most a few seconds once (see fetchGatewayModels), not the request.
-  await loadGatewayModels(config, signal);
+  if (providerOf(request.model) === GATEWAY_PROVIDER) await loadGatewayModels(config, signal);
   if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: [] });
-  const client = await getClient(config);
+  // The provider of the request's model: another one after a pause when the user chose another model (afterPause).
+  let ep = endpointFor(config, request.model);
+  let client = await getClient(config, request.model);
   let params = buildParams(config, request);
   // The gateway keeps a conversation on the upstream account that served it, where its prompt cache is; the
-  // session id names the conversation, in the header Claude Code sends it in.
-  const options = { signal, ...(config.sessionId ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) };
+  // session id names the conversation, in the header Claude Code sends it in. (The gateway's business alone.)
+  const optionsFor = (e) => ({ signal, ...(config.sessionId && e.provider === GATEWAY_PROVIDER ? { headers: { 'X-Claude-Code-Session-Id': config.sessionId } } : {}) });
+  let options = optionsFor(ep);
   let imagesFitted = false;
   const refused = new Set(); // what the endpoint refused for this request: remembered once a request got through
   const retryState = { attempt: 0, rateLimitHits: 0, waitedMs: 0, overloaded: 0, overloadedWaitMs: 0 };
@@ -320,6 +355,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
             if (b.type === 'tool_use' || b.type === 'server_tool_use') { b.input = {}; jsonBufs[ev.index] = ''; }
             if (b.type === 'text') b.text = b.text || '';
             if (b.type === 'thinking') { b.thinking = b.thinking || ''; b.signature = b.signature || ''; }
+            if (isThinking(b)) b.origin = ep.provider; // it goes back to this provider alone (see withoutForeignThinking)
             blocks[ev.index] = b;
             emitted = true;
             onEvent({ type: 'block_start', index: ev.index, block: b });
@@ -367,10 +403,10 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       if (!stopped && !stopReason) throw Object.assign(new Error('The response stream ended unexpectedly'), { status: 503 });
       const content = blocks.filter(Boolean).filter((b) => !(b.type === 'text' && !b.text));
       if (refused.size) { // it got through without what the endpoint refused: leave that off from now on
-        const key = cacheKey(config, params.model);
+        const key = cacheKey(config, request.model);
         cacheRefused.set(key, new Set([...(cacheRefused.get(key) || []), ...refused]));
       }
-      const cost = charge(config, params.model, model, usage);
+      const cost = charge(config, params.model, model, usage, request.model);
       return { message: { role: 'assistant', content }, usage, stopReason, model, cost, cache: { ...cachePlanOf(params), fingerprint: fingerprint(params), at: startedAt } };
     } catch (raw) {
       // A reply cut off (interrupted, or failed on the way: a stream error, a stream that ended early) is billed for
@@ -379,14 +415,14 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       const chargeCut = () => {
         if (usage.input_tokens == null) return;
         const written = blocks.reduce((n, b) => n + (b?.text?.length || 0) + (b?.thinking?.length || 0), 0) + jsonBufs.join('').length;
-        charge(config, params.model, model, { ...usage, output_tokens: Math.max(usage.output_tokens || 0, Math.ceil(written / 4)) });
+        charge(config, params.model, model, { ...usage, output_tokens: Math.max(usage.output_tokens || 0, Math.ceil(written / 4)) }, request.model);
       };
       if (signal?.aborted || isAbort(raw)) {
         chargeCut();
         throw Object.assign(new Error('aborted'), { name: 'AbortError', partial: raw?.partial || [] });
       }
       chargeCut();
-      const err = describeError(raw, config);
+      const err = describeError(raw, config, ep);
       // Not every model takes an effort level. Leave it out for this one, and for the rest of the session.
       if (err.status === 400 && params.output_config && /does not support the effort parameter/i.test(err.message)) {
         noEffort.add(params.model);
@@ -421,7 +457,7 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
       // The default max_tokens is generous: if this API allows less, learn its limit and retry at once.
       const limit = err.status === 400 ? parseMaxTokensLimit(err.message) : null;
       if (limit && limit < params.max_tokens) {
-        outputCaps.set(params.model, limit);
+        outputCaps.set(keyOf(request.model), limit);
         params.max_tokens = limit;
         if (params.thinking?.budget_tokens) params.thinking.budget_tokens = Math.min(params.thinking.budget_tokens, limit - 1);
         continue;
@@ -449,7 +485,13 @@ export async function streamMessage(config, request, { signal, onEvent = () => {
         }
         retryState.attempt = 0; // the pause is a fresh start: quick retries made before it do not count after it
         const next = afterPause?.({ woken });
-        if (next) params = buildParams(config, next);
+        if (next) {
+          request = next;
+          ep = endpointFor(config, request.model);
+          client = await getClient(config, request.model);
+          options = optionsFor(ep);
+          params = buildParams(config, next);
+        }
       } else {
         onEvent({ type: 'retry', attempt: plan.attempt, error: err, delayMs: plan.delayMs, maxRetries: plan.maxRetries });
         await sleepUntil(plan.resumeAt, signal);

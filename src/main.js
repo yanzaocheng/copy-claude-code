@@ -7,14 +7,14 @@ import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
 
-A command line coding agent using the gateway (https://7bit.fun).
+A command line coding agent using the gateway (https://7bit.fun), or the providers connected with /connect.
 Starts an interactive session by default; use -p for non-interactive output.
 
 Options:
   -p, --print                      Print the response and exit (useful for pipes)
   -c, --continue                   Continue the most recent conversation in this directory
   -r, --resume [sessionId]         Resume a conversation (picker if no id given)
-  --model <model>                  Model for this session (name or alias: opus, sonnet, haiku)
+  --model <model>                  Model for this session (opus, sonnet, haiku, a gateway model, or provider/model)
   --effort <level>                 Reasoning effort: none|minimal|low|medium|high|xhigh|max
   --output-format <format>         text | json | stream-json (with --print)
   --verify <command>               After the agent edits files, run this (e.g. "npm test") and send failures back to fix
@@ -38,7 +38,8 @@ Commands:
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
 
-In a session, /login logs in with an API key of your gateway account (made on its user page, API 密钥).
+In a session, /login logs in with an API key of your gateway account (made on its user page, API 密钥), and
+/connect connects other providers (Anthropic, OpenAI, DeepSeek, Kimi, GLM, Qwen, OpenRouter, your own...).
 `;
 
 function parseArgs(argv) {
@@ -106,7 +107,7 @@ async function configCommand(args, cwd) {
       }
       if (sub !== 'get') {
         await loadGatewayModels(cfg);
-        console.log(`\ngateway: ${cfg.endpointLabel}`);
+        console.log(`\nbackend: ${cfg.endpointLabel}`);
         console.log(`model: ${cfg.model.label} (context ${cfg.model.contextWindow.toLocaleString()})${cfg.effort ? `, effort ${cfg.effort}` : ''}`);
         if (remembered.model || remembered.effort) {
           const what = Object.entries(remembered).map(([k, v]) => `${k} ${v}`).join(', ');

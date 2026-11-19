@@ -19,6 +19,7 @@ import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
 import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { gatewayLogin, loadGatewayModels, normalizeGatewayUrl, formatUsd } from '../gateway.js';
+import { connectedProviders } from '../providers.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
 import { buildCommands, modelChoices, effortChoices } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, reloadTiming, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
@@ -37,7 +38,8 @@ import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, 
 import { RemoteControl, transcriptItems, onlineEnabled, remoteCommandsEnabled, REMOTE_WIDTH } from '../remote.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
-export const modelTag = (model) => String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+// (a provider's model with its provider in front: deepseek/deepseek-v4-pro; the gateway's without)
+export const modelTag = (model) => `${model?.provider && model.provider !== '7bit' ? `${model.provider}/` : ''}${String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '')}`;
 
 // The model and effort level that requests use now, for the footer and the terminal title. The effort
 // is left out when none is sent (auto) and for a model that does not take one.
@@ -383,9 +385,9 @@ export class App {
     }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
-    // Nothing configured yet: the gateway is the default, and /login asks for its key first.
-    else if (!gatewayLogin(this.config.gatewayUrl)) {
-      Promise.resolve(this.commands.get('login').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
+    // Nothing configured yet (no gateway login, no provider): /connect, where the gateway comes first.
+    else if (!gatewayLogin(this.config.gatewayUrl) && !connectedProviders().length) {
+      Promise.resolve(this.commands.get('connect').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
     this.startSourceWatch();
     if (!this.driven) {
@@ -1304,7 +1306,11 @@ export class App {
       c.claude(glyphs.bottomLeft + '─'.repeat(w - 2) + glyphs.bottomRight),
     ];
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
-    if (!gatewayLogin(cfg.gatewayUrl)) lines.push('', c.yellow(` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login.`));
+    // (the model in use cannot be reached: said, with what connects it)
+    const provider = cfg.model.provider;
+    if (provider === '7bit' ? !gatewayLogin(cfg.gatewayUrl) : !connectedProviders().some((p) => p.id === provider)) {
+      lines.push('', c.yellow(provider === '7bit' ? ` ⚠ Not logged in to the gateway ${cfg.gatewayUrl}. Run /login (or /connect for another provider).` : ` ⚠ ${cfg.model.label} is a model of ${provider}, which is not connected. Run /connect ${provider}, or /model for another.`));
+    }
     const mcp = this.runtime.mcp.status();
     if (mcp.length) {
       const ok = mcp.filter((m) => m.status === 'connected').length;

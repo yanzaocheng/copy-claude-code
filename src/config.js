@@ -15,6 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeTtl } from './cache.js';
+import { GATEWAY_PROVIDER, splitModelRef, providerModel, providerInfo, normalizeBaseUrl } from './providers.js';
 
 export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A source checkout (a git clone, also when npm links to one), as opposed to a copy installed from npm: the agent
@@ -224,18 +225,41 @@ export class Config {
   }
 
   get gatewayUrl() { return normalizeGatewayUrl(this.env.CLAUDE_PRO_GATEWAY_URL); }
-  get endpointLabel() { return `${this.gatewayUrl} (gateway)`; }
+  // Where the current model's requests go, for /status and the welcome box.
+  get endpointLabel() {
+    const provider = this.model.provider;
+    if (provider === GATEWAY_PROVIDER) return `${this.gatewayUrl} (gateway)`;
+    const info = providerInfo(provider);
+    if (!info) return `${provider} (no such provider: /connect lists them)`;
+    return `${normalizeBaseUrl(info.connection?.baseUrl || info.baseUrl, info.protocol)} (${info.name}${info.connection ? '' : ', not connected: /connect'})`;
+  }
 
   aliasTarget(alias) {
     return { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5' }[alias] || null;
   }
 
-  // Resolve a model spec (alias or name, maybe with [1m]) to {id, contextWindow, label}. The window is the model's
-  // max_input_tokens from the gateway's model list, once loaded, else what is known of it here; [1m] asks for 1M.
+  // Resolve a model spec (alias or name, maybe with [1m]) to {id, provider, contextWindow, label}. The window is the
+  // model's max_input_tokens from the gateway's model list, once loaded, else what is known of it here; [1m] asks for
+  // 1M. A provider's model (deepseek/deepseek-v4-pro, see providers.js) is sent as its own id to its provider, with
+  // the window, output limit and price it was listed with at /connect.
   resolveModel(spec) {
     let name = (spec || '').trim() || 'sonnet';
     let oneM = false;
     if (/\[1m\]$/i.test(name)) { oneM = true; name = name.replace(/\[1m\]$/i, ''); }
+    const ref = splitModelRef(name);
+    if (ref.provider !== GATEWAY_PROVIDER) {
+      const known = providerModel(ref.provider, ref.model);
+      const claudeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(ref.model);
+      return {
+        id: ref.model,
+        provider: ref.provider,
+        contextWindow: oneM ? 1_000_000 : known?.window || (claudeOneM ? 1_000_000 : 200_000),
+        label: `${ref.provider}/${ref.model}${oneM ? '[1m]' : ''}`,
+        ...(known?.maxOutput ? { maxOutput: known.maxOutput } : {}),
+        ...(known?.price ? { price: known.price } : {}),
+      };
+    }
+    name = ref.model; // (7bit/claude-opus-5-5 names the gateway's model too)
     const aliased = this.aliasTarget(name.toLowerCase());
     if (aliased) {
       const inner = this.resolveModel(aliased);
@@ -244,9 +268,9 @@ export class Config {
     const served = servedWindows.get(`${this.gatewayUrl}\n${name}`);
     // GPT models are served by the gateway's Codex backend, whose standard window is 272k. A request above 272k costs
     // twice as much (see pricing.js), but the user wants the gateway's window here too (2026-10-27).
-    if (/^gpt-/i.test(name)) return { id: name, contextWindow: served || 272_000, label: name };
+    if (/^gpt-/i.test(name)) return { id: name, provider: GATEWAY_PROVIDER, contextWindow: served || 272_000, label: name };
     const nativeOneM = /^claude-(?:(?:sonnet|haiku)-5(?:-|$)|opus-(?:5(?:-|$)|4-[78](?:-|$)))/i.test(name);
-    return { id: name, contextWindow: oneM ? 1_000_000 : served || (nativeOneM ? 1_000_000 : 200_000), label: `${name}${oneM ? '[1m]' : ''}` };
+    return { id: name, provider: GATEWAY_PROVIDER, contextWindow: oneM ? 1_000_000 : served || (nativeOneM ? 1_000_000 : 200_000), label: `${name}${oneM ? '[1m]' : ''}` };
   }
 
   // The selected model: the configured default unless /model has overridden it for this session.

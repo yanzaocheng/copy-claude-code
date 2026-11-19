@@ -1,6 +1,6 @@
 # claude-pro — 完全访问的命令行编程 Agent
 
-`claude-pro` 是一个**自己实现**的终端 AI 编程助手：模型请求只通过 **codex-gateway** 发送。网关负责上游模型和账户计费，claude-pro 本地只保存网关登录得到的机器专用 key。
+`claude-pro` 是一个**自己实现**的终端 AI 编程助手：模型请求默认发往 **7bit.fun 网关**（codex-gateway，负责上游模型和账户计费），也可以用 `/connect` 接上 Anthropic、OpenAI、DeepSeek、Kimi、智谱、通义等供应商或你自己的接口，用自己的 Key。
 
 最大的特点：**没有任何权限确认**。Bash 命令、文件读写、联网、MCP 工具，模型要用就直接执行，不弹窗、不问、没有 allow/deny 规则。它面向你自己的测试机器，目的是让模型的能力不被打断地发挥出来。作为补偿，每次文件修改都会做检查点，`/rewind` 可以撤销。
 
@@ -42,9 +42,9 @@ npm link                   # 注册全局命令 claude-pro，之后在任意项�
 
 > 在 Git Bash 自带的 mintty 窗口里交互模式需要 `winpty claude-pro`；推荐在 Windows Terminal / PowerShell / cmd 中运行。
 
-## 网关登录
+## 登录与供应商
 
-claude-pro 只支持 codex-gateway（默认 https://7bit.fun）。交互式启动时如果没有网关登录，会自动打开 `/login` 让你粘贴 Key；也可以手动运行：
+交互式启动时，如果既没有网关登录、也没有连接任何供应商，会自动打开 `/connect`（第一项是 7bit.fun 网关）；也可以手动运行：
 
 ```powershell
 claude-pro /login
@@ -65,6 +65,41 @@ claude-pro -p "用 Read 工具读取 package.json，告诉我项目版本"
 /login
 /logout
 /cost
+```
+
+## /connect：其他供应商
+
+和 OpenCode 的 `/connect` 一样：从列表里选一家，粘贴它的 API Key，就能用它的模型。**可以同时连接多家**，它们的模型都列在 `/model` 里，名字是 `供应商/模型`（如 `deepseek/deepseek-v4-pro`、`openrouter/anthropic/claude-sonnet-4.5`），随时切换；不带前缀的名字（`opus`、`claude-opus-5-5`）仍是 7bit.fun 的，旧设置和记住的选择照常可用。
+
+| 供应商 | 协议 | 地址 |
+|---|---|---|
+| 7bit.fun | 网关（同 `/login`） | 余额、远程网页、跨电脑会话都靠它 |
+| Anthropic (Claude) | Anthropic | api.anthropic.com |
+| OpenAI | OpenAI | api.openai.com/v1 |
+| DeepSeek | Anthropic | api.deepseek.com/anthropic |
+| Kimi (Moonshot) | Anthropic | api.moonshot.cn/anthropic |
+| 智谱 GLM | Anthropic | open.bigmodel.cn/api/anthropic |
+| MiniMax | Anthropic | api.minimaxi.com/anthropic |
+| 通义千问（阿里云百炼） | Anthropic | dashscope.aliyuncs.com/apps/anthropic |
+| OpenRouter | OpenAI | openrouter.ai/api/v1 |
+| 硅基流动 | OpenAI | api.siliconflow.cn/v1 |
+| 火山方舟 | OpenAI | ark.cn-beijing.volces.com/api/v3 |
+| Google Gemini | OpenAI | generativelanguage.googleapis.com/v1beta/openai |
+| xAI (Grok) | OpenAI | api.x.ai/v1 |
+| Ollama（本机） | OpenAI | localhost:11434/v1，不需要 Key |
+| 你自己的（Anthropic 兼容 / OpenAI 兼容） | 任选 | 自己填名字和地址：中转站、LM Studio、vLLM…… |
+
+同时有两种接口的供应商优先走 Anthropic 协议：思考过程、工具调用、图片都是原生的。OpenAI 协议由 claude-pro 在本地转换（`src/openai-chat.js`，移植自 codex-gateway）：工具调用、图片、用量、`reasoning_content` 思考过程、推理强度（`/effort` → `reasoning_effort`）都会转换；提示词缓存标记和 Anthropic 的服务端工具不会发过去（WebSearch 会退回到抓取搜索页）。
+
+连接时的步骤：粘贴 Key（只显示星号）→ 用 Key 请求它的模型列表（自动识别 Key 放在 `x-api-key` 还是 `Authorization: Bearer`；被拒绝可以重新粘贴）→ 从列表里选要用的模型（或“继续用当前模型”）→ 给这个模型发一个很小的请求，确认协议、Key 和模型都对，才保存。模型的上下文窗口、输出上限和价格取自 [models.dev](https://models.dev)（OpenCode 用的模型目录，缓存一天），没有收录的模型按 200k 窗口算、不计价。
+
+Key 保存在 `~/.claude-pro/providers.json`（只有你自己能读）。`/disconnect [供应商]` 忘掉它的 Key；正在用它的模型时会回到默认模型。余额、远程网页和跨电脑会话只跟 7bit.fun 的登录有关，和当前用哪家的模型无关。一段对话中途换到另一家的模型时，上一家的思考过程不会发给下一家（它无法验证别家的签名），换回去时又会带上。
+
+```text
+/connect            供应商列表（已连接的打 ✔）
+/connect deepseek   直接连接某一家
+/model deepseek/deepseek-v4-pro
+/disconnect deepseek
 ```
 
 网关地址默认是 `https://7bit.fun`，也可以通过 `CLAUDE_PRO_GATEWAY_URL` 修改。旧地址 `https://gw.predix.icu` 是同一个网关：用它保存的登录和设置会自动按 7bit.fun 读取，不需要重新登录。账户余额和用量在网关用户页查看。
@@ -99,7 +134,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择；`--model`、`--effort` 可覆盖本次启动。
 
-设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。provider 固定为 `gateway`，已删除 `--provider` 和 `CLAUDE_PRO_PROVIDER` 配置入口。
+设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。没有 `--provider` 或 `CLAUDE_PRO_PROVIDER` 配置：用哪家由模型名决定（`/model`、`--model deepseek/deepseek-v4-pro`、设置 `model`）。
 
 ## 系统提示词
 
