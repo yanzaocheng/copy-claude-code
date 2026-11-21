@@ -1941,6 +1941,11 @@ export class App {
     } finally {
       this.flushStreaming();
       this.flushActive(true);
+      // When the answer came and how long the turn took, under the answer (the user asked for the time, 2026-11-21).
+      if (result && !result.interrupted && !error) {
+        const at = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+        this.screen.log(c.dim(`✻ Done at ${at} · worked ${formatDuration(Date.now() - this.turnStart)}`), '');
+      }
       this.answerPeers(result, error);
       this.busy = false;
       this.controller = null;
