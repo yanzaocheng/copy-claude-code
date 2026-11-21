@@ -1,6 +1,6 @@
-// The prompt input box: multi-line editing, history, paste handling and completions.
+// The prompt input: multi-line editing, history, paste handling and Tab completion.
 
-import { c, glyphs, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './ansi.js';
+import { c, graphemes, graphemeWidth, stringWidth, truncate, padEnd } from './ansi.js';
 
 const PASTE_THRESHOLD_CHARS = 800;
 const PASTE_THRESHOLD_LINES = 8;
@@ -23,29 +23,6 @@ export function quotePreview(text, source = '') {
 // conversation shown again, resumed or on the web page.
 export function shownQuotes(text) {
   return String(text).replace(/<quote(?: source="([^"]*)")?>\n([\s\S]*?)\n<\/quote>/g, (_, source = '', body) => quotePreview(body, source.replace(/&quot;/g, '"')));
-}
-
-// "╭─ left ───── right ─╮", the parts cut short to fit (the start of the directory goes first).
-export function topBorder(boxW, color, title) {
-  const plain = () => color(glyphs.topLeft + '─'.repeat(boxW - 2) + glyphs.topRight);
-  if (!title || (!title.left && !title.right)) return plain();
-  const room = boxW - 6; // the corners, a dash at each end and a space each side of a part
-  const right = title.right ? truncate(title.right, Math.max(0, Math.floor(room / 3))).replace(/\x1b\[0m$/, '') : '';
-  const rightPart = right ? `${glyphs.lineGap}${right} ` : '';
-  const rightW = stringWidth(rightPart);
-  let left = title.left || '';
-  const leftRoom = room - rightW - (right && left ? 1 : 0) - 2;
-  if (leftRoom < 4) left = '';
-  else if (stringWidth(left) > leftRoom) {
-    const chars = [...left];
-    while (chars.length && stringWidth(chars.join('')) > leftRoom - 1) chars.shift();
-    left = '…' + chars.join('');
-  }
-  if (!left && !right) return plain();
-  const leftPart = left ? ` ${left} ` : '';
-  const dashes = boxW - 4 - stringWidth(leftPart) - stringWidth(rightPart);
-  if (dashes < 1) return plain();
-  return color(glyphs.topLeft + '─') + c.dim(leftPart) + color('─'.repeat(dashes)) + (right ? c.blue(rightPart) : '') + color('─' + glyphs.topRight);
 }
 
 // Start of the line the cursor is on. (lastIndexOf with a negative start still looks at index 0, so a
@@ -134,12 +111,10 @@ export class Editor {
     this.imageFromPath = imageFromPath; // (path) => image | null, for pasted/dropped image files
     this.pendingSubmit = null;
     this.lastEscape = 0;
-    this.suggestionsDismissedFor = null;
     this.onDoubleEscape = onDoubleEscape;
     this.textW = 76; // the width of the text in the box, as last drawn: up and down move by the rows shown
     this.goalCol = null; // the column up and down aim for, kept while they are pressed in a row
-    this.selection = null; // {from, to}: text selected with the mouse (see mouse), indexes into `text`
-    this.press = null; // the mouse button held down on the text: {at, moved}
+    this.completing = false; // Tab opened the completion list: it follows what is typed until it is closed
   }
 
   get mode() {
@@ -151,110 +126,12 @@ export class Editor {
   set(text, cursor = text.length) {
     this.text = text;
     this.cursor = Math.max(0, Math.min(cursor, text.length));
-    this.selection = null;
-    this.refreshSuggestions();
+    if (this.completing) this.refreshSuggestions();
     this.onChange?.();
-  }
-
-  // ------------------------------------------------------------ the mouse (fullscreen)
-  //
-  // As in Claude Code: a click on the text puts the cursor there. A drag selects from the cell it started in to the
-  // one it is over, both included (as in the conversation, see Screen.mouse); a double click selects a word, a
-  // triple click the line. A selection is there to be copied (ctrl+c, see App.onKey): any other key clears it and
-  // then does what it does, so typing does not replace it (there is no undo to bring the text back).
-
-  // The place in the text under a cell of the rows shown (see place): `row` among them, `col` the column in the
-  // text. {i, end}: the index of the character drawn in that cell, or, for a cell past the text of the row, of the
-  // row's end (end: true), where a click there puts the cursor.
-  at(row, col) {
-    const { rows, offset } = this.place();
-    const r = rows[Math.max(0, Math.min(rows.length - 1, (this.viewTop || 0) + row))]; // the rows shown start at viewTop
-    const x = Math.max(0, col);
-    for (const st of r.stops) {
-      if (st.g !== undefined && x >= st.col && x < st.col + graphemeWidth(st.g)) return { i: offset + st.i, end: false };
-    }
-    const tail = r.stops[r.stops.length - 1]; // the newline, the end, or (a row that wraps) its last character
-    return { i: offset + tail.i + (tail.g?.length ?? 0), end: true };
-  }
-
-  // A mouse event on the text (see Screen.inputAt): {kind: 'press' | 'drag' | 'release', row, col, count}.
-  mouse({ kind, row, col, count = 1 }) {
-    const at = this.at(row, col);
-    if (kind === 'press') {
-      this.press = null;
-      this.selection = null;
-      if (count >= 3) this.selection = this.lineRange(at);
-      else if (count === 2) this.selection = this.wordRange(at);
-      else this.press = { at, moved: false };
-    } else if (!this.press) {
-      return;
-    } else if (kind === 'drag') {
-      const a = this.press.at;
-      this.press.moved = true;
-      // the cells in order; of two at the same index, the one past the end of a row comes first (it holds nothing)
-      const [lo, hi] = at.i < a.i || (at.i === a.i && at.end) ? [at, a] : [a, at];
-      const to = hi.end ? hi.i : nextBoundary(this.text, hi.i);
-      this.selection = to > lo.i ? { from: lo.i, to } : null;
-    } else { // released: without a drag, a click
-      const click = !this.press.moved;
-      this.press = null;
-      if (click) { this.goalCol = null; this.set(this.text, at.i); return; }
-    }
-    this.onChange?.();
-  }
-
-  // The word (what is between spaces, as in the conversation) under `at`, or null.
-  wordRange(at) {
-    const t = this.text;
-    const offset = this.mode === 'prompt' ? 0 : 1;
-    const word = (ch) => ch !== undefined && !/\s/.test(ch);
-    if (at.end || !word(t[at.i])) return null;
-    let from = at.i;
-    let to = at.i;
-    while (from > offset && word(t[from - 1])) from--;
-    while (to < t.length && word(t[to])) to++;
-    return { from, to };
-  }
-
-  // The line `at` is on, without its newline, or null when it is empty.
-  lineRange(at) {
-    const from = Math.max(this.mode === 'prompt' ? 0 : 1, lineStartOf(this.text, at.i));
-    const nl = this.text.indexOf('\n', at.i);
-    const to = nl < 0 ? this.text.length : nl;
-    return to > from ? { from, to } : null;
-  }
-
-  // The text selected, pasted text in it as what its placeholder stands for (see expanded).
-  selectedText() {
-    if (!this.selection) return '';
-    let t = this.text.slice(this.selection.from, this.selection.to);
-    for (const [label, content] of this.pastes) t = t.split(label).join(content);
-    return t;
-  }
-
-  clearSelection() {
-    if (!this.selection && !this.press) return false;
-    this.selection = null;
-    this.press = null;
-    this.onChange?.();
-    return true;
-  }
-
-  // A row of the rows shown (see layoutRows) with what is selected in reverse video, its newline as a space.
-  paintRow(row, offset) {
-    const { from, to } = this.selection;
-    let out = '';
-    let on = false;
-    for (const st of row.stops) {
-      const sel = offset + st.i >= from && offset + st.i < to;
-      if (st.g === undefined && !sel) continue; // a newline, drawn as a space when selected (the end of the text never is)
-      if (sel !== on) { out += sel ? '\x1b[7m' : '\x1b[27m'; on = sel; }
-      out += st.g === undefined ? (row.width < this.textW ? ' ' : '') : st.g === '\t' ? '    ' : st.g;
-    }
-    return on ? out + '\x1b[27m' : out;
   }
 
   clear() {
+    this.closeSuggestions();
     this.set('');
     this.pastes = new Map();
     this.images = new Map();
@@ -336,23 +213,6 @@ export class Editor {
     return true;
   }
 
-  // A part of the conversation quoted in the message (see App.quoteSelection), as ChatGPT's "Ask ChatGPT" does:
-  // "[Quote #1 +12 lines]" on a line of its own, the cursor on the line after it, where the question goes. What is
-  // sent has the text itself in a <quote>, with the line of the conversation it is under as its source (see
-  // quoteBlock), so that the model knows which part is meant; the transcript shows its first lines (see displayed).
-  // Deleted like a paste: one backspace takes the whole placeholder.
-  insertQuote(text, source = '') {
-    const lines = text.split('\n').length;
-    const label = `[Quote #${++this.quoteCounter} +${lines} line${lines === 1 ? '' : 's'}]`;
-    this.pastes.set(label, quoteBlock(text, source));
-    this.quotes.set(label, quotePreview(text, source));
-    const before = this.text.slice(0, this.cursor);
-    const newline = this.text.slice(this.cursor).startsWith('\n');
-    this.insert((before && !before.endsWith('\n') ? '\n' : '') + label + (newline ? '' : '\n'));
-    if (newline) this.set(this.text, this.cursor + 1);
-    return label;
-  }
-
   insertImage(image) {
     const label = `[Image #${++this.imageCounter}]`;
     this.images.set(label, image);
@@ -398,11 +258,45 @@ export class Editor {
     return t;
   }
 
+  // The completion list again for the text as it is now (while it is open: see complete). It closes when nothing
+  // matches any more.
   refreshSuggestions() {
-    if (!this.getSuggestions || this.suggestionsDismissedFor === this.text) { this.suggestions = null; return; }
-    const s = this.getSuggestions(this.text, this.cursor);
+    if (!this.completing || !this.getSuggestions) return;
+    const s = this.getSuggestions(this.text, this.cursor, { quiet: true });
     this.suggestions = s && s.items.length ? s : null;
+    if (!this.suggestions) this.completing = false;
     if (!this.suggestions || this.selected >= this.suggestions.items.length) this.selected = 0;
+  }
+
+  closeSuggestions() {
+    this.completing = false;
+    this.suggestions = null;
+    this.selected = 0;
+  }
+
+  // Tab, as in a shell: one match is put in at once; several put in what they all start with and open the list,
+  // which Tab and down then go through (Enter takes the one selected, Esc closes it).
+  complete() {
+    if (this.suggestions) { this.selected = (this.selected + 1) % this.suggestions.items.length; this.onChange?.(); return; }
+    const s = this.getSuggestions?.(this.text, this.cursor);
+    // nothing (yet: the file list may still be loading, see App's FileIndex, which then completes again)
+    this.lastMiss = s?.items.length ? null : { text: this.text, cursor: this.cursor, at: Date.now() };
+    if (!s?.items.length) return;
+    const typed = this.text.slice(s.from, s.to);
+    // what starts with what is typed counts first ("/he": /help, not /bashes, which only contains it)
+    const starting = s.items.filter((item) => item.value.toLowerCase().startsWith(typed.toLowerCase()));
+    if (starting.length && starting.length < s.items.length) s.items = starting;
+    if (s.items.length === 1) { this.suggestions = s; this.selected = 0; this.acceptSuggestion(); return; }
+    let common = s.items[0].value;
+    for (const item of s.items) while (!item.value.toLowerCase().startsWith(common.toLowerCase())) common = common.slice(0, -1);
+    this.completing = true;
+    if (common.length > typed.length && common.toLowerCase().startsWith(typed.toLowerCase())) {
+      this.set(this.text.slice(0, s.from) + common + this.text.slice(s.to), s.from + common.length); // reopens the list
+    } else {
+      this.suggestions = s;
+      this.selected = 0;
+      this.onChange?.();
+    }
   }
 
   acceptSuggestion() {
@@ -412,8 +306,8 @@ export class Editor {
     const before = this.text.slice(0, s.from);
     const after = this.text.slice(s.to);
     const value = item.value + (item.noSpace ? '' : ' ');
+    this.closeSuggestions();
     this.set(before + value + after.replace(/^ /, ''), before.length + value.length);
-    this.suggestions = null;
     return item;
   }
 
@@ -463,11 +357,16 @@ export class Editor {
       return true;
     }
     if (name === 'tab' && !key.shift) {
-      if (this.suggestions) this.acceptSuggestion();
+      this.complete();
+      return true;
+    }
+    if (name === 'tab' && this.suggestions) { // shift+tab: back up the list
+      this.selected = (this.selected - 1 + this.suggestions.items.length) % this.suggestions.items.length;
+      this.onChange?.();
       return true;
     }
     if (name === 'escape') {
-      if (this.suggestions) { this.suggestionsDismissedFor = this.text; this.suggestions = null; return true; }
+      if (this.completing) { this.closeSuggestions(); this.onChange?.(); return true; }
       const now = Date.now();
       const twice = key.meta || now - this.lastEscape < 800; // meta: ESC ESC arriving in one chunk
       if (twice && this.text) { this.discard(); this.lastEscape = 0; return true; }
@@ -584,42 +483,37 @@ export class Editor {
     else this.restoreDraft(entry.text, entry.text.length, entry.parts);
   }
 
-  // Render as a rounded box. Returns {lines, cursor:{row,col}}.
-  // `title`: {left, right}, shown in the top border (left: the directory; right: the session's name).
+  // Draw the input without a box: "> " before its first row, two spaces before the others (the ! or # of bash and
+  // memory mode take the place of ">"). Returns {lines, cursor: {row, col}}.
   // `maxRows`: the most rows of text to show. A longer text shows a window of them that follows the cursor (from
-  // viewTop), and the bottom border says how many rows are above and below it: the whole box used to be drawn and
-  // the screen cut its top off, so that the cursor stood on a row that was not the one typed in.
-  render(width, { placeholder = '', active = true, borderColor, title = null, maxRows = Infinity } = {}) {
-    const boxW = Math.max(20, width - 1);
-    const textW = boxW - 6;
+  // viewTop), and a line under it says how many rows are above and below.
+  render(width, { placeholder = '', active = true, maxRows = Infinity } = {}) {
+    const textW = Math.max(10, width - 1 - 2);
     const mode = this.mode;
-    const color = borderColor || (mode === 'bash' ? c.magenta : mode === 'memory' ? c.blue : c.gray);
+    const color = mode === 'bash' ? c.magenta : mode === 'memory' ? c.blue : c.claude;
     const promptCh = mode === 'bash' ? '!' : mode === 'memory' ? '#' : '>';
     const body = mode === 'prompt' ? this.text : this.text.slice(1);
     this.textW = textW;
-    const { rows: laid, r, col, offset } = this.place();
+    const { rows: laid, r, col } = this.place();
     const shown = Math.max(1, Math.min(laid.length, Math.floor(maxRows)));
     let top = Math.min(this.viewTop || 0, laid.length - shown); // the window moves only as far as the cursor needs
     if (r < top) top = r;
     else if (r >= top + shown) top = r - shown + 1;
     this.viewTop = top = Math.max(0, top);
 
-    const lines = [topBorder(boxW, color, title)];
+    const lines = [];
     for (let i = top; i < top + shown; i++) {
       let content = laid[i].text;
       if (!body && i === 0 && placeholder) content = c.dim(truncate(placeholder, textW));
-      else if (this.selection) content = this.paintRow(laid[i], offset);
-      const lead = i === 0 ? (mode === 'prompt' ? promptCh : color(promptCh)) + ' ' : '  ';
-      lines.push(color('│') + ' ' + lead + padEnd(content, textW) + ' ' + color('│'));
+      lines.push((i === 0 ? color(promptCh) + ' ' : '  ') + content);
     }
     const below = laid.length - top - shown;
     const hidden = [top ? `↑ ${top} more rows` : '', below ? `↓ ${below} more rows` : ''].filter(Boolean).join(' · ');
-    const label = hidden && boxW > stringWidth(hidden) + 6 ? ` ${hidden} ` : '';
-    lines.push(color(glyphs.bottomLeft + '─') + c.dim(label) + color('─'.repeat(boxW - 3 - stringWidth(label)) + glyphs.bottomRight));
-    // `text`: where the text is in `lines` (its first row, how many, the column it starts at), for the mouse
-    return { lines, cursor: active ? { row: r - top + 1, col: 4 + col } : null, text: { row: 1, rows: shown, col: 4 } };
+    if (hidden) lines.push(c.dim(`  ${hidden}`));
+    return { lines, cursor: active ? { row: r - top, col: 2 + col } : null };
   }
 
+  // The completion list (Tab): a window of 8 items around the selected one.
   renderSuggestions(width) {
     if (!this.suggestions) return [];
     const items = this.suggestions.items;
@@ -627,11 +521,13 @@ export class Editor {
     const start = Math.max(0, Math.min(this.selected - Math.floor(max / 2), items.length - max));
     const shown = items.slice(start, start + max);
     const labelW = Math.min(30, Math.max(...shown.map((i) => stringWidth(i.label))) + 2);
-    return shown.map((item, k) => {
+    const lines = shown.map((item, k) => {
       const sel = start + k === this.selected;
-      const label = padEnd(truncate(item.label, labelW), labelW);
+      const label = padEnd(truncate(item.label, labelW - 2), labelW);
       const desc = item.description ? truncate(item.description, Math.max(10, width - labelW - 6)) : '';
       return sel ? '  ' + c.permission(label) + c.permission(desc) : '  ' + c.gray(label) + c.dim(desc);
     });
+    if (items.length > max) lines.push(c.dim(`  ${this.selected + 1}/${items.length} · tab/↓ next · ⏎ choose · esc close`));
+    return lines;
   }
 }

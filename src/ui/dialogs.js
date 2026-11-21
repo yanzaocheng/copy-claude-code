@@ -1,25 +1,18 @@
 // Modal dialogs rendered in the live region: selection menus (questions, the model and session pickers, /rewind),
 // with a typed answer of their own when they offer "Other", and a text field (/connect asks for a key or an address).
 
-import { c, glyphs, padEnd, stringWidth, truncate, wordWrap } from './ansi.js';
+import { c, glyphs, stringWidth, truncate, wordWrap } from './ansi.js';
 import { Editor } from './editor.js';
 
-function box(lines, width, color) {
-  const w = Math.max(20, width - 1);
-  const inner = w - 4;
-  const out = [color(glyphs.topLeft + '─'.repeat(w - 2) + glyphs.topRight)];
-  for (const l of lines) {
-    for (const part of stringWidth(l) > inner ? wordWrap(l, inner) : [l]) {
-      out.push(color('│') + ' ' + padEnd(part, inner) + ' ' + color('│'));
-    }
-  }
-  out.push(color(glyphs.bottomLeft + '─'.repeat(w - 2) + glyphs.bottomRight));
-  return out;
+// A dialog is drawn without a frame: its lines, the long ones wrapped between words.
+const innerWidth = (width) => Math.max(20, width - 1);
+function wrapAll(lines, width) {
+  const inner = innerWidth(width);
+  return lines.flatMap((l) => (stringWidth(l) > inner ? wordWrap(l, inner) : [l]));
 }
-
-// The rows `lines` take inside box(), which wraps the long ones.
-function boxRows(lines, width) {
-  const inner = Math.max(20, width - 1) - 4;
+// The rows `lines` take once wrapAll() has wrapped the long ones.
+function rowsOf(lines, width) {
+  const inner = innerWidth(width);
   return lines.reduce((n, l) => n + (stringWidth(l) > inner ? wordWrap(l, inner).length : 1), 0);
 }
 
@@ -100,10 +93,10 @@ export class SelectDialog {
     lines.push(...this.body);
     if (this.body.length) lines.push('');
     if (this.question) lines.push(this.question);
-    const inner = Math.max(20, width - 1) - 4;
+    const inner = innerWidth(width);
     // Show a window of options around the selection when they don't all fit.
     const perOption = this.options.some((o) => o.description) ? 2 : 1;
-    const room = Math.max(3, Math.floor((maxHeight - boxRows(lines, width) - 4 - (this.other ? 5 : 0)) / perOption));
+    const room = Math.max(3, Math.floor((maxHeight - rowsOf(lines, width) - 2 - (this.other ? 3 : 0)) / perOption));
     let first = 0;
     if (this.options.length > room) first = Math.min(Math.max(0, this.selected - Math.floor(room / 2)), this.options.length - room);
     const last = Math.min(this.options.length, first + room);
@@ -120,12 +113,12 @@ export class SelectDialog {
     let cursor = null;
     if (this.other) {
       lines.push('');
-      const r = this.other.render(width - 4, { placeholder: 'Type your answer, Enter to submit, Esc to go back' });
-      const top = boxRows(lines, width) + 1; // the rows above it once box() has wrapped the long ones, and its top border
+      const r = this.other.render(width, { placeholder: 'Type your answer, Enter to submit, Esc to go back' });
+      const top = rowsOf(lines, width); // the rows above it once wrapAll() has wrapped the long ones
       lines.push(...r.lines.map((l) => truncate(l, inner)));
-      if (r.cursor) cursor = { row: top + r.cursor.row, col: 2 + r.cursor.col };
+      if (r.cursor) cursor = { row: top + r.cursor.row, col: r.cursor.col };
     }
-    const out = box(lines, width, this.color);
+    const out = wrapAll(lines, width);
     const hint = this.footer ?? (this.multi ? 'Space to toggle · Enter to confirm · Esc to cancel' : 'Enter to confirm · Esc to cancel');
     out.push(c.dim('  ' + hint));
     return { lines: out, cursor };
@@ -186,23 +179,23 @@ export class TextInputDialog {
     lines.push(...this.body);
     if (this.body.length) lines.push('');
     if (this.question) lines.push(this.question);
-    const inner = Math.max(20, width - 1) - 4;
+    const inner = innerWidth(width);
     let cursor = null;
     if (this.secret) {
       const n = this.value().length;
       const room = Math.max(4, inner - 20);
       const stars = n ? `${'*'.repeat(Math.min(n, room))}${n > room ? '...' : ''}` : '';
-      const row = boxRows(lines, width) + 1; // the row it takes once box() has wrapped the long ones, and the top border
-      lines.push(`> ${stars}${n ? c.dim(`  (${n} characters)`) : c.dim(this.placeholder)}`);
-      cursor = { row, col: 2 + 2 + stringWidth(stars) };
+      const row = rowsOf(lines, width); // the row it takes once wrapAll() has wrapped the long ones
+      lines.push(`${c.claude('>')} ${stars}${n ? c.dim(`  (${n} characters)`) : c.dim(this.placeholder)}`);
+      cursor = { row, col: 2 + stringWidth(stars) };
     } else {
-      const r = this.editor.render(width - 4, { placeholder: this.placeholder });
-      const top = boxRows(lines, width) + 1;
+      const r = this.editor.render(width, { placeholder: this.placeholder });
+      const top = rowsOf(lines, width);
       lines.push(...r.lines.map((l) => truncate(l, inner)));
-      if (r.cursor) cursor = { row: top + r.cursor.row, col: 2 + r.cursor.col };
+      if (r.cursor) cursor = { row: top + r.cursor.row, col: r.cursor.col };
     }
     if (this.error) lines.push('', c.red(this.error));
-    const out = box(lines, width, this.color);
+    const out = wrapAll(lines, width);
     out.push(c.dim(`  Enter to confirm · Esc to cancel${this.secret ? ' · Ctrl+V pastes' : ''}`));
     return { lines: out, cursor };
   }

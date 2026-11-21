@@ -10,7 +10,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function check() {
   const problems = [];
   const fail = (text) => problems.push(text);
-  // The App starts as a session does (the fullscreen renderer, ...), so that code only a real start runs is checked
+  // The App starts as a session does, so that code only a real start runs is checked
   // too, but this process must not show up as a session or go online.
   Object.assign(process.env, { CLAUDE_PRO_PEERS: '0', CLAUDE_PRO_ONLINE: '0' });
 
@@ -34,7 +34,7 @@ async function check() {
     exited = app.start('');
     exited.catch((e) => fail(`Starting failed: ${e?.stack || e}`));
     const began = Date.now();
-    while (!(screen.includes('Welcome to') && screen.includes('for shortcuts'))) {
+    while (!(screen.includes('Welcome to') && (screen.includes('explain this codebase') || screen.includes('Enter to confirm')))) {
       if (problems.length) return problems;
       if (Date.now() - began > STARTUP_LIMIT_MS) return [`The interface did not come up within ${STARTUP_LIMIT_MS / 1000} seconds.\n${screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').slice(-800)}`];
       await sleep(25);

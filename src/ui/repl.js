@@ -3,16 +3,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { c, ESC, glyphs, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
-import { Screen, queryCursorRow, mouseFilter } from './screen.js';
-import { Editor, topBorder, shownQuotes } from './editor.js';
+import { Screen, queryCursorRow } from './screen.js';
+import { Editor, shownQuotes } from './editor.js';
 import { SelectDialog } from './dialogs.js';
 import { MarkdownStream, renderMarkdown } from './markdown.js';
 import {
-  DOT, toolHeader, renderToolResult, renderTodos, renderUserMessage, resultLines, formatTokens, formatDuration, toolLabel, bashModeLines,
+  DOT, toolHeader, renderToolResult, renderUserMessage, resultLines, formatTokens, formatDuration, toolLabel, bashModeLines,
 } from './render.js';
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
@@ -256,7 +255,6 @@ export class App {
     this.md = null;
     this.thinking = null;
     this.verbose = !!flags.verbose;
-    this.showTodos = true;
     this.turnStart = 0;
     this.turnTokens = 0;
     this.verb = 'Thinking';
@@ -302,7 +300,15 @@ export class App {
     this.remotePeersLoading = null;
     this.remotePeersTimer = null;
     this.cost = 0; // what this conversation's requests have cost so far (USD at list prices): the footer and /cost
-    this.fileIndex = new FileIndex(cwd, () => this.runtime?.config, () => { this.editor?.refreshSuggestions(); this.screen?.schedule(); });
+    this.fileIndex = new FileIndex(cwd, () => this.runtime?.config, () => {
+      const e = this.editor;
+      if (!e) return;
+      // a Tab pressed while the list was being made had nothing to complete: it does now
+      const miss = e.lastMiss;
+      if (miss && miss.text === e.text && miss.cursor === e.cursor && Date.now() - miss.at < 5000) e.complete();
+      else e.refreshSuggestions();
+      this.screen?.schedule();
+    });
     this.store = new SessionStore(cwd);
     SessionStore.onError = (e, store) => this.notice(`Could not save the conversation to ${store.file} (${e.code || e.message}): it is written again whole before a restart, but /resume may miss what was not saved.`, 'warn');
     // What the terminal prints goes to the remote page too, except what it is told about as events.
@@ -318,10 +324,9 @@ export class App {
       imageFromPath: (p) => {
         const r = imageFromFile(resolvePath(p, this.cwd));
         if (r.error && !/not found|Not a file/.test(r.error)) this.flash(r.error, 'warn');
-        if (r.image) this.flashMessage = null;
         return r.image || null;
       },
-      getSuggestions: (text, cursor) => this.suggest(text, cursor),
+      getSuggestions: (text, cursor, opts) => this.suggest(text, cursor, opts),
       onChange: () => this.screen.schedule(),
     });
   }
@@ -361,15 +366,11 @@ export class App {
     // so that the footer shows it before the first request.
     // not in the self-check a restart runs first: that would ask the gateway once more for every restart
     if (!this.driven && !this.selfCheck) loadGatewayModels(this.runtime.config).then(() => this.screen.schedule());
-    // What the session showed before a restart: scrolled back to in fullscreen, repainted after a resize otherwise.
+    // What the session showed before a restart: repainted after a resize.
     if (Array.isArray(this.flags.restart?.screenHistory)) this.screen.history = this.flags.restart.screenHistory.filter((l) => typeof l === 'string');
-    if (this.fullscreenWanted()) this.screen.setFull(true);
-    // Keys typed while starting up stay buffered in stdin until we listen. Mouse reports (fullscreen: the wheel)
-    // are taken out before the keys are read.
-    const keys = mouseFilter(stdin, (m) => this.onMouse(m));
-    this.keys = keys;
-    readline.emitKeypressEvents(keys);
-    keys.on('keypress', (str, key) => {
+    // Keys typed while starting up stay buffered in stdin until we listen.
+    readline.emitKeypressEvents(stdin);
+    stdin.on('keypress', (str, key) => {
       if (/^\x1b\[\d+;\d+R$/.test(key?.sequence || '')) return; // a late answer to the cursor position query, not a key
       try { this.onKey(str, key || {}); } catch (e) { this.logError(e); }
     });
@@ -395,10 +396,11 @@ export class App {
     }
 
     this.screen.setLive((w) => this.renderLive(w));
+    // the restart line took the place of the same one of the process before (see resumeAfterRestart): the screen is
+    // written again from the history, which no longer has the old one
+    if (this.collapsedRestart) { this.collapsedRestart = false; this.screen.repaint(); }
     this.spinnerTimer = setInterval(() => {
-      const clock = this.cacheClock(); // the footer's clock counts down while nothing else is drawn
-      if (this.isTurnRunning() || this.active.length || clock !== this.shownClock) this.screen.schedule();
-      this.shownClock = clock;
+      if (this.isTurnRunning() || this.active.length) this.screen.schedule();
     }, 120);
     if (restart) this.continueAfterRestart(restart);
     else if (initialPrompt?.trim()) this.onSubmit(initialPrompt, initialPrompt);
@@ -1199,9 +1201,6 @@ export class App {
     }
     if (state.browser && typeof state.browser === 'object' && typeof state.browser.dir === 'string') browserSession.preferred = state.browser;
     if (typeof state.draft === 'string' && state.draft) this.editor.restoreDraft(state.draft, state.draftCursor, state.draftParts);
-    // Fullscreen starts on an empty screen: without what the process before showed (an older version, or one
-    // that ran classic), the conversation is drawn again from the session.
-    if (this.screen.full && resumable && !Array.isArray(state.screenHistory)) this.printTranscript(this.agent.messages.slice(-80));
     if (state.changedDirectory) {
       // /cd: the line it answers with, here and on the remote page (which starts again from the conversation)
       const line = `Working directory: ${this.cwd}`;
@@ -1215,17 +1214,18 @@ export class App {
     let count = 1;
     const prev = state.restartNote;
     const hist = this.screen.history;
-    if (this.screen.full && prev && prev.text === text && !state.continueWith) {
+    if (prev && prev.text === text && !state.continueWith) {
       let i = hist.length;
       while (i > 0 && hist[i - 1] === '') i--;
       if (i > 0 && hist[i - 1] === prev.line) {
         hist.splice(i - 1);
-        if (Array.isArray(this.screen.wrapped)) this.screen.wrapped = [];
         count = (prev.count || 1) + 1;
+        this.collapsedRestart = true;
       }
     }
     const line = c.dim(count > 1 ? `${text} (×${count})` : text);
-    this.screen.log(line, '');
+    if (this.collapsedRestart) this.screen.queueLog([line, '']); // drawn by the repaint in start()
+    else this.screen.log(line, '');
     this.restartNote = { text, count, line };
   }
 
@@ -1382,20 +1382,12 @@ export class App {
 
   printWelcome() {
     const cfg = this.config;
-    const w = Math.min(this.width - 1, 76);
-    const inner = w - 4;
-    const row = (s) => c.claude('│') + ' ' + padEnd(truncate(s, inner), inner) + ' ' + c.claude('│');
     const model = cfg.model;
     const lines = [
-      c.claude(glyphs.topLeft + '─'.repeat(w - 2) + glyphs.topRight),
-      row(`${c.claude('✻')} Welcome to ${c.bold(APP_NAME)}! ${c.dim(`v${VERSION} · a command line coding agent`)}`),
-      row(''),
-      row(c.dim('  /help for help, /status for your current setup')),
-      row(''),
-      row(c.dim(`  cwd:    ${this.cwd}`)),
-      row(c.dim(`  model:  ${model.label}${cfg.effort ? ` · effort ${cfg.effort}` : ''} · ${formatTokens(model.contextWindow)} context`)),
-      row(c.dim(`  backend: ${cfg.endpointLabel}`)),
-      c.claude(glyphs.bottomLeft + '─'.repeat(w - 2) + glyphs.bottomRight),
+      `${c.claude('✻')} Welcome to ${c.bold(APP_NAME)}! ${c.dim(`v${VERSION} · /help · ? for shortcuts · ${APP_NAME} web: the web console`)}`,
+      c.dim(`  cwd:     ${this.cwd}`),
+      c.dim(`  model:   ${model.label}${cfg.effort ? ` · effort ${cfg.effort}` : ''} · ${formatTokens(model.contextWindow)} context`),
+      c.dim(`  backend: ${cfg.endpointLabel}`),
     ];
     lines.push('', c.dim(' Full access: every tool runs immediately, nothing is ever asked. File edits are checkpointed;'), c.dim(' /rewind puts files and/or the conversation back (shell-command changes are not tracked).'));
     // (the model in use cannot be reached: said, with what connects it)
@@ -1407,55 +1399,11 @@ export class App {
       const ok = mcp.filter((m) => m.status === 'connected').length;
       lines.push(c.dim(` MCP: ${ok}/${mcp.length} servers connected${ok < mcp.length ? ' · /mcp for details' : ''}`));
     }
-    lines.push('', c.dim(' Tips for getting started:'), c.dim(' 1. Ask questions, edit files, or run commands'), c.dim(' 2. Be as specific as you would with another engineer for the best results'), c.dim(` 3. Run /init to create a CLAUDE.md file with instructions for ${APP_NAME}`), '');
+    lines.push('');
     this.logLocal(lines);
   }
 
   // ---------------------------------------------------------------- input
-
-  // Always fullscreen on a terminal (there is no other mode to choose). Output that is no terminal (isTTY false: a
-  // test's fake terminal that asks for it) is written as it comes, with the input box after it.
-  fullscreenWanted() {
-    return this.stdout.isTTY !== false;
-  }
-
-  // Fullscreen: the wheel scrolls the conversation (3 rows a notch); a drag,
-  // a double or a triple click selects text. Selection is copied only with Ctrl+C.
-  // In the input box a click moves the cursor and a drag selects its text (see Editor.mouse).
-  onMouse(m) {
-    if (!this.screen.full || this.exiting) return;
-    if (m.button & 64) {
-      if (m.button & 128) return;
-      const speed = 3;
-      this.screen.scrollBy(m.button & 1 ? -speed : speed);
-      return;
-    }
-    // Right-click is intentionally inert. Clipboard operations use Ctrl+C and Ctrl+V only.
-    const had = this.screen.selection;
-    const hadInput = this.editor.selection;
-    const r = this.screen.mouse(m);
-    if (r?.input) this.editor.mouse(r.input);
-    else if ((m.button & 3) === 0 && !(m.button & 32) && !m.release) this.editor.clearSelection(); // a press elsewhere
-    if ((this.screen.selection && this.screen.selection !== had) || (this.editor.selection && this.editor.selection !== hadInput)) {
-      this.flashMessage = null; // the footer says what a selection takes
-      this.screen.schedule();
-    }
-  }
-
-  // Quote what is selected in the conversation in the message being written, as ChatGPT's "Ask ChatGPT" does:
-  // ctrl+q (alt+q where the terminal keeps ctrl+q), as the footer says while there is a selection. The box shows
-  // "[Quote #1 +12 lines]"; the model gets the text and the line of the conversation it is under (see
-  // Editor.insertQuote), so that it knows which part, and which file or command, the question is about.
-  quoteSelection() {
-    if (!this.screen.full) { this.flash('Quoting needs the fullscreen view: select text with the mouse, then ctrl+q', 'warn'); return; }
-    const quote = this.screen.selectionQuote();
-    if (!quote?.text.trim()) { this.flash('Select part of the conversation first (drag over it, or double/triple-click), then ctrl+q', 'warn'); return; }
-    if (this.dialogs.length) { this.flash('Answer the open question first, then quote', 'warn'); return; }
-    if (this.finder) this.closeFind();
-    this.screen.clearSelection();
-    const label = this.editor.insertQuote(quote.text, quote.source);
-    this.flash(`${label}${quote.source ? ` from ${quote.source}` : ''}: type your question below it`);
-  }
 
   copyText(text) {
     writeClipboard(text).then((ok) => {
@@ -1467,30 +1415,14 @@ export class App {
   clipboardEditor() {
     const dialog = this.dialogs[0];
     if (dialog) return dialog.editor || dialog.other || null;
-    return this.finder ? null : this.editor;
+    return this.editor;
   }
 
-  insertFindText(text) {
-    const f = this.finder;
-    const clean = String(text ?? '').replace(/[\r\n\t]+/g, ' ');
-    if (!f || !clean) return;
-    if (f.selected) {
-      f.text = clean;
-      f.cursor = clean.length;
-      f.selected = false;
-    } else {
-      f.text = f.text.slice(0, f.cursor) + clean + f.text.slice(f.cursor);
-      f.cursor += clean.length;
-    }
-    this.screen.setFind(f.text);
-  }
-
-  // Pasted text into the input box, the open dialog's text field or the find box.
+  // Pasted text into the input box or the open dialog's text field.
   insertPastedText(text, target = this.clipboardEditor()) {
     const clean = String(text || '').replace(/\x1b\[20[01]~/g, '');
     if (!clean) return;
     if (target) target.insertPaste(clean);
-    else if (this.finder) this.insertFindText(clean);
     this.screen.schedule();
   }
 
@@ -1498,9 +1430,8 @@ export class App {
   // is only done when the terminal had nothing to paste (alt+v, ctrl+v as a key, an empty bracketed paste).
   pasteClipboard(target = this.clipboardEditor()) {
     if (this.readingClipboard || this.exiting) return;
-    if (!target && !this.finder) return; // selection dialogs have no text field to paste into
+    if (!target) return; // selection dialogs have no text field to paste into
     this.readingClipboard = true;
-    this.flash('Reading clipboard…');
     const allowImage = Boolean(target?.insertImage);
     const image = allowImage
       ? readClipboardImage().catch((e) => ({ image: null, error: e.message }))
@@ -1544,57 +1475,22 @@ export class App {
       }
       return;
     }
-    if (this.screen.full) {
-      const half = Math.max(1, Math.floor((this.screen.lastArea || this.screen.height) / 2));
-      if (key.name === 'pageup') { this.screen.scrollBy(half); return; }
-      if (key.name === 'pagedown') { this.screen.scrollBy(-half); return; }
-      if (key.ctrl && key.name === 'home') { this.screen.scrollBy('top'); return; }
-      if (key.ctrl && key.name === 'end') { this.screen.scrollBy('bottom'); return; }
-      // ctrl+f looks for what is selected, if anything
-      if (key.ctrl && key.name === 'f' && !this.dialogs.length) {
-        const seed = this.screen.selection ? this.screen.selectedText() : '';
-        this.screen.clearSelection();
-        this.openFind(seed);
-        return;
-      }
-      // A selection: ctrl+c copies it (and does not interrupt), esc only clears it, any other key clears it and
-      // then does what it does.
-      if (this.screen.selection) {
-        if (key.ctrl && key.name === 'c') { this.copyText(this.screen.selectedText()); this.screen.clearSelection(); return; }
-        if ((key.ctrl || key.meta) && key.name === 'q') { this.quoteSelection(); return; }
-        this.screen.clearSelection();
-        if (key.name === 'escape') return;
-      }
-    }
-    // A selection in the input box (see Editor.mouse), the same way: ctrl+c copies it (and neither interrupts nor
-    // clears the message), esc only clears it, any other key clears it and then does what it does.
-    if (this.editor.selection) {
-      const shown = !this.dialogs.length && !this.finder; // else the box is not on screen, and the key is not for it
-      if (shown && key.ctrl && key.name === 'c') { this.copyText(this.editor.selectedText()); this.editor.clearSelection(); return; }
-      this.editor.clearSelection();
-      if (shown && key.name === 'escape') return;
-    }
     if (key.name === 'paste-start' || key.sequence === '\x1b[200~') {
       this.bracketedPaste = { raw: '' };
       return;
     }
-    if (key.ctrl && key.name === 'c' && this.finder && !this.dialogs.length) { this.closeFind(); return; } // not the hidden input's text
     if (key.ctrl && key.name === 'c') { this.onCtrlC(); return; }
     if ((key.ctrl || key.meta) && key.name === 'v') { this.pasteClipboard(); return; } // alt+v: the clipboard's image
-    if ((key.ctrl || key.meta) && key.name === 'q') { this.quoteSelection(); return; } // nothing selected: says how
     const dialog = this.dialogs[0];
     if (dialog) {
       dialog.handleKey(str, key);
       this.screen.schedule();
       return;
     }
-    if (key.ctrl && key.name === 'f') { this.openFind(); return; }
-    if (this.finder) { this.findKey(str, key); this.screen.schedule(); return; }
-    if (key.ctrl && key.name === 't') { this.showTodos = !this.showTodos; this.screen.schedule(); return; }
-    if (key.ctrl && key.name === 'l') { if (this.screen.full) this.screen.repaint(); else this.screen.clearScreen(); return; }
+    if (key.ctrl && key.name === 'l') { this.screen.clearScreen(); return; }
     if (key.ctrl && key.name === 'd' && !this.editor.text) { this.keyboardExit(); return; }
     // esc closes an open completion list first (the editor does that), and only then stops the turn
-    if (key.name === 'escape' && this.isTurnRunning() && !this.editor.suggestions) { this.interrupt(); return; }
+    if (key.name === 'escape' && this.isTurnRunning() && !this.editor.completing) { this.interrupt(); return; }
     this.exitArmed = 0;
     this.editor.handleKey(str, key);
     this.screen.schedule();
@@ -1707,7 +1603,6 @@ export class App {
   onSubmit(value, raw, images = [], display = undefined, parts = null) {
     const text = value.trim();
     if (!text) { this.screen.schedule(); return; }
-    if (this.screen.scrolledUp) this.screen.scrollBy('bottom'); // what was sent, and what comes of it, is in view
     appendHistory(this.cwd, raw, parts);
     if (this.sendTypedToPeer(text)) return;
     if (this.isTurnRunning() && !this.modelSwitchAtPause(text)) {
@@ -1730,7 +1625,7 @@ export class App {
         return;
       }
       if (!/^\/[\w:-]+$/.test(text.split(/\s/)[0])) { this.startTurn(value, { display }); return; } // e.g. a path like /usr/bin
-      this.notice(`Unknown command: /${name}. Type /help for the list of commands.`, 'warn');
+      this.notice(`Unknown command: /${name}. Type / and press Tab for the list of commands, or /help.`, 'warn');
       return;
     }
     this.startTurn(value, { display });
@@ -1776,100 +1671,13 @@ export class App {
   shortcutsHelp() {
     const rows = [
       ['! for bash mode', 'double tap esc to clear input'],
-      ['/ for commands', '/verbose for detailed tool output'],
-      ['@ for files and sessions', 'ctrl + f to find in the conversation'],
-      ['PgUp/PgDn, wheel to scroll', 'ctrl + home/end to the top/bottom'],
-      ['# to memorize', 'ctrl + t to toggle todos'],
-      ['\\⏎ or alt+⏎ for newline', 'ctrl + l to redraw, ctrl + d to exit'],
-      ['ctrl + c to copy selection', 'ctrl + q to quote it in your message'],
-      ['ctrl + v to paste text or an image', ''],
+      ['/ for commands', 'tab to complete / and @'],
+      ['@ for files and sessions', '/verbose for detailed tool output'],
+      ['# to memorize', 'esc to interrupt'],
+      ['\\⏎ or alt+⏎ for newline', 'ctrl + l to clear, ctrl + d to exit'],
+      ['ctrl + v to paste text or an image', 'claude-pro web: the web console'],
     ];
     return rows.map(([a, b]) => c.dim('  ' + padEnd(a, 30) + b));
-  }
-
-  // ---------------------------------------------------------------- finding in the conversation (ctrl+f)
-  //
-  // As in VS Code: a box takes the input box's place, the conversation shows the matches as they are typed, the
-  // current one apart, and goes to it. In a conversation the newest matter most: the first one shown is the
-  // nearest above the bottom of the view, enter (or ↑) goes on to older ones, shift+enter (or ↓) back to newer
-  // ones, round from either end. Esc closes the box and leaves the view where it is. The text typed last comes
-  // back selected (typing replaces it), or what is selected with the mouse. Fullscreen only: in the classic
-  // renderer the conversation is in the terminal's own scrollback.
-
-  openFind(seed = '') {
-    if (!this.screen.full) { this.flash('ctrl+f needs the fullscreen view; here use the terminal\'s own find', 'warn'); return; }
-    if (this.finder && !seed.trim()) { this.finder.selected = Boolean(this.finder.text); this.screen.schedule(); return; } // open: select what is typed
-    const text = (seed.split('\n').find((l) => l.trim()) || '').trim() || this.lastFind || '';
-    if (!this.finder) this.screen.openFind();
-    this.finder = { text, cursor: text.length, selected: Boolean(text) };
-    this.screen.setFind(text);
-    this.screen.schedule();
-  }
-
-  closeFind() {
-    if (!this.finder) return;
-    this.lastFind = this.finder.text;
-    this.finder = null;
-    this.screen.closeFind();
-    this.screen.schedule();
-  }
-
-  findKey(str, key) {
-    const f = this.finder;
-    const name = key.name;
-    const edit = (text, cursor) => {
-      Object.assign(f, { text, cursor, selected: false });
-      this.screen.setFind(text);
-    };
-    const insert = (s) => {
-      const t = s.replace(/[\r\n\t]+/g, ' ');
-      if (!t) return;
-      if (f.selected) edit(t, t.length);
-      else edit(f.text.slice(0, f.cursor) + t + f.text.slice(f.cursor), f.cursor + t.length);
-    };
-    // a bracketed paste never gets here: App.onKey takes it whole (see insertFindText)
-    if (name === 'escape') { this.closeFind(); return; }
-    const back = (name === 'return' && (key.meta || key.shift)) || name === 'enter' || key.sequence === '\x1b[13;2u' || (name === 'f3' && key.shift);
-    if (back || name === 'down' || (key.ctrl && name === 'n')) { f.selected = false; this.screen.findStep(-1); return; }
-    if (name === 'return' || name === 'f3' || name === 'up' || (key.ctrl && name === 'p')) { f.selected = false; this.screen.findStep(1); return; }
-    const chars = [...f.text.slice(0, f.cursor)];
-    if (name === 'backspace') {
-      if (f.selected) edit('', 0);
-      else if (chars.length) { const keep = chars.slice(0, -1).join(''); edit(keep + f.text.slice(f.cursor), keep.length); }
-      return;
-    }
-    if (name === 'delete') {
-      if (f.selected) edit('', 0);
-      else if (f.cursor < f.text.length) { const next = [...f.text.slice(f.cursor)].slice(1).join(''); edit(f.text.slice(0, f.cursor) + next, f.cursor); }
-      return;
-    }
-    if (key.ctrl && name === 'u') { edit('', 0); return; }
-    if (name === 'left') { f.selected = false; f.cursor = chars.slice(0, -1).join('').length; return; }
-    if (name === 'right') { f.selected = false; f.cursor = Math.min(f.text.length, f.cursor + ([...f.text.slice(f.cursor)][0]?.length || 0)); return; }
-    if (name === 'home' || (key.ctrl && name === 'a')) { f.selected = false; f.cursor = 0; return; }
-    if (name === 'end' || (key.ctrl && name === 'e')) { f.selected = false; f.cursor = f.text.length; return; }
-    if (str && !key.ctrl && !key.meta && !/[\x00-\x1f\x7f]/.test(str)) insert(str);
-  }
-
-  // The find box, in the input box's place: what is typed (selected: in reverse video), and how many matches.
-  renderFind(width) {
-    const f = this.finder;
-    const boxW = Math.max(20, width - 1);
-    const textW = boxW - 6;
-    const s = this.screen.findStatus();
-    const count = !f.text ? '' : s?.total ? `${s.index + 1}/${s.total}` : c.red('No results');
-    const title = { left: 'Find in the conversation', right: count };
-    // the part of the text that fits, the cursor in it
-    let before = f.text.slice(0, f.cursor);
-    while (before && stringWidth(before) > textW - 1) before = [...before].slice(1).join('');
-    const shown = truncate(before + f.text.slice(f.cursor), textW, '');
-    const content = f.selected && shown ? c.inverse(shown) : shown;
-    const lines = [
-      topBorder(boxW, c.yellow, title),
-      c.yellow('│') + ' ' + c.yellow(glyphs.find) + ' ' + padEnd(content, textW) + ' ' + c.yellow('│'),
-      c.yellow(glyphs.bottomLeft + '─'.repeat(boxW - 2) + glyphs.bottomRight),
-    ];
-    return { lines, cursor: { row: 1, col: 4 + stringWidth(before) } };
   }
 
   // ---------------------------------------------------------------- turns
@@ -1996,12 +1804,27 @@ export class App {
     return [{ type: 'text', text: `<system-reminder>The user refers to other sessions: ${notes.join('; ')}. MessagePeer (to: the name in quotes) sends a session a task.</system-reminder>` }];
   }
 
-  // A short-lived message in the footer (not written to the transcript).
+  // The status line under each answer: "✻ Done at 14:05 · worked 1m 3s · $0.12 (total $3.40) · ctx 45k/1M · opus-5-5 max".
+  doneLine() {
+    const at = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const parts = [`✻ Done at ${at}`, `worked ${formatDuration(Date.now() - this.turnStart)}`];
+    const spent = this.cost - (this.turnCostStart || 0);
+    if (spent > 0) parts.push(this.cost > spent + 0.005 ? `${formatUsd(spent)} (total ${formatUsd(this.cost)})` : formatUsd(spent));
+    try {
+      const cfg = this.config;
+      const k = (n) => formatTokens(n).replace(/\.0([kM])$/, '$1');
+      parts.push(`ctx ${k(this.agent.contextEstimate)}/${k(cfg.model.contextWindow)}`);
+      const { model, effort } = modelInfo(cfg);
+      const level = effort || defaultEffort(cfg.model.id, cfg);
+      parts.push(level ? `${model} ${level}` : model);
+    } catch { /* no model information: the time and the cost are enough */ }
+    return c.dim(parts.join(' · '));
+  }
+
+  // A short message about something the user just did (a paste, a copy, a completion with nothing to offer): a
+  // line of its own, as there is no footer to show it in.
   flash(text, kind = 'info') {
-    this.flashMessage = { text, kind, until: Date.now() + 4000 };
-    this.screen.schedule();
-    clearTimeout(this.flashTimer);
-    this.flashTimer = setTimeout(() => this.screen.schedule(), 4100);
+    this.notice(text, kind);
   }
 
   async runAgent(content, { peers = [] } = {}) {
@@ -2013,6 +1836,7 @@ export class App {
     this.controller = new AbortController();
     this.turnStart = Date.now();
     this.turnTokens = 0;
+    this.turnCostStart = this.cost;
     this.verb = VERBS[Math.floor(Math.random() * VERBS.length)];
     this.screen.schedule();
     try {
@@ -2034,11 +1858,9 @@ export class App {
     } finally {
       this.flushStreaming();
       this.flushActive(true);
-      // When the answer came and how long the turn took, under the answer (the user asked for the time, 2026-11-21).
-      if (result && !result.interrupted && !error) {
-        const at = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
-        this.screen.log(c.dim(`✻ Done at ${at} · worked ${formatDuration(Date.now() - this.turnStart)}`), '');
-      }
+      // When the answer came and how long the turn took, under the answer (the user asked for the time, 2026-11-21),
+      // with what there is no footer for: the cost, the context in use, the model.
+      if (result && !result.interrupted && !error) this.screen.log(this.doneLine(), '');
       this.answerPeers(result, error);
       this.busy = false;
       this.controller = null;
@@ -2622,8 +2444,6 @@ export class App {
       if (!this.dialogs.length) {
         if (lines.length) lines.push('');
         lines.push(this.spinnerLine());
-        const todos = this.agent.todos;
-        if (this.showTodos && todos.length) lines.push(...renderTodos(todos).map((l) => truncate(l, w)));
       }
     } else if (this.active.length) {
       for (const e of this.active) lines.push(...this.renderActiveEntry(e, w));
@@ -2641,93 +2461,27 @@ export class App {
     }
     if (lines.length) lines.push('');
     const placeholder = this.isTurnRunning() ? 'Type a message to queue it for the agent…' : (this.agent.messages.length ? '' : 'Try "explain this codebase" or "fix the failing test"');
-    const after = this.finder ? [c.dim(truncate('  ⏎ or ↑ older · shift+⏎ or ↓ newer · PgUp/PgDn scroll · esc to close', w))]
-      : this.editor.suggestions ? this.editor.renderSuggestions(w)
-        : this.editor.text === '?' ? this.shortcutsHelp()
-          : [this.footer(w)];
-    // the box's text gets the screen less what is above and below it, its borders, and two rows of the conversation
-    const maxRows = Math.max(3, this.screen.height - 1 - lines.length - after.length - 2 - 2);
-    const r = this.finder ? this.renderFind(width) : this.editor.render(width, { placeholder, title: this.boxTitle(), maxRows });
+    const hint = this.hint();
+    const after = this.editor.suggestions ? this.editor.renderSuggestions(w) : hint ? [hint] : [];
+    // the input's text gets the screen less what is above and below it, and two rows of the conversation
+    const maxRows = Math.max(3, this.screen.height - 1 - lines.length - after.length - 1 - 2);
+    const r = this.editor.render(width, { placeholder, maxRows });
     const top = lines.length;
     lines.push(...r.lines);
     if (r.cursor) cursor = { row: top + r.cursor.row, col: r.cursor.col };
-    const input = r.text ? { ...r.text, row: top + r.text.row } : null; // where the mouse reaches the input box's text
     lines.push(...after);
-    return { lines, cursor, input };
+    return { lines, cursor };
   }
 
-  // In the input box's top border: the session's directory (only /cd changes it), and this
-  // session's name for the other sessions.
-  boxTitle() {
-    const dir = this.agent?.cwd || this.cwd;
-    const home = os.homedir();
-    const shown = dir.toLowerCase().startsWith(home.toLowerCase()) ? '~' + dir.slice(home.length) : dir;
-    const name = this.peers || this.remote ? `@${this.peerLabel()}` : '';
-    return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online ? `⇄ ${name}` : name };
-  }
 
-  // The prompt cache clock, as in Claude Code's VS Code extension: the minutes the conversation's cache has left
-  // ("◷ 12m"), or the icon alone in red once it has run out or right after a compaction, until the next response:
-  // the next message then writes the whole conversation to the cache again. Nothing before a response reported
-  // cache use.
-  cacheClock() {
-    const clock = this.agent?.cache.clock();
-    return !clock ? '' : clock.cold ? c.red(glyphs.clock) : c.dim(`${glyphs.clock} ${clock.minutes}m`);
-  }
-
-  footer(w) {
-    let left;
-    const flash = this.flashMessage && Date.now() < this.flashMessage.until ? this.flashMessage : null;
-    if (this.exitArmed && Date.now() - this.exitArmed < 1500) left = c.dim('  Press Ctrl-C again to exit');
-    else if (flash) left = (flash.kind === 'warn' ? c.yellow : c.dim)('  ' + truncate(flash.text, w - 4));
-    else if (this.screen.full && this.screen.selection) left = c.dim('  ctrl+c to copy · ctrl+q to quote it in your message');
-    else if (this.editor.selection) left = c.dim('  ctrl+c to copy · esc to clear');
-    else if (this.restartRequest) left = c.dim(`  ${glyphs.restart} restarting when this turn ends`);
-    else if (this.editor.mode === 'bash') left = c.magenta('  ! for bash mode');
-    else if (this.editor.mode === 'memory') left = c.blue('  # to memorize');
-    else left = c.dim('  ? for shortcuts');
-    if (this.remote?.online && this.remote.viewers && !flash && !(this.exitArmed && Date.now() - this.exitArmed < 1500)) {
-      left += c.dim(' · ') + c.green(`⇄ ${this.remote.viewers} watching`);
-    }
-    if (!flash) {
-      if (this.updating) left += c.dim(' · ') + c.blue(`${glyphs.update} updating ${APP_NAME} to ${this.updating}…`);
-      else if (this.updateRestart && this.sourceChanged && !this.restartRequest) left += c.dim(' · ') + c.blue(`${glyphs.restart} ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
-      else if (this.sourceChanged && !this.sourceChangedInTurn && !this.restartRequest && !this.reloading && !this.working() && this.sourceQuietAt > Date.now()) left += c.dim(' · ') + c.dim(`${glyphs.restart} source changed: restarts once it is left alone (/restart: now)`);
-      else if (this.pendingUpdate) left += c.dim(' · ') + c.dim(`update ${this.pendingUpdate} ready · ${this.updateWaitingFor ? `installs when @${this.updateWaitingFor.split(',')[0]} is idle` : 'installs when idle'}`);
-    }
-    const cfg = this.config;
-    const threshold = cfg.compactWindow();
-    const used = this.agent.contextEstimate;
-    let notice = '';
-    const pctLeft = Math.max(0, Math.round((1 - used / threshold) * 100));
-    if (pctLeft <= 30) notice = c.yellow(`Context left until auto-compact: ${pctLeft}%`);
-    else if (this.runtime.tasks.running().length) notice = c.dim(`${this.runtime.tasks.running().length} background agent${this.runtime.tasks.running().length === 1 ? '' : 's'} running · /tasks`);
-    else if (this.verbose) notice = c.dim('verbose');
-    // The model and effort in use always have a place at the right: with the notice after it when both fit,
-    // and the notice alone when they do not (a context warning matters more than the model's name).
-    const { model, effort } = modelInfo(cfg);
-    // An effort that is not set is not sent: the API then uses the model's default, which is shown instead.
-    const level = effort || defaultEffort(cfg.model.id, cfg);
-    const info = c.dim(level ? `${model} · ${level}` : model);
-    const version = c.dim(`v${VERSION}`);
-    const compactTokens = (n) => formatTokens(n).replace(/\.0([kM])$/, '$1');
-    const context = c.dim(`ctx ${compactTokens(used)}/${compactTokens(cfg.model.contextWindow)}`);
-    // Before the context, version and model: the prompt cache clock, then what the conversation has cost so far;
-    // when room is short the cost goes first, then the clock.
-    const spent = this.cost > 0 ? c.dim(formatUsd(this.cost)) : '';
-    const clock = this.cacheClock();
-    const join = (...parts) => parts.filter(Boolean).join(c.dim(' · '));
-    const room = w - stringWidth(left) - 1;
-    const right = [
-      join(notice, clock, spent, context, version, info),
-      join(notice, clock, context, version, info),
-      join(notice, context, version, info),
-      join(notice, context, version),
-      join(notice, version),
-      version,
-    ].find((r) => r && stringWidth(r) < room) || '';
-    const gap = room - stringWidth(right);
-    return right ? left + ' '.repeat(gap) + right : left;
+  // A line under the input, only while there is something to say that cannot wait for the end of the turn.
+  hint() {
+    if (this.exitArmed && Date.now() - this.exitArmed < 1500) return c.dim('  Press Ctrl-C again to exit');
+    if (this.restartRequest) return c.dim(`  ${glyphs.restart} restarting when this turn ends`);
+    if (this.updating) return c.blue(`  ${glyphs.update} updating ${APP_NAME} to ${this.updating}…`);
+    if (this.updateRestart && this.sourceChanged) return c.blue(`  ${glyphs.restart} ${this.updateRestart} installed: restarts ${this.working() ? 'when the work is done' : 'now'}`);
+    if (this.sourceChanged && !this.sourceChangedInTurn && !this.reloading && !this.working() && this.sourceQuietAt > Date.now()) return c.dim(`  ${glyphs.restart} source changed: restarts once it is left alone (/restart: now)`);
+    return '';
   }
 }
 
