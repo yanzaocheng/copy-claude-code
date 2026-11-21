@@ -744,21 +744,33 @@
 
   // ---------------------------------------------------------------- the message box (new conversation and live)
 
+  // What was typed and not sent, per box (`draftKey`): kept when the page shows another conversation and back. The text
+  // also in localStorage (it survives a reload), the images only in memory (their object URLs live as long as the page).
+  const draftImages = new Map();
+  const draftText = (key) => (key ? localStorage.getItem(`cpDraft:${key}`) || "" : "");
+  function saveDraft(key, text, images) {
+    if (!key) return;
+    if (text) localStorage.setItem(`cpDraft:${key}`, text); else localStorage.removeItem(`cpDraft:${key}`);
+    if (images.length) draftImages.set(key, images); else draftImages.delete(key);
+  }
+
   // A rounded box with the text, images (pasted, dropped or added with +), what goes left and right of the send button.
   // onSend(text, images) resolves when sent (the box is emptied) or throws (it is kept).
-  function composer(box, { placeholder, onSend, left = "", right = "", dropZone = box }) {
+  function composer(box, { placeholder, onSend, left = "", right = "", dropZone = box, draftKey = "" }) {
     box.innerHTML = `<form class="composer"><div class="thumbs hidden"></div><textarea rows="1" placeholder="${esc(placeholder)}"></textarea>
       <div class="composer-bar"><button type="button" class="icon-btn" data-add title="添加图片（也可以粘贴或拖进来）" aria-label="添加图片">${ICON.add}</button><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         <span class="composer-left">${left}</span><span class="grow"></span><span class="composer-right">${right}</span>
         <button type="button" class="round-btn stop hidden" data-stop title="停止当前任务">${ICON.stop}</button><button type="submit" class="round-btn" data-send title="发送（Enter）" disabled>${ICON.send}</button></div></form>`;
     const form = $("form", box), input = $("textarea", box), thumbs = $(".thumbs", box), file = $("input[type=file]", box), send = $("[data-send]", box);
-    let images = [];
+    let images = [...(draftImages.get(draftKey) || [])];
     let sending = false;
+    const keep = () => saveDraft(draftKey, input.value, images);
     const ready = () => { send.disabled = sending || (!input.value.trim() && !images.length); };
     const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(240, input.scrollHeight)}px`; ready(); };
     const paint = () => {
       thumbs.classList.toggle("hidden", !images.length);
       thumbs.innerHTML = images.map((img, i) => `<div class="thumb"><img src="${img.url}" alt="图片 ${i + 1}"><button type="button" data-drop="${i}" title="移除" aria-label="移除">×</button></div>`).join("");
+      keep();
       ready();
     };
     async function add(files) {
@@ -779,7 +791,7 @@
     });
     $("[data-add]", box).addEventListener("click", () => file.click());
     file.addEventListener("change", async () => { await add(file.files); file.value = ""; });
-    input.addEventListener("input", autosize);
+    input.addEventListener("input", () => { autosize(); keep(); });
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); } });
     input.addEventListener("paste", (e) => {
       const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file").map((it) => it.getAsFile());
@@ -799,17 +811,21 @@
         input.value = "";
         for (const img of images) URL.revokeObjectURL(img.url);
         images = [];
-        paint();
+        paint(); // (the draft goes with it)
         autosize();
       } catch (err) { fail(err); } finally { sending = false; ready(); }
     });
+    input.value = draftText(draftKey);
+    if (images.length) paint();
+    requestAnimationFrame(autosize); // (measured once the box is on the page)
     return {
       input,
       left: $(".composer-left", box),
       right: $(".composer-right", box),
       setBusy(busy) { $("[data-stop]", box).classList.toggle("hidden", !busy); },
       onStop(fn) { $("[data-stop]", box).addEventListener("click", fn); },
-      dispose() { for (const img of images) URL.revokeObjectURL(img.url); },
+      // (images of a draft stay: they come back with it)
+      dispose() { for (const img of images) if (!draftImages.get(draftKey)?.includes(img)) URL.revokeObjectURL(img.url); },
     };
   }
 
@@ -845,6 +861,7 @@
       placeholder: "描述你要它做的事，/命令 也可以。Enter 发送，Shift+Enter 换行",
       left: `<button type="button" class="chip" id="ndir" title="会话在哪个目录里工作">${ICON.folder}<span></span>${ICON.caret}</button>`,
       onSend: async (text, images) => startSession(dir, text, images),
+      draftKey: "new",
     });
     const chip = $("#ndir", el);
     const paintDir = () => { $("span", chip).textContent = dir ? baseName(dir) : "选择目录"; chip.title = dir ? `会话在 ${dir} 里工作` : "选择目录"; };
@@ -907,6 +924,7 @@
       placeholder: "发给这个会话：和在终端里输入一样，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
       right: '<button type="button" class="chip" id="lmodel" title="切换模型和推理强度"><span></span></button>',
       dropZone: el,
+      draftKey: `live:${peerId}`,
       onSend: async (text, images) => {
         if (/^\s*\/(exit|quit|restart|reload|update)(\s|$)/i.test(text)) throw new Error("结束、重启会话和更新 claude-pro 只能在终端里操作");
         const r = await post("send", { text, images });
