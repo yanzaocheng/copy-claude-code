@@ -866,7 +866,17 @@ class BrowserSession {
       const fn = isFn ? `function() { return (${script})(this); }` : `function() { return (${script}); }`;
       r = await this.untilDialog(tab, this.send(tab, 'Runtime.callFunctionOn', { objectId, functionDeclaration: fn, returnByValue: true, awaitPromise: true, userGesture: true }, { timeoutMs: browserLimits.evalMs }));
     } else {
-      r = await this.untilDialog(tab, this.send(tab, 'Runtime.evaluate', { expression: isFn ? `(${script})()` : script, returnByValue: true, awaitPromise: true, userGesture: true, replMode: !isFn }, { timeoutMs: browserLimits.evalMs }));
+      r = await this.untilDialog(tab, this.send(tab, 'Runtime.evaluate', { expression: isFn ? `(${script})()` : script, returnByValue: !!isFn, awaitPromise: true, userGesture: true, replMode: !isFn }, { timeoutMs: browserLimits.evalMs }));
+      // REPL mode waits for the statements, not for a promise they end with (fetch(…).then(…)): that one is
+      // awaited here, and an object result is read by value afterwards
+      const objectId = !isFn && !r?.exceptionDetails ? r?.result?.objectId : null;
+      if (objectId) {
+        const read = r.result.subtype === 'promise'
+          ? this.send(tab, 'Runtime.awaitPromise', { promiseObjectId: objectId, returnByValue: true }, { timeoutMs: browserLimits.evalMs })
+          : this.send(tab, 'Runtime.callFunctionOn', { objectId, functionDeclaration: 'function() { return this; }', returnByValue: true }, { timeoutMs: browserLimits.evalMs });
+        r = await this.untilDialog(tab, read);
+        this.send(tab, 'Runtime.releaseObject', { objectId }).catch(() => {});
+      }
     }
     if (!r) return `(no value yet: the script opened ${tab.dialog?.type === 'alert' ? 'an' : 'a'} ${tab.dialog?.type || ''} dialog, ${JSON.stringify(tab.dialog?.message ?? '')}; answer it with dialog)`;
     if (r.exceptionDetails) throw new BrowserError(`the script threw: ${exceptionText(r.exceptionDetails)}`);
