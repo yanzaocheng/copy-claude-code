@@ -80,12 +80,15 @@ export function findPeer(peers, ref) {
 export class PeerNode {
   // onMessage(msg): msg = {id, kind: 'task'|'reply', text, inReplyTo, from: {id, name, cwd}}
   // `id`: the id this session had before a restart, so that answers on their way still find it.
-  // getStatus(): {busy}, what GET /status answers (an update waits until no session of the machine is busy).
-  constructor({ cwd, name, id, onMessage, getStatus }) {
+  // getStatus(): {busy, ...}, what GET /status answers (an update waits until no session of the machine is busy; the
+  // web console lists the sessions with it). live: {feed: a LiveFeed (GET /events), command(type, body): the web
+  // console's commands (POST /command), as the gateway's page sends them}.
+  constructor({ cwd, name, id, onMessage, getStatus, live = null }) {
     this.cwd = cwd;
     this.wantedName = name || null;
     this.onMessage = onMessage;
     this.getStatus = getStatus;
+    this.live = live;
     this.id = /^[0-9a-f]{12}$/.test(id || '') ? id : crypto.randomBytes(6).toString('hex');
     this.token = crypto.randomBytes(16).toString('hex');
     this.name = null;
@@ -145,7 +148,29 @@ export class PeerNode {
       if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
       let status = {};
       try { status = this.getStatus?.() || {}; } catch { /* nothing to say */ }
-      return reply(200, { busy: Boolean(status.busy) });
+      return reply(200, { ...status, busy: Boolean(status.busy) });
+    }
+    if (req.method === 'GET' && req.url === '/events' && this.live?.feed) {
+      if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
+      this.live.feed.attach(res);
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/command' && this.live?.command) {
+      if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (d) => { body += d; if (body.length > 16 * MAX_BODY) req.destroy(); });
+      req.on('end', async () => {
+        let cmd;
+        try { cmd = JSON.parse(body); } catch { return reply(400, { ok: false, error: 'bad json' }); }
+        try {
+          const result = await this.live.command(String(cmd?.type || ''), cmd?.body && typeof cmd.body === 'object' ? cmd.body : {});
+          reply(200, { ...(result || {}), ok: true });
+        } catch (e) {
+          reply(200, { ok: false, error: e?.message || String(e) });
+        }
+      });
+      return;
     }
     if (req.method !== 'POST' || req.url !== '/message') return reply(404, { error: 'not found' });
     if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });

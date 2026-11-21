@@ -110,7 +110,10 @@ function shownUserText(text) {
 }
 
 // Transcript items for a conversation (agent.messages), as the page shows them when it connects.
-export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE_WIDTH } = {}) {
+// `limit`: the newest items kept (the web console's history view takes them all); `images`: an image is {k: 'image', n}
+// (the n-th image of the conversation) instead of the text [image].
+export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE_WIDTH, limit = SEED_ITEMS, images = false } = {}) {
+  let imageCount = 0;
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const items = [];
   const calls = new Map();
@@ -126,7 +129,7 @@ export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE
           const text = raw.startsWith('<system-reminder>') ? '' : shownUserText(raw);
           if (text) items.push({ k: 'user', text });
         } else if (b.type === 'image') {
-          items.push({ k: 'user', text: '[image]' });
+          items.push(images ? { k: 'image', n: imageCount++ } : { k: 'user', text: '[image]' });
         } else if (b.type === 'tool_result') {
           const call = calls.get(b.tool_use_id);
           if (!call) continue;
@@ -148,7 +151,7 @@ export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE
       }
     }
   }
-  return items.slice(-SEED_ITEMS);
+  return Number.isFinite(limit) ? items.slice(-limit) : items;
 }
 
 // The newest items that fit in a snapshot the gateway takes, as copies (the POST may be serialized later, when

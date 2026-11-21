@@ -184,6 +184,21 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 - 需要真正退出再启动的只有两种情况：改了 `bin/claude-pro.js` 或 `src/supervisor.js`（运行中的监督进程是旧代码）；以及新代码启动不起来而你想强行重启。`-p`、管道、`config` 子命令不经过监督进程；`CLAUDE_PRO_NO_SUPERVISOR=1` 也可以关掉它（环境变量，不是配置项）。
 - `claude-pro --self-check` 可以单独运行那个启动检查。
 
+## 本机 Web 控制台：claude-pro web
+
+在会话里输入 `/web`，或在终端运行 `claude-pro web`（`--no-open` 只启动不打开浏览器），会在浏览器里打开 `http://127.0.0.1:7878`（端口被占用时换一个随机端口）。它和终端用的是同一份配置和数据，改动对新会话生效。
+
+- **概览**：版本和更新、安装位置、默认模型、7bit.fun 余额、运行中的会话数、会话记录占用的空间。
+- **会话**：所有项目的对话记录，可以搜索（会话名、第一句话、id、目录）、按项目筛选、按时间/大小/花费排序。点开看完整对话（Markdown、工具调用、思考过程、图片），可以改名、导出 Markdown、删除（先进回收站，保留 7 天，可恢复），或「在终端中继续」（打开一个 Windows Terminal 新标签，在原目录里 `claude-pro --resume <id>`）。
+- **运行中**：这台电脑上开着的会话，实时查看对话和工具输出，发消息（和在终端输入框回车一样，`/命令`、`!命令` 都行）、回答它的问题、停止当前任务、看工具调用的完整输出。结束、重启和更新只能在终端里做。
+- **模型与供应商**：连接/断开 7bit.fun 和各家供应商（粘贴 Key → 列出模型 → 测试 → 保存，和 /connect 一样），添加自定义的 OpenAI/Anthropic 兼容接口，设置默认模型和推理强度。Key 只显示开头和结尾。
+- **设置**：所有普通和高级设置，中文说明、当前生效的值和它来自哪一层，可以写到用户、项目或项目本地的设置文件，或恢复默认。
+- **记忆与指令**：全局和各项目的 CLAUDE.md、自动记忆，查看、编辑、删除（删除的文件移到 `~/.claude-pro/trash/files`）。
+- **扩展**：技能、子 agent、自定义命令（查看、编辑、新建）、MCP 服务器（添加、修改、删除；环境变量和请求头的值不显示）、hooks。
+- **用量**：近 7/30/90 天按天、模型、项目统计的请求数、tokens 和按价格估算的花费（来自运行 Trace），以及花费最多的会话。
+
+服务是整台电脑共用的一个后台进程，没有页面打开 30 分钟后自动退出，下次 `/web` 再启动；claude-pro 更新（或源码改动）后会自动换成新版本。只监听 127.0.0.1，只接受以 127.0.0.1/localhost 访问的请求，修改类请求必须来自控制台自己的页面；第一次用 `/web` 打开时地址里带一个令牌，之后换成 cookie（令牌在 `~/.claude-pro/web.json`，只有你能读）。控制台不能打开 `gateway.json`、`providers.json` 这类存 Key 的文件，也不能打开会话记录以外的任意文件。
+
 ## 远程会话：在浏览器里查看和操作
 
 本地手动启动的交互式 claude-pro 会话登录网关后自动上线，但默认只用于会话之间互发任务；在会话里输入 `/rc`（或用 `claude-pro --rc` 启动）开启远程控制后，网页才能看到并操作它，`/rc off` 关闭。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页经网关查看并操作已经在运行的本地终端会话（不能新建会话）。
@@ -266,7 +281,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/rc` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/rc` `/web` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 
@@ -364,6 +379,8 @@ src/tools/*           各工具实现（含 Skill、NotebookEdit）
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
 src/remote.js         远程会话：发布、网页指令、对话事件模型和终端 peer messaging（applyEvent，网关页面里有同一份）
+src/live.js           本机 Web 控制台的实时查看：会话的对话事件流（经会话自己的 127.0.0.1 peer 服务）
+src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面
 src/commands.js       斜杠命令
 ```
 

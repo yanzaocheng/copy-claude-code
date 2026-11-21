@@ -35,6 +35,7 @@ import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } 
 import { fitImagesIn, imageSize } from '../utils/images.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
+import { LiveFeed } from '../live.js';
 import { RemoteControl, transcriptItems, onlineEnabled, remoteCommandsEnabled, REMOTE_WIDTH } from '../remote.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
@@ -279,6 +280,14 @@ export class App {
     this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
     this.remote = null; // the browser page that watches and steers this session (see remote.js), when it is on
     this.remoteControl = false; // /rc: the page shows the conversation (online without it: messages between sessions only)
+    // the local web console's live view of this session (claude-pro web, see live.js and web/server.js)
+    this.liveFeed = new LiveFeed({
+      seed: () => [
+        ...transcriptItems(this.agent?.messages || [], { tools: this.runtime?.tools || [], ctx: this.agent?.makeCtx(), cwd: this.cwd }),
+        ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
+      ],
+      status: () => this.liveStatus(),
+    });
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
@@ -298,8 +307,10 @@ export class App {
     // What the terminal prints goes to the remote page too, except what it is told about as events.
     this.screen.onLog = (items) => {
       const lines = () => items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/));
-      if (!this.remote || this.remoteMuted) return;
-      this.remote.output(lines());
+      if (this.remoteMuted || !(this.remote || this.liveFeed?.active)) return;
+      const all = lines();
+      this.remote?.output(all);
+      this.liveFeed?.output(all);
     };
     this.editor = new Editor({
       history: loadHistory(cwd),
@@ -484,6 +495,7 @@ export class App {
     this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
     this.peers?.close();
+    this.liveFeed?.close();
     clearInterval(this.remotePeersTimer);
     clearInterval(this.loginTimer);
     const remoteClosed = this.remote?.close({ restarting: restart });
@@ -515,7 +527,8 @@ export class App {
         name: this.flags.restart?.peerName,
         id: this.flags.restart?.peerId,
         onMessage: (msg) => this.onPeerMessage(msg),
-        getStatus: () => ({ busy: this.working() }),
+        getStatus: () => this.liveStatus(),
+        live: { feed: this.liveFeed, command: (type, body) => this.pageCommand(type, body) },
       }).start();
     } catch (e) {
       this.peers = null;
@@ -715,7 +728,7 @@ export class App {
   // A message of the user in the transcript (typed here, on the remote page, or sent by another session).
   echoUser(text, images = 0) {
     this.logLocal(renderUserMessage(text, this.width));
-    this.remote?.emit({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
+    this.emitEvent({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
   }
 
   // Whether this session should be online at the gateway (see remote.js): whenever this computer is logged in to
@@ -2161,7 +2174,7 @@ export class App {
     // Its cache still warm (a restart, a quick resume): it goes on being refreshed while idle (keepalive.js).
     this.agent.restoreCacheState(loaded.cacheState);
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
-    this.remote?.resync();
+    this.remote?.resync(); this.liveFeed.resync();
     if (quiet) return;
     const restoredCount = loaded.messages.length;
     const shown = loaded.messages.slice(-30);
@@ -2204,7 +2217,7 @@ export class App {
     this.customTitle = null;
     this.firstPrompt = null;
     this.cost = 0;
-    this.remote?.resync();
+    this.remote?.resync(); this.liveFeed.resync();
   }
 
   // ---------------------------------------------------------------- dialogs
@@ -2248,9 +2261,9 @@ export class App {
         if (ev.block.type === 'text') {
           this.flushThinking();
           this.md = new MarkdownStream({ width: w, firstPrefix: `${DOT} `, indent: '  ' });
-          this.remote?.emit({ t: 'start', kind: 'text' });
+          this.emitEvent({ t: 'start', kind: 'text' });
         } else if (ev.block.type === 'thinking') {
-          this.remote?.emit({ t: 'start', kind: 'thinking' });
+          this.emitEvent({ t: 'start', kind: 'thinking' });
           this.thinking = new MarkdownStream({ width: w, firstPrefix: c.dim('✻ '), indent: '  ', style: (s) => c.dim(c.italic(s)) });
         } else if (ev.block.type === 'tool_use') {
           this.flushThinking();
@@ -2262,13 +2275,13 @@ export class App {
         if (this.md) {
           const lines = this.md.write(ev.text);
           if (lines.length) this.logLocal({ soon: true }, lines);
-          this.remote?.emit({ t: 'delta', kind: 'text', text: ev.text });
+          this.emitEvent({ t: 'delta', kind: 'text', text: ev.text });
         }
         break;
       case 'thinking':
         this.turnTokens += estimateTokens(ev.text);
         if (this.thinking) {
-          this.remote?.emit({ t: 'delta', kind: 'thinking', text: ev.text });
+          this.emitEvent({ t: 'delta', kind: 'thinking', text: ev.text });
           const lines = this.thinking.write(ev.text);
           if (lines.length) this.logLocal({ soon: true }, lines);
         }
@@ -2285,7 +2298,7 @@ export class App {
           if (lines.length) this.logLocal(lines);
           this.logLocal('');
           this.md = null;
-          this.remote?.emit({ t: 'stop' });
+          this.emitEvent({ t: 'stop' });
         } else if (ev.block.type === 'thinking') {
           this.flushThinking();
         } else if (ev.block.type === 'tool_use') {
@@ -2300,7 +2313,7 @@ export class App {
         this.rateLimitEvent(ev);
         break;
       case 'reset':
-        if (this.md || this.thinking) this.remote?.emit({ t: 'stop' });
+        if (this.md || this.thinking) this.emitEvent({ t: 'stop' });
         this.md = null;
         this.thinking = null;
         this.pendingToolBlocks.clear();
@@ -2329,7 +2342,7 @@ export class App {
     const t = this.thinking;
     if (!t) return;
     this.thinking = null;
-    this.remote?.emit({ t: 'stop' });
+    this.emitEvent({ t: 'stop' });
     const lines = t.end();
     if (lines.length) this.logLocal(lines);
     if (t.emittedAny) this.logLocal('');
@@ -2341,7 +2354,7 @@ export class App {
       const lines = this.md.end();
       if (lines.length) this.logLocal(lines, '');
       this.md = null;
-      this.remote?.emit({ t: 'stop' });
+      this.emitEvent({ t: 'stop' });
     }
     this.pendingToolBlocks.clear();
   }
@@ -2354,13 +2367,13 @@ export class App {
     if (!this.isMain(agent)) return {};
     const entry = { tu, tool, input, status: 'running', progress: '', sub: [], subCount: 0, ctx: agent.makeCtx(), started: Date.now() };
     this.active.push(entry);
-    this.remote?.emit({ t: 'tool', id: tu.id, head: toolHeader(tool, input, entry.ctx, { width: REMOTE_WIDTH, dot: false }) });
+    this.emitEvent({ t: 'tool', id: tu.id, head: toolHeader(tool, input, entry.ctx, { width: REMOTE_WIDTH, dot: false }) });
     this.screen.schedule();
     return {
       progress: (p, meta) => {
         // `all`: the whole output so far (the progress is its end), for the page's "the whole output"
-        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; entry.progressAll = meta?.all; this.remote?.toolProgress(tu.id, entry); }
-        else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; this.remote?.emit({ t: 'sub', id: tu.id, head: p.header }); }
+        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; entry.progressAll = meta?.all; this.remote?.toolProgress(tu.id, entry); this.liveFeed.toolProgress(tu.id, entry); }
+        else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; this.emitEvent({ t: 'sub', id: tu.id, head: p.header }); }
         this.screen.schedule();
       },
       done: (result) => {
@@ -2376,20 +2389,48 @@ export class App {
     if (!this.isMain(agent)) return;
     const ctx = agent.makeCtx();
     const entry = { tu, tool, input: tu.input, status: 'rejected', rejected: true, rejectMessage: message, ctx };
-    if (this.remote) {
-      this.remote.emit({ t: 'tool', id: tu.id, head: toolHeader(tool, tu.input, ctx, { width: REMOTE_WIDTH, dot: false }) });
+    if (this.remote || this.liveFeed.active) {
+      this.emitEvent({ t: 'tool', id: tu.id, head: toolHeader(tool, tu.input, ctx, { width: REMOTE_WIDTH, dot: false }) });
       this.remoteToolDone(entry);
     }
     this.logLocal(toolHeader(tool, tu.input, ctx, { status: 'rejected', width: this.width }), renderToolResult(entry, { width: this.width, cwd: this.cwd }), '');
   }
 
+  // An event of the transcript, for the gateway's page and the local web console's live view (each takes its own copy).
+  emitEvent(ev) {
+    this.remote?.emit({ ...ev });
+    this.liveFeed.emit({ ...ev });
+  }
+
+  // What the local web console shows of this session: its list and the status under the live view.
+  liveStatus() {
+    let status = {};
+    try { status = this.remoteStatus(); } catch { /* the basics below */ }
+    return { ...status, busy: this.working(), turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, rc: Boolean(this.remoteControl) };
+  }
+
+  // A command of the local web console's live view: the same ones the gateway's page sends (see remote.js).
+  pageCommand(type, body = {}) {
+    const handlers = {
+      send: (b) => this.remoteSend(b.text, b.images),
+      interrupt: () => this.remoteInterrupt(),
+      dialog: (b) => this.answerDialog(b),
+      options: () => this.remoteOptions(),
+      suggest: (b) => this.remoteSuggest(b),
+      list: (b) => this.remoteList(b),
+      output: (b) => this.remoteOutput(b),
+    };
+    if (!Object.hasOwn(handlers, type)) throw new Error(`Unknown command: ${type}`);
+    return handlers[type](body);
+  }
+
   // A tool call finished (or was refused, or interrupted): its result on the remote page, once.
   remoteToolDone(entry) {
-    if (!this.remote || !entry.tu?.id || entry.remoteDone) return;
+    if (!(this.remote || this.liveFeed.active) || !entry.tu?.id || entry.remoteDone) return;
     entry.remoteDone = true;
     let lines = [];
     try { lines = renderToolResult(entry, { width: REMOTE_WIDTH, cwd: this.cwd }); } catch { /* shown without */ }
-    this.remote.emit({ t: 'done', id: entry.tu.id, status: entry.result?.isError || entry.rejected ? 'error' : 'done', lines });
+    this.emitEvent({ t: 'done', id: entry.tu.id, status: entry.result?.isError || entry.rejected ? 'error' : 'done', lines });
   }
 
   // Move finished tool entries (in call order) from the live region to the transcript.

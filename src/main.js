@@ -35,6 +35,7 @@ checkpointed per prompt, and /rewind in a session undoes them. The old flags
 are accepted and ignored, and so is --plan (there is no plan mode: ask for a plan in the message).
 
 Commands:
+  claude-pro web [--no-open]              Open the web console (settings, providers, every conversation, live sessions)
   claude-pro config list [--advanced]     Show ordinary settings (add --advanced for optional controls)
   claude-pro config set <KEY> <VALUE> [--project|--local]   Save a setting (default: ~/.claude-pro/settings.json)
   claude-pro config unset <KEY> [--project|--local]
@@ -165,6 +166,7 @@ const REMOVED_COMMANDS = new Set(['host', 'attach', 'connect']);
 export async function main(argv) {
   let cwd = process.cwd();
   if (argv[0] === 'config') return configCommand(argv.slice(1), cwd);
+  if (argv[0] === 'web') return (await import('./web/server.js')).webCommand(argv.slice(1));
   if (REMOVED_COMMANDS.has(argv[0])) {
     process.stderr.write(`claude-pro ${argv[0]} was removed (the computer service, attach and connect are no longer part of claude-pro). To send this as a prompt, quote it: claude-pro "${argv.join(' ')}"\n`);
     return 2;

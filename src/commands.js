@@ -892,6 +892,23 @@ export function buildCommands(app) {
   });
 
   add({
+    name: 'web',
+    description: 'Open the web console in your browser: settings, providers, memory, every conversation, the sessions running now',
+    async run() {
+      out(c.dim('Starting the web console…'));
+      try {
+        const { ensureWebServer, openBrowser } = await import('./web/server.js');
+        const { url, port } = await ensureWebServer();
+        const opened = openBrowser(url);
+        out(`${c.green('✔')} Web console: ${c.blue(`http://127.0.0.1:${port}`)}${opened ? c.dim(' (opened in your browser)') : ''}`);
+        if (!opened) out(c.dim(`Open this link to log in: ${url}`));
+      } catch (e) {
+        out(c.red(`Could not start the web console: ${e.message}`));
+      }
+    },
+  });
+
+  add({
     name: 'rc',
     aliases: ['remote-control'],
     argHint: '[off]',

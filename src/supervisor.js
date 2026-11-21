@@ -41,7 +41,7 @@ export function sessionEntry(entry, platform = process.platform) {
 // Whether this invocation is an interactive session that should run under the supervisor.
 export function shouldSupervise(argv, env = process.env, isTty = (fd) => tty.isatty(fd)) {
   if (env[ENV_SUPERVISED] || /^(1|true|yes)$/i.test(env.CLAUDE_PRO_NO_SUPERVISOR || '')) return false;
-  if (['config', 'host', 'attach', 'connect'].includes(argv[0])) return false; // a command, or a removed one (see main.js)
+  if (['config', 'web', 'host', 'attach', 'connect'].includes(argv[0])) return false; // a command, or a removed one (see main.js)
   if (!isTty(0) || !isTty(1)) return false;
   return !argv.some((a) => NOT_INTERACTIVE.has(a));
 }

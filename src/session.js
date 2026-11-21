@@ -312,5 +312,8 @@ const SESSION_INDEX = 'sessions-index.json';
 export function firstUserText(message) {
   const blocks = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content;
   const t = blocks.find((b) => b.type === 'text' && !b.text.startsWith('<system-reminder>') && !b.text.startsWith('['));
-  return t ? t.text.replace(/\s+/g, ' ').trim().slice(0, 100) : null;
+  if (!t) return null;
+  // a command of bash mode (!cmd): the command, as it was typed
+  const bash = /^<bash-input>([\s\S]*?)<\/bash-input>/.exec(t.text);
+  return (bash ? `! ${bash[1]}` : t.text).replace(/\s+/g, ' ').trim().slice(0, 100);
 }
