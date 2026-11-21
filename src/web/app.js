@@ -978,7 +978,7 @@
 
   function liveView(peerId) {
     const el = page(`<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill">连接中</span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill warn" hidden></span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-extra"><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
         <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
@@ -1173,9 +1173,10 @@
     }
     const conn = $("#lconn", el);
     const es = new EventSource(`/api/live/${peerId}/events`);
-    es.onopen = () => { conn.textContent = "实时"; conn.className = "pill ok"; };
+    // shown only when the page has lost the session (connected is the normal state, not worth a word)
+    es.onopen = () => { conn.hidden = true; };
     es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch { /* skip */ } };
-    es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "已断开" : "重新连接中…"; conn.className = "pill warn"; };
+    es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "连接已断开，请刷新页面" : "正在重新连接…"; conn.hidden = false; };
     const tick = setInterval(renderStatus, 250);
     cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); };
     c.input.focus();
