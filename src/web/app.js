@@ -1413,31 +1413,18 @@
     $("#body", el).innerHTML = `<div id="pbody">
       <div class="section-head"><div><h2>默认模型</h2><p>新会话用的模型和推理强度。会话里的 /model、/effort 只改那一个会话（并记住给下次用）</p></div></div>
       <div class="panel panel-pad" id="defaults"><div class="muted">正在读取可用模型…</div></div>
-      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型才出现在会话的模型菜单里（都不勾就显示全部）。列表只在点「刷新模型列表」时更新；点一行把它填进上面的默认模型</p></div><div class="actions head-actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button><button class="button small" id="addProvider" title="连接 DeepSeek、Kimi、OpenRouter 等供应商，或你自己的兼容接口">添加供应商</button></div></div>
-      <div id="modelLists"><div class="panel panel-pad muted">正在读取…</div></div>
-      <div class="section-head"><div><h2>7bit.fun 网关</h2><p>Claude、GPT 等模型，余额、远程控制、跨电脑和通讯录都通过它</p></div></div>
-      <div class="panel prov${p.gateway.connected ? " connected" : ""}" style="max-width:640px"><div class="prov-top"><strong>7bit.fun</strong>${p.gateway.connected ? '<span class="pill ok">已连接</span>' : ""}</div>
-        <div class="meta">${esc(p.gateway.url)}${p.gateway.connected ? ` · Key ${esc(p.gateway.key)}${p.gateway.account?.email ? ` · ${esc(p.gateway.account.email)}` : ""}` : ""}</div>
-        <form class="actions" id="gwForm"><input type="password" id="gwKey" placeholder="${p.gateway.connected ? "粘贴新 Key 来更换" : "粘贴 7bit.fun 的 API Key"}" style="flex:1;min-width:240px" autocomplete="off"><button class="button small" type="submit">${p.gateway.connected ? "更换" : "连接"}</button>${p.gateway.connected ? '<button class="button danger small" type="button" id="gwOut">断开</button>' : ""}<a class="button secondary small" href="${esc(p.gateway.keyPage)}" target="_blank" rel="noopener">获取 Key</a></form></div></div>`;
+      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型才出现在会话的模型菜单里（都不勾就显示全部）。列表只在点「刷新模型列表」时更新；点一行把它填进上面的默认模型</p></div><div class="actions head-actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button><button class="button small" id="addProvider" title="连接 7bit.fun、DeepSeek、Kimi、OpenRouter 等供应商，或你自己的兼容接口">添加供应商</button></div></div>
+      <div id="modelLists"><div class="panel panel-pad muted">正在读取…</div></div></div>`;
     loadDefaults(el, p);
     loadModelLists(el, p);
-    $("#gwForm", el).addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const apiKey = $("#gwKey", el).value.trim();
-      if (!apiKey) return toast("请先粘贴 Key", "error");
-      try { drawProviders(el, await api("/api/gateway", { method: "POST", body: { apiKey } })); toast("已连接 7bit.fun"); } catch (err) { fail(err); }
-    });
-    $("#gwOut", el)?.addEventListener("click", async () => {
-      if (!confirm("断开 7bit.fun？这台电脑的会话会下线，网关上的模型也不能用了。")) return;
-      try { drawProviders(el, await api("/api/gateway", { method: "DELETE" })); toast("已断开"); } catch (err) { fail(err); }
-    });
     // 添加供应商: a built-in one not connected yet, or one of the user's own
     $("#addProvider", el).addEventListener("click", (e) => {
       const free = p.presets.filter((x) => !x.connected);
+      const gateway = p.gateway.connected ? [] : [{ label: "7bit.fun", description: `${p.gateway.url} · Claude、GPT 等模型；远程访问、跨电脑互发任务也通过它`, value: "7bit" }];
       popMenu(e.currentTarget, [
-        { key: "preset", title: "选择供应商", items: free.map((x) => ({ label: x.name, description: x.baseUrl, value: x.id })) },
+        { key: "preset", title: "选择供应商", items: [...gateway, ...free.map((x) => ({ label: x.name, description: x.baseUrl, value: x.id }))] },
         { key: "custom", title: "", items: [{ label: "自定义供应商…", description: "任何兼容 Anthropic 或 OpenAI 的接口", value: "" }] },
-      ], (key, value) => connectDialog(el, key === "custom" ? null : free.find((x) => x.id === value)), { dropdown: true });
+      ], (key, value) => (value === "7bit" ? gatewayDialog(el, p) : connectDialog(el, key === "custom" ? null : free.find((x) => x.id === value))), { dropdown: true });
     });
     $("#refreshModels", el).addEventListener("click", async (e) => {
       const b = e.currentTarget;
@@ -1471,7 +1458,12 @@
     const head = (g) => {
       const x = providerOf(g.id);
       const when = `${g.models.length} 个模型${g.at ? ` · ${esc(ago(g.at))}更新` : ""}`;
-      if (!x) return `<div class="mg-head"><div class="meta">${when} · Key 和账户在下面的「7bit.fun 网关」里管理</div></div>`;
+      if (g.id === "7bit" && p?.gateway) {
+        // (the balance comes after: GET /api/gateway/account)
+        return `<div class="mg-head"><div class="meta">${esc(p.gateway.url)} · Key ${esc(p.gateway.key)}<span id="gwAccount">${p.gateway.account?.email ? ` · ${esc(p.gateway.account.email)}` : ""}</span> · 余额 <strong id="gwBalance">…</strong> · ${when}</div>
+          <div class="actions"><button class="button secondary small" data-gateway="change">更换 Key</button><button class="button danger small" data-gateway="remove">断开</button><a class="button secondary small" href="${esc(p.gateway.keyPage)}" target="_blank" rel="noopener">获取 Key</a></div></div>`;
+      }
+      if (!x) return `<div class="mg-head"><div class="meta">${when}</div></div>`;
       return `<div class="mg-head"><div class="meta">${esc(x.protocol === "openai" ? "OpenAI 协议" : "Anthropic 协议")} · ${esc(x.baseUrl)} · Key ${esc(x.key || "（无需）")} · ${when}</div>
         <div class="actions"><button class="button secondary small" data-connect="${esc(x.id)}">更换 Key / 模型</button><button class="button danger small" data-remove="${esc(x.id)}">断开</button>${x.keyPage ? `<a class="button secondary small" href="${esc(x.keyPage)}" target="_blank" rel="noopener">获取 Key</a>` : ""}</div></div>`;
     };
@@ -1500,6 +1492,15 @@
       savePicked();
       toast("已清除勾选：会话的模型菜单显示全部模型");
     });
+    if ($("#gwBalance", box)) {
+      api("/api/gateway/account").then((a) => {
+        const b = $("#gwBalance", box);
+        if (!b) return;
+        b.textContent = a.balance != null ? fmtUsd(a.balance) : "—";
+        if (a.error) b.title = `查询失败：${a.error}`;
+        if (a.email && !$("#gwAccount", box).textContent) $("#gwAccount", box).textContent = ` · ${a.email}`;
+      }).catch(() => { const b = $("#gwBalance", box); if (b) b.textContent = "—"; });
+    }
     const filter = $("#modelFilter", el);
     // searching: every tab says how many of its models match; the tab shown lists them
     const apply = () => {
@@ -1523,6 +1524,13 @@
     box.onclick = async (e) => {
       const tab = e.target.closest("[data-tab]");
       if (tab) return show(tab.dataset.tab);
+      const gw = e.target.closest("[data-gateway]");
+      if (gw?.dataset.gateway === "change") return gatewayDialog(el, p);
+      if (gw?.dataset.gateway === "remove") {
+        if (!confirm("断开 7bit.fun？保存的 Key 会删除：它的模型不能用了，这台电脑的会话也会下线（远程访问、跨电脑互发任务靠它）。")) return;
+        try { drawProviders(el, await api("/api/gateway", { method: "DELETE" })); toast("已断开 7bit.fun"); } catch (err) { fail(err); }
+        return;
+      }
       const c = e.target.closest("[data-connect]"), rm = e.target.closest("[data-remove]");
       if (c) return connectDialog(el, providerOf(c.dataset.connect));
       if (rm) {
@@ -1565,6 +1573,37 @@
         providers();
       } catch (e) { fail(e); }
     });
+  }
+
+  // Connect 7bit.fun, or change its key: the gateway checks the key (its account), and its model list comes with it.
+  function gatewayDialog(el, p) {
+    const again = p.gateway.connected;
+    const m = modal({
+      title: again ? "更换 7bit.fun 的 Key" : "连接 7bit.fun", sub: p.gateway.url,
+      body: `<label class="field">API Key<small>在网关网页「API 密钥」里创建；远程访问、跨电脑互发任务也用这个 Key</small><input type="password" id="gKey" autocomplete="off" placeholder="粘贴 7bit.fun 的 API Key"></label>
+        <a class="button secondary small" href="${esc(p.gateway.keyPage)}" target="_blank" rel="noopener">获取 Key</a>`,
+      foot: `<span class="modal-error"></span><button class="button secondary" data-close>取消</button><button class="button" id="gConnect">${again ? "更换" : "连接"}</button>`,
+    });
+    const input = $("#gKey", m.el);
+    input.focus();
+    const go = async () => {
+      const apiKey = input.value.trim();
+      const err = $(".modal-error", m.el);
+      if (!apiKey) { err.textContent = "请先粘贴 Key"; return; }
+      const b = $("#gConnect", m.el);
+      b.disabled = true;
+      b.textContent = "正在验证…";
+      err.textContent = "";
+      try {
+        const view = await api("/api/gateway", { method: "POST", body: { apiKey } });
+        m.close();
+        toast(again ? "已更换 7bit.fun 的 Key" : "已连接 7bit.fun");
+        modelTab = "7bit";
+        drawProviders(el, view);
+      } catch (ex) { err.textContent = ex.message; b.disabled = false; b.textContent = again ? "更换" : "连接"; }
+    };
+    $("#gConnect", m.el).addEventListener("click", go);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
   }
 
   // Connect a provider (a built-in one, or with x = null one of the user's own): key → models → test → saved.

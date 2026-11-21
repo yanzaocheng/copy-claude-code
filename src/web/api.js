@@ -757,7 +757,19 @@ export const routes = [
   ['POST', /^\/api\/gateway$/, async (req, m, body) => {
     const config = loadConfig({ cwd: home });
     try { await loginWithKey({ url: config.gatewayUrl, apiKey: body?.apiKey, signal: AbortSignal.timeout(15_000) }); } catch (e) { throw httpError(e.status === 401 || e.status === 403 ? 400 : 502, e.message); }
+    // its model list at once (as /connect keeps a provider's): its tab in 模型列表 is not empty
+    const login = gatewayLogin(config.gatewayUrl);
+    if (login) await fetchGatewayModels(login, { fresh: true, timeoutMs: 10_000 }).catch(() => {});
     return providersView();
+  }],
+  // the account behind the gateway key: its balance, for the 7bit.fun tab
+  ['GET', /^\/api\/gateway\/account$/, async () => {
+    const login = gatewayLogin(loadConfig({ cwd: home }).gatewayUrl);
+    if (!login) throw httpError(404, '没有连接 7bit.fun');
+    try {
+      const account = await fetchGatewayAccount(login, { signal: AbortSignal.timeout(6000) });
+      return { balance: account?.available_usd ?? account?.balance_usd ?? null, email: account?.email || login.account?.email || null, name: account?.name || null };
+    } catch (e) { return { balance: null, email: login.account?.email || null, error: e.message }; }
   }],
   ['DELETE', /^\/api\/gateway$/, () => { clearGatewayLogin(); return providersView(); }],
 
