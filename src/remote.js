@@ -386,6 +386,8 @@ export class RemoteControl {
       return;
     }
     if (cmd.type === 'snapshot') { this.needSnapshot = true; this.scheduleFlush(0); return; }
+    // 通讯录: someone asked this account to be a contact, or accepted its request
+    if (cmd.type === 'contact') { try { this.handlers.contactEvent?.(cmd); } catch { /* the App's problem */ } return; }
     if (!cmd.cid) return;
     if (cmd.type === 'peer') { this.peerMessage(cmd); return; }
     // A command of the page, answered with POST …/results {cid, ok: true, …fields} or {cid, ok: false, error} (the
@@ -428,21 +430,34 @@ export class RemoteControl {
       if (this.seenPeer.size > 500) this.seenPeer.delete(this.seenPeer.values().next().value);
       const f = cmd.from || {};
       const machine = f.machine || f.host || 'computer';
+      // a contact's session (another person's account): its 通讯号 and how this account takes its tasks
+      const account = typeof f.account === 'string' && f.account ? f.account : null;
       this.handlers.peerMessage?.({
         id: cmd.cid,
         kind: cmd.kind === 'reply' ? 'reply' : 'task',
         text: String(cmd.text ?? ''),
         inReplyTo: cmd.inReplyTo || null,
-        from: { id: f.id, name: `${machine}/${f.name || 'session'}`, cwd: f.cwd || '', machine, remote: true },
+        from: {
+          id: f.id, name: `${account ? `${account}:` : ''}${machine}/${f.name || 'session'}`, cwd: account ? '' : (f.cwd || ''), machine, remote: true,
+          ...(account ? { account, trust: f.trust === 'auto' ? 'auto' : 'confirm' } : {}),
+        },
       });
     } catch { /* the App's problem: the message is acknowledged anyway, or it would come back forever */ }
     ack();
   }
 
-  // The sessions of this gateway account, on every computer, as the gateway lists them (this one included).
+  // The sessions of this gateway account, on every computer, as the gateway lists them (this one included), and
+  // the online sessions of the account's contacts (each with `account`, the contact's 通讯号).
   async sessions() {
     const data = await this.request('GET', '/v1/remote/sessions');
-    return Array.isArray(data?.data) ? data.data : [];
+    return { own: Array.isArray(data?.data) ? data.data : [], contacts: Array.isArray(data?.contacts) ? data.contacts : [] };
+  }
+
+  // 通讯录 at the gateway: no action lists them ({handle, contacts: [{handle, status, trust, online}]}); handle,
+  // add, accept, reject, remove, block, trust act ({handle[, trust]}) and answer with the list as it is then.
+  async contacts(action = '', body = {}) {
+    if (!action) return await this.request('GET', '/v1/remote/contacts');
+    return await this.request('POST', `/v1/remote/contacts/${action}`, body, { retry: false });
   }
 
   // A message to another session of the account: resolves with {id} (the message's id, which a reply names).

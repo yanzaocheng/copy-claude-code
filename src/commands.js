@@ -876,15 +876,65 @@ export function buildCommands(app) {
     async run(args) {
       const [action, ...rest] = args.split(/\s+/).filter(Boolean);
       if (action === 'name' && rest.length) { out(`This session is now ${c.bold('@' + app.renameSession(rest.join('-')))}`); return; }
-      const { me, local, remote, online } = await app.listAllPeers();
+      const { me, local, remote, contacts = [], online } = await app.listAllPeers();
       out([
         `This session: ${c.bold('@' + me.name)} ${c.dim(displayPath(me.cwd, app.cwd))}${online ? c.dim(` · from other computers: @${me.label}`) : ''}`,
         ...local.map((p) => `${c.bold('@' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`),
         ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('@' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
-        ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
+        ...(contacts.length ? [c.dim('Of your contacts (other people, /contacts):'), ...contacts.map((p) => `${c.bold('@' + p.label)}${p.busy ? c.dim(' · busy') : ''}`)] : []),
+        ...(local.length || remote.length || contacts.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
           ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
           : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/connect 7bit.fun; /status says why it is not).'),
+      ]);
+    },
+  });
+
+  // 通讯录 at the gateway: other people's accounts whose claude-pro sessions and this account's may send each other
+  // tasks, once both sides agreed. Each account has a public 通讯号 (handle) that the others add it by.
+  const CONTACT_LABELS = { incoming: c.yellow('asks to be your contact'), outgoing: c.dim('waiting for them to accept'), accepted: c.green('contact'), blocked: c.red('blocked') };
+  add({
+    name: 'contacts',
+    argHint: '[add|accept|reject|remove|block|trust|handle] [通讯号] [auto|confirm]',
+    description: 'Your contacts at the gateway: other people whose claude-pro sessions and yours may send each other tasks once both agree',
+    async run(args) {
+      const [action = '', handle = '', extra = ''] = args.trim().split(/\s+/).filter(Boolean).map((s, i) => (i === 0 ? s.toLowerCase() : s));
+      const remote = await app.syncRemote();
+      if (!remote?.registered) { out(c.red(`Contacts live at the gateway, and this session is not online there: ${app.remoteState().text}`)); return; }
+      const actions = ['add', 'accept', 'reject', 'remove', 'block', 'trust', 'handle'];
+      if (action && !actions.includes(action)) { out(c.red(`Unknown action "${action}". /contacts ${actions.join('|')} 通讯号`)); return; }
+      if (action && !handle) { out(c.red(`/contacts ${action} needs a 通讯号${action === 'handle' ? ' (your new one)' : ''}.`)); return; }
+      const trust = extra.toLowerCase() || 'auto';
+      if (action === 'trust' && !['auto', 'confirm'].includes(trust)) { out(c.red('/contacts trust 通讯号 auto (their tasks run without asking) or confirm (each one is asked).')); return; }
+      let data;
+      try {
+        data = await remote.contacts(action, action === 'trust' ? { handle, trust } : action ? { handle } : undefined);
+      } catch (e) {
+        out(c.red(e.status === 404 && !action ? `The gateway ${remote.base} has no contacts yet (${e.message}).` : e.message));
+        return;
+      }
+      const done = {
+        add: `Asked ${handle}: once they accept, your sessions can send each other tasks.`,
+        accept: `${handle} is your contact now.`,
+        reject: `Declined ${handle}.`,
+        remove: `${handle} is no longer in your contacts.`,
+        block: `Blocked ${handle}: they cannot ask you nor send your sessions tasks.`,
+        trust: trust === 'auto' ? `Tasks from ${handle} run without asking now.` : `Each task from ${handle} is asked about now.`,
+        handle: `Your 通讯号 is ${data.handle} now.`,
+      }[action];
+      const added = action === 'add' && data.contacts?.find((x) => x.handle === handle.toLowerCase().replace(/^@/, ''))?.status === 'accepted';
+      if (done) out(c.green('✔ ') + (added ? `${handle} had asked you already: you are contacts now.` : done));
+      if (action === 'accept' || action === 'remove' || action === 'block' || added) app.refreshRemotePeers();
+      if (action && action !== 'handle') return;
+      const rows = Array.isArray(data.contacts) ? data.contacts : [];
+      out([
+        `Your 通讯号: ${c.bold(data.handle)} ${c.dim('(the name others add you by; /contacts handle NEW changes it)')}`,
+        ...rows.map((x) => {
+          const online = x.status === 'accepted' ? c.dim(` · ${x.online ? `${x.online} session${x.online === 1 ? '' : 's'} online` : 'no session online'} · tasks: ${x.trust === 'auto' ? 'run without asking' : 'asked about each time'}`) : '';
+          return `  ${c.bold(x.handle)} ${CONTACT_LABELS[x.status] || x.status}${online}`;
+        }),
+        ...(rows.length ? [] : [c.dim('  No contacts yet.')]),
+        c.dim('/contacts add 通讯号 asks someone; accept / reject / remove / block 通讯号; trust 通讯号 auto|confirm. A contact sees only the name, computer and state of your online sessions; their tasks are asked about here before they run, unless you set trust to auto. In /peers their sessions show as @通讯号:computer/name.'),
       ]);
     },
   });

@@ -564,20 +564,30 @@ export class App {
   }
 
   // The account's sessions on other computers that are online now, from the gateway (what was known stays when
-  // it cannot be asked). Sessions of this computer are left out: they are reached directly.
+  // it cannot be asked), and those of its contacts (other people, /contacts). Sessions of this computer are left
+  // out: they are reached directly.
   refreshRemotePeers() {
     if (!this.remote?.registered) return Promise.resolve(this.remotePeers);
     this.remotePeersLoading ??= (async () => {
       try {
         const near = new Set([this.peers?.id, ...(this.peers?.peers() || []).map((p) => p.id)].filter(Boolean));
-        const list = await this.remote.sessions();
-        this.remotePeers = list
-          .filter((p) => p.online && !p.ended && p.id !== this.remote?.id && !near.has(p.peerId))
-          .map((p) => {
-            const machine = p.machine || p.host || 'computer';
-            const name = p.name || 'session';
-            return { id: p.id, name, machine, cwd: p.cwd || '', remote: true, label: `${machine}/${name}`, busy: Boolean(p.busy), title: p.title || '' };
-          });
+        const { own, contacts } = await this.remote.sessions();
+        this.remotePeers = [
+          ...own
+            .filter((p) => p.online && !p.ended && p.id !== this.remote?.id && !near.has(p.peerId))
+            .map((p) => {
+              const machine = p.machine || p.host || 'computer';
+              const name = p.name || 'session';
+              return { id: p.id, name, machine, cwd: p.cwd || '', remote: true, label: `${machine}/${name}`, busy: Boolean(p.busy), title: p.title || '' };
+            }),
+          ...contacts
+            .filter((p) => p.online && p.account)
+            .map((p) => {
+              const machine = p.machine || 'computer';
+              const name = p.name || 'session';
+              return { id: p.id, name, machine, cwd: '', remote: true, contact: true, account: p.account, label: `${p.account}:${machine}/${name}`, busy: Boolean(p.busy), title: '' };
+            }),
+        ];
         this.remotePeersAt = Date.now();
       } catch { /* the gateway cannot be asked now */ } finally {
         this.remotePeersLoading = null;
@@ -594,19 +604,64 @@ export class App {
     return {
       me: { name, cwd: this.agent?.cwd || this.cwd, label: `${machineName(this.config.env)}/${name}` },
       local: this.peers?.peers() || [],
-      remote: this.remotePeers,
+      remote: this.remotePeers.filter((p) => !p.contact),
+      contacts: this.remotePeers.filter((p) => p.contact),
       online: Boolean(this.remote?.online),
     };
   }
 
+  // 通讯录 events from the gateway: another account asked this one to be a contact, or accepted its request.
+  onContactEvent(ev) {
+    const handle = String(ev.handle || '').replace(/[^\w-]/g, '');
+    if (!handle || this.exiting) return;
+    if (ev.event === 'request') {
+      this.screen.log(`${c.blue('✉')} ${c.bold(handle)} asks to be your contact: their claude-pro sessions and yours could then send each other tasks.`,
+        c.dim(`  /contacts accept ${handle} · /contacts reject ${handle} · /contacts block ${handle} (or 通讯录 on the gateway's web page)`), '');
+    } else if (ev.event === 'accepted') {
+      this.screen.log(`${c.blue('✉')} ${c.bold(handle)} accepted you as a contact: their online sessions show in /peers as @${handle}:computer/name.`, '');
+      this.refreshRemotePeers();
+    }
+  }
+
+  // A task from a contact's session (another person) runs only once the user allows it here, unless the user set
+  // that contact's tasks to run by themselves (trust "auto", /contacts trust). Resolves with whether it runs.
+  async allowContactTask(msg) {
+    if (msg.from.trust === 'auto') return true;
+    const preview = msg.text.length > 1200 ? `${msg.text.slice(0, 1200)}…` : msg.text;
+    const choice = await this.showDialog(new SelectDialog({
+      title: `Task from the contact ${msg.from.account}`,
+      body: [c.dim(`From their session @${msg.from.name}, another person's agent, not you:`), ...preview.split('\n').flatMap((line) => wordWrap(line, Math.max(20, this.width - 8))).slice(0, 20)],
+      question: 'Let this session work on it? Its final answer is sent back to them.',
+      color: c.yellow,
+      options: [
+        { label: 'Run it', value: 'run', description: 'This task only' },
+        { label: 'Decline', value: 'decline', description: 'They are told that you declined it' },
+        { label: `Always run tasks from ${msg.from.account}`, value: 'always', description: 'Their later tasks run without asking (/contacts trust to change it)' },
+      ],
+    }));
+    if (choice === 'always') {
+      this.remote?.contacts('trust', { handle: msg.from.account, trust: 'auto' }).catch((e) => this.notice(`Could not save that at the gateway: ${e.message}`, 'warn'));
+    }
+    return choice === 'run' || choice === 'always';
+  }
+
   onPeerMessage(msg) {
     if (this.exiting) return;
+    if (msg.kind === 'task' && msg.from.account && !msg.confirmed && msg.from.trust !== 'auto') {
+      this.allowContactTask(msg).then((ok) => {
+        if (ok) { this.onPeerMessage({ ...msg, confirmed: true }); return; }
+        this.screen.log(c.dim(`  ✉ Declined the task from @${msg.from.name}`), '');
+        this.replyToPeer(msg, `The user of ${this.peerLabel()} declined this task.`);
+      }, (e) => this.logError(e));
+      return;
+    }
     const from = c.bold(`@${msg.from.name}`);
     const width = this.width - 1;
     if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
       // the answer to something the user sent: shown, and noted for the model, without a turn of its own
       this.screen.log(`${c.blue('✉')} ${from} ${c.dim('answered:')}`, ...renderMarkdown(msg.text, { width: width - 2 }).map((l) => '  ' + l), '');
-      this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} (${msg.from.cwd}), which answered:\n${msg.text}`);
+      const whose = msg.from.account ? `of the contact "${msg.from.account}" (another person)` : `(${msg.from.cwd})`;
+      this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} ${whose}, which answered:\n${msg.text}`);
       return;
     }
     const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${msg.text}`;
@@ -739,6 +794,7 @@ export class App {
         status: () => this.remoteStatus(),
         ...commands,
         peerMessage: (msg) => this.onPeerMessage(msg),
+        contactEvent: (ev) => this.onContactEvent(ev),
         changed: () => {
           this.screen.schedule();
           if (remote.online && Date.now() - this.remotePeersAt > 10_000) this.refreshRemotePeers();
@@ -1883,7 +1939,8 @@ export class App {
 
   // What `@name` in a message the user wrote stands for, told to the model: which session, and how to reach it.
   async peerMentions(prompt) {
-    const refs = [...new Set([...String(prompt).matchAll(/(?:^|\s)@([^\s@"&，。;；:：!！?？、)）]+)/gu)].map((m) => m[1]))];
+    // (a colon inside is a contact's session, yzc:computer/name; one at the end is punctuation)
+    const refs = [...new Set([...String(prompt).matchAll(/(?:^|\s)@([^\s@"&，。;；：!！?？、)）]+)/gu)].map((m) => m[1].replace(/:+$/, '')).filter(Boolean))];
     if (!refs.length) return [];
     const local = this.peers?.peers() || [];
     const notes = [];
@@ -1891,7 +1948,8 @@ export class App {
       let found = resolvePeer(local, this.remotePeers, ref, { ids: false });
       if (!found.peer && !found.ambiguous && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), ref, { ids: false });
       const p = found.peer;
-      if (p) notes.push(`@${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
+      if (p?.contact) notes.push(`@${ref} is the claude-pro session "${p.label}" of the contact "${p.account}", another person (not the user)`);
+      else if (p) notes.push(`@${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
       else if (found.ambiguous) notes.push(found.error);
     }
     if (!notes.length) return [];
