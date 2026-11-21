@@ -38,6 +38,7 @@ export function applyEvent(state, ev) {
   const push = (item) => { items.push(item); return item; };
   switch (ev.t) {
     case 'user': return push({ k: 'user', text: ev.text });
+    case 'image': return push({ k: 'image', n: ev.n }); // (the local web console's: the gateway's page is not sent these)
     case 'output': {
       const last = items[items.length - 1];
       if (last && last.k === 'output') { last.lines.push(...ev.lines); return last; }

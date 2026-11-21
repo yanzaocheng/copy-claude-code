@@ -184,6 +184,7 @@
     const push = (item) => { items.push(item); return item; };
     switch (ev.t) {
       case "user": return push({ k: "user", text: ev.text });
+      case "image": return push({ k: "image", n: ev.n });
       case "output": {
         const last = items[items.length - 1];
         if (last && last.k === "output") { last.lines.push(...(ev.lines || [])); return last; }
@@ -245,8 +246,10 @@
         : ansiLines(trimBlank(item.lines));
       const whole = opts.full?.get(item.id);
       if (whole != null && !running) body = esc(whole);
-      const more = opts.canExpand && item.id && !running ? `<button type="button" class="more" data-expand="${esc(item.id)}">${whole != null ? "收起" : "完整输出"}</button>` : "";
-      return `<div class="it it-tool ${running ? "running" : item.status === "error" ? "error" : "done"}"><div class="head"><span class="dot"></span><span>${ansi(item.head || "")}</span>${more}</div>${body ? `<pre>${body}</pre>` : ""}</div>`;
+      // a shortened output ("… +N lines") is fetched whole when it comes into view (see wholeOutputs), except for
+      // the edits, whose diff says more than their result
+      const cut = !running && whole == null && item.id && truncated(item);
+      return `<div class="it it-tool ${running ? "running" : item.status === "error" ? "error" : "done"}"${cut ? ` data-cut="${esc(item.id)}"` : ""}><div class="head"><span class="dot"></span><span>${ansi(item.head || "")}</span></div>${body ? `<pre>${body}</pre>` : ""}</div>`;
     }
     return "";
   }
@@ -287,6 +290,34 @@
       reader.readAsDataURL(blob);
     });
     return { media_type: IMAGE_TYPES.includes(blob.type) ? blob.type : file.type, data, size: blob.size, url: URL.createObjectURL(blob) };
+  }
+
+  // ---------------------------------------------------------------- whole tool outputs
+
+  const EDIT_TOOL = /^(Edit|MultiEdit|Write|NotebookEdit)\b/;
+  function truncated(item) {
+    if (EDIT_TOOL.test(plain(item.head || ""))) return false;
+    return (item.lines || []).some((l) => /… \+\d+ lines/.test(plain(l)));
+  }
+
+  // Watches the tool calls in `root` whose output was shortened; when one comes near the view its whole output is
+  // fetched (fetch(id) → text) and handed to onWhole(id, text). Returns {observe(), disconnect()}.
+  function wholeOutputs(root, fetch, onWhole) {
+    const asked = new Set();
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const id = e.target.dataset.cut;
+        io.unobserve(e.target);
+        if (!id || asked.has(id)) continue;
+        asked.add(id);
+        fetch(id).then((text) => { if (typeof text === "string") onWhole(id, text); }).catch(() => { /* the short one stays */ });
+      }
+    }, { root: root.closest(".chat-scroll") || null, rootMargin: "600px 0px" });
+    return {
+      observe() { for (const n of root.querySelectorAll("[data-cut]")) if (!asked.has(n.dataset.cut)) io.observe(n); },
+      disconnect() { io.disconnect(); },
+    };
   }
 
   // ---------------------------------------------------------------- modal and file editor
@@ -464,8 +495,14 @@
     const image = (n) => `${base}/image/${n}`;
     // drawn in pieces: a long conversation has thousands of items
     let i = 0;
+    const wholes = wholeOutputs(log, async (tool) => (await api(`${base}/output/${encodeURIComponent(tool)}`)).text, (tool, text) => {
+      const pre = log.querySelector(`[data-cut="${CSS.escape(tool)}"] pre`);
+      if (pre) pre.innerHTML = esc(text);
+    });
+    cleanup = () => wholes.disconnect();
     const step = () => {
       log.insertAdjacentHTML("beforeend", d.items.slice(i, i + 200).map((it) => itemHtml(it, { image })).join(""));
+      wholes.observe();
       i += 200;
       if (i < d.items.length) requestAnimationFrame(step);
       else if (!d.items.length) log.innerHTML = '<div class="chat-empty">没有内容</div>';
@@ -852,7 +889,7 @@
 
     function render(item) {
       let node = elements.get(item);
-      const html = itemHtml(item, { full, canExpand: true });
+      const html = itemHtml(item, { full, canExpand: true, image: (n) => `/api/live/${peerId}/image/${n}` });
       if (!node) {
         if (!html) return;
         node = document.createElement("div");
@@ -863,11 +900,13 @@
       const open = node.querySelector("details")?.open;
       node.innerHTML = html;
       if (open) { const det = node.querySelector("details"); if (det) det.open = true; }
+      if (item.k === "tool" && item.status !== "running") wholes?.observe();
     }
     function renderAll() {
       log.innerHTML = "";
       elements.clear();
       for (const it of state.items) render(it);
+      wholes?.observe();
       if (!state.items.length) log.innerHTML = '<div class="chat-empty">还没有消息：在下面输入，或在它的终端里输入</div>';
       scroller.scrollTop = scroller.scrollHeight;
     }
@@ -936,12 +975,8 @@
       if (!body) return;
       try { await post("dialog", { id: dialogShown, ...body }); } catch (err) { fail(err); dialogShown = null; renderDialog(status.dialog); }
     });
-    log.addEventListener("click", async (e) => {
-      const b = e.target.closest("[data-expand]");
-      if (!b) return;
-      const id = b.dataset.expand;
-      if (full.has(id)) full.delete(id);
-      else { try { full.set(id, (await post("output", { id })).text); } catch (err) { return fail(err); } }
+    const wholes = wholeOutputs(log, async (id) => (await post("output", { id })).text, (id, text) => {
+      full.set(id, text);
       const item = state.items.find((it) => it.id === id);
       if (item) render(item);
     });
@@ -962,7 +997,7 @@
     es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch { /* skip */ } };
     es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "已断开" : "重新连接中…"; conn.className = "pill warn"; };
     const tick = setInterval(renderStatus, 250);
-    cleanup = () => { es.close(); clearInterval(tick); c.dispose(); };
+    cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); };
     c.input.focus();
   }
 

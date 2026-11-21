@@ -179,6 +179,27 @@ export function sessionImage(dir, id, n) {
   return null;
 }
 
+// The whole output of a tool call of a conversation (as the session's own remoteOutput gives it): the result's text,
+// or the file a large one was saved to; at most 1 MB.
+export function sessionToolOutput(dir, id, toolId) {
+  const loaded = SessionStore.load(sessionFile(dir, id));
+  let result = null;
+  for (const m of loaded.messages) {
+    if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+    for (const b of m.content) if (b.type === 'tool_result' && b.tool_use_id === toolId) result = b;
+  }
+  if (!result) throw httpError(404, 'no such tool call');
+  let text = typeof result.content === 'string' ? result.content
+    : (Array.isArray(result.content) ? result.content : []).map((b) => (b.type === 'text' ? b.text : b.type === 'image' ? '[image]' : '')).join('\n');
+  const saved = /(?:saved to:?|saved at)\s+(\S+?\.txt)\b/.exec(text)?.[1];
+  if (saved && path.resolve(saved).startsWith(projectsRoot() + path.sep) && path.resolve(saved).includes(`${path.sep}tool-results${path.sep}`)) {
+    try { text = fs.readFileSync(saved, 'utf8'); } catch { /* the reference is what there is */ }
+  }
+  const MAX = 1024 * 1024;
+  const buf = Buffer.from(text, 'utf8');
+  return buf.length > MAX ? { text: buf.subarray(0, MAX).toString('utf8').replace(/\ufffd$/, ''), truncated: true } : { text };
+}
+
 // A conversation as Markdown: what was said, the tool calls as one line each (their results left out).
 export function sessionMarkdown(dir, id) {
   const d = sessionDetail(dir, id);

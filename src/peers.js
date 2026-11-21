@@ -155,6 +155,16 @@ export class PeerNode {
       this.live.feed.attach(res);
       return;
     }
+    const image = /^\/image\/(\d+)$/.exec(req.url || '');
+    if (req.method === 'GET' && image && this.live?.image) {
+      if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
+      let img = null;
+      try { img = this.live.image(Number(image[1])); } catch { /* none */ }
+      if (!img) return reply(404, { error: 'no such image' });
+      res.writeHead(200, { 'content-type': img.mediaType, 'cache-control': 'private, max-age=3600' });
+      res.end(img.data);
+      return;
+    }
     if (req.method === 'POST' && req.url === '/command' && this.live?.command) {
       if (req.headers.authorization !== `Bearer ${this.token}`) return reply(401, { error: 'bad token' });
       let body = '';

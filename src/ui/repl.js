@@ -283,7 +283,7 @@ export class App {
     // the local web console's live view of this session (claude-pro web, see live.js and web/server.js)
     this.liveFeed = new LiveFeed({
       seed: () => [
-        ...transcriptItems(this.agent?.messages || [], { tools: this.runtime?.tools || [], ctx: this.agent?.makeCtx(), cwd: this.cwd }),
+        ...transcriptItems(this.agent?.messages || [], { tools: this.runtime?.tools || [], ctx: this.agent?.makeCtx(), cwd: this.cwd, images: true }),
         ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
       ],
       status: () => this.liveStatus(),
@@ -528,7 +528,7 @@ export class App {
         id: this.flags.restart?.peerId,
         onMessage: (msg) => this.onPeerMessage(msg),
         getStatus: () => this.liveStatus(),
-        live: { feed: this.liveFeed, command: (type, body) => this.pageCommand(type, body) },
+        live: { feed: this.liveFeed, command: (type, body) => this.pageCommand(type, body), image: (n) => this.liveImage(n) },
       }).start();
     } catch (e) {
       this.peers = null;
@@ -728,7 +728,29 @@ export class App {
   // A message of the user in the transcript (typed here, on the remote page, or sent by another session).
   echoUser(text, images = 0) {
     this.logLocal(renderUserMessage(text, this.width));
-    this.emitEvent({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
+    this.remote?.emit({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
+    // the web console shows the images themselves: they become the next ones of the conversation (see liveImage)
+    this.liveFeed.emit({ t: 'user', text: String(text) });
+    if (images && this.liveFeed.active) {
+      const before = this.conversationImages().length;
+      for (let i = 0; i < images; i++) this.liveFeed.emit({ t: 'image', n: before + i });
+    }
+  }
+
+  // The images of the user's messages, in order (what transcriptItems numbers {k: 'image', n}).
+  conversationImages() {
+    const out = [];
+    for (const m of this.agent?.messages || []) {
+      if (m.role !== 'user' || !Array.isArray(m.content)) continue;
+      for (const b of m.content) if (b.type === 'image') out.push(b);
+    }
+    return out;
+  }
+
+  // The n-th image of the conversation, for the web console: {mediaType, data (Buffer)} or null.
+  liveImage(n) {
+    const b = this.conversationImages()[n];
+    return b?.source?.type === 'base64' ? { mediaType: b.source.media_type, data: Buffer.from(b.source.data, 'base64') } : null;
   }
 
   // Whether this session should be online at the gateway (see remote.js): whenever this computer is logged in to

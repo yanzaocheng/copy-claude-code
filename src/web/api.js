@@ -18,7 +18,7 @@ import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fet
 import { checkForUpdate } from '../updater.js';
 import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
 import {
-  listAllSessions, sessionDetail, sessionImage, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
+  listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
   purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError,
 } from './data.js';
 
@@ -417,6 +417,7 @@ export const routes = [
     if (!image) throw httpError(404, 'no such image');
     return { raw: { type: image.mediaType, data: image.data } };
   }],
+  ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/output\/([\w-]+)$/, (req, [dir, id, tool]) => sessionToolOutput(dir, id, tool)],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/export$/, (req, [dir, id]) => ({ raw: { type: 'text/markdown; charset=utf-8', data: sessionMarkdown(dir, id), name: `claude-pro-${id.slice(0, 8)}.md` } })],
   ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/rename$/, async (req, [dir, id], body) => {
     if ((await running()).has(id)) throw httpError(409, '会话正在运行：请在它的终端里用 /rename，或在「运行中」里给它发 /rename');

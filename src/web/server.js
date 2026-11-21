@@ -121,6 +121,18 @@ async function serve() {
       }
       if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid });
 
+      // an image of a running session's conversation, from its peer server
+      const liveImage = /^\/api\/live\/([0-9a-f]{12})\/image\/(\d+)$/.exec(url.pathname);
+      if (liveImage && req.method === 'GET') {
+        const peer = data.findPeerById(liveImage[1]);
+        const upstream = http.get({ host: '127.0.0.1', port: peer.port, path: `/image/${liveImage[2]}`, headers: { authorization: `Bearer ${peer.token}` } }, (up) => {
+          if (up.statusCode !== 200) { up.resume(); return send(res, 404, { error: 'no such image' }); }
+          res.writeHead(200, { 'content-type': up.headers['content-type'] || 'application/octet-stream', 'cache-control': 'private, max-age=3600' });
+          up.pipe(res);
+        });
+        upstream.on('error', () => { if (!res.headersSent) send(res, 502, { error: '连不上这个会话' }); else res.end(); });
+        return;
+      }
       // a running session's live view: its peer server's event stream, passed through
       const live = /^\/api\/live\/([0-9a-f]{12})\/events$/.exec(url.pathname);
       if (live && req.method === 'GET') {
