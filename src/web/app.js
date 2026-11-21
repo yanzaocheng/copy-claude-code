@@ -418,6 +418,8 @@
     const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
     const page = parts[0] || "new";
     $$("#nav a, .side-new").forEach((a) => a.classList.toggle("active", a.dataset.nav === page));
+    $("#sideMe").classList.toggle("active", $$("#nav a").some((a) => a.dataset.nav === page)); // a page of its menu
+    showUserMenu(false);
     markActive();
     $("#tip")?.classList.add("hidden");
     $(".pop")?.remove();
@@ -1522,6 +1524,15 @@
   });
   window.addEventListener("hashchange", route);
   wireSidebar();
+  // the account's menu: settings and the other pages
+  function showUserMenu(open) {
+    $("#userMenu").classList.toggle("hidden", !open);
+    $("#sideMe").classList.toggle("open", open);
+    $("#sideMe").setAttribute("aria-expanded", String(open));
+  }
+  $("#sideMe").addEventListener("click", () => showUserMenu($("#userMenu").classList.contains("hidden")));
+  document.addEventListener("mousedown", (e) => { if (!e.target.closest("#userMenu, #sideMe")) showUserMenu(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") showUserMenu(false); });
   $("#menuBtn").addEventListener("click", () => $(".app").classList.toggle("nav-open"));
   $("#sideBackdrop").addEventListener("click", () => $(".app").classList.remove("nav-open"));
   $("#logoutBtn").addEventListener("click", async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.reload(); });
