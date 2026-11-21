@@ -682,18 +682,21 @@
       return { href: peer ? `#/live/${peer.peerId}` : `#/session/${s.dir}/${s.id}`, title: peer?.status?.title || s.title, cwd: s.cwd || s.dir, mtime: s.mtime, peer, alt: peer ? `#/session/${s.dir}/${s.id}` : null };
     });
     // running sessions with nothing written yet (just started)
-    for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: Date.now(), peer: l });
+    for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: l.startedAt || 0, peer: l });
     const q = ws.q.toLowerCase();
     const groups = new Map();
     for (const it of items) {
       if (q && !`${it.title} ${it.cwd}`.toLowerCase().includes(q)) continue;
       const key = projectKey(it.cwd);
-      if (!groups.has(key)) groups.set(key, { key, cwd: it.cwd, items: [], last: 0 });
+      if (!groups.has(key)) groups.set(key, { key, cwd: it.cwd, items: [], last: 0, live: false });
       const g = groups.get(key);
       g.items.push(it);
-      g.last = Math.max(g.last, it.peer ? Date.now() : it.mtime);
+      // the projects with a session running first, then by when they last had a message (a running session counted as
+      // "now" made two such projects swap places at every redraw: both were "now", a few ms apart)
+      g.last = Math.max(g.last, it.mtime || 0);
+      if (it.peer) g.live = true;
     }
-    const list = [...groups.values()].sort((a, b) => b.last - a.last);
+    const list = [...groups.values()].sort((a, b) => b.live - a.live || b.last - a.last || a.key.localeCompare(b.key));
     const here = location.hash;
     ws.tips.clear();
     let n = 0;
