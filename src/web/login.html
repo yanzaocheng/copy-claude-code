@@ -2,13 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="robots" content="noindex">
   <title>登录 · claude-pro 控制台</title>
   <style>
     :root { color-scheme: light dark; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif; background: #f6f7f9; color: #111827; }
-    main { width: min(380px, calc(100% - 32px)); background: #fff; border: 1px solid #e3e6eb; border-radius: 16px; padding: 28px 24px 24px; box-shadow: 0 10px 34px rgba(0, 0, 0, .07); }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 16px; padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif; background: #f6f7f9; color: #111827; }
+    main { width: min(430px, 100%); background: #fff; border: 1px solid #e3e6eb; border-radius: 16px; padding: 28px 24px 24px; box-shadow: 0 10px 34px rgba(0, 0, 0, .07); overflow-wrap: anywhere; }
     .logo { width: 40px; height: 40px; border-radius: 11px; background: #d97757; color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 20px; margin-bottom: 14px; }
     h1 { font-size: 20px; margin: 0 0 4px; }
     p { margin: 0 0 18px; color: #6b7280; font-size: 13.5px; }
@@ -18,6 +19,10 @@
     button { width: 100%; padding: 11px; border: 0; border-radius: 10px; background: #d97757; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
     button:disabled { opacity: .6; }
     .error { min-height: 20px; margin-top: 10px; color: #dc2626; font-size: 13.5px; }
+    @media (max-width: 860px) {
+      input[type=password] { font-size: 16px; }
+      label.remember { min-height: 44px; margin: 4px 0 8px; }
+    }
     @media (prefers-color-scheme: dark) {
       body { background: #0f1115; color: #e5e7eb; }
       main { background: #171a21; border-color: #2a2f3a; }

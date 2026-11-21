@@ -57,6 +57,7 @@ export class SessionHost {
     this.failed = null; // the key of the change whose new code did not start (said once)
     this.restarting = false;
     this.checking = false;
+    this.updating = false;
     this.recovering = false;
     this.launching = 0; // sessions starting (a /cd starts one again under the same id)
     this.startedAt = Date.now();
@@ -72,24 +73,37 @@ export class SessionHost {
 
   get size() { return this.apps.size; }
 
+  beginUpdate() {
+    if (this.updating || this.restarting || this.checking || this.recovering || this.launching || [...this.apps].some((app) => !this.ready(app))) return false;
+    this.updating = true;
+    return true;
+  }
+
+  endUpdate(restart) {
+    this.updating = false;
+    if (restart) this.requestHandover();
+    else this.check();
+  }
+
   log(e, what = '') {
     try { fs.appendFileSync(errorLog(), `${new Date().toISOString()} ${what}${what ? ': ' : ''}${e?.stack || e}\n`); } catch { /* nowhere to say it */ }
   }
 
   // A session: new in `cwd`, a saved one (`resumeFile`, `resumeId`), or one taken up again (`restart`: the state it
   // left). Resolves with its App once the console's page can reach it.
-  async launch({ cwd, restart = null, resumeFile = null, resumeId = null }) {
+  async launch({ cwd, restart = null, resumeFile = null, resumeId = null, initialChoices = null }) {
     this.launching++;
     try {
-      return await this.startApp({ cwd, restart, resumeFile, resumeId });
+      return await this.startApp({ cwd, restart, resumeFile, resumeId, initialChoices });
     } finally {
       this.launching--;
+      this.check();
     }
   }
 
-  async startApp({ cwd, restart, resumeFile, resumeId }) {
+  async startApp({ cwd, restart, resumeFile, resumeId, initialChoices }) {
     const { App } = await import('../ui/repl.js');
-    const flags = {};
+    const flags = initialChoices ? { initialChoices } : {};
     if (restart) flags.restart = restart;
     else if (resumeFile) Object.assign(flags, { resumeFile, resumeId });
     const { stdin, stdout } = noTerminal();
@@ -124,8 +138,11 @@ export class SessionHost {
       const busy = app.working() || this.requests.has(app) || app.liveFeed?.active;
       if (busy || !this.idleSince.has(app)) { this.idleSince.set(app, now); continue; }
       if (now - this.idleSince.get(app) >= hostTiming.idleMs) {
-        this.idleSince.delete(app);
-        try { app.exit(0); } catch (e) { this.log(e, 'put away'); }
+        try {
+          if (!app.flushUnsavedConversation()) continue;
+          this.idleSince.delete(app);
+          app.exit(0);
+        } catch (e) { this.log(e, 'put away'); }
       }
     }
   }
@@ -189,6 +206,7 @@ export class SessionHost {
     } finally {
       this.recovering = false;
       this.saveRoster();
+      this.check();
     }
   }
 
@@ -234,7 +252,7 @@ export class SessionHost {
   }
 
   check() {
-    if (this.restarting || this.checking) return;
+    if (this.restarting || this.checking || this.updating || this.launching || this.recovering) return;
     clearTimeout(this.timer);
     const sourceDue = this.source && this.source.key !== this.failed;
     if (!this.requests.size && !sourceDue) return;
@@ -272,7 +290,7 @@ export class SessionHost {
       }
       return;
     }
-    if ([...this.apps].some((a) => !this.ready(a))) { this.check(); return; } // something started meanwhile
+    if (this.launching || this.recovering || [...this.apps].some((a) => !this.ready(a))) { this.check(); return; } // something started meanwhile
     const now = Date.now();
     this.restartTimes = this.restartTimes.filter((t) => now - t < RESTART_WINDOW_MS);
     if (this.restartTimes.length >= MAX_RESTARTS) {

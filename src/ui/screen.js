@@ -368,29 +368,31 @@ export class Screen {
     this.resizeSince = 0;
     const cols = this.width;
     const screenRows = Math.max(1, this.dimensions[1]);
-    this.takeStatic();
     const layout = this.layoutLive(cols);
+    if (!layout.rows.length) layout.rows.push(''); // leave the cursor below output even if nothing live is drawn
     const room = Math.max(0, screenRows - layout.rows.length);
     const tail = [];
-    for (let used = 0, i = this.history.length - 1; i >= 0; i--) {
+    let used = 0;
+    for (let i = this.history.length - 1; i >= 0; i--) {
       const n = rowsOf(this.history[i], cols);
       if (used + n > room) break;
       tail.unshift(this.history[i]);
       used += n;
     }
-    // Every row is overwritten (EL clears what the new text does not cover) and what is left below is
-    // erased, so no old text survives, wherever the terminal put it when it re-flowed.
+    // The history tail has already reached the terminal. New output hasn't: write every queued line, letting it
+    // scroll off the viewport normally if there is more than fits, and keep the untruncated text for this write.
+    const pending = this.takeStatic();
     if (this.pin) {
-      const used = tail.reduce((n, line) => n + rowsOf(line, cols), 0);
+      used += pending.reduce((n, line) => n + rowsOf(line, cols), 0);
       this.pinned = screenRows;
       const gap = this.gapFor(used, layout.rows.length);
       layout.rows.unshift(...Array(gap).fill(''));
       if (layout.cursorRow !== null) layout.cursorRow += gap;
     }
-    const all = [...tail, ...layout.rows];
-    let buf = SYNC_START + ESC.hideCursor + this.titleUpdate() + '\x1b[H';
-    buf += all.map(endRow).join('\r\n');
-    buf += ESC.clearDown;
+    // Erase the reflowed viewport before writing, without clearing scrollback or erasing the new text afterward.
+    const all = [...tail.map(endRow), ...pending.map((line) => line + '\x1b[0m'), ...layout.rows.map(endRow)];
+    let buf = SYNC_START + ESC.hideCursor + this.titleUpdate() + '\x1b[H' + ESC.clearDown;
+    buf += all.join('\r\n');
     buf += this.settleCursor(layout);
     buf += SYNC_END;
     this.out.write(buf);

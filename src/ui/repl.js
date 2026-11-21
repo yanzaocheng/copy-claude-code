@@ -340,7 +340,7 @@ export class App {
   get agent() { return this.runtime.agent; }
   // Whether this session can restart (to load new code, or for /cd): under the supervisor, or in the web console.
   canRestart() { return Boolean(this.host) || canRestart(); }
-  get owner() { return this.runtime?.config.owner; }
+  get owner() { return this.runtime?.config?.owner; }
   // Whether the conversation is being worked on, not only looked at: a session the web console took up because its
   // conversation was opened is not, until it runs a turn (`used`, carried over by a restart).
   inUse() { return !this.host || Boolean(this.used); }
@@ -351,11 +351,13 @@ export class App {
   // ---------------------------------------------------------------- lifecycle
 
   async start(initialPrompt) {
+    if (this.exiting) return this.exitCode;
     const stdin = this.stdin;
     stdin.setRawMode(true);
     // Where the cursor is, before anything is drawn: the input box is kept on the last rows of the window from
     // there (see screen.js).
     if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
+    if (this.exiting) return this.exitCode;
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
     if (!this.host) { // (the host's process is not this session's)
@@ -365,7 +367,13 @@ export class App {
     }
 
     await this.startPeer();
-    this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this, sessionId: this.store.id });
+    if (this.exiting) return this.exitCode;
+    const runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this, sessionId: this.store.id });
+    if (this.exiting) {
+      this.closeRuntime(runtime); // exit could not clean up the runtime while it was still being built
+      return this.exitCode;
+    }
+    this.runtime = runtime;
     // The conversation's id, sent to the gateway with each request (see streamMessage); it follows /clear and /resume.
     Object.defineProperty(this.runtime.config, 'sessionId', { get: () => this.store.id, configurable: true });
     // Every request's cost (the conversation's, its sub-agents', side queries'), kept with the session.
@@ -399,6 +407,7 @@ export class App {
     if (restart) this.resumeAfterRestart(restart, resumable);
     else if (this.flags.resumeFile) this.loadSession(this.flags.resumeFile, this.flags.resumeId);
     else if (this.flags.resume) await this.commands.get('resume').run('');
+    if (this.exiting) return this.exitCode;
     if (!restart && this.flags.name?.trim()) this.renameSession(this.flags.name); // --name, as /rename does
     this.autoStartRemote(restart);
     // 远程访问 on: the console's server (and its tunnel) is brought up again by any session that starts
@@ -434,7 +443,7 @@ export class App {
       this.loginTimer = setInterval(() => this.syncRemote(), 10_000);
       this.loginTimer.unref?.();
     }
-    return new Promise((resolve) => { this.resolveExit = resolve; });
+    return this.exiting ? this.exitCode : new Promise((resolve) => { this.resolveExit = resolve; });
   }
 
   // What the session is about now: the current model named the topic last, or else the first thing asked
@@ -508,40 +517,54 @@ export class App {
     } catch { /* ignore */ }
   }
 
+  closeRuntime(runtime) {
+    // In the console process, no owner means there is nothing to clean up, not every session.
+    const owner = this.host ? runtime?.config?.owner : undefined;
+    if (!this.host || owner) {
+      shutdownBackgroundShells(owner);
+      shutdownInterpreters(owner);
+    }
+    if (this.host && owner) closeBrowserSession(owner);
+    runtime?.agent?.keepAlive?.stop();
+    runtime?.tasks?.killAll();
+    runtime?.mcp?.close();
+    runtime?.releaseSession?.();
+  }
+
   exit(code = 0, { restart = false } = {}) {
     if (this.exiting) return;
     this.exiting = true;
-    this.controller?.abort();
-    clearInterval(this.spinnerTimer);
-    clearTimeout(this.reloadTimer);
-    this.sourceWatch?.close();
-    clearTimeout(this.updateRetry);
-    clearInterval(this.moveTimer);
-    // only this session's: in the web console's process the other sessions go on
-    shutdownBackgroundShells(this.host ? this.owner : undefined);
-    shutdownInterpreters(this.host ? this.owner : undefined);
-    if (this.host && this.owner) closeBrowserSession(this.owner);
-    this.runtime?.agent?.keepAlive?.stop(); // (a process that ends stops it too; the host's does not end)
-    this.runtime?.tasks.killAll();
-    this.runtime?.mcp.close();
-    this.peers?.close();
-    this.liveFeed?.close();
-    clearInterval(this.remotePeersTimer);
-    clearInterval(this.loginTimer);
-    const remoteClosed = this.remote?.close({ restarting: restart });
-    const u = this.agent?.totalUsage();
+    this.exitCode = code;
+    let remoteClosed;
     const farewell = []; // left on the terminal once the program's screen is gone (see Screen.close)
-    if (!restart && u && u.requests) {
-      farewell.push(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
-    }
-    if (!restart && this.agent?.messages.length) farewell.push(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
-    this.restoreTerminal({ handOver: restart, farewell });
-    this.stdin.pause();
-    this.resolveExit?.(code);
-    if (!this.noProcessExit) {
-      // with remote control on, the gateway is told first (at most a second and a half; see RemoteControl.close)
-      if (remoteClosed) remoteClosed.finally(() => process.exit(code));
-      else setTimeout(() => process.exit(code), 50).unref();
+    try {
+      this.controller?.abort();
+      clearInterval(this.spinnerTimer);
+      clearTimeout(this.reloadTimer);
+      this.sourceWatch?.close();
+      clearTimeout(this.updateRetry);
+      clearInterval(this.moveTimer);
+      this.closeRuntime(this.runtime);
+      this.peers?.close();
+      this.liveFeed?.close();
+      clearInterval(this.remotePeersTimer);
+      clearInterval(this.loginTimer);
+      remoteClosed = this.remote?.close({ restarting: restart });
+      const agent = this.runtime?.agent;
+      const u = agent?.totalUsage();
+      if (!restart && u?.requests) {
+        farewell.push(c.dim(`Total usage: ${formatTokens(u.input + u.cacheRead + u.cacheWrite)} input (${formatTokens(u.cacheRead)} cached), ${formatTokens(u.output)} output, ${u.requests + u.compactions} requests`));
+      }
+      if (!restart && agent?.messages.length) farewell.push(c.dim(`Resume this session with: ${APP_NAME} --resume ${this.store.id}`));
+    } finally {
+      this.resolveExit?.(code);
+      this.restoreTerminal({ handOver: restart, farewell });
+      this.stdin.pause();
+      if (!this.noProcessExit) {
+        // with remote control on, the gateway is told first (at most a second and a half; see RemoteControl.close)
+        if (remoteClosed) remoteClosed.finally(() => process.exit(code));
+        else setTimeout(() => process.exit(code), 50).unref();
+      }
     }
   }
 
@@ -552,14 +575,34 @@ export class App {
   async startPeer() {
     if (this.driven || !peersEnabled()) return;
     try {
-      this.peers = await new PeerNode({
+      const peer = new PeerNode({
         cwd: this.cwd,
         name: this.flags.restart?.peerName,
         id: this.flags.restart?.peerId,
         onMessage: (msg) => this.onPeerMessage(msg),
         getStatus: () => this.liveStatus(),
         live: { feed: this.liveFeed, command: (type, body) => this.pageCommand(type, body), image: (n) => this.liveImage(n) },
-      }).start();
+      });
+      if (this.legacyHidden) {
+        const handle = peer.handle.bind(peer);
+        peer.handle = (req, res) => {
+          if (req.method === 'POST' && req.url === '/message' && req.headers.authorization === `Bearer ${peer.token}`) {
+            // PeerNode acknowledges before calling onMessage. Refuse at the endpoint, and do not move while an
+            // already accepted request is still uploading its message.
+            if (this.moving || this.exiting) {
+              res.writeHead(503, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Session is moving or ending; try again.' }));
+              return;
+            }
+            this.peerMessages = (this.peerMessages || 0) + 1;
+            res.once('close', () => { this.peerMessages--; });
+          }
+          handle(req, res);
+        };
+      }
+      await peer.start();
+      if (this.exiting) peer.close();
+      else this.peers = peer;
     } catch (e) {
       this.peers = null;
       this.notice(`Other sessions cannot reach this one: ${e.message}`, 'warn');
@@ -842,7 +885,7 @@ export class App {
           cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION,
         }),
         status: () => this.remoteStatus(),
-        peerMessage: (msg) => this.onPeerMessage(msg),
+        peerMessage: (msg) => this.moving || this.exiting ? false : this.onPeerMessage(msg),
         contactEvent: (ev) => this.onContactEvent(ev),
         changed: () => {
           this.screen.schedule();
@@ -1117,8 +1160,11 @@ export class App {
 
   restartBlockers() {
     const found = [];
-    for (const t of this.runtime.tasks.running()) found.push(`background agent ${t.id} "${t.description}"`);
-    for (const s of listBackgroundShells(this.owner)) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
+    for (const t of this.runtime?.tasks?.running() || []) found.push(`background agent ${t.id} "${t.description}"`);
+    const owner = this.owner;
+    if (owner || !this.host) {
+      for (const s of listBackgroundShells(owner)) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
+    }
     return found;
   }
 
@@ -1171,6 +1217,17 @@ export class App {
     this.exit(RESTART_EXIT_CODE, { restart: true });
   }
 
+  // Recover a missing conversation write before releasing the only in-memory copy.
+  flushUnsavedConversation() {
+    const store = this.store;
+    if (!store?.lost) return true;
+    const messages = this.runtime?.agent?.messages;
+    if (!messages) return false;
+    store.lost = false;
+    store.reset(messages); // append sets lost again if this write fails too
+    return !store.lost;
+  }
+
   // What the next process (in the web console: the next App) needs to take the session up where it is now.
   // `counts`: towards the restarts that look like a loop; not a /cd (the user's), nor a restart of the web console that
   // another of its sessions or a change of the source caused.
@@ -1178,7 +1235,7 @@ export class App {
     const cfg = this.config;
     const now = Date.now();
     // a write of the conversation failed at some point: the file lacks part of it, and the next process goes on from it
-    if (this.store.lost) { this.store.lost = false; this.store.reset(this.agent.messages); }
+    this.flushUnsavedConversation();
     return {
       at: now,
       reason: request.reason || '',
@@ -1215,11 +1272,12 @@ export class App {
   // own: once it is idle the console takes it up in its own process (see web/host.js), with the same id and the state
   // a restart carries over, and this process ends (exit code 0: the supervisor does not start it again).
   async maybeMoveIntoConsole() {
-    if (!this.legacyHidden || this.moving || this.exiting || !this.runtime || this.working() || this.restartRequest || this.reloading) return;
+    if (!this.legacyHidden || this.moving || this.exiting || !this.runtime || this.peerMessages || this.working() || this.restartRequest || this.reloading || this.updating) return;
     this.moving = true;
     try {
       const { adoptIntoConsole } = await import('../web/server.js');
-      if (this.exiting || this.working()) return;
+      if (this.exiting || this.working() || this.restartRequest || this.reloading || this.updating) return;
+      if (!this.flushUnsavedConversation()) return;
       const state = this.restartState({ reason: 'moved into the web console' }, { counts: false });
       const r = await adoptIntoConsole(state);
       if (!r?.ok) { this.moveRefused = r?.error || 'refused'; return; }
@@ -1231,6 +1289,7 @@ export class App {
       this.moveRefused = e.message; // tried again in a minute
     } finally {
       this.moving = false;
+      if (!this.exiting && this.sourceChanged) this.maybeAutoReload().catch((e) => this.logError(e));
     }
   }
 
@@ -1332,7 +1391,7 @@ export class App {
 
   async maybeAutoReload() {
     if (this.host) { this.host.check(); return; } // all the console's sessions restart together, once all are idle
-    if (!this.sourceChanged || this.updating || this.reloading || this.isTurnRunning() || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
+    if (!this.sourceChanged || this.updating || this.reloading || this.isTurnRunning() || this.exiting || this.moving || this.restartRequest || this.dialogs.length || this.queue.length) return;
     if (this.skipAutoReload) { this.skipAutoReload = false; return; } // the user just interrupted: not now
     if (this.restartBlockers().length) return; // looked at again whenever the program is next idle
     clearTimeout(this.reloadTimer);
@@ -1520,7 +1579,7 @@ export class App {
   }
 
   onKey(str, key) {
-    if (this.exiting) return;
+    if (this.exiting || this.moving) return;
     // Terminals paste (ctrl+v in Windows Terminal and VS Code) as bracketed paste: readline reports paste-start/end
     // and emits the text as ordinary keys between them. That text goes in at once. A paste with no text is what a
     // terminal sends for an image on the clipboard, which only the system clipboard has (alt+v reads it on demand).
@@ -2041,7 +2100,7 @@ export class App {
 
   // `quiet`: do not print the transcript (a restart: it is still on screen).
   loadSession(file, id, { quiet = false } = {}) {
-    const loaded = SessionStore.load(file);
+    const loaded = this.runtime.useSession(id, () => SessionStore.load(file));
     this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
     this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
@@ -2106,7 +2165,9 @@ export class App {
   }
 
   newSession() {
-    this.store = new SessionStore(this.cwd);
+    const store = new SessionStore(this.cwd);
+    this.runtime.useSession(store.id);
+    this.store = store;
     this.store.onError = this.storeError;
     this.runtime.trace?.setSessionId(this.store.id);
     this.seedOutput = [];
@@ -2318,14 +2379,18 @@ export class App {
       end: (b) => this.pageEnd(b),
     };
     if (!Object.hasOwn(handlers, type)) throw new Error(`Unknown command: ${type}`);
+    if (['send', 'interrupt', 'dialog', 'end'].includes(type)) {
+      if (this.exiting) throw new Error('The session is ending.');
+      if (this.moving) throw new Error('The session is moving into the web console; try again.');
+    }
     return handlers[type](body);
   }
 
-  // The web console ends the session (a 后台会话 has no window to type /exit in): not in the middle of a task unless
-  // `force` (then the task is stopped first). The answer goes out before the process ends.
+  // The web console only ends sessions it owns. The host process survives and the current HTTP request can reply.
   pageEnd({ force = false } = {}) {
-    if (this.isTurnRunning() && !force) throw new Error('会话正在工作：先停止当前任务，或选择强制结束');
-    setTimeout(() => this.exit(0), 150).unref?.();
+    if (!this.host) throw new Error('请在对应的终端结束这个会话');
+    if (!force && this.working()) throw new Error('会话正在工作：先停止当前任务，或选择强制结束');
+    this.exit(0);
     return { ending: true };
   }
 

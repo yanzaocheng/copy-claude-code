@@ -426,7 +426,7 @@
     closeMenu?.();
     if (cleanup) { try { cleanup(); } catch { /* ignore */ } cleanup = null; }
     main.scrollTop = 0;
-    $(".app").classList.remove("nav-open");
+    setDrawer(false);
     const views = { new: newView, remote: remotePage, overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => (parts[1] ? liveView(parts[1]) : newView()), providers, settings, memory, extensions, usage };
     (views[page] || newView)();
   }
@@ -466,8 +466,10 @@
       </tbody></table>` : '<div class="empty">还没有连接任何供应商</div>'}</div>`;
     $("#checkUpdate").addEventListener("click", async () => {
       $("#updateState").textContent = "检查中…";
-      const u = await api("/api/update").catch((e) => ({ status: "error", error: e.message }));
-      $("#updateState").textContent = { dev: "· 源码运行，不检查 npm", current: "· 已是最新", available: `· 有新版本 ${u.version}：在会话里 /update`, installed: `· 新版本 ${u.version} 已安装，重启会话后生效`, error: `· 检查失败：${u.error}` }[u.status] || "";
+      const u = await api("/api/update?check=1").catch((e) => ({ status: "error", error: e.message }));
+      paintBrandUpdate(u);
+      const state = $("#updateState", el);
+      if (state) state.textContent = { dev: "· 源码版通过 Git 更新", current: "· 已是最新", available: `· 有新版本 ${u.version}，请点击版本号旁的更新按钮`, installed: `· 新版本 ${u.version} 已安装，点击版本号旁的按钮加载`, updating: "· 正在安装", restarting: "· 等待控制台加载新版", error: `· 检查失败：${u.error}` }[u.status] || "";
     });
   }
 
@@ -543,14 +545,15 @@
   }
 
   async function sessionView(dir, id) {
+    const here = location.hash;
     const el = page('<div class="chat-page"><div class="chat-scroll"><div class="empty">正在加载会话…</div></div></div>', "chat");
     let d;
     try { d = await api(`/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`); } catch (e) { el.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
+    if (!el.isConnected || location.hash !== here) return;
     if (d.running) { location.replace(`#/live/${d.running}`); return; }
     // A conversation is opened as a running one: the console takes it up (in a tenth of a second) and the live view
     // replaces this one; what is drawn here meanwhile is the same conversation. (The console puts it away again once
     // nobody has looked at it for a while: see SessionHost.reap.)
-    const here = location.hash;
     const base = `/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`;
     el.innerHTML = `<div class="chat-page">
       <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
@@ -588,23 +591,26 @@
       }
       throw new Error("会话 30 秒内没有上线");
     };
-    const open = async (peerId) => { await loadWorkspace(); location.hash = `#/live/${peerId}`; };
+    let sendingFirst = false;
     // Writing to it starts it: the message goes to it once its live view watches it (as for a new session)
     const hc = composer($("#hcomp", el), {
       placeholder: "发消息继续这个对话，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
       dropZone: el,
       draftKey: `session:${id}`,
       onSend: async (text, images) => {
-        const peerId = await start(true);
-        if (!peerId) throw new Error("这个系统不能自动启动会话");
-        firstMessage = { peerId, text, images };
-        setTimeout(() => open(peerId), 0); // after the box is emptied
+        sendingFirst = true;
+        try {
+          const peerId = await start(true);
+          if (!peerId) throw new Error("这个系统不能自动启动会话");
+          queueFirstMessage(peerId, text, images);
+          if (!left && location.hash === here) location.hash = `#/live/${peerId}`;
+        } catch (e) { sendingFirst = false; throw e; }
       },
     });
     const done = cleanup;
     let left = false;
     cleanup = () => { left = true; done(); hc.dispose(); };
-    start(true).then((peerId) => { if (peerId && !left && location.hash === here) { loadWorkspace(); location.replace(`#/live/${peerId}`); } }).catch(() => { /* stays as it is: sending starts it */ });
+    start(true).then((peerId) => { if (peerId && !left && !sendingFirst && location.hash === here) { loadWorkspace(); location.replace(`#/live/${peerId}`); } }).catch(() => { /* stays as it is: sending starts it */ });
     $("#hmenu", el).addEventListener("click", (e) => {
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
         { label: "导出 Markdown", value: "export" },
@@ -669,17 +675,24 @@
   const projectKey = (cwd) => shortPath(cwd || "").toLowerCase().replace(/\/+$/, "");
   const baseName = (cwd) => shortPath(cwd || "").replace(/\/+$/, "").split("/").pop() || cwd || "?";
 
-  async function loadWorkspace() {
-    try {
-      const [s, l] = await Promise.all([api("/api/sessions"), api("/api/live")]);
-      ws.sessions = s.sessions;
-      ws.projectOpen = s.projectOpen || {};
-      ws.live = l.sessions;
-      ws.loaded = true;
-      if (!sidebarMenuOpen()) drawWorkspace();
-    } catch (e) {
-      if (!ws.loaded) $("#ws").innerHTML = `<div class="ws-empty">加载失败：${esc(e.message)}</div>`;
+  let workspaceLoad;
+  async function loadWorkspace({ afterPending = false } = {}) {
+    if (workspaceLoad) {
+      if (!afterPending) return workspaceLoad;
+      await workspaceLoad;
     }
+    return workspaceLoad ||= (async () => {
+      try {
+        const s = await api("/api/sessions");
+        ws.sessions = s.sessions;
+        ws.projectOpen = s.projectOpen || {};
+        ws.live = s.live || (await api("/api/live")).sessions;
+        ws.loaded = true;
+        if (!sidebarMenuOpen()) drawWorkspace();
+      } catch (e) {
+        if (!ws.loaded) $("#ws").innerHTML = `<div class="ws-empty">加载失败：${esc(e.message)}</div>`;
+      }
+    })().finally(() => { workspaceLoad = null; });
   }
 
   const sidebarMenuOpen = () => $("#ws :is([data-session-menu], [data-pmenu])[aria-expanded=true]");
@@ -737,28 +750,37 @@
     });
   }
 
-  // 归档 (or back, `archived` false): out of the workspace, kept whole, never cleaned up by age
+  // 归档 (or back, `archived` false): out of the workspace, kept whole, never cleaned up by age. A conversation the
+  // console runs is put away first; one running in a terminal is only marked (it stays listed while it runs, and the
+  // page does not end a terminal's session).
   async function archive(ids, archived = true, { force = false } = {}) {
-    if (archived) for (const id of ids) await putAway(id, { force });
+    if (archived) {
+      const live = (await api("/api/live")).sessions;
+      for (const id of ids) {
+        const peer = live.find((x) => x.status?.sessionId === id);
+        if (peer?.status?.hidden) await putAway(id, { force, peer }).catch((e) => { if (!/对应的终端/.test(e.message)) throw e; });
+      }
+    }
     await api("/api/sessions/archive", { method: "POST", body: { ids, archived } });
     for (const s of ws.sessions) if (ids.includes(s.id)) s.archived = archived ? Date.now() : undefined;
     drawWorkspace();
     toast(archived ? `已归档${ids.length > 1 ? ` ${ids.length} 个会话` : ""}：在「全部会话 → 已归档」里可以找回` : "已取消归档");
-    loadWorkspace();
+    loadWorkspace({ afterPending: true });
   }
 
   // A conversation the console runs (taken up when it was opened) is let go of, its turn stopped if `force`: before it
   // is archived, deleted or continued in a terminal. Resolves once it is gone.
-  async function putAway(sessionId, { force = false } = {}) {
-    const l = (await api("/api/live")).sessions.find((x) => x.status?.sessionId === sessionId);
+  async function putAway(sessionId, { force = false, peer } = {}) {
+    const l = peer || (await api("/api/live")).sessions.find((x) => x.status?.sessionId === sessionId);
     if (!l) return;
     try { await api(`/api/live/${l.peerId}/end`, { method: "POST", body: { force } }); } catch (e) {
       if (!/不在运行/.test(e.message)) throw e; // (gone meanwhile: what was wanted)
     }
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 250));
-      if (!(await api("/api/live").catch(() => ({ sessions: [] }))).sessions.some((x) => x.status?.sessionId === sessionId)) return;
+      if (!(await api("/api/live")).sessions.some((x) => x.status?.sessionId === sessionId)) return;
     }
+    throw new Error("会话尚未结束，请稍后再试");
   }
 
   async function copySessionId(id) {
@@ -780,18 +802,18 @@
       if (value === "copy") return copySessionId(it.id);
       const s = ws.sessions.find((s) => s.id === it.id) || it;
       const peer = ws.live.find((l) => l.status?.sessionId === it.id);
-      const busy = working({ peer });
+      const busy = Boolean(peer?.status?.busy || working({ peer }));
       const archiving = value === "archive" && !s.archived;
       try {
         if (value === "archive") {
-          if (archiving && busy && !confirm("它正在工作，归档会停止当前任务。确定归档？")) return;
+          if (archiving && busy && peer?.status?.hidden && !confirm("它正在工作，归档会停止当前任务。确定归档？")) return;
           await archive([it.id], archiving, { force: busy });
         } else {
           if (!confirm(`删除「${it.title}」？会先移到回收站，保留 7 天。${busy ? "它正在工作，会先停止。" : ""}`)) return;
           await putAway(it.id, { force: busy });
           await api(`/api/sessions/${encodeURIComponent(it.dir)}/${encodeURIComponent(it.id)}`, { method: "DELETE" });
           toast("已移到回收站");
-          await loadWorkspace();
+          await loadWorkspace({ afterPending: true });
         }
         if ((value === "delete" || archiving) && (location.hash === it.href || location.hash === it.alt)) location.hash = "#/new";
         else if (/^#\/sessions(?:\?|$)/.test(location.hash)) route();
@@ -905,6 +927,7 @@
       ready();
     };
     async function add(files) {
+      if (sending) return;
       const list = [...files].filter((f) => f && f.type.startsWith("image/"));
       for (const f of list) {
         if (images.length >= MAX_IMAGES) { toast(`一条消息最多 ${MAX_IMAGES} 张图片`, "error"); break; }
@@ -915,7 +938,7 @@
     }
     thumbs.addEventListener("click", (e) => {
       const b = e.target.closest("[data-drop]");
-      if (!b) return;
+      if (!b || sending) return;
       const [gone] = images.splice(Number(b.dataset.drop), 1);
       if (gone) URL.revokeObjectURL(gone.url);
       paint();
@@ -936,6 +959,7 @@
       const text = input.value;
       if (sending || (!text.trim() && !images.length)) return;
       sending = true;
+      input.readOnly = true;
       ready();
       try {
         await onSend(text, images.map(({ media_type, data }) => ({ media_type, data })));
@@ -944,13 +968,14 @@
         images = [];
         paint(); // (the draft goes with it)
         autosize();
-      } catch (err) { fail(err); } finally { sending = false; ready(); }
+      } catch (err) { fail(err); } finally { sending = false; input.readOnly = false; ready(); }
     });
     input.value = draftText(draftKey);
     if (images.length) paint();
     requestAnimationFrame(autosize); // (measured once the box is on the page)
     return {
       input,
+      submit: () => form.requestSubmit(),
       left: $(".composer-left", box),
       right: $(".composer-right", box),
       setBusy(busy) { $("[data-stop]", box).classList.toggle("hidden", !busy); },
@@ -1003,39 +1028,124 @@
 
   // ---------------------------------------------------------------- 新会话
 
+  let hasNativeFolderPicker = false;
+  function browseProjectDirectories(initial, onSelect) {
+    const m = modal({ title: "选择项目目录", sub: "目录位于运行 claude-pro 的电脑上", body: `<div class="actions"><button type="button" class="button secondary small" data-dir-root>位置</button><button type="button" class="button secondary small" data-dir-up hidden>上一级</button></div><p class="mono" data-dir-path></p><div class="panel" data-dir-list aria-live="polite"></div>`, foot: `<button type="button" class="button" data-dir-use disabled>选择此目录</button>` });
+    let listing = null, request = 0;
+    const box = $("[data-dir-list]", m.el), use = $("[data-dir-use]", m.el), up = $("[data-dir-up]", m.el);
+    async function load(cwd) {
+      const id = ++request;
+      box.textContent = "正在读取…";
+      use.disabled = true;
+      try {
+        const next = await api(`/api/projects/directories${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`);
+        if (id !== request || !m.el.isConnected) return;
+        listing = next;
+        $("[data-dir-path]", m.el).textContent = next.cwd || "选择一个位置";
+        up.hidden = !next.parent;
+        use.disabled = !next.cwd;
+        box.innerHTML = next.dirs.map((d, n) => `<div class="file-row"><button type="button" class="button secondary" data-dir="${n}">${ICON.folder}<span>${esc(d.name)}</span></button></div>`).join("") || `<div class="empty">没有子目录</div>`;
+      } catch (e) {
+        if (id === request) box.textContent = e.message;
+      }
+    }
+    m.el.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.hasAttribute("data-dir-root")) load(null);
+      else if (b.hasAttribute("data-dir-up")) load(listing?.parent);
+      else if (b.hasAttribute("data-dir") && listing?.dirs[b.dataset.dir]) load(listing.dirs[b.dataset.dir].path);
+      else if (b.hasAttribute("data-dir-use") && listing?.cwd) { onSelect(listing.cwd); m.close(); }
+    });
+    load(initial || null);
+  }
+
   async function newView() {
     const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">选一个项目目录，告诉它要做什么：你在这里看着它工作、随时给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
     let projects = [];
-    try { projects = (await api("/api/projects")).projects; } catch { /* typed by hand */ }
+    try { projects = (await api("/api/projects")).projects; } catch { /* the folder chooser still works */ }
+    if (!el.isConnected) return;
     let dir = localStorage.getItem("cpNewDir") || projects[0]?.cwd || "";
+    let model, effort, configRequest = 0;
     const c = composer($("#ncomp", el), {
       placeholder: "描述你要它做的事，/命令 也可以。Enter 发送，Shift+Enter 换行",
       left: `<button type="button" class="chip" id="ndir" title="会话在哪个目录里工作">${ICON.folder}<span></span>${ICON.caret}</button>`,
-      onSend: async (text, images) => startSession(dir, text, images),
+      right: `<button type="button" class="chip" id="nmodel" title="选择模型"><span>模型</span>${ICON.caret}</button><button type="button" class="chip" id="neffort" title="选择思考强度"><span>思考强度</span>${ICON.caret}</button>`,
+      onSend: async (text, images) => startSession(dir, text, images, { model, effort }),
       draftKey: "new",
     });
     const chip = $("#ndir", el);
     const paintDir = () => { $("span", chip).textContent = dir ? baseName(dir) : "选择目录"; chip.title = dir ? `会话在 ${dir} 里工作` : "选择目录"; };
     paintDir();
+    const modelChip = $("#nmodel", el), effortChip = $("#neffort", el);
+    const options = (kind) => api(`/api/live/new/options?${new URLSearchParams({ cwd: dir, kind, ...(model ? { model } : {}), ...(effort ? { effort } : {}) })}`);
+    function paintChoices(info) {
+      $("span", modelChip).textContent = info.model || "模型";
+      modelChip.title = `选择模型${info.model ? `：${info.model}` : ""}`;
+      $("span", effortChip).textContent = info.effort === "auto" || !info.effort ? "思考强度：自动" : `思考强度：${info.effort}`;
+    }
+    async function refreshChoices() {
+      const seq = ++configRequest;
+      try { const info = await options("summary"); if (el.isConnected && seq === configRequest) paintChoices(info); } catch { /* the menus can try again */ }
+    }
+    const selectDir = (value) => {
+      if (!value || !el.isConnected) return;
+      dir = value;
+      localStorage.setItem("cpNewDir", dir);
+      paintDir();
+      refreshChoices();
+    };
+    for (const [anchor, kind] of [[modelChip, "models"], [effortChip, "efforts"]]) {
+      anchor.addEventListener("click", async () => {
+        const currentDir = dir;
+        anchor.disabled = true;
+        try {
+          const info = await options(kind);
+          if (!el.isConnected || dir !== currentDir) return;
+          const isModel = kind === "models";
+          const current = isModel ? info.modelChoice : info.effortChoice;
+          const items = info[kind].map((item) => ({ ...item, label: item.value === "default" ? "项目默认" : item.label, current: item.value === current }));
+          popMenu(anchor, [{ key: kind, title: isModel ? "模型" : "思考强度", items }], (_, value) => {
+            if (isModel) { if (model !== value) effort = undefined; model = value; }
+            else effort = value;
+            refreshChoices();
+          });
+        } catch (e) { fail(e); } finally { anchor.disabled = false; }
+      });
+    }
+    refreshChoices();
     chip.addEventListener("click", () => {
       popMenu(chip, [
         { key: "dir", title: "最近的项目", items: projects.slice(0, 12).map((p) => ({ label: baseName(p.cwd), description: shortPath(p.cwd), value: p.cwd, current: p.cwd === dir })) },
         { key: "other", title: "", items: [{ label: "其他目录…", value: "" }] },
-      ], (key, value) => {
-        if (key === "other") value = prompt("目录的完整路径", dir) || "";
-        if (value) { dir = value.trim(); localStorage.setItem("cpNewDir", dir); paintDir(); }
+      ], async (key, value) => {
+        if (key !== "other") return selectDir(value);
+        if (!hasNativeFolderPicker) return browseProjectDirectories(dir, selectDir);
+        chip.disabled = true;
+        try { selectDir((await api("/api/projects/pick", { method: "POST", body: {} })).cwd); }
+        catch (e) {
+          if (e.status === 409) fail(e);
+          else if (el.isConnected) browseProjectDirectories(dir, selectDir);
+        } finally { chip.disabled = false; }
       });
     });
-    c.input.focus();
+    if (!mobileLayout.matches) c.input.focus();
   }
 
-  let firstMessage = null; // {peerId, text, images}: for a session just started, sent by its live view (startSession)
+  const pendingFirstSends = new Set();
+  function queueFirstMessage(peerId, text, images = []) {
+    const key = `live:${peerId}`;
+    if (draftText(key) || draftImages.has(key)) throw new Error("该会话已有未发送的草稿，本条消息仍保留在当前输入框");
+    saveDraft(key, text, images.map((img) => ({ ...img, url: `data:${img.media_type};base64,${img.data}` })));
+    pendingFirstSends.add(peerId);
+  }
 
   // A new session in `dir`, run by the console; it is opened here and the message goes to it.
-  async function startSession(dir, text, images) {
+  async function startSession(dir, text, images, choices = {}) {
     if (!dir) throw new Error("先选一个目录");
+    const here = location.hash;
     const before = new Set(ws.live.map((r) => r.peerId));
-    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir } });
+    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir, ...choices } });
     localStorage.setItem("cpNewDir", r.cwd);
     const until = Date.now() + 30_000;
     let found = r.peerId ? { peerId: r.peerId } : null;
@@ -1044,10 +1154,9 @@
       try { found = (await api("/api/live")).sessions.find((x) => !before.has(x.peerId) && projectKey(x.status?.cwd || x.cwd) === projectKey(r.cwd)); } catch { /* again */ }
     }
     if (!found) throw new Error("会话 30 秒内没有上线：可能是启动出错了，在终端里运行 claude-pro 看看");
-    // sent by its live view once that watches it (sent before, what the session printed first was missed)
-    if (text || images?.length) firstMessage = { peerId: found.peerId, text, images };
-    await loadWorkspace();
-    location.hash = `#/live/${found.peerId}`;
+    if (text || images?.length) queueFirstMessage(found.peerId, text, images);
+    loadWorkspace({ afterPending: true });
+    if (location.hash === here) location.hash = `#/live/${found.peerId}`;
   }
 
   // ---------------------------------------------------------------- a running session, live
@@ -1102,14 +1211,13 @@
       ] }], async (key, value) => {
         if (!known) return toast("这个对话还没有内容");
         const sessionId = status.sessionId;
-        const busy = Boolean(status.turn);
+        const busy = Boolean(status.busy || status.turn || status.dialog);
         const base = known ? `/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}` : "";
         try {
           if (value === "export") location.href = `${base}/export`;
           if (value === "archive") {
             if (busy && !confirm("它正在工作，归档会停止当前任务。确定归档？")) return;
-            await putAway(sessionId, { force: busy });
-            await archive([sessionId]);
+            await archive([sessionId], true, { force: busy });
             location.hash = "#/new";
           }
           if (value === "delete") {
@@ -1224,18 +1332,9 @@
         state = hydrate(msg.items || []);
         renderAll();
         if (msg.status) setStatus(msg.status);
-        if (firstMessage?.peerId === peerId) {
-          const { text, images } = firstMessage;
-          firstMessage = null;
-          (async () => {
-            // the session may still be drawing its first screen: tried again for a few seconds
-            for (let i = 0; i < 10; i++) {
-              try { await post("send", { text, images }); return; } catch (ex) {
-                if (i === 9) toast(`消息没发出去：${ex.message}`, "error");
-                await new Promise((res) => setTimeout(res, 800));
-              }
-            }
-          })();
+        if (pendingFirstSends.delete(peerId)) {
+          if (status.dialog) toast("消息已保留为草稿：请先完成会话的提示，再发送");
+          else c.submit(); // only once; the composer holds the draft on any unacknowledged send
         }
         return;
       }
@@ -1255,7 +1354,7 @@
     es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "连接已断开，请刷新页面" : "正在重新连接…"; conn.hidden = false; };
     const tick = setInterval(renderStatus, 250);
     cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); };
-    c.input.focus();
+    if (!mobileLayout.matches) c.input.focus();
   }
 
   // ---------------------------------------------------------------- 远程访问
@@ -1638,6 +1737,53 @@
     $("#body", el).addEventListener("click", (e) => { const r = e.target.closest("[data-open]"); if (r) location.hash = `#/session/${r.dataset.open}`; });
   }
 
+  // ---------------------------------------------------------------- manual npm updates
+
+  let updateInfo, updateTimer, clickedVersion;
+  const updateButton = $("#brandUpdate");
+  function paintBrandUpdate(info) {
+    updateInfo = info;
+    if (info.runningVersion) $("#brandVersion").textContent = `v${info.runningVersion}`;
+    const busy = info.status === "updating" || info.status === "restarting";
+    const available = info.status === "available" || info.status === "installed";
+    updateButton.classList.toggle("hidden", !available && !busy);
+    updateButton.disabled = busy;
+    updateButton.textContent = busy ? "…" : "↑";
+    updateButton.title = busy ? (info.status === "updating" ? `正在安装 v${info.version}` : `等待加载 v${info.version}`) : available ? `${info.status === "installed" ? "加载" : "更新到"} v${info.version}` : "";
+    updateButton.setAttribute("aria-label", updateButton.title);
+    if (clickedVersion && !busy) {
+      if (info.runningVersion === clickedVersion) { toast(`已更新到 v${info.runningVersion}，刷新网页可加载新版界面`); clickedVersion = null; }
+      else if (info.error && available) { fail(new Error(info.error)); clickedVersion = null; }
+      else if (info.status === "current" || info.status === "dev") clickedVersion = null;
+    }
+    scheduleUpdateCheck(busy || clickedVersion ? 2500 : info.status === "error" ? 60_000 : 15 * 60_000);
+  }
+
+  function scheduleUpdateCheck(delay = 0) {
+    clearTimeout(updateTimer);
+    updateTimer = setTimeout(async () => {
+      try { paintBrandUpdate(await api("/api/update")); }
+      catch { scheduleUpdateCheck(clickedVersion ? 2500 : 60_000); }
+    }, delay);
+  }
+
+  updateButton.addEventListener("click", async () => {
+    if (!updateInfo || updateButton.disabled) return;
+    const { status, version } = updateInfo;
+    const promptText = status === "installed" ? `加载已安装的 v${version}？控制台会在会话空闲后重启。` : `在运行 claude-pro 的电脑上安装 v${version}？只会在会话空闲时开始。`;
+    if (!confirm(promptText)) return;
+    clearTimeout(updateTimer);
+    updateButton.disabled = true;
+    try {
+      clickedVersion = version;
+      paintBrandUpdate(await api("/api/update", { method: "POST", body: { version } }));
+    } catch (e) {
+      clickedVersion = null;
+      paintBrandUpdate(updateInfo);
+      fail(e);
+    }
+  });
+
   // ---------------------------------------------------------------- start
 
   const theme = localStorage.getItem("cpTheme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
@@ -1658,14 +1804,45 @@
   $("#sideMe").addEventListener("click", () => showUserMenu($("#userMenu").classList.contains("hidden")));
   document.addEventListener("mousedown", (e) => { if (!e.target.closest("#userMenu, #sideMe")) showUserMenu(false); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") showUserMenu(false); });
-  $("#menuBtn").addEventListener("click", () => $(".app").classList.toggle("nav-open"));
-  $("#sideBackdrop").addEventListener("click", () => $(".app").classList.remove("nav-open"));
+  const mobileLayout = matchMedia("(max-width: 860px)");
+  const drawer = $(".side"), mobileMenu = $("#menuBtn");
+  function setDrawer(open, { focus = false } = {}) {
+    const mobile = mobileLayout.matches;
+    open = mobile && open;
+    if (focus && !open) mobileMenu.focus({ preventScroll: true });
+    $(".app").classList.toggle("nav-open", open);
+    mobileMenu.setAttribute("aria-expanded", String(open));
+    drawer.inert = mobile && !open;
+    main.inert = open;
+    if (open && focus) $("#drawerClose")?.focus({ preventScroll: true });
+    if (!open) showUserMenu(false);
+  }
+  const toggleDrawer = () => {
+    closeMenu?.();
+    setDrawer(!$(".app").classList.contains("nav-open"), { focus: true });
+  };
+  mobileMenu.addEventListener("click", toggleDrawer);
+  $("#drawerClose")?.addEventListener("click", toggleDrawer);
+  $("#sideBackdrop").addEventListener("click", () => { closeMenu?.(); setDrawer(false, { focus: true }); });
+  drawer.addEventListener("click", (e) => { if (e.target.closest('a[href^="#/"]')) { closeMenu?.(); setDrawer(false); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !closeMenu && !$(".modal-back") && $(".app").classList.contains("nav-open")) setDrawer(false, { focus: true }); });
+  mobileLayout.addEventListener("change", () => { closeMenu?.(); setDrawer(false); syncVisualHeight(); });
+  function syncVisualHeight() {
+    const viewport = window.visualViewport;
+    if (!mobileLayout.matches || !viewport || Math.abs(viewport.scale - 1) > 0.03) { document.documentElement.style.removeProperty("--visible-height"); return; }
+    document.documentElement.style.setProperty("--visible-height", `${Math.round(viewport.height)}px`);
+  }
+  window.visualViewport?.addEventListener("resize", syncVisualHeight);
+  setDrawer(false);
+  syncVisualHeight();
   $("#logoutBtn").addEventListener("click", async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.reload(); });
   api("/api/ping").then((p) => {
     $("#brandVersion").textContent = `v${p.version}`;
+    hasNativeFolderPicker = p.nativeFolderPicker === true;
     $("#remoteLinks").classList.toggle("hidden", !p.remote); // opened through 远程访问: switch computer, log out
     route();
     loadWorkspace();
+    scheduleUpdateCheck();
   }).catch(() => {});
   // the sidebar follows the sessions (and keeps the server from stopping while the page is open)
   setInterval(() => { if (document.visibilityState === "visible") loadWorkspace(); else api("/api/ping").catch(() => {}); }, 5000);

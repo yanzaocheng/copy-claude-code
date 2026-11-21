@@ -38,7 +38,7 @@ const STATIC = {
 // started by older code gives way to the new one.
 export function codeStamp() {
   const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css'].map((f) => path.join(HERE, f));
-  files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'));
+  files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;
 }
@@ -214,7 +214,8 @@ async function serve() {
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote, hosted: host?.size ?? 0 });
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote, nativeFolderPicker: !remote && process.platform === 'win32', hosted: host?.size ?? 0 });
+      if (remote && url.pathname === '/api/projects/pick') return send(res, 403, { error: '远程访问请使用目录列表' });
       // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
       if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }
       // a session an older version started in a hidden window moves in (App.maybeMoveIntoConsole): the state it leaves
@@ -258,20 +259,29 @@ async function serve() {
       // a running session's live view: its peer server's event stream, passed through
       const live = /^\/api\/live\/([0-9a-f]{12})\/events$/.exec(url.pathname);
       if (live && req.method === 'GET') {
+        let upstream, upstreamResponse, counted = false;
+        res.once('close', () => {
+          if (counted) { streams--; lastActivity = Date.now(); }
+          upstreamResponse?.destroy();
+          upstream?.destroy();
+        });
         const peer = await livePeer(live[1]);
-        const upstream = http.get({ host: '127.0.0.1', port: peer.port, path: '/events', headers: { authorization: `Bearer ${peer.token}` } }, (up) => {
+        if (res.destroyed || res.writableEnded) return;
+        upstream = http.get({ host: '127.0.0.1', port: peer.port, path: '/events', headers: { authorization: `Bearer ${peer.token}` } }, (up) => {
+          upstreamResponse = up;
+          if (res.destroyed || res.writableEnded) { up.destroy(); return; }
           if (up.statusCode !== 200) { up.resume(); return send(res, up.statusCode === 404 ? 409 : 502, { error: up.statusCode === 404 ? '这个会话的 claude-pro 版本较旧，不支持实时查看' : '会话没有回应' }); }
           streams++;
+          counted = true;
           res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', connection: 'keep-alive' });
           res.write('retry: 2000\n\n');
           up.pipe(res);
-          const end = () => { try { res.end(); } catch { /* gone */ } };
-          up.on('end', end);
-          up.on('error', end);
-          res.once('close', () => { streams = Math.max(0, streams - 1); lastActivity = Date.now(); up.destroy(); });
+          up.on('error', () => res.end());
         });
-        upstream.on('error', () => { if (!res.headersSent) send(res, 502, { error: '连不上这个会话' }); else res.end(); });
-        req.on('close', () => upstream.destroy());
+        upstream.on('error', () => {
+          if (res.destroyed || res.writableEnded) return;
+          if (!res.headersSent) send(res, 502, { error: '连不上这个会话' }); else res.end();
+        });
         return;
       }
 

@@ -1,5 +1,5 @@
 // Manual update support for `npm i -g claude-pro`: the interactive session checks npm and installs a release only
-// when `/update` asks for it (App.updateFromNpm). Installation is serialized by a lock file and the session loads
+// when `/update` or the web console's update button asks for it. Installation is serialized by a lock file and the session loads
 // the new package with a restart (the conversation carries over). A git checkout (the development copy) is never
 // touched.
 
@@ -100,19 +100,20 @@ function runNpm(args, { timeoutMs = 300_000 } = {}) {
 
 // Look for a newer version on npm. Resolves with {status: 'dev'|'current'|'available'|'installed', version}:
 // 'available' to be installed (installUpdate), 'installed' when it is on disk already (another session installed
-// it: a restart loads it). (The background checks every few minutes, with their state file and switches, are gone:
-// /update is the only caller.)
+// it: a restart loads it). Checking does not install anything.
 export async function checkForUpdate() {
   if (!installedByNpm()) return { status: 'dev' };
+  const disk = installedVersion();
+  if (isNewer(disk, VERSION)) return { status: 'installed', version: disk };
   const latest = await latestVersion();
   if (!isNewer(latest, VERSION)) return { status: 'current', version: latest };
-  if (!isNewer(latest, installedVersion())) return { status: 'installed', version: installedVersion() };
   return { status: 'available', version: latest };
 }
 
 // Install `version` with npm. Resolves with {status: 'updated'|'installed'|'locked'|'failed', version, error}:
 // 'locked' while another session of the machine is installing.
 export async function installUpdate(version) {
+  if (!/^\d+\.\d+\.\d+$/.test(String(version))) return { status: 'failed', error: 'invalid npm version' };
   if (!takeLock()) return { status: 'locked', version };
   try {
     if (!isNewer(version, installedVersion())) return { status: 'installed', version: installedVersion() };

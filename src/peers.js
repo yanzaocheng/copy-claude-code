@@ -124,7 +124,9 @@ export class PeerNode {
   write() {
     if (!this.port) return;
     fs.mkdirSync(PEERS_DIR, { recursive: true });
-    const data = { id: this.id, name: this.name, cwd: this.cwd, pid: process.pid, port: this.port, token: this.token, startedAt: this.startedAt ??= Date.now() };
+    // sessionClaims: this version marks the conversations it holds (session.js claimSession), so the age cleanup
+    // need not keep a whole project for it
+    const data = { id: this.id, name: this.name, cwd: this.cwd, pid: process.pid, port: this.port, token: this.token, startedAt: this.startedAt ??= Date.now(), sessionClaims: true };
     const json = JSON.stringify(data);
     if (json === this.written) return;
     // whole or not at all: the other sessions read these files at any time (listPeers)

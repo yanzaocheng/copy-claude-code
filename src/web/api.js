@@ -4,10 +4,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import {
   CONFIG_DIR, INSTALL_DIR, SOURCE_CHECKOUT, VERSION, BASIC_SETTINGS, KNOWN_KEYS, loadConfig, settingsFiles,
-  writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile,
+  writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile, applyRememberedChoices,
 } from '../config.js';
 import {
   PRESETS, GATEWAY_PROVIDER, readConnections, saveConnection, removeConnection, providerInfo, connectedProviders,
@@ -15,8 +15,9 @@ import {
   normalizeBaseUrl, validBaseUrl,
 } from '../providers.js';
 import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels } from '../gateway.js';
-import { checkForUpdate } from '../updater.js';
+import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
+import { modelChoices as sessionModels, effortChoices as sessionEfforts } from '../commands.js';
 import { setArchived, archivedSessions } from '../session.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
@@ -77,6 +78,12 @@ function vscodePath() {
   return null;
 }
 
+let vscodeCache;
+function vscodeAvailable() {
+  if (!vscodeCache || Date.now() >= vscodeCache.until) vscodeCache = { found: Boolean(vscodePath()), until: Date.now() + 60_000 };
+  return vscodeCache.found;
+}
+
 async function openProject(body) {
   const { cwd, target } = body || {};
   if (!isWin) throw httpError(409, '当前主机不支持这个操作');
@@ -97,11 +104,65 @@ async function openProject(body) {
   if (!exe) throw httpError(409, '没有检测到已安装的 VS Code');
   // The browser never supplies the executable or a command line; only the checked directory is passed.
   await new Promise((resolve, reject) => {
-    const child = spawn(exe, [dir], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' });
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE; // (set, Code.exe runs as plain Node and takes the folder for a script)
+    const child = spawn(exe, [dir], { cwd: path.dirname(exe), detached: true, stdio: 'ignore', env });
     child.once('error', () => reject(httpError(500, `无法启动${label}`)));
     child.once('spawn', () => { child.unref(); resolve(); });
   });
   return { opened: true };
+}
+
+// On the local Windows console only: the host's native directory picker, not a browser upload prompt.
+let folderDialog;
+function pickProjectDirectory() {
+  if (!isWin) throw httpError(409, '这台电脑没有可用的系统目录选择器');
+  if (folderDialog) throw httpError(409, '目录选择窗口已经打开');
+  const script = `
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Opacity = 0
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '选择 claude-pro 项目目录'
+try {
+  $owner.Show()
+  if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.SelectedPath) }
+} finally { $dialog.Dispose(); $owner.Dispose() }
+`;
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const args = ['-NoProfile', '-NoLogo', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+  folderDialog = new Promise((resolve, reject) => {
+    execFile(powershell, args, { windowsHide: true, timeout: 180_000, maxBuffer: 64 * 1024 }, (err, stdout) => {
+      if (err) reject(httpError(503, '系统目录选择器不可用，请从目录列表选择'));
+      else resolve({ cwd: stdout || null });
+    });
+  }).finally(() => { folderDialog = null; });
+  return folderDialog;
+}
+
+async function projectDirectories(cwd) {
+  if (!cwd) {
+    const paths = [home, process.cwd(), ...knownProjects().map((p) => p.cwd)];
+    const roots = new Map();
+    for (const dir of paths) {
+      if (!path.isAbsolute(dir) || (isWin && !windowsDrivePath(dir))) continue;
+      const root = path.parse(dir).root;
+      roots.set(isWin ? root.toLowerCase() : root, root);
+    }
+    return { cwd: null, dirs: [...new Set([...paths.slice(0, 2), ...roots.values()])].filter((dir) => !isWin || windowsDrivePath(dir)).map((dir) => ({ path: dir, name: dir })) };
+  }
+  if (!path.isAbsolute(cwd) || (isWin && !windowsDrivePath(cwd))) throw httpError(400, '不是本机目录');
+  try {
+    const dir = await fs.promises.realpath(cwd);
+    if (isWin && !windowsDrivePath(dir)) throw httpError(400, '不是本机目录');
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    const dirs = entries.filter((e) => e.isDirectory()).map((e) => ({ name: e.name, path: path.join(dir, e.name) })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    return { cwd: dir, parent: path.dirname(dir) === dir ? null : path.dirname(dir), dirs };
+  } catch (e) { throw httpError(e.status || 404, '无法读取这个目录，请选择其他目录'); }
 }
 
 const inside = (file, dir) => {
@@ -419,11 +480,66 @@ function windowsTerminal() {
 let host = null;
 export function useHost(h) { host = h; }
 
-// A session in `cwd` (a saved conversation: `resumeFile`, `resumeId`), run by the console itself: up in ~0.1 s.
-async function launchSession(cwd, { resumeFile = null, resumeId = null } = {}) {
+let updateCache, updateCheck, updateTask;
+async function webUpdateStatus({ fresh = false } = {}) {
+  if (updateTask?.status === 'restarting' && host?.source && host.failed === host.source.key) {
+    updateCache = { result: { status: 'installed', version: updateTask.version, error: '新版未能通过启动检查，控制台仍在运行旧版' }, until: Date.now() + 60_000 };
+    updateTask = null;
+  }
+  if (updateTask) return { ...updateTask, runningVersion: VERSION };
+  if (fresh || !updateCache || Date.now() >= updateCache.until) {
+    updateCheck ||= checkForUpdate()
+      .catch(() => ({ status: 'error', error: '暂时无法连接 npm 检查更新' }))
+      .then((result) => { updateCache = { result, until: Date.now() + (result.status === 'error' ? 60_000 : 15 * 60_000) }; })
+      .finally(() => { updateCheck = null; });
+    await updateCheck;
+  }
+  return { ...(updateTask || updateCache.result), runningVersion: VERSION };
+}
+
+async function startWebUpdate(expectedVersion) {
+  let info = await webUpdateStatus();
+  if (info.status === 'updating' || info.status === 'restarting') return info;
+  if (info.status !== 'available' && info.status !== 'installed') info = await webUpdateStatus({ fresh: true });
+  if (info.status !== 'available' && info.status !== 'installed') return info;
+  if (info.version !== expectedVersion) throw httpError(409, '可用版本已变化，请重新检查更新');
   if (!host) throw httpError(503, '控制台还在启动，请稍后再试');
-  const app = await host.launch({ cwd, resumeFile, resumeId });
-  if (app.exiting) throw httpError(500, '会话没能启动（详情在 ~/.claude-pro/web-errors.log）');
+  if (info.status === 'installed') {
+    updateTask = { status: 'restarting', version: info.version };
+    host.requestHandover();
+    return webUpdateStatus();
+  }
+  const peers = await runningSessions();
+  if (updateTask) return webUpdateStatus();
+  if (peers.some((p) => p.status?.busy || p.status?.turn || p.status?.dialog) || !host.beginUpdate()) {
+    throw httpError(409, '还有会话正在工作，请等会话空闲后再更新');
+  }
+  const version = info.version;
+  updateTask = { status: 'updating', version };
+  void (async () => {
+    let r;
+    try { r = await installUpdate(version); } catch (e) { host.log(e, 'update'); }
+    if (r?.status === 'updated' || r?.status === 'installed') {
+      updateTask = { status: 'restarting', version: r.version };
+      host.endUpdate(true);
+    } else {
+      if (r?.error) host.log(r.error, 'update');
+      const error = r?.status === 'locked' ? '另一个会话正在安装更新，请稍后重试' : 'npm 安装失败，可重试，或在终端运行 /update 查看详情';
+      updateCache = { result: { status: 'available', version, error }, until: Date.now() + 60_000 };
+      updateTask = null;
+      host.endUpdate(false);
+    }
+  })();
+  return webUpdateStatus();
+}
+
+// A session in `cwd` (a saved conversation: `resumeFile`, `resumeId`), run by the console itself: up in ~0.1 s.
+async function launchSession(cwd, { resumeFile = null, resumeId = null, initialChoices = null } = {}) {
+  if (!host) throw httpError(503, '控制台还在启动，请稍后再试');
+  if (host.updating) throw httpError(409, '正在安装更新，请稍后再试');
+  if (host.restarting || host.recovering) throw httpError(409, '控制台正在恢复会话，请稍后再试');
+  const app = await host.launch({ cwd, resumeFile, resumeId, initialChoices });
+  if (app.exiting || !app.runtime) throw httpError(500, '会话没能启动（详情在 ~/.claude-pro/web-errors.log）');
   return { opened: true, peerId: app.peers?.id || null, sessionId: app.store?.id || null };
 }
 
@@ -445,13 +561,31 @@ function launchTerminal(cwd, args, title) {
 }
 
 // A saved conversation goes on: in the console (`terminal` false), or in a terminal tab.
-async function openSession(dir, id, { terminal = false } = {}) {
+const pendingSessions = new Map();
+
+function sessionOperation(id, kind, work) {
+  const pending = pendingSessions.get(id);
+  if (pending) {
+    if (kind === 'open' && pending.kind === kind) return pending.promise;
+    throw httpError(409, '会话正在执行另一个操作，请稍后再试');
+  }
+  const promise = Promise.resolve().then(work).finally(() => pendingSessions.delete(id));
+  pendingSessions.set(id, { kind, promise });
+  return promise;
+}
+
+function openSession(dir, id, { terminal = false } = {}) {
   const session = listAllSessions().find((s) => s.dir === dir && s.id === id);
   if (!session) throw httpError(404, '会话不存在');
-  if ((await running()).has(id)) throw httpError(409, '这个会话已经在运行');
-  const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
-  if (!terminal) return launchSession(cwd, { resumeFile: session.file, resumeId: id });
-  return launchTerminal(cwd, ['--resume', id], session.title);
+  return sessionOperation(id, terminal ? 'terminal' : 'open', async () => {
+    if (host?.recovering || host?.restarting) throw httpError(409, '控制台正在恢复会话，请稍后再试');
+    const live = (await running()).get(id);
+    if (live && !terminal) return { opened: true, peerId: live.peerId, sessionId: id };
+    if (live) throw httpError(409, '这个会话已经在运行');
+    const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
+    if (!terminal) return launchSession(cwd, { resumeFile: session.file, resumeId: id });
+    return launchTerminal(cwd, ['--resume', id], session.title);
+  });
 }
 
 // A new session in `cwd` (its first message, if any, is sent by the page once the session is up: no quoting through
@@ -463,7 +597,35 @@ async function newSession(body) {
   let st;
   try { st = fs.statSync(cwd); } catch { throw httpError(400, `目录不存在：${cwd}`); }
   if (!st.isDirectory()) throw httpError(400, `不是目录：${cwd}`);
-  return { ...(await launchSession(cwd)), cwd };
+  return { ...(await launchSession(cwd, { initialChoices: readInitialChoices(body) })), cwd };
+}
+
+function readInitialChoices(values) {
+  const choices = {};
+  for (const key of ['model', 'effort']) {
+    const value = values?.[key];
+    if (value == null || value === '') continue;
+    // (a provider's model id may hold @, as Cloudflare's @cf/...: only blanks and control characters are refused)
+    if (typeof value !== 'string' || !/^[^\s\x00-\x1f\x7f]{1,200}$/.test(value)) throw httpError(400, '无效的模型或思考强度');
+    choices[key] = value === 'default' ? null : value;
+  }
+  try { loadConfig({ cwd: home, flags: choices }); } catch { throw httpError(400, '无效的模型或思考强度'); }
+  return choices;
+}
+
+async function newSessionOptions(url) {
+  const cwd = url.searchParams.get('cwd') || home;
+  if (!path.isAbsolute(cwd) || (isWin && !windowsDrivePath(cwd))) throw httpError(400, '无效的项目目录');
+  const config = loadConfig({ cwd });
+  applyRememberedChoices(config);
+  const choices = readInitialChoices(Object.fromEntries(url.searchParams));
+  if ('model' in choices) config.modelOverride = choices.model;
+  if ('effort' in choices) config.effortOverride = choices.effort;
+  const kind = url.searchParams.get('kind');
+  const base = { model: config.modelSpec, effort: config.effort || 'auto', modelChoice: config.modelOverride || 'default', effortChoice: config.effortOverride || 'default' };
+  if (kind === 'models') return { ...base, models: await sessionModels(config) };
+  if (kind === 'efforts') return { ...base, efforts: (await sessionEfforts(config)).options };
+  return base;
 }
 
 // ---------------------------------------------------------------- routes
@@ -475,13 +637,16 @@ const running = async () => {
 
 export const routes = [
   ['GET', /^\/api\/overview$/, () => overview()],
-  ['GET', /^\/api\/update$/, () => checkForUpdate().catch((e) => ({ status: 'error', error: e.message }))],
+  ['GET', /^\/api\/update$/, (req, m, body, url) => webUpdateStatus({ fresh: url.searchParams.get('check') === '1' })],
+  ['POST', /^\/api\/update$/, (req, m, body) => startWebUpdate(body?.version)],
 
   ['GET', /^\/api\/sessions$/, async () => {
-    const live = await running();
+    const live = await runningSessions();
+    const peersById = new Map(live.filter((r) => r.status?.sessionId).map((r) => [r.status.sessionId, r.peerId]));
     return {
-      sessions: listAllSessions().map(({ file, ...s }) => ({ ...s, running: live.has(s.id) ? live.get(s.id).peerId : null })),
-      projectOpen: { explorer: isWin, vscode: Boolean(vscodePath()) },
+      sessions: listAllSessions().map(({ file, ...s }) => ({ ...s, running: peersById.get(s.id) ?? null })),
+      live,
+      projectOpen: { explorer: isWin, vscode: vscodeAvailable() },
     };
   }],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
@@ -501,10 +666,11 @@ export const routes = [
     return { name: renameSession(dir, id, body?.name) };
   }],
   ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/open$/, (req, [dir, id], body) => openSession(dir, id, { terminal: body?.terminal === true || body?.background === false })],
-  ['DELETE', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
-    if ((await running()).has(id)) throw httpError(409, '会话正在运行，不能删除');
+  ['DELETE', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, (req, [dir, id]) => sessionOperation(id, 'delete', async () => {
+    if (host?.recovering || host?.restarting) throw httpError(409, '控制台正在恢复会话，请稍后再试');
+    if ((await running()).has(id)) throw httpError(409, '会话正在运行，请先关闭它再删除');
     return trashSession(dir, id);
-  }],
+  })],
   // 归档: put conversations away from the workspace (or back), several at once (a whole project)
   ['POST', /^\/api\/sessions\/archive$/, (req, m, body) => {
     const ids = Array.isArray(body?.ids) ? body.ids.filter((id) => typeof id === 'string' && /^[\w-]{1,80}$/.test(id)) : [];
@@ -518,8 +684,13 @@ export const routes = [
   ['DELETE', /^\/api\/trash$/, () => ({ removed: purgeTrash({ all: true }) })],
 
   ['GET', /^\/api\/live$/, async () => ({ sessions: await runningSessions() })],
+  ['GET', /^\/api\/live\/new\/options$/, (req, m, body, url) => newSessionOptions(url)],
   ['POST', /^\/api\/live\/new$/, (req, m, body) => newSession(body)],
   ['POST', /^\/api\/live\/([0-9a-f]{12})\/(send|interrupt|dialog|options|suggest|list|output|end)$/, async (req, [peerId, type], body) => {
+    if (host?.updating && type === 'send') throw httpError(409, '正在安装更新，请稍后再试');
+    if (type === 'end' && ![...(host?.apps || [])].some((app) => !app.exiting && app.peers?.id === peerId)) {
+      throw httpError(409, '请在对应的终端结束这个会话');
+    }
     const peer = findPeerById(peerId);
     const r = await peerRequest(peer, 'POST', '/command', { type, body: body || {} }, { timeout: type === 'options' ? 20_000 : 10_000 });
     if (r.status === 404) throw httpError(409, '这个会话的 claude-pro 版本较旧，不支持网页操作');
@@ -559,6 +730,8 @@ export const routes = [
   ['GET', /^\/api\/memory$/, () => memoryView()],
   ['GET', /^\/api\/projects$/, () => ({ projects: knownProjects() })],
   ['POST', /^\/api\/projects\/open$/, (req, m, body) => openProject(body)],
+  ['POST', /^\/api\/projects\/pick$/, () => pickProjectDirectory()],
+  ['GET', /^\/api\/projects\/directories$/, (req, m, body, url) => projectDirectories(url.searchParams.get('cwd'))],
   ['GET', /^\/api\/file$/, (req, m, b, url) => readFileInfo(checkedPath(url.searchParams.get('path')))],
   ['PUT', /^\/api\/file$/, (req, m, body) => {
     const file = checkedPath(body?.path);

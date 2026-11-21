@@ -187,7 +187,7 @@ export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(
 // (Until 2026-11-21 the transcript went there too, for the gateway's 远程控制 page, which is gone.)
 export class RemoteControl {
   // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model, version, machine, peerId}, status() -> object,
-  // peerMessage(message), contactEvent(event), changed() (online changed), refused(status) (the key was refused).
+  // peerMessage(message) (false defers delivery), contactEvent(event), changed() (online changed), refused(status).
   constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
@@ -200,6 +200,8 @@ export class RemoteControl {
     this.refused = null; // the status (401/403) of the gateway refusing the key after the start: the connection ended
     this.seenPeer = new Set(); // ids of the messages from other sessions already handled (the gateway sends again what was not acknowledged)
     this.lastStatus = '';
+    this.statusEpoch = 0;
+    this.statusSending = false;
     this.statusTimer = null;
     this.streamAbort = null;
   }
@@ -244,6 +246,7 @@ export class RemoteControl {
     if (data.id) this.id = data.id;
     this.registered = true;
     this.lastStatus = '';
+    this.statusEpoch++;
   }
 
   // The stream, kept open (and opened again) until close(): while it is open the session is online.
@@ -306,6 +309,7 @@ export class RemoteControl {
     }
     this.online = true;
     this.lastStatus = ''; // the gateway may have been restarted: it gets the status again
+    this.statusEpoch++;
     this.handlers.changed?.();
     this.flush();
     let last = Date.now();
@@ -349,15 +353,13 @@ export class RemoteControl {
   // drops it from the session's mailbox (it sends what was not acknowledged again when the stream reconnects).
   peerMessage(cmd) {
     const ack = () => this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, { cid: cmd.cid, ok: true }).catch(() => { /* sent again on reconnect, and dropped here as seen */ });
+    if (this.seenPeer.has(cmd.cid)) { ack(); return; }
     try {
-      if (this.seenPeer.has(cmd.cid)) { ack(); return; }
-      this.seenPeer.add(cmd.cid);
-      if (this.seenPeer.size > 500) this.seenPeer.delete(this.seenPeer.values().next().value);
       const f = cmd.from || {};
       const machine = f.machine || f.host || 'computer';
       // a contact's session (another person's account): its 通讯号 and how this account takes its tasks
       const account = typeof f.account === 'string' && f.account ? f.account : null;
-      this.handlers.peerMessage?.({
+      const accepted = this.handlers.peerMessage?.({
         id: cmd.cid,
         kind: cmd.kind === 'reply' ? 'reply' : 'task',
         text: String(cmd.text ?? ''),
@@ -367,7 +369,14 @@ export class RemoteControl {
           ...(account ? { account, trust: f.trust === 'auto' ? 'auto' : 'confirm' } : {}),
         },
       });
+      if (accepted === false) {
+        // A session moving into the console cannot take new work. Leave it in the mailbox for the next stream.
+        this.streamAbort?.abort();
+        return;
+      }
     } catch { /* the App's problem: the message is acknowledged anyway, or it would come back forever */ }
+    this.seenPeer.add(cmd.cid);
+    if (this.seenPeer.size > 500) this.seenPeer.delete(this.seenPeer.values().next().value);
     ack();
   }
 
@@ -403,17 +412,24 @@ export class RemoteControl {
     return { busy: Boolean(busy), name, title, cwd, model };
   }
 
-  flush() {
-    if (this.closed || !this.registered || !this.online) return;
+  async flush() {
+    if (this.closed || !this.registered || !this.online || this.statusSending) return;
     const status = this.status();
     const key = JSON.stringify(status);
     if (key === this.lastStatus) return;
-    this.lastStatus = key;
-    this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'status', status }] }).catch((e) => {
-      this.lastStatus = ''; // sent again next time
+    const epoch = this.statusEpoch;
+    this.statusSending = true; // one POST at a time: an older status must not overtake a newer one
+    try {
+      await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'status', status }] });
+      if (!this.closed && epoch === this.statusEpoch) this.lastStatus = key;
+    } catch (e) {
+      if (this.closed || epoch !== this.statusEpoch) return;
+      this.lastStatus = ''; // the gateway may or may not have received the POST; send the current status again
       if (e.status === 404) { this.registered = false; this.streamAbort?.abort(); }
       if (e.status === 401 || e.status === 403) this.refuse(e.status);
-    });
+    } finally {
+      this.statusSending = false;
+    }
   }
 
   // Ends the connection; resolves once the gateway was told (or gave up waiting). `restarting`: the session comes

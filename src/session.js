@@ -7,6 +7,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { CONFIG_DIR } from './config.js';
 import { PROMPT_CODE_VERSION } from './prompts.js';
+import { processAlive } from './utils/shell.js';
+import { listPeers } from './peers.js';
 
 // The directory of a project's state (conversations, memory, checkpoints, traces): its path with every character
 // but a-z, A-Z and 0-9 made '-', as Claude Code names it. A path with characters beyond ASCII in it also gets a hash
@@ -118,14 +120,68 @@ export function setArchived(ids, archived = true) {
   return data;
 }
 
+// Ownership is independent of peer servers: even --print and CLAUDE_PRO_PEERS=0 can own a transcript.
+// Both sides publish their intent before checking the other's marks. If a sweep got there first, the resume
+// must not read the transcript until it can claim it; if the owner got there first, the sweep leaves it alone.
+function markSession(id, kind) {
+  const key = crypto.createHash('sha256').update(process.platform === 'win32' ? id.toLowerCase() : id).digest('hex');
+  const dir = path.join(CONFIG_DIR, 'session-owners', key);
+  const file = path.join(dir, `${kind}-${process.pid}-${crypto.randomUUID()}`);
+  const create = () => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, '', { flag: 'wx' }); };
+  try { create(); } catch (e) { if (e.code !== 'ENOENT') throw e; create(); } // a concurrent release removed the empty dir
+  return {
+    dir,
+    close() {
+      try { fs.unlinkSync(file); } catch { /* already gone, or still protected */ }
+      try { fs.rmdirSync(dir); } catch { /* still in use */ }
+    },
+  };
+}
+
+function hasSessionMark(dir, kind) {
+  return fs.readdirSync(dir).some((name) => {
+    const [, type, pid] = /^(owner|sweep)-(\d+)-/.exec(name) || [];
+    if (!type) return false;
+    if (processAlive(Number(pid))) return type === kind;
+    try { fs.unlinkSync(path.join(dir, name)); } catch { /* already gone */ }
+    return false;
+  });
+}
+
+export function claimSession(id) {
+  const mark = markSession(id, 'owner');
+  try {
+    if (hasSessionMark(mark.dir, 'sweep')) throw new Error(`Session ${id} is being checked for expiration; try again.`);
+    return mark.close;
+  } catch (e) {
+    mark.close();
+    throw e;
+  }
+}
+
+// During an upgrade an older process may not publish ownership marks yet. Peer IDs aren't transcript IDs,
+// and /status can time out or change after a /resume. Conservatively keep its project's transcripts and traces.
+// (A process of this version says so in its peer file and is covered by its marks.)
+function foreignPeerIn(dir) {
+  return listPeers().some(({ pid, cwd, sessionClaims }) => {
+    if (pid === process.pid || sessionClaims) return false;
+    if (typeof cwd !== 'string' || !cwd) return true;
+    const abs = path.resolve(cwd);
+    const name = abs.replace(/[^a-zA-Z0-9]/g, '-');
+    const key = pathKey(dir);
+    const legacy = path.join(path.dirname(dir), name);
+    return key === pathKey(legacy) || key === pathKey(`${legacy}-${pathHash(abs)}`);
+  });
+}
+
 // Delete what is older than `days` (the cleanupPeriodDays setting, as in Claude Code: 30 by default), in every
 // project: conversations not written to since (they no longer appear in /resume), their traces, saved tool outputs
 // (at most 7 days) and /rewind snapshots (at most 14 days). The memory is never touched. Conversations were kept
 // for good before: 646 MB in 176 files in a month (2026-11-11), of which only the current project's tool outputs,
 // snapshots and traces were deleted, and only when a session started there. Runs in the background, at most once
 // an hour on the machine (`marker`); `keep`: conversation ids not to delete whatever their age (and the archived
-// ones are never deleted). Returns what went.
-export async function sweepOldData({ days, keep = [], root = path.join(CONFIG_DIR, 'projects'), now = Date.now() } = {}) {
+// ones are never deleted). `isOwned` is a synchronous fallback for owners without a claim. Returns what went.
+export async function sweepOldData({ days, keep = [], isOwned = () => false, root = path.join(CONFIG_DIR, 'projects'), now = Date.now() } = {}) {
   const done = { conversations: 0, files: 0, bytes: 0 };
   if (!(days >= 1)) return done;
   const marker = path.join(root, '.last-sweep');
@@ -136,6 +192,20 @@ export async function sweepOldData({ days, keep = [], root = path.join(CONFIG_DI
   const fsp = fs.promises;
   const list = async (dir) => { try { return await fsp.readdir(dir, { withFileTypes: true }); } catch { return []; } };
   const old = async (file, maxAgeMs) => { try { return now - (await fsp.stat(file)).mtimeMs > maxAgeMs; } catch { return false; } };
+  const removeSessionFile = (file, id, dir) => {
+    let mark;
+    try {
+      mark = markSession(id, 'sweep');
+      // Check after the async age test, then keep the ownership check, final stat and unlink together.
+      if (hasSessionMark(mark.dir, 'owner') || isOwned(id, dir) || foreignPeerIn(dir) || Object.hasOwn(archivedSessions(), id)) return false;
+      const stats = fs.statSync(file);
+      if (now - stats.mtimeMs <= days * day) return false;
+      fs.unlinkSync(file);
+      done.files++;
+      done.bytes += stats.size;
+      return true;
+    } catch { return false; } finally { mark?.close(); }
+  };
   const remove = async (file, isDir = false) => {
     try {
       const size = isDir ? 0 : (await fsp.stat(file)).size;
@@ -145,17 +215,26 @@ export async function sweepOldData({ days, keep = [], root = path.join(CONFIG_DI
       return true;
     } catch { return false; }
   };
+  // marks left by processes that ended without releasing them (a crash): nothing else removes them
+  const owners = path.join(CONFIG_DIR, 'session-owners');
+  for (const d of await list(owners)) {
+    if (!d.isDirectory()) continue;
+    try { hasSessionMark(path.join(owners, d.name), 'owner'); } catch { /* gone meanwhile */ }
+    try { fs.rmdirSync(path.join(owners, d.name)); } catch { /* still in use */ }
+  }
   for (const project of await list(root)) {
     if (!project.isDirectory()) continue;
     const dir = path.join(root, project.name);
     for (const e of await list(dir)) {
       const id = e.name.replace(/\.jsonl$/, '');
       if (!e.isFile() || id === e.name || keepIds.has(id)) continue;
-      if (await old(path.join(dir, e.name), days * day) && (await remove(path.join(dir, e.name)))) done.conversations++;
+      const f = path.join(dir, e.name);
+      if (await old(f, days * day) && removeSessionFile(f, id, dir)) done.conversations++;
     }
     for (const e of await list(path.join(dir, 'traces'))) { // a conversation's trace is written with it
       const f = path.join(dir, 'traces', e.name);
-      if (!keepIds.has(e.name.replace(/\.jsonl(\.\d+)?$/, '')) && (await old(f, days * day))) await remove(f);
+      const id = e.name.replace(/\.jsonl(\.\d+)?$/, '');
+      if (!keepIds.has(id) && (await old(f, days * day))) removeSessionFile(f, id, dir);
     }
     for (const e of await list(path.join(dir, 'tool-results'))) {
       const f = path.join(dir, 'tool-results', e.name);

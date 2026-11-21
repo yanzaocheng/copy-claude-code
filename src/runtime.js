@@ -13,7 +13,7 @@ import { isAbort } from './api.js';
 import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
-import { autoMemoryDir, sweepOldData, projectDir } from './session.js';
+import { autoMemoryDir, claimSession, sweepOldData, projectDir } from './session.js';
 import { loadAutoMemoryIndex, takeEnvSnapshot, takeEnvSnapshotAsync, localDate } from './context.js';
 import { canRestart } from './restart.js';
 import { RuntimeTrace } from './trace.js';
@@ -25,16 +25,9 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   config.owner = crypto.randomUUID();
   const trace = new RuntimeTrace({ cwd, sessionId, enabled: config.traceEnabled });
   applyRememberedChoices(config, flags); // what /model and /effort chose last time
+  if (flags.initialChoices && 'model' in flags.initialChoices) config.modelOverride = flags.initialChoices.model;
+  if (flags.initialChoices && 'effort' in flags.initialChoices) config.effortOverride = flags.initialChoices.effort;
   if (flags.verify) config.verifyOverride = flags.verify;
-  // Old conversations and what goes with them, in the background a while after the start (not in the self-check's
-  // throwaway process, nor a test's: CLAUDE_PRO_CONFIG_DIR points elsewhere then anyway)
-  if (process.env.CLAUDE_PRO_SELF_CHECK !== '1') {
-    setTimeout(() => {
-      sweepOldData({ days: config.setting('cleanupPeriodDays'), keep: [sessionId, config.sessionId] })
-        .then((done) => { if (done.files) trace.append('cleanup', { conversations: done.conversations, files: done.files, bytes: done.bytes }); })
-        .catch(() => {});
-    }, 15_000).unref();
-  }
   pruneStaleShellFiles();
   // Full access: nothing is ever asked.
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));
@@ -205,5 +198,34 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     runtime.agent.notifications.push({ taskId: task.id, text: taskNotification(task) });
     io.backgroundTaskDone?.(task);
   });
+
+  // A /resume must claim the new id before it reads the old transcript. If loading fails, keep the previous claim.
+  let ownedId, release;
+  runtime.useSession = (id, load = () => {}) => {
+    if (!id || id === ownedId) return load();
+    const next = claimSession(id);
+    let value;
+    try { value = load(); } catch (e) { next(); throw e; }
+    release?.();
+    ownedId = id;
+    release = next;
+    return value;
+  };
+  runtime.releaseSession = () => { release?.(); ownedId = release = undefined; };
+  // The REPL switches via useSession; print mode can only resume the id given at startup.
+  try { runtime.useSession(!io?.store && flags.resumeFile ? (flags.resumeId || sessionId) : sessionId); }
+  catch (e) { mcp.close(); throw e; }
+
+  if (process.env.CLAUDE_PRO_SELF_CHECK !== '1') {
+    setTimeout(() => {
+      if (io?.exiting) return;
+      // Read live state at the deletion point, also covering local Apps still in startup.
+      const isOwned = (id) => id === config.sessionId || id === io?.store?.id || [...(io?.host?.apps || [])].some((app) =>
+        !app.exiting && (id === app.store?.id || (!app.runtime && (id === app.flags?.resumeId || id === app.flags?.restart?.sessionId))));
+      sweepOldData({ days: config.setting('cleanupPeriodDays'), isOwned })
+        .then((done) => { if (done.files) trace.append('cleanup', { conversations: done.conversations, files: done.files, bytes: done.bytes }); })
+        .catch(() => {});
+    }, 15_000).unref();
+  }
   return runtime;
 }
