@@ -941,7 +941,7 @@ export class Agent {
     const tool = { name: 'Verify', summarize: () => command };
     const input = { command, timeout: this.config.bashMaxTimeout };
     const handle = this.io.toolStart?.({ id: `verify_${Date.now()}`, name: 'Verify', input }, tool, input, this) || {};
-    const ctx = { ...this.makeCtx(signal), cwd: this.projectRoot, setCwd() {} };
+    const ctx = { ...this.makeCtx(signal), cwd: this.projectRoot };
     ctx.onProgress = (p, meta) => handle.progress?.(p, meta);
     let result;
     try {
@@ -1027,7 +1027,6 @@ export class Agent {
     const agent = this;
     return {
       get cwd() { return agent.cwd; },
-      setCwd(dir) { agent.cwd = dir; },
       projectRoot: this.projectRoot,
       config: this.config,
       signal,

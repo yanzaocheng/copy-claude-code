@@ -1058,8 +1058,6 @@ export class App {
       continueWith: request.continueTurn ? restartNote(request) : '',
       cwd: request.cwd || this.cwd,
       changedDirectory: Boolean(request.cwd),
-      // where the agent's shell is (a `cd` in Bash moves it): the next process goes on there, not at the project's root
-      agentCwd: request.cwd ? null : this.agent.cwd,
       // the browser instance in use (it may be any of several): the next process connects to it again, where the
       // tab ids in the conversation are still its tabs'
       browser: browserSession.preferred || null,
@@ -1119,9 +1117,6 @@ export class App {
       this.loadSession(state.sessionFile, state.sessionId, { quiet: true });
       if (Array.isArray(state.todos)) this.agent.todos = state.todos;
       if (state.checkpoints) this.runtime.checkpoints.adopt(state.checkpoints);
-      if (typeof state.agentCwd === 'string' && state.agentCwd !== this.cwd) {
-        try { if (fs.statSync(state.agentCwd).isDirectory()) this.agent.cwd = state.agentCwd; } catch { /* gone: the project's root */ }
-      }
     }
     if (state.browser && typeof state.browser === 'object' && typeof state.browser.dir === 'string') browserSession.preferred = state.browser;
     if (typeof state.draft === 'string' && state.draft) this.editor.restoreDraft(state.draft, state.draftCursor, state.draftParts);
@@ -2527,7 +2522,7 @@ export class App {
     return { lines, cursor, input };
   }
 
-  // In the input box's top border: the directory the agent is in now (a `cd` moves it), and this
+  // In the input box's top border: the session's directory (only /cd changes it), and this
   // session's name for the other sessions.
   boxTitle() {
     const dir = this.agent?.cwd || this.cwd;

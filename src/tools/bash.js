@@ -60,7 +60,7 @@ export function makeBashTool(config) {
   const isCmd = shell.kind === 'cmd';
   return {
     name: 'Bash',
-    description: `Executes a given ${isCmd ? 'cmd.exe' : 'bash'} command with an optional timeout. The working directory persists between commands; shell state (variables, functions) does not.
+    description: `Executes a given ${isCmd ? 'cmd.exe' : 'bash'} command with an optional timeout. Every command starts in the session's working directory: a \`cd\` lasts for that command only, and shell state (variables, functions) does not persist either.
 
 This tool is for terminal operations like git, npm, docker, running builds and tests. For file work use the dedicated tools instead of shell commands: Read, not cat/head/tail; Edit, not sed/awk; Write, not echo or heredoc redirection; Glob and Grep, not find and grep. An edit made with Edit, MultiEdit or Write can be undone with /rewind and is shown to the user as a diff; one made by a command (a script that rewrites the file, sed -i) is neither. To edit and then build or test in one step, put the edit calls and the Bash call in the same response: they run in that order. A script is fine for a mechanical change across many files, once you know git can bring them back.
 
@@ -92,7 +92,6 @@ When you commit (the system prompt says when): run git status, git diff and git 
       const command = String(input.command || '').trim();
       if (!command) return { isError: true, content: 'Empty command' };
       const stdinText = typeof input.stdin === 'string' ? input.stdin : undefined;
-      const cwdFile = path.join(os.tmpdir(), `claude-pro-cwd-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       let cwd = ctx.cwd;
       if (!fs.existsSync(cwd)) cwd = ctx.projectRoot;
 
@@ -122,7 +121,7 @@ When you commit (the system prompt says when): run git status, git diff and git 
         let timedOut = false;
         let child;
         try {
-          child = spawnShell(shell, command, { cwd, env: childEnv(), cwdFile, stdin: stdinText });
+          child = spawnShell(shell, command, { cwd, env: childEnv(), stdin: stdinText });
         } catch (e) {
           resolve({ isError: true, content: `Failed to start shell: ${e.message}` });
           return;
@@ -133,11 +132,6 @@ When you commit (the system prompt says when): run git status, git diff and git 
         const finish = (code, err) => {
           clearTimeout(timer);
           ctx.signal?.removeEventListener('abort', onAbort);
-          try {
-            const newCwd = fs.readFileSync(cwdFile, 'utf8').trim();
-            if (newCwd && fs.existsSync(newCwd)) ctx.setCwd(path.resolve(newCwd));
-          } catch { /* command may have exited early */ }
-          fs.rm(cwdFile, { force: true }, () => {});
           if (ctx.signal?.aborted) {
             reject(Object.assign(new Error('aborted'), { name: 'AbortError', partialOutput: output }));
             return;
