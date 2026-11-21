@@ -546,9 +546,13 @@
     let d;
     try { d = await api(`/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`); } catch (e) { el.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
     if (d.running) { location.replace(`#/live/${d.running}`); return; }
+    // A conversation is opened as a running one: the console takes it up (in a tenth of a second) and the live view
+    // replaces this one; what is drawn here meanwhile is the same conversation. (The console puts it away again once
+    // nobody has looked at it for a while: see SessionHost.reap.)
+    const here = location.hash;
     const base = `/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`;
     el.innerHTML = `<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><span class="pill">未运行</span><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-composer" id="hcomp"></div></div></div>`;
     const log = $("#log", el);
@@ -598,7 +602,9 @@
       },
     });
     const done = cleanup;
-    cleanup = () => { done(); hc.dispose(); };
+    let left = false;
+    cleanup = () => { left = true; done(); hc.dispose(); };
+    start(true).then((peerId) => { if (peerId && !left && location.hash === here) { loadWorkspace(); location.replace(`#/live/${peerId}`); } }).catch(() => { /* stays as it is: sending starts it */ });
     let toolsShown = true;
     $("#hmenu", el).addEventListener("click", (e) => {
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [

@@ -341,6 +341,9 @@ export class App {
   // Whether this session can restart (to load new code, or for /cd): under the supervisor, or in the web console.
   canRestart() { return Boolean(this.host) || canRestart(); }
   get owner() { return this.runtime?.config.owner; }
+  // Whether the conversation is being worked on, not only looked at: a session the web console took up because its
+  // conversation was opened is not, until it runs a turn (`used`, carried over by a restart).
+  inUse() { return !this.host || Boolean(this.used); }
   get config() { return this.runtime.config; }
   get width() { return this.screen.width; }
   isTurnRunning() { return this.busy || this.turnStarting; }
@@ -1204,6 +1207,7 @@ export class App {
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
       restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between
+      used: this.inUse(),
     };
   }
 
@@ -1251,6 +1255,7 @@ export class App {
     // The Effort tool's level holds for the request the restart continues, not for the user's next one.
     if (state.effortBoost) { cfg.effortBoost = state.effortBoost; cfg.effortBoostKeepNext = Boolean(state.continueWith); }
     this.restarts = (Array.isArray(state.restarts) ? state.restarts : []).filter((t) => Number.isFinite(t));
+    this.used = state.used !== false; // (a state from before it was kept: a session in use)
     if (resumable) {
       this.loadSession(state.sessionFile, state.sessionId, { quiet: true });
       if (Array.isArray(state.todos)) this.agent.todos = state.todos;
@@ -1886,6 +1891,7 @@ export class App {
   }
 
   async runAgent(content, { peers = [] } = {}) {
+    this.used = true; // (see inUse)
     this.turnStarting = false;
     this.busy = true;
     this.turnPeers.push(...peers);
@@ -2060,8 +2066,10 @@ export class App {
     this.store.systemPrompt = loaded.systemPrompt;
     this.runtime.resumeSystemPrompt(loaded.systemPrompt, loaded.promptCode);
     // Its cache still warm (a restart, a quick resume): it goes on being refreshed while idle (keepalive.js).
-    this.agent.restoreCacheState(loaded.cacheState);
-    if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
+    // (in the web console a conversation is taken up as soon as it is opened: one only looked at costs nothing, no
+    // cache refreshes and no title request, until it is used)
+    this.agent.restoreCacheState(loaded.cacheState, { keepWarm: this.inUse() });
+    if (!this.topic && this.inUse()) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
     this.liveFeed.resync();
     if (quiet) return;
     const restoredCount = loaded.messages.length;

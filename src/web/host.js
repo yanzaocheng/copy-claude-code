@@ -23,7 +23,7 @@ import { REMOTE_WIDTH } from '../remote.js';
 export const rosterFile = () => path.join(CONFIG_DIR, 'web-running.json');
 export const handoffFile = () => path.join(CONFIG_DIR, 'web-handoff.json');
 const errorLog = () => path.join(CONFIG_DIR, 'web-errors.log');
-export const hostTiming = { emptyQuietMs: 2000, recheckMs: 5000, handoffMaxAgeMs: 10 * 60_000, startMs: 20_000 };
+export const hostTiming = { idleMs: 30 * 60_000, emptyQuietMs: 2000, recheckMs: 5000, handoffMaxAgeMs: 10 * 60_000, startMs: 20_000 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
@@ -65,6 +65,9 @@ export class SessionHost {
     this.watcher = null;
     this.rosterTimer = setInterval(() => this.saveRoster(), 60_000); // (the model of each, which changes in between)
     this.rosterTimer.unref();
+    this.idleSince = new Map(); // app -> since when nothing has gone on in it and no page has watched it
+    this.reapTimer = setInterval(() => this.reap(), 60_000);
+    this.reapTimer.unref();
   }
 
   get size() { return this.apps.size; }
@@ -100,6 +103,7 @@ export class SessionHost {
       this.apps.delete(app);
       this.requests.delete(app);
       this.told.delete(app);
+      this.idleSince.delete(app);
       if (!this.restarting) { this.saveRoster(); this.check(); }
     });
     // up: its runtime exists (its peer server, which the page talks to, comes before it)
@@ -107,6 +111,23 @@ export class SessionHost {
     while (!app.runtime && !app.exiting && Date.now() < until) await sleep(50);
     this.saveRoster();
     return app;
+  }
+
+  // A session nobody works in or looks at for a while is put away: opening the conversation (or sending to it) takes
+  // it up again in a tenth of a second, so the page does not tell running and saved conversations apart, and what
+  // the console holds is what is in use. Not one that works, asks, has something queued or running in the background,
+  // or waits for a restart.
+  reap(now = Date.now()) {
+    if (this.restarting) return;
+    for (const app of this.apps) {
+      if (app.exiting || !app.runtime) continue;
+      const busy = app.working() || this.requests.has(app) || app.liveFeed?.active;
+      if (busy || !this.idleSince.has(app)) { this.idleSince.set(app, now); continue; }
+      if (now - this.idleSince.get(app) >= hostTiming.idleMs) {
+        this.idleSince.delete(app);
+        try { app.exit(0); } catch (e) { this.log(e, 'put away'); }
+      }
+    }
   }
 
   // /cd in one session: it alone starts again, in the new directory, with the state it left.
@@ -139,6 +160,7 @@ export class SessionHost {
       peerName: a.peers?.name || a.sessionName || null,
       modelOverride: a.runtime?.config.modelOverride ?? null,
       effortOverride: a.runtime?.config.effortOverride ?? null,
+      used: a.inUse(),
     }));
     try { writeJson(rosterFile(), { pid: process.pid, at: Date.now(), sessions }); } catch (e) { this.log(e, 'roster'); }
   }
@@ -288,6 +310,7 @@ export class SessionHost {
   close() {
     clearTimeout(this.timer);
     clearInterval(this.rosterTimer);
+    clearInterval(this.reapTimer);
     this.watcher?.close();
   }
 }

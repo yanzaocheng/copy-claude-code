@@ -693,11 +693,12 @@ export class Agent {
     return s && { ...s, since: this.keepAlive?.pauseStart || 0 };
   }
 
-  // A loaded conversation whose cache the session file says is still warm: refreshed from here on as well.
-  restoreCacheState(state) {
+  // A loaded conversation whose cache the session file says is still warm: refreshed from here on as well, unless
+  // `keepWarm` is false (a conversation only opened to be looked at: its next turn keeps its cache warm again).
+  restoreCacheState(state, { keepWarm = true } = {}) {
     if (!this.cache.restore(state)) return false;
     this.keepAlive?.noteRequest(state.since || 0);
-    this.keepAlive?.plan();
+    if (keepWarm) this.keepAlive?.plan();
     return true;
   }
 
