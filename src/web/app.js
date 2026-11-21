@@ -299,12 +299,14 @@
 
   let cleanup = null; // what the current view leaves behind (timers, streams)
   function route() {
-    if (cleanup) { try { cleanup(); } catch { /* ignore */ } cleanup = null; }
     const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
     const page = parts[0] || "overview";
     $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === page || (page === "session" && a.dataset.nav === "sessions")));
+    // another session of 运行中: the list stays, only the right side changes
+    if (page === "live" && liveSplit && main.contains(liveSplit.root)) { liveSplit.select(parts[1] || null); return; }
+    if (cleanup) { try { cleanup(); } catch { /* ignore */ } cleanup = null; }
     main.scrollTop = 0;
-    const views = { overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => (parts[1] ? liveView(parts[1]) : liveList()), providers, settings, memory, extensions, usage };
+    const views = { overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => live(parts[1] || null), providers, settings, memory, extensions, usage };
     (views[page] || overview)();
   }
   const page = (html, wide = false) => { main.innerHTML = `<div class="page${wide ? " wide" : ""}">${html}</div>`; return $(".page", main); };
@@ -472,33 +474,56 @@
     } catch { /* next time */ }
   }
 
-  async function liveList() {
-    const el = page('<h1>运行中</h1><p class="sub">这台电脑上开着的 claude-pro 会话：实时查看、发消息、回答问题、停止</p><div id="cards"><div class="empty">正在加载…</div></div>');
+  // 运行中: the sessions on the left, the one chosen on the right (live), as a chat app lays out its conversations.
+  let liveSplit = null;
+  function live(peerId) {
+    const el = page(`<div class="split" id="lsplit"><aside class="split-list"><div class="split-head"><h2>运行中</h2><span class="muted" id="lcount"></span></div><div id="lrows"><div class="empty">正在加载…</div></div></aside><section class="split-main" id="lmain"></section></div>`, true);
+    const root = $("#lsplit", el);
+    let current = null;
+    let viewCleanup = null;
+    let sessions = [];
+    const rows = $("#lrows", el);
     const draw = async () => {
       let data;
-      try { data = await api("/api/live"); } catch (e) { $("#cards", el).innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
-      refreshLiveBadge(data.sessions);
-      $("#cards", el).innerHTML = data.sessions.length ? `<div class="cards">${data.sessions.map((s) => {
+      try { data = await api("/api/live"); } catch (e) { rows.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
+      sessions = data.sessions;
+      refreshLiveBadge(sessions);
+      $("#lcount", el).textContent = sessions.length ? `${sessions.length} 个` : "";
+      rows.innerHTML = sessions.length ? sessions.map((s) => {
         const [cls, label] = liveState(s);
         const st = s.status || {};
-        return `<div class="panel live-card" data-peer="${esc(s.peerId)}"><div class="top"><span class="dot-state ${cls}"></span><strong>${esc(st.title || s.name)}</strong><span class="pill ${cls === "ask" ? "off" : cls === "busy" ? "warn" : "ok"}">${esc(label)}</span></div>
-          <div class="muted mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@${esc(s.name)} · ${esc(shortPath(st.cwd || s.cwd))}</div>
-          <div class="muted" style="font-size:12px">${esc(st.model || "")}${st.cost != null ? ` · ${fmtUsd(st.cost)}` : ""}${st.context?.window ? ` · 上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""}${st.rc ? " · ⇄ 远程控制" : ""}</div></div>`;
-      }).join("")}</div>` : '<div class="panel"><div class="empty">现在没有运行中的会话。在终端里启动 claude-pro 后会出现在这里。</div></div>';
+        return `<a class="lrow${s.peerId === current ? " active" : ""}" href="#/live/${esc(s.peerId)}" title="${esc(st.title || s.name)}"><div class="lrow-top"><span class="dot-state ${cls}"></span><strong>${esc(st.title || s.name)}</strong>${cls ? `<span class="pill ${cls === "ask" ? "off" : "warn"}">${esc(label)}</span>` : ""}</div>
+          <div class="lrow-sub mono">@${esc(s.name)} · ${esc(shortPath(st.cwd || s.cwd))}</div>
+          <div class="lrow-sub">${esc(st.model || "")}${st.cost != null ? ` · ${fmtUsd(st.cost)}` : ""}${st.context?.window ? ` · ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""}${st.rc ? " · ⇄" : ""}</div></a>`;
+      }).join("") : '<div class="empty">现在没有运行中的会话。在终端里启动 claude-pro 后会出现在这里。</div>';
+      if (current && !sessions.some((s) => s.peerId === current) && !$("#lmain .live-wrap", el)) select(null);
     };
-    await draw();
+    function select(id) {
+      if (id === current && (id || $("#lmain", el).childElementCount)) return;
+      if (viewCleanup) { try { viewCleanup(); } catch { /* ignore */ } viewCleanup = null; }
+      current = id;
+      root.classList.toggle("has-sel", Boolean(id));
+      $$(".lrow", rows).forEach((r) => r.classList.toggle("active", r.getAttribute("href") === `#/live/${id}`));
+      const box = $("#lmain", el);
+      if (id) viewCleanup = liveView(id, box);
+      else box.innerHTML = `<div class="split-empty"><div class="brand-logo" style="width:44px;height:44px;font-size:22px">c</div><h2>选择左边的会话</h2><p class="muted">实时查看它在做什么，给它发消息、回答它的问题，或停止当前任务</p></div>`;
+    }
+    liveSplit = { root, select };
+    select(peerId);
+    draw();
     const timer = setInterval(draw, 3000);
-    cleanup = () => clearInterval(timer);
-    $("#cards", el).addEventListener("click", (e) => { const c = e.target.closest("[data-peer]"); if (c) location.hash = `#/live/${c.dataset.peer}`; });
+    cleanup = () => { clearInterval(timer); if (viewCleanup) viewCleanup(); liveSplit = null; };
   }
 
-  function liveView(peerId) {
-    const el = page(`<div class="live-wrap">
-      <div class="convo-head" style="margin:0"><div><a href="#/live" class="muted" style="font-size:13px">← 运行中</a><h2 id="ltitle" style="margin-top:4px;font-size:18px">连接中…</h2><div class="path" id="lsub"></div></div><div class="actions"><span id="lconn" class="pill">连接中</span></div></div>
+  // A running session, live, in `box`. Returns what stops it.
+  function liveView(peerId, box) {
+    box.innerHTML = `<div class="live-wrap">
+      <div class="convo-head" style="margin:0"><div><a href="#/live" class="muted back-mobile" style="font-size:13px">← 运行中</a><h2 id="ltitle" style="margin-top:4px;font-size:18px">连接中…</h2><div class="path" id="lsub"></div></div><div class="actions"><span id="lconn" class="pill">连接中</span></div></div>
       <div class="log" id="log"></div>
       <div class="live-foot"><div class="status-line" id="lstatus"></div><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div>
         <form class="send-form" id="lform"><textarea id="linput" rows="1" placeholder="发给这个会话（和在终端输入框里回车一样：/命令、!命令、@会话 都可以）。Enter 发送，Shift+Enter 换行"></textarea><button type="button" class="button danger hidden" id="lstop">停止</button><button class="button" type="submit">发送</button></form></div>
-    </div>`, true);
+    </div>`;
+    const el = box;
     const log = $("#log", el);
     const input = $("#linput", el);
     const elements = new Map();
@@ -616,7 +641,7 @@
     es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch { /* skip */ } };
     es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "已断开" : "重新连接中…"; conn.className = "pill warn"; };
     const tick = setInterval(renderStatus, 250);
-    cleanup = () => { es.close(); clearInterval(tick); };
+    const stop = () => { es.close(); clearInterval(tick); };
 
     const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(220, input.scrollHeight + 2)}px`; };
     input.addEventListener("input", autosize);
@@ -635,6 +660,7 @@
     });
     $("#lstop", el).addEventListener("click", () => post("interrupt").catch(fail));
     input.focus();
+    return stop;
   }
 
   // ---------------------------------------------------------------- 模型与供应商
