@@ -588,7 +588,6 @@
       throw new Error("会话 30 秒内没有上线");
     };
     const open = async (peerId) => { await loadWorkspace(); location.hash = `#/live/${peerId}`; };
-    const resume = (background) => start(background).then((peerId) => peerId && open(peerId)).catch(fail);
     // Writing to it starts it: the message goes to it once its live view watches it (as for a new session)
     const hc = composer($("#hcomp", el), {
       placeholder: "发消息继续这个对话，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
@@ -605,29 +604,15 @@
     let left = false;
     cleanup = () => { left = true; done(); hc.dispose(); };
     start(true).then((peerId) => { if (peerId && !left && location.hash === here) { loadWorkspace(); location.replace(`#/live/${peerId}`); } }).catch(() => { /* stays as it is: sending starts it */ });
-    let toolsShown = true;
     $("#hmenu", el).addEventListener("click", (e) => {
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
-        { label: "改名", value: "rename" },
-        { label: "在终端窗口里继续", value: "terminal" },
         { label: "导出 Markdown", value: "export" },
-        { label: toolsShown ? "隐藏工具调用" : "显示工具调用", value: "tools" },
         { label: d.archived ? "取消归档" : "归档", description: d.archived ? "回到工作区" : "从工作区收起，内容保留", value: "archive" },
-        { label: "删除（进回收站）", value: "delete" },
+        { label: "删除", description: "先进回收站，7 天内可以恢复", value: "delete" },
       ] }], async (key, value) => {
         try {
-          if (value === "rename") {
-            const name = prompt("会话的新名字（留空则去掉名字）", d.name || "");
-            if (name === null) return;
-            await api(`${base}/rename`, { method: "POST", body: { name } });
-            toast("已改名");
-            loadWorkspace();
-            sessionView(dir, id);
-          }
           if (value === "export") location.href = `${base}/export`;
-          if (value === "terminal") resume(false);
           if (value === "archive") { await archive([id], !d.archived); d.archived = !d.archived; }
-          if (value === "tools") { toolsShown = !toolsShown; $$(".it-tool", log).forEach((n) => n.classList.toggle("hidden", !toolsShown)); }
           if (value === "delete" && confirm(`删除「${d.title}」？会先移到回收站，保留 7 天。`)) {
             await api(base, { method: "DELETE" });
             toast("已移到回收站");
@@ -993,7 +978,7 @@
 
   function liveView(peerId) {
     const el = page(`<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill">连接中</span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle" title="点击改名">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill">连接中</span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-extra"><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
         <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
@@ -1032,34 +1017,46 @@
     };
     $("#lmodel", el).addEventListener("click", choose("model", "模型", "models"));
     $("#leffort", el).addEventListener("click", choose("effort", "推理强度", "efforts"));
+    // the title is renamed where it is: click, type, Enter (Esc: as it was)
+    const titleEl = $("#ltitle", el);
+    titleEl.addEventListener("click", () => {
+      if (titleEl.isContentEditable) return;
+      const before = titleEl.textContent;
+      titleEl.contentEditable = "plaintext-only";
+      titleEl.classList.add("editing");
+      titleEl.focus();
+      document.getSelection().selectAllChildren(titleEl);
+      const finish = (save) => {
+        titleEl.removeEventListener("keydown", onKey);
+        titleEl.removeEventListener("blur", onBlur);
+        titleEl.contentEditable = "false";
+        titleEl.classList.remove("editing");
+        const name = titleEl.textContent.replace(/\s+/g, " ").trim();
+        if (!save || !name || name === before) { titleEl.textContent = before; return; }
+        post("send", { text: `/rename ${name}` }).then(() => loadWorkspace()).catch((err) => { titleEl.textContent = before; fail(err); });
+      };
+      const onKey = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); finish(true); } if (ev.key === "Escape") finish(false); };
+      const onBlur = () => finish(true);
+      titleEl.addEventListener("keydown", onKey);
+      titleEl.addEventListener("blur", onBlur);
+    });
     $("#lmenu", el).addEventListener("click", (e) => {
       const known = ws.sessions.find((s) => s.id === status.sessionId);
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
-        { label: "改名（/rename）", value: "rename" },
-        { label: "压缩上下文（/compact）", value: "compact" },
-        ...(known ? [{ label: "导出 Markdown", value: "export" }, { label: "归档", description: "从工作区收起，内容保留", value: "archive" }] : []),
-        ...(status.hidden && known ? [{ label: "在终端窗口里继续", description: "在终端标签里接着这个对话", value: "terminal" }] : []),
-        ...(known ? [{ label: "删除（进回收站）", value: "delete" }] : []),
+        { label: "导出 Markdown", value: "export" },
+        { label: "归档", description: "从工作区收起，内容保留", value: "archive" },
+        { label: "删除", description: "先进回收站，7 天内可以恢复", value: "delete" },
       ] }], async (key, value) => {
+        if (!known) return toast("这个对话还没有内容");
         const sessionId = status.sessionId;
         const busy = Boolean(status.turn);
         const base = known ? `/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}` : "";
         try {
-          if (value === "rename") { const name = prompt("新的名字", status.title || ""); if (name) await post("send", { text: `/rename ${name}` }); }
-          if (value === "compact") await post("send", { text: "/compact" });
           if (value === "export") location.href = `${base}/export`;
           if (value === "archive") {
             if (busy && !confirm("它正在工作，归档会停止当前任务。确定归档？")) return;
             await putAway(sessionId, { force: busy });
             await archive([sessionId]);
-            location.hash = "#/new";
-          }
-          if (value === "terminal") {
-            if (busy && !confirm("它正在工作，改到终端会停止当前任务。确定？")) return;
-            await putAway(sessionId, { force: busy });
-            const r = await api(`${base}/open`, { method: "POST", body: { terminal: true } });
-            toast(r.opened ? `已在 ${r.how} 里继续` : `请在终端运行：${r.command}`);
-            await loadWorkspace();
             location.hash = "#/new";
           }
           if (value === "delete") {
@@ -1115,7 +1112,7 @@
     function setStatus(next) {
       status = next || {};
       statusAt = Date.now();
-      $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
+      if (!$("#ltitle", el).isContentEditable) $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
       $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? "" : " · 在终端窗口里运行"}`;
       $("#lmodel span", el).textContent = status.model || "模型";
       $("#leffort span", el).textContent = status.effort || "推理强度";
