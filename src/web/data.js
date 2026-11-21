@@ -353,19 +353,22 @@ function traceRows(file) {
     try { e = JSON.parse(line); } catch { continue; }
     if (!e.ok && !e.output_tokens) continue;
     const usage = { input_tokens: e.input_tokens, output_tokens: e.output_tokens, cache_read_input_tokens: e.cache_read_tokens, cache_creation_input_tokens: e.cache_write_tokens };
-    rows.push({ day: localDay(e.time), model: e.model || '?', session: e.session_id, input: e.input_tokens || 0, output: e.output_tokens || 0, cacheRead: e.cache_read_tokens || 0, cacheWrite: e.cache_write_tokens || 0, cost: costOf(e.model, usage) });
+    rows.push({ day: localDay(e.time), hour: new Date(e.time).getHours(), model: e.model || '?', session: e.session_id, input: e.input_tokens || 0, output: e.output_tokens || 0, cacheRead: e.cache_read_tokens || 0, cacheWrite: e.cache_write_tokens || 0, cost: costOf(e.model, usage) });
   }
   usageMemo.set(file, { mtime: st.mtimeMs, size: st.size, rows });
   return rows;
 }
 
-// Tokens and (where the model has a price here) cost by day, model and project, from every project's traces; and
-// each conversation's own total (its meta), which covers what the traces do not price.
+// Tokens and (where the model has a price here) cost by day (by hour too for today alone, `days` 1), model, project
+// and conversation, from every project's traces; and each conversation's own total (its meta), which covers what
+// the traces do not price.
 export function usageReport({ days = 30 } = {}) {
   const since = localDay(new Date(Date.now() - (days - 1) * 86_400_000).toISOString());
   const byDay = new Map();
   const byModel = new Map();
   const byProject = new Map();
+  const bySession = new Map();
+  const byHour = new Map();
   const add = (map, key, r) => {
     const e = map.get(key) || { key, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unpriced: 0 };
     e.requests++;
@@ -387,6 +390,8 @@ export function usageReport({ days = 30 } = {}) {
         add(byDay, r.day, r);
         add(byModel, r.model, r);
         add(byProject, cwdOfDir.get(d.name) || d.name, r);
+        if (r.session) add(bySession, r.session, r);
+        if (days === 1) add(byHour, r.hour, r);
       }
     }
   }
@@ -396,12 +401,19 @@ export function usageReport({ days = 30 } = {}) {
     dayList.push(byDay.get(key) || { key, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unpriced: 0 });
   }
   const sortCost = (a, b) => b.cost - a.cost || b.requests - a.requests;
+  const sessionById = new Map(sessions.map((s) => [s.id, s]));
+  const empty = (key) => ({ key, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unpriced: 0 });
   return {
     days: dayList,
+    // today, hour by hour up to now
+    ...(days === 1 ? { hours: Array.from({ length: new Date().getHours() + 1 }, (_, h) => ({ ...(byHour.get(h) || empty(h)), key: `${String(h).padStart(2, '0')}:00` })) } : {}),
     models: [...byModel.values()].sort(sortCost),
     projects: [...byProject.values()].sort(sortCost),
-    sessions: sessions.filter((s) => s.cost > 0).sort((a, b) => b.cost - a.cost).slice(0, 30)
-      .map(({ id, dir, cwd, title, cost, mtime }) => ({ id, dir, cwd, title, cost, mtime })),
+    // the conversations that cost most in this period (a deleted one has no title, nor a page to open)
+    sessions: [...bySession.values()].sort(sortCost).slice(0, 30).map((e) => {
+      const s = sessionById.get(e.key);
+      return { id: e.key, dir: s?.dir || null, cwd: s?.cwd || null, title: s?.title || null, mtime: s?.mtime || null, cost: e.cost, requests: e.requests, unpriced: e.unpriced };
+    }),
     totalSessionCost: sessions.reduce((sum, s) => sum + s.cost, 0),
   };
 }

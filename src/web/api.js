@@ -779,7 +779,7 @@ export const routes = [
     return extensionsView(body?.project);
   }],
 
-  ['GET', /^\/api\/usage$/, (req, m, b, url) => usageReport({ days: Math.min(90, Math.max(7, Number(url.searchParams.get('days')) || 30)) })],
+  ['GET', /^\/api\/usage$/, (req, m, b, url) => usageReport({ days: Math.min(90, Math.max(1, Math.round(Number(url.searchParams.get('days'))) || 30)) })],
 ];
 
 function checkedProject(project) {
