@@ -414,6 +414,7 @@
   // ---------------------------------------------------------------- routing
 
   let cleanup = null; // what the current view leaves behind (timers, streams)
+  let closeMenu = null;
   function route() {
     const parts = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").map(decodeURIComponent); // (?tab=… is the view's own)
     const page = parts[0] || "new";
@@ -422,7 +423,7 @@
     showUserMenu(false);
     markActive();
     $("#tip")?.classList.add("hidden");
-    $(".pop")?.remove();
+    closeMenu?.();
     if (cleanup) { try { cleanup(); } catch { /* ignore */ } cleanup = null; }
     main.scrollTop = 0;
     $(".app").classList.remove("nav-open");
@@ -501,7 +502,7 @@
       $("#table").innerHTML = shown.length ? `<table class="list"><thead><tr><th>会话</th><th>最后使用</th><th class="num">消息</th><th class="num">大小</th><th class="num">花费</th></tr></thead><tbody>
         ${shown.map((s) => `<tr class="click" data-open="${esc(s.dir)}/${esc(s.id)}"><td class="title-cell"><strong>${s.running ? '<span class="pill ok">运行中</span> ' : ""}${esc(s.title)}</strong><div class="path">${esc(shortPath(s.cwd || s.dir))} · ${esc(s.id.slice(0, 8))}</div></td>
           <td title="${esc(fmtTime(s.mtime))}">${ago(s.mtime)}</td><td class="num">${s.count}</td><td class="num">${fmtBytes(s.size)}</td><td class="num">${s.cost ? fmtUsd(s.cost) : "—"}${tab === "archived" ? ` <button class="button secondary small" data-unarchive="${esc(s.id)}">取消归档</button>` : ""}</td></tr>`).join("")}
-      </tbody></table>` : `<div class="empty">${tab === "archived" ? "没有归档的会话：在工作区里鼠标移到会话上，点右边的归档按钮" : "没有符合条件的会话"}</div>`;
+      </tbody></table>` : `<div class="empty">${tab === "archived" ? "没有归档的会话：在工作区点会话右边的「…」，选择「归档」" : "没有符合条件的会话"}</div>`;
       $("#count").textContent = `共 ${list.length} 个${list.length > shown.length ? `，显示前 ${shown.length} 个（用搜索缩小范围）` : ""}`;
     };
     draw();
@@ -635,7 +636,6 @@
     newChat: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
     send: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
     stop: '<svg viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg>',
-    archive: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
     add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     caret: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
     more: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
@@ -675,20 +675,23 @@
       ws.sessions = s.sessions;
       ws.live = l.sessions;
       ws.loaded = true;
-      drawWorkspace();
+      if (!sidebarMenuOpen()) drawWorkspace();
     } catch (e) {
       if (!ws.loaded) $("#ws").innerHTML = `<div class="ws-empty">加载失败：${esc(e.message)}</div>`;
     }
   }
 
+  const sidebarMenuOpen = () => $("#ws [data-session-menu][aria-expanded=true]");
+
   function drawWorkspace() {
+    if (sidebarMenuOpen()) closeMenu?.();
     const box = $("#ws");
     const liveById = new Map(ws.live.map((l) => [l.peerId, l]));
     const known = new Set(ws.sessions.map((s) => s.id));
     // (an archived conversation is not listed, unless it runs again)
     const items = ws.sessions.filter((s) => !s.archived || s.running).map((s) => {
       const peer = s.running ? liveById.get(s.running) : null;
-      return { id: s.id, href: peer ? `#/live/${peer.peerId}` : `#/session/${s.dir}/${s.id}`, title: peer?.status?.title || s.title, cwd: s.cwd || s.dir, mtime: s.mtime, peer, alt: peer ? `#/session/${s.dir}/${s.id}` : null };
+      return { id: s.id, dir: s.dir, archived: s.archived, href: peer ? `#/live/${peer.peerId}` : `#/session/${s.dir}/${s.id}`, title: peer?.status?.title || s.title, cwd: s.cwd || s.dir, mtime: s.mtime, peer, alt: peer ? `#/session/${s.dir}/${s.id}` : null };
     });
     // running sessions with nothing written yet (just started)
     for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: l.startedAt || 0, peer: l });
@@ -718,7 +721,7 @@
         ws.tips.set(id, it);
         const [cls] = it.peer ? liveState(it.peer.status) : [""];
         const active = here === it.href || (it.alt && here === it.alt);
-        return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${working(it) ? "" : esc(shortAgo(it.mtime))}</span>${working(it) || !it.id ? "" : `<span class="ws-arch" role="button" data-archive="${esc(it.id)}" title="归档" aria-label="归档">${ICON.archive}</span>`}</a>`;
+        return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
       }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
       const running = g.items.filter(working).length;
       return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" title="更多" aria-label="项目菜单">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
@@ -728,14 +731,14 @@
   function markActive() {
     const here = location.hash;
     $$("#ws .ws-item").forEach((a) => {
-      const it = ws.tips.get(a.dataset.tip);
+      const it = ws.tips.get(a.parentElement.dataset.tip);
       a.classList.toggle("active", Boolean(it && (here === it.href || (it.alt && here === it.alt))));
     });
   }
 
   // 归档 (or back, `archived` false): out of the workspace, kept whole, never cleaned up by age
-  async function archive(ids, archived = true) {
-    if (archived) for (const id of ids) await putAway(id);
+  async function archive(ids, archived = true, { force = false } = {}) {
+    if (archived) for (const id of ids) await putAway(id, { force });
     await api("/api/sessions/archive", { method: "POST", body: { ids, archived } });
     for (const s of ws.sessions) if (ids.includes(s.id)) s.archived = archived ? Date.now() : undefined;
     drawWorkspace();
@@ -757,14 +760,53 @@
     }
   }
 
+  async function copySessionId(id) {
+    try {
+      await navigator.clipboard.writeText(id);
+      toast("已复制 Session ID");
+    } catch {
+      prompt("请手动复制 Session ID", id);
+    }
+  }
+
+  function sidebarSessionMenu(button, it) {
+    const items = [
+      { label: it.archived ? "取消归档" : "归档", value: "archive" },
+      { label: "复制 Session ID", value: "copy" },
+      { label: "删除对话", value: "delete", danger: true },
+    ];
+    popMenu(button, [{ key: "session", title: "", items }], async (_, value) => {
+      if (value === "copy") return copySessionId(it.id);
+      const s = ws.sessions.find((s) => s.id === it.id) || it;
+      const peer = ws.live.find((l) => l.status?.sessionId === it.id);
+      const busy = working({ peer });
+      const archiving = value === "archive" && !s.archived;
+      try {
+        if (value === "archive") {
+          if (archiving && busy && !confirm("它正在工作，归档会停止当前任务。确定归档？")) return;
+          await archive([it.id], archiving, { force: busy });
+        } else {
+          if (!confirm(`删除「${it.title}」？会先移到回收站，保留 7 天。${busy ? "它正在工作，会先停止。" : ""}`)) return;
+          await putAway(it.id, { force: busy });
+          await api(`/api/sessions/${encodeURIComponent(it.dir)}/${encodeURIComponent(it.id)}`, { method: "DELETE" });
+          toast("已移到回收站");
+          await loadWorkspace();
+        }
+        if ((value === "delete" || archiving) && (location.hash === it.href || location.hash === it.alt)) location.hash = "#/new";
+        else if (/^#\/sessions(?:\?|$)/.test(location.hash)) route();
+      } catch (e) { fail(e); }
+    }, { dropdown: true });
+  }
+
   function wireSidebar() {
     const box = $("#ws");
+    const tip = $("#tip");
     box.addEventListener("click", (e) => {
-      const arch = e.target.closest("[data-archive]");
-      if (arch) {
-        e.preventDefault();
-        e.stopPropagation();
-        archive([arch.dataset.archive]).catch(fail);
+      const menu = e.target.closest("[data-session-menu]");
+      if (menu) {
+        tip.classList.add("hidden");
+        const it = ws.tips.get(menu.closest("[data-tip]").dataset.tip);
+        if (it) sidebarSessionMenu(menu, it);
         return;
       }
       const pm = e.target.closest("[data-pmenu]");
@@ -793,11 +835,10 @@
       }
       if (x) { ws.expanded.add(x.dataset.expand); drawWorkspace(); }
     });
-    const tip = $("#tip");
     box.addEventListener("mouseover", (e) => {
       const a = e.target.closest("[data-tip]");
       const it = a && ws.tips.get(a.dataset.tip);
-      if (!it) { tip.classList.add("hidden"); return; }
+      if (!it || sidebarMenuOpen() || e.target.closest("[data-session-menu]")) { tip.classList.add("hidden"); return; }
       const [cls, label] = working(it) ? liveState(it.peer.status) : ["", ""];
       const st = it.peer?.status || {};
       tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div>${label || (it.peer && !st.hidden) ? `<div class="tip-state">${label ? `<span class="ws-dot ${cls}"></span>${esc(label)}` : ""}${it.peer && !st.hidden ? `${label ? " · " : ""}在终端窗口里运行` : ""}</div>` : ""}`;
@@ -807,7 +848,10 @@
       tip.style.top = `${Math.min(window.innerHeight - tip.offsetHeight - 8, r.top)}px`;
     });
     box.addEventListener("mouseleave", () => tip.classList.add("hidden"));
-    box.addEventListener("scroll", () => tip.classList.add("hidden"));
+    box.addEventListener("scroll", () => {
+      tip.classList.add("hidden");
+      if (sidebarMenuOpen()) closeMenu?.();
+    });
     $("#wsSearchBtn").addEventListener("click", () => {
       const input = $("#wsSearch");
       input.classList.toggle("hidden");
@@ -904,24 +948,44 @@
     };
   }
 
-  // A small menu under `anchor`: items [{label, description, current, value}], onPick(value).
-  function popMenu(anchor, sections, onPick) {
-    $(".pop")?.remove();
+  // A small menu next to `anchor`: onPick(section, value).
+  function popMenu(anchor, sections, onPick, { dropdown = false } = {}) {
+    const wasOpen = anchor.getAttribute("aria-expanded") === "true";
+    closeMenu?.();
+    if (wasOpen) return;
     const pop = document.createElement("div");
     pop.className = "pop";
-    pop.innerHTML = sections.map((s) => `<div class="pop-head">${esc(s.title)}</div>${s.items.map((it, i) => `<button type="button" data-s="${esc(s.key)}" data-i="${i}" class="${it.current ? "current" : ""}"><span>${esc(it.label)}</span>${it.description ? `<small>${esc(it.description)}</small>` : ""}</button>`).join("")}`).join("");
+    pop.innerHTML = sections.map((s) => `<div class="pop-head">${esc(s.title)}</div>${s.items.map((it, i) => `<button type="button" data-s="${esc(s.key)}" data-i="${i}" class="${it.current ? "current" : ""}${it.danger ? " danger" : ""}"><span>${esc(it.label)}</span>${it.description ? `<small>${esc(it.description)}</small>` : ""}</button>`).join("")}`).join("");
     document.body.appendChild(pop);
     const r = anchor.getBoundingClientRect();
     pop.style.left = `${Math.max(8, Math.min(window.innerWidth - pop.offsetWidth - 8, r.right - pop.offsetWidth))}px`;
-    pop.style.top = `${Math.max(8, r.top - pop.offsetHeight - 6)}px`;
-    const close = (e) => { if (!e || !pop.contains(e.target)) { pop.remove(); document.removeEventListener("mousedown", close); } };
-    setTimeout(() => document.addEventListener("mousedown", close), 0);
+    const below = dropdown && r.bottom + pop.offsetHeight + 14 <= window.innerHeight;
+    pop.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - pop.offsetHeight - 6)}px`;
+    const close = (focus = false) => {
+      pop.remove();
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+      closeMenu = null;
+      if (dropdown) {
+        anchor.setAttribute("aria-expanded", "false");
+        if (focus) anchor.focus({ preventScroll: true });
+      }
+    };
+    const outside = (e) => { if (!pop.contains(e.target) && !anchor.contains(e.target)) close(); };
+    const escape = (e) => { if (e.key === "Escape") { e.preventDefault(); close(true); } };
+    closeMenu = close;
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    if (dropdown) {
+      anchor.setAttribute("aria-expanded", "true");
+      $("button", pop)?.focus({ preventScroll: true });
+    }
     pop.addEventListener("click", (e) => {
       const b = e.target.closest("button");
       if (!b) return;
       const s = sections.find((x) => x.key === b.dataset.s);
+      close(true);
       onPick(s.key, s.items[Number(b.dataset.i)].value);
-      close();
     });
   }
 

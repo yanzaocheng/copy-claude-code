@@ -71,16 +71,18 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 .ws-folder svg { color: var(--muted); flex: none; }
 .ws-folder span:not(.ws-count) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-count { min-width: 18px; padding: 0 5px; border-radius: 99px; background: var(--ok-soft); color: var(--ok); font-size: 11px; line-height: 17px; text-align: center; }
+.ws-row { position: relative; }
 .ws-item { display: flex; align-items: center; gap: 7px; padding: 7px 10px 7px 34px; border-radius: 8px; color: var(--text); font-size: 13.5px; position: relative; }
-.ws-item:hover { background: var(--hover); text-decoration: none; }
-.ws-item.active { background: var(--active); }
+.ws-row:hover .ws-item, .ws-row:focus-within .ws-item, .ws-row:has(.ws-menu[aria-expanded=true]) .ws-item { background: var(--hover); text-decoration: none; }
+.ws-row .ws-item.active { background: var(--active); }
 .ws-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ago { color: var(--faint); font-size: 12px; flex: none; }
-.ws-arch { display: none; place-items: center; width: 22px; height: 22px; margin: -3px -4px -3px 0; border-radius: 6px; color: var(--muted); flex: none; cursor: pointer; }
-.ws-arch:hover { background: var(--surface-2); color: var(--text); }
-.ws-item:hover .ws-arch { display: grid; }
-.ws-item:hover .ws-ago { display: none; }
-@media (hover: none) { .ws-arch { display: none !important; } }
+.ws-menu { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; opacity: 0; pointer-events: none; }
+.ws-menu:hover, .ws-menu[aria-expanded=true] { background: var(--surface-2); color: var(--text); }
+.ws-row:is(:hover, :focus-within, :has(.ws-menu[aria-expanded=true])) .ws-menu { opacity: 1; pointer-events: auto; }
+.ws-row.has-menu:is(:hover, :focus-within, :has(.ws-menu[aria-expanded=true])) .ws-item { padding-right: 34px; }
+.ws-row.has-menu:is(:hover, :focus-within, :has(.ws-menu[aria-expanded=true])) .ws-ago { display: none; }
+@media (hover: none) { .ws-menu { opacity: 1; pointer-events: auto; } .ws-row.has-menu .ws-item { padding-right: 34px; } }
 .ws-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; display: inline-block; }
 .ws-item .ws-dot { position: absolute; left: 20px; }
 .ws-dot.busy { background: var(--warn); animation: blink 1s infinite; }
@@ -153,6 +155,7 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 .pop button { display: grid; width: 100%; padding: 7px 10px; border: 0; border-radius: 7px; background: none; color: var(--text); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
 .pop button:hover { background: var(--hover); }
 .pop button.current { color: var(--accent-text); font-weight: 600; }
+.pop button.danger { color: var(--danger); }
 .pop small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* parts */
