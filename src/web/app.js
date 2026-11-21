@@ -244,7 +244,7 @@
   // One transcript item as HTML. opts: {image(n): url, full: Map id -> text, canExpand}
   function itemHtml(item, opts = {}) {
     if (item.k === "user") return `<div class="it it-user"><div class="bubble">${esc(item.text)}</div></div>`;
-    if (item.k === "image") return `<div class="it it-image">${opts.image ? `<a href="${opts.image(item.n)}" target="_blank"><img src="${opts.image(item.n)}" alt="图片" loading="lazy"></a>` : "[图片]"}</div>`;
+    if (item.k === "image") return `<div class="it it-image">${opts.image ? `<img src="${opts.image(item.n)}" alt="图片" loading="lazy" data-zoom>` : "[图片]"}</div>`;
     if (item.k === "text") return `<div class="it it-text"><span class="mark">⏺</span><div class="md">${md(item.text)}</div></div>`;
     if (item.k === "thinking") return `<div class="it it-thinking"><details${item.open ? " open" : ""}><summary>✻ ${item.open ? "思考中…" : "思考过程"}</summary><div class="pre">${esc(item.text)}</div></details></div>`;
     if (item.k === "summary") return `<div class="it it-summary"><details><summary>✻ 对话已压缩（摘要）</summary><div class="md">${md(item.text)}</div></details></div>`;
@@ -319,6 +319,24 @@
     const open = box.classList.toggle("open");
     b.textContent = open ? "收起" : `展开全部 · ${box.querySelector("pre").textContent.split("\n").length} 行`;
     if (!open) box.scrollIntoView({ block: "nearest" });
+  });
+
+  // An image of the conversation (or of the message box) opens in a box over the page: Esc, a click or ✕ closes it.
+  function zoomImage(src) {
+    const back = document.createElement("div");
+    back.className = "zoom";
+    back.innerHTML = `<img src="${esc(src)}" alt="图片"><button type="button" class="zoom-close" aria-label="关闭">✕</button>`;
+    const close = () => { back.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    back.addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(back);
+  }
+  document.addEventListener("click", (e) => {
+    const img = e.target.closest("img[data-zoom], .thumb img");
+    if (!img) return;
+    e.preventDefault();
+    zoomImage(img.src);
   });
 
   // ---------------------------------------------------------------- whole tool outputs
