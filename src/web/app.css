@@ -307,10 +307,21 @@ details.proj > div { padding: 0 0 6px 18px; }
 .dot-state.ask { background: var(--danger); }
 
 
+.mobile-menu, .side-backdrop { display: none; }
+.remote-links { display: flex; gap: 8px; padding: 8px 6px 0; }
+.remote-links a, .remote-links button { flex: 1; text-align: center; padding: 6px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--text-2); font: inherit; font-size: 13px; cursor: pointer; }
+.remote-links a:hover, .remote-links button:hover { text-decoration: none; border-color: var(--accent); }
 @media (max-width: 860px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .side { max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
-  .page { padding: 18px 14px 40px; }
+  /* a phone: the sidebar is a drawer (☰), the conversation takes the screen */
+  .app { grid-template-columns: 1fr; height: 100dvh; }
+  .side { position: fixed; z-index: 45; top: 0; bottom: 0; left: 0; width: min(300px, 86vw); transform: translateX(-102%); transition: transform .2s ease; box-shadow: 0 0 40px rgba(0,0,0,.2); }
+  .app.nav-open .side { transform: none; }
+  .app.nav-open .side-backdrop { display: block; position: fixed; inset: 0; z-index: 44; background: rgba(0,0,0,.35); }
+  .mobile-menu { display: grid; place-items: center; position: fixed; z-index: 40; top: 10px; left: 10px; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 18px; box-shadow: var(--shadow); }
+  .chat-head { padding-left: 58px !important; }
+  .welcome h1 { font-size: 21px; }
+  .composer textarea { font-size: 16px; } /* (no zoom on focus in iOS) */
+  .page:not(.chat) { padding: 60px 14px 40px; }
   .setting { grid-template-columns: 1fr; }
   .chat-log { padding: 16px 14px; }
   .chat-foot, .chat-head { padding-left: 12px; padding-right: 12px; }

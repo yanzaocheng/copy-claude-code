@@ -385,6 +385,12 @@ export class App {
     else if (this.flags.resume) await this.commands.get('resume').run('');
     if (!restart && this.flags.name?.trim()) this.renameSession(this.flags.name); // --name, as /rename does
     this.autoStartRemote(restart);
+    // 远程访问 on: the console's server (and its tunnel) is brought up again by any session that starts
+    if (!this.driven && !this.selfCheck) {
+      import('../web/remote-access.js')
+        .then((ra) => (ra.readRemote().enabled ? import('../web/server.js').then((w) => w.ensureWebServer()) : null))
+        .catch(() => { /* /web remote says what is wrong */ });
+    }
 
     this.screen.setLive((w) => this.renderLive(w));
     this.spinnerTimer = setInterval(() => {

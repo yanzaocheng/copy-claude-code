@@ -886,15 +886,20 @@ export function buildCommands(app) {
     },
   });
 
+  // The local web console, and its 远程访问 (https://<通讯号>.7bit.fun with a password, see web/remote-access.js).
   add({
     name: 'web',
-    description: 'Open the web console in your browser: settings, providers, memory, every conversation, the sessions running now',
-    async run() {
+    argHint: '[remote [on|off|password|logout]]',
+    description: 'Open the web console in your browser; /web remote on reaches it from your phone at <通讯号>.7bit.fun with a password',
+    async run(args) {
+      const [what = '', action = ''] = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const web = await import('./web/server.js');
+      if (what === 'remote') return remoteAccess(web, action);
+      if (what) { out(c.red('/web, or /web remote [on|off|password|logout]')); return; }
       out(c.dim('Starting the web console…'));
       try {
-        const { ensureWebServer, openBrowser } = await import('./web/server.js');
-        const { url, port } = await ensureWebServer();
-        const opened = openBrowser(url);
+        const { url, port } = await web.ensureWebServer();
+        const opened = web.openBrowser(url);
         out(`${c.green('✔')} Web console: ${c.blue(`http://127.0.0.1:${port}`)}${opened ? c.dim(' (opened in your browser)') : ''}`);
         if (!opened) out(c.dim(`Open this link to log in: ${url}`));
       } catch (e) {
@@ -902,6 +907,87 @@ export function buildCommands(app) {
       }
     },
   });
+
+  async function askPassword(ra) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const first = await app.showDialog(new TextInputDialog({
+        title: '远程访问密码',
+        body: [`在手机或别的电脑上打开控制台时要输入它。至少 ${ra.MIN_PASSWORD} 位（空格不算）；它能让人在这台电脑上执行命令，请用强密码。`, c.dim('只在这台电脑上保存它的哈希，网关不知道它。')],
+        question: '密码:',
+        secret: true,
+        validate: (t) => (t.replace(/\s+/g, '').length < ra.MIN_PASSWORD ? `至少 ${ra.MIN_PASSWORD} 位` : null),
+      }));
+      if (first === null) return null;
+      const again = await app.showDialog(new TextInputDialog({ title: '远程访问密码', body: ['再输一次。'], question: '密码:', secret: true }));
+      if (again === null) return null;
+      if (again === first) return first;
+      out(c.yellow('两次输入不一样，再来一次。'));
+    }
+    return null;
+  }
+
+  // What the console server says of 远程访问 (GET /api/remote), started if need be.
+  async function remoteStatus(web, { start = true, waitOnline = 0 } = {}) {
+    let state = null;
+    try { state = JSON.parse(fs.readFileSync(web.stateFile(), 'utf8')); } catch { /* not started */ }
+    if (start) state = { ...state, ...(await web.ensureWebServer()) };
+    const until = Date.now() + waitOnline;
+    for (;;) {
+      try {
+        const token = JSON.parse(fs.readFileSync(web.stateFile(), 'utf8')).token;
+        const res = await fetch(`http://127.0.0.1:${state.port}/api/remote`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) });
+        const view = await res.json();
+        if (Date.now() >= until || view.tunnel?.status === 'online' || view.tunnel?.status === 'error') return view;
+      } catch (e) { if (Date.now() >= until) throw e; }
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+
+  async function remoteAccess(web, action) {
+    const ra = await import('./web/remote-access.js');
+    const cfg = app.runtime.config;
+    if (action === 'off') {
+      ra.setEnabled(false);
+      out(`${c.green('✔')} 远程访问已关闭：${c.dim('外网打不开这台电脑的控制台了（本机的 /web 照常可用）。')}`);
+      return;
+    }
+    if (action === 'logout') {
+      ra.endAllSessions();
+      out(`${c.green('✔')} 所有远程登录的设备都已退出，下次要重新输密码。`);
+      return;
+    }
+    if (action === 'password') {
+      const pw = await askPassword(ra);
+      if (!pw) { out(c.dim('密码没有改。')); return; }
+      ra.setPassword(pw);
+      out(`${c.green('✔')} 密码已修改，所有远程登录的设备都已退出。`);
+      return;
+    }
+    if (action === 'on') {
+      if (!gatewayLogin(cfg.gatewayUrl)) { out(c.red(`远程访问通过 7bit.fun 网关：先 /connect 7bit.fun 连上网关。`)); return; }
+      if (!ra.hasPassword()) {
+        const pw = await askPassword(ra);
+        if (!pw) { out(c.dim('远程访问没有开启。')); return; }
+        ra.setPassword(pw);
+      }
+      ra.setEnabled(true);
+      out(c.dim('正在连接网关…'));
+    } else if (action) { out(c.red('/web remote [on|off|password|logout]')); return; }
+    const d = ra.readRemote();
+    if (!d.enabled) {
+      out([`远程访问：${c.dim('关闭')}`, c.dim('/web remote on 开启：在手机上打开 https://<你的通讯号>.7bit.fun，输入密码就能用这台电脑的 claude-pro 控制台。')]);
+      return;
+    }
+    let view;
+    try { view = await remoteStatus(web, { waitOnline: action === 'on' ? 12_000 : 0 }); } catch (e) { out(c.red(`控制台没有启动：${e.message}`)); return; }
+    const t = view.tunnel || {};
+    const lines = [];
+    if (t.status === 'online') lines.push(`${c.green('✔')} 远程访问已开启：${c.bold(c.blue(`https://${t.host}`))}`, c.dim('在手机上打开它，输入密码。电脑休眠或关机时打不开；claude-pro 的任何会话启动时都会把它重新接上。'));
+    else if (t.status === 'error') lines.push(c.red(`远程访问没有接上：${t.error}`));
+    else lines.push(c.yellow(`远程访问正在连接网关…${t.error ? c.dim(`（${t.error}）`) : ''}`));
+    lines.push(c.dim(`登录着的设备 ${view.sessions?.length || 0} 台 · /web remote logout 让它们全部退出 · /web remote password 改密码 · /web remote off 关闭`));
+    out(lines);
+  }
 
   // 通讯录 at the gateway: other people's accounts whose claude-pro sessions and this account's may send each other
   // tasks, once both sides agreed. Each account has a public 通讯号 (handle) that the others add it by.

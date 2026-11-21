@@ -23,6 +23,9 @@ const BODY_LIMIT = 20 * 1024 * 1024;
 const COOKIE = 'cpweb';
 export const stateFile = () => path.join(CONFIG_DIR, 'web.json');
 
+// (__Host-: only this host can set it, not a page of another 7bit.fun subdomain; plain on http, in tests)
+const REMOTE_COOKIE = 'cpremote';
+const remoteCookieName = (origin) => (String(origin).startsWith('https:') ? `__Host-${REMOTE_COOKIE}` : REMOTE_COOKIE);
 const STATIC = {
   '/': ['page.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
@@ -32,7 +35,7 @@ const STATIC = {
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'page.html', 'app.js', 'app.css'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;
@@ -78,6 +81,10 @@ async function serve() {
   const code = codeStamp(); // the code this server runs (a later start compares it with the files as they are then)
   const { routes } = await import('./api.js');
   const data = await import('./data.js');
+  const ra = await import('./remote-access.js');
+  // 远程访问: what marks a request that came through the tunnel (made by this process to itself; never leaves it)
+  const tunnelSecret = crypto.randomBytes(24).toString('base64url');
+  let tunnel = null;
   data.purgeTrash();
   let port = PORT;
   let lastActivity = Date.now();
@@ -91,6 +98,57 @@ async function serve() {
     res.end(text);
   };
 
+  // POST /__login {password, remember}: the remote login page's form.
+  async function remoteLogin(req, res, ip, origin) {
+    if (!origin || String(req.headers.origin || '').toLowerCase() !== origin) return send(res, 403, { error: 'cross-site request refused' });
+    const blocked = ra.loginBlocked(ip);
+    if (blocked) return send(res, 429, { error: `密码错误次数太多，请 ${blocked} 分钟后再试` });
+    let body;
+    try { body = (await readBody(req)) || {}; } catch { return send(res, 400, { error: 'bad request' }); }
+    const ua = req.headers['user-agent'];
+    if (!ra.readRemote().enabled || !ra.checkPassword(String(body.password || ''))) {
+      ra.loginFailed(ip);
+      ra.noteLogin({ ip, ua, ok: false });
+      await new Promise((r) => setTimeout(r, 600)); // a little slower for each guess
+      return send(res, 401, { error: '密码不对' });
+    }
+    ra.loginPassed(ip);
+    ra.noteLogin({ ip, ua, ok: true });
+    const { token: value, maxAge } = ra.newSession({ remember: Boolean(body.remember), ip, ua });
+    return send(res, 200, { ok: true }, { 'set-cookie': `${remoteCookieName(origin)}=${value}; Path=/; HttpOnly; SameSite=Lax${origin.startsWith('https:') ? '; Secure' : ''}${maxAge ? `; Max-Age=${maxAge}` : ''}` });
+  }
+
+  function remoteView() {
+    const d = ra.readRemote();
+    const now = Date.now();
+    return {
+      enabled: Boolean(d.enabled), hasPassword: ra.hasPassword(d), minPassword: ra.MIN_PASSWORD,
+      tunnel: tunnel ? tunnel.state : { status: d.enabled ? 'connecting' : 'off', host: null, error: null },
+      gateway: Boolean(gatewayLoginNow()),
+      sessions: Object.entries(d.sessions || {}).filter(([, s]) => s.expires > now).map(([id, s]) => ({ id, created: s.created, lastSeen: s.lastSeen, expires: s.expires, ip: s.ip, ua: s.ua, remember: s.remember })),
+      logins: (d.logins || []).slice(0, 15),
+    };
+  }
+
+  // The tunnel follows web-remote.json (changed here, or by /web remote in a session) and the gateway login.
+  function gatewayLoginNow() {
+    try {
+      const g = JSON.parse(fs.readFileSync(path.join(CONFIG_DIR, 'gateway.json'), 'utf8'));
+      return g?.apiKey ? { url: String(g.url || process.env.CLAUDE_PRO_GATEWAY_URL || 'https://7bit.fun'), apiKey: g.apiKey } : null;
+    } catch { return null; }
+  }
+  function syncTunnel() {
+    const want = ra.readRemote().enabled && ra.hasPassword();
+    const login = want ? gatewayLoginNow() : null;
+    const key = login ? `${login.url}|${login.apiKey}` : '';
+    if (tunnel && tunnel.key === key) return;
+    tunnel?.close();
+    tunnel = null;
+    if (!login) return;
+    tunnel = new ra.TunnelClient({ gatewayUrl: login.url, apiKey: login.apiKey, localPort: port, secret: tunnelSecret });
+    tunnel.key = key;
+  }
+
   const server = http.createServer(async (req, res) => {
     lastActivity = Date.now();
     res.setHeader('x-content-type-options', 'nosniff');
@@ -99,9 +157,28 @@ async function serve() {
     // only requests for this server by its own name: a page elsewhere cannot reach it through a name that points here
     if (!hosts().has(String(req.headers.host || '').toLowerCase())) return send(res, 421, { error: 'wrong host' });
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    // 远程访问: through the tunnel, from https://<通讯号>.7bit.fun: its own password and cookie, and its own origin
+    const remote = equal(req.headers['x-cpweb-tunnel'], tunnelSecret) && /^(?:127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || '');
+    // (the address the browser is at, https://<通讯号>.7bit.fun, as the gateway says: changes must come from it)
+    const remoteOrigin = remote ? String(req.headers['x-cpweb-origin'] || '').toLowerCase() : '';
+    const ip = remote ? String(req.headers['x-cpweb-ip'] || '') : '127.0.0.1';
     try {
+      if (remote) {
+        if (url.pathname === '/__login' && req.method === 'POST') return remoteLogin(req, res, ip, remoteOrigin);
+        const session = ra.validSession(cookieOf(req, remoteCookieName(remoteOrigin)));
+        if (!session) {
+          if (url.pathname.startsWith('/api/')) return send(res, 401, { error: '请先登录', login: true });
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'" });
+          return res.end(fs.readFileSync(path.join(HERE, 'login.html')));
+        }
+        if (url.pathname === '/api/logout' && req.method === 'POST') {
+          ra.endSession(cookieOf(req, remoteCookieName(remoteOrigin)));
+          return send(res, 200, { ok: true }, { 'set-cookie': `${remoteCookieName(remoteOrigin)}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${remoteOrigin.startsWith('https:') ? '; Secure' : ''}` });
+        }
+        if (req.method !== 'GET' && req.method !== 'HEAD' && String(req.headers.origin || '').toLowerCase() !== remoteOrigin) return send(res, 403, { error: 'cross-site request refused' });
+      }
       // the secret, once, from /web: kept as a cookie, then out of the address
-      if (req.method === 'GET' && url.pathname === '/' && url.searchParams.has('t')) {
+      if (!remote && req.method === 'GET' && url.pathname === '/' && url.searchParams.has('t')) {
         if (!equal(url.searchParams.get('t'), token)) return send(res, 403, { error: '链接已失效：请在 claude-pro 里重新运行 /web' });
         res.writeHead(302, { location: '/', 'set-cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}`, 'cache-control': 'no-store' });
         return res.end();
@@ -112,14 +189,29 @@ async function serve() {
         return res.end(fs.readFileSync(path.join(HERE, file)));
       }
       if (!url.pathname.startsWith('/api/')) return send(res, 404, { error: 'not found' });
-      const authed = equal(cookieOf(req, COOKIE), token) || equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
+      const authed = remote || equal(cookieOf(req, COOKIE), token) || equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
       if (!authed) return send(res, 401, { error: '需要从 claude-pro 打开：在会话里输入 /web，或运行 claude-pro web' });
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
+      if (!remote && req.method !== 'GET' && req.method !== 'HEAD') {
         // a change only from the console's own page
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid });
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote });
+      // 远程访问's own settings: on or off, the password, the devices logged in, the recent logins
+      if (url.pathname === '/api/remote' && req.method === 'GET') return send(res, 200, remoteView());
+      if (url.pathname === '/api/remote' && req.method === 'POST') {
+        const body = (await readBody(req)) || {};
+        if (typeof body.password === 'string' && body.password) {
+          try { ra.setPassword(body.password); } catch (e) { return send(res, 400, { error: e.message }); }
+        }
+        if (typeof body.enabled === 'boolean') {
+          if (body.enabled && !ra.hasPassword()) return send(res, 400, { error: '先设一个密码' });
+          ra.setEnabled(body.enabled);
+        }
+        if (body.logoutAll) ra.endAllSessions();
+        syncTunnel();
+        return send(res, 200, remoteView());
+      }
 
       // an image of a running session's conversation, from its peer server
       const liveImage = /^\/api\/live\/([0-9a-f]{12})\/image\/(\d+)$/.exec(url.pathname);
@@ -201,15 +293,20 @@ async function serve() {
   fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
   fs.renameSync(tmp, stateFile());
 
+  syncTunnel();
+  setInterval(syncTunnel, 3000).unref();
+
   // (web.json stays: the next server takes its secret over, so that the page's cookie still works)
   const quit = () => process.exit(0);
-  setInterval(() => { if (!streams && Date.now() - lastActivity > IDLE_MS) quit(); }, 60_000).unref();
+  // with 远程访问 on, it stays (a phone may come any time)
+  setInterval(() => { if (!streams && !tunnel && Date.now() - lastActivity > IDLE_MS) quit(); }, 60_000).unref();
   // Its code changed (an update, or an edit in a source checkout): a new server takes over at once, on the same port
   // and with the same secret, so that an open page keeps working with the new page code (it is read from disk at
   // every load) instead of new pages talking to an old server.
   const handOver = setInterval(() => {
     if (codeStamp() === code) return;
     clearInterval(handOver);
+    tunnel?.close();
     server.close();
     server.closeAllConnections?.();
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });

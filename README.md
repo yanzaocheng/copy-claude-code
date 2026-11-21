@@ -202,6 +202,17 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 服务是整台电脑共用的一个后台进程，没有页面打开 30 分钟后自动退出，下次 `/web` 再启动；claude-pro 更新（或源码改动）后会自动换成新版本。只监听 127.0.0.1，只接受以 127.0.0.1/localhost 访问的请求，修改类请求必须来自控制台自己的页面；第一次用 `/web` 打开时地址里带一个令牌，之后换成 cookie（令牌在 `~/.claude-pro/web.json`，只有你能读）。控制台不能打开 `gateway.json`、`providers.json` 这类存 Key 的文件，也不能打开会话记录以外的任意文件。
 
+## 远程访问：在手机上用这台电脑的控制台
+
+在会话里运行 `/web remote on`（第一次会让你设一个至少 10 位的密码），控制台就能在 **`https://<你的通讯号>.7bit.fun`** 打开：手机或别的电脑上打开这个地址，输入密码，就能看会话、发任务（可以带图片）、回答问题、改设置，和在本机打开 `/web` 一样。通讯号在网关网页「通讯录」里改（只能用小写字母、数字和 `-`），比如改成 `yanzc` 就是 `https://yanzc.7bit.fun`。
+
+- **怎么连的**：本机控制台的后台服务主动连一条 WebSocket 到 7bit.fun 网关（用 `/connect` 保存的 Key），网关把这个域名的请求从这条连接转给它。电脑不开任何端口，转过来的请求只能到控制台本身。
+- **密码只在本机校验**：`~/.claude-pro/web-remote.json` 里只存 scrypt 哈希，网关不知道密码。登录页可以选「记住这台设备 30 天」，不勾就只保持 1 天。同一个 IP 连续输错 5 次锁 15 分钟，一小时内总共错 20 次就锁到这个小时结束。每次登录（成功或失败）都有记录。
+- **管理**：`/web remote` 看状态和地址，`/web remote password` 改密码（所有设备退出），`/web remote logout` 让所有设备退出，`/web remote off` 关闭。控制台左边「远程访问」页面也能做这些，并列出登录着的设备和最近的登录。
+- **保持在线**：开启后控制台服务不再空闲退出；电脑休眠、关机时打不开，claude-pro 的任何会话启动时会把它重新接上。
+- **多台电脑**：同一个账号的几台电脑都开了远程访问时，打开地址先让你选电脑（记在 cookie 里），控制台左下角有「切换电脑」。
+- **安全**：能登录就等于能在这台电脑上执行命令，密码要够强；从外网打开时控制台不接受 `/web` 的本机令牌，修改类请求必须来自这个域名的页面。
+
 ## 会话之间互发任务（本机和其他电脑）
 
 每个交互会话都有一个名字（默认是目录名，输入框右上角的 `@名字`），别的会话可以给它发任务，它做完后回答自动发回来。
@@ -270,7 +281,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/web` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/web`（`/web remote …`）`/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 
@@ -369,7 +380,7 @@ src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
 src/remote.js         对话事件模型（applyEvent，控制台页面里有同一份）和网关的会话中继连接（跨电脑、通讯录互发任务）
 src/live.js           本机 Web 控制台的实时查看：会话的对话事件流（经会话自己的 127.0.0.1 peer 服务）
-src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面
+src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面，远程访问的密码和隧道（remote-access.js）
 src/commands.js       斜杠命令
 ```
 
