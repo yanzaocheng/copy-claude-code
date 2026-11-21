@@ -400,16 +400,11 @@ export function buildCommands(app) {
       app.screen.schedule();
     }
   };
-  // The gateway connected: this session goes online there at once, for messages between sessions; its web page shows
-  // it (and can steer it, unless CLAUDE_PRO_REMOTE_COMMANDS=0) only with remote control on (/rc).
+  // The gateway connected: this session goes online there at once, for tasks from your other computers and contacts.
   const goOnline = async () => {
     const remote = await app.syncRemote();
     if (!remote) return;
-    const page = !remote.rc
-      ? 'sessions on your other computers and your contacts can send it tasks; /rc lets the web page (远程控制) show and steer it'
-      : remote.commands?.length
-        ? 'its web page shows it and can send it messages and commands (CLAUDE_PRO_REMOTE_COMMANDS=0 makes the page read-only)'
-        : 'the read-only web page shows it';
+    const page = 'sessions on your other computers and your contacts can send it tasks';
     out(remote.registered
       ? `${c.green('⇄')} This session is online at the gateway: ${page}.`
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
@@ -905,19 +900,6 @@ export function buildCommands(app) {
       } catch (e) {
         out(c.red(`Could not start the web console: ${e.message}`));
       }
-    },
-  });
-
-  add({
-    name: 'rc',
-    aliases: ['remote-control'],
-    argHint: '[off]',
-    description: 'Remote control: the gateway\'s web page (远程控制) shows this session and can steer it; /rc off stops that',
-    async run(args) {
-      const off = /^(off|stop|0|false|no)$/i.test(args.trim());
-      if (!off && app.remoteControl && app.remote?.rc) { out(`Remote control is on already: ${c.dim('/rc off turns it off.')}`); return; }
-      const said = await app.setRemoteControl(!off);
-      out(off ? c.dim(said) : said);
     },
   });
 

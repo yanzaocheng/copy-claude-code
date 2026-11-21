@@ -36,7 +36,7 @@ import { fitImagesIn, imageSize } from '../utils/images.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
 import { LiveFeed } from '../live.js';
-import { RemoteControl, transcriptItems, onlineEnabled, remoteCommandsEnabled, REMOTE_WIDTH } from '../remote.js';
+import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
 
 // A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
 // (every model with its provider in front: 7bit/opus-5-5, deepseek/deepseek-v4-pro)
@@ -279,7 +279,6 @@ export class App {
     this.turnPeers = []; // tasks from other sessions that the running turn answers: [{msg}]
     this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
     this.remote = null; // the browser page that watches and steers this session (see remote.js), when it is on
-    this.remoteControl = false; // /rc: the page shows the conversation (online without it: messages between sessions only)
     // the local web console's live view of this session (claude-pro web, see live.js and web/server.js)
     this.liveFeed = new LiveFeed({
       seed: () => [
@@ -307,10 +306,8 @@ export class App {
     // What the terminal prints goes to the remote page too, except what it is told about as events.
     this.screen.onLog = (items) => {
       const lines = () => items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/));
-      if (this.remoteMuted || !(this.remote || this.liveFeed?.active)) return;
-      const all = lines();
-      this.remote?.output(all);
-      this.liveFeed?.output(all);
+      if (this.remoteMuted || !this.liveFeed?.active) return;
+      this.liveFeed.output(lines());
     };
     this.editor = new Editor({
       history: loadHistory(cwd),
@@ -728,7 +725,6 @@ export class App {
   // A message of the user in the transcript (typed here, on the remote page, or sent by another session).
   echoUser(text, images = 0) {
     this.logLocal(renderUserMessage(text, this.width));
-    this.remote?.emit({ t: 'user', text: images ? `${text}\n[${images} image${images === 1 ? '' : 's'}]` : String(text) });
     // the web console shows the images themselves: they become the next ones of the conversation (see liveImage)
     this.liveFeed.emit({ t: 'user', text: String(text) });
     if (images && this.liveFeed.active) {
@@ -766,8 +762,6 @@ export class App {
   // Online at the gateway from the start when this computer is logged in, and after a restart with the same
   // session id so that an already-open page keeps following it.
   autoStartRemote(restart) {
-    // Remote control (the web page shows and steers the session) only after /rc or --rc, and through restarts.
-    this.remoteControl = Boolean(restart ? restart.remoteControl : this.flags.remoteControl);
     const id = restart?.remote?.id || null;
     if (!id && !this.onlineWanted()) return;
     this.startRemote({ id }).catch((e) => {
@@ -806,32 +800,15 @@ export class App {
   async connectRemote({ id }) {
     const login = gatewayLogin(this.config.gatewayUrl);
     if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/connect 7bit.fun connects it)`), { code: 'NO_GATEWAY_LOGIN' });
-    // What the page may do here, besides watching (see remote.js): nothing with CLAUDE_PRO_REMOTE_COMMANDS=0.
-    const commands = remoteCommandsEnabled(this.config.env) ? {
-      send: (body) => this.remoteSend(body.text, body.images),
-      interrupt: () => this.remoteInterrupt(),
-      answer: (body) => this.answerDialog(body),
-      options: () => this.remoteOptions(),
-      suggest: (body) => this.remoteSuggest(body),
-      list: (body) => this.remoteList(body),
-      output: (body) => this.remoteOutput(body),
-    } : {};
     const remote = new RemoteControl({
       gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
       id,
-      rc: this.remoteControl,
       handlers: {
         info: () => ({
           name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '',
           cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION,
-          kind: 'terminal',
         }),
-        seed: () => [
-          ...transcriptItems(this.agent.messages, { tools: this.runtime.tools, ctx: this.agent.makeCtx(), cwd: this.cwd }),
-          ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
-        ],
         status: () => this.remoteStatus(),
-        ...commands,
         peerMessage: (msg) => this.onPeerMessage(msg),
         contactEvent: (ev) => this.onContactEvent(ev),
         changed: () => {
@@ -862,21 +839,6 @@ export class App {
     return remote;
   }
 
-  // /rc: the web page (远程控制) shows this session's conversation and may steer it, or (off) only messages between
-  // sessions go through the gateway. Resolves with what to tell the user.
-  async setRemoteControl(on) {
-    this.remoteControl = Boolean(on);
-    this.screen.schedule();
-    if (!on) {
-      if (this.remote) await this.remote.setRc(false);
-      return 'Remote control is off: the web page no longer shows this session (messages between sessions still go through the gateway).';
-    }
-    const remote = this.remote || await this.syncRemote();
-    if (!remote) return `Remote control is on, but this session is not online at the gateway: ${stripAnsi(this.remoteState().text)}`;
-    await remote.setRc(true);
-    return 'Remote control is on: 远程控制 on the gateway\'s web page shows this session and can send it messages and commands. /rc off turns it off.';
-  }
-
   stopRemote() {
     this.remote?.close();
     this.remote = null;
@@ -884,14 +846,12 @@ export class App {
     this.screen.schedule();
   }
 
-  // This session at the gateway, for /status: {text}. (Its page is in the web page's list, 远程控制: no link here.)
+  // This session at the gateway (its session relay: tasks across computers and from contacts), for /status: {text}.
   remoteState() {
     const r = this.remote;
     if (r) {
       const who = r.account ? ` as ${r.account}` : '';
-      const pages = r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
-      const readOnly = !r.rc ? c.dim(' · remote control off (/rc turns it on)') : r.commands.length ? c.dim(' · remote control on') : c.dim(' · remote control on, read-only on the page (CLAUDE_PRO_REMOTE_COMMANDS=0)');
-      const text = r.online ? `${c.green('online')}${who}${pages}${readOnly}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
+      const text = r.online ? `${c.green('online')}${who}${c.dim(' · your other computers and your contacts can send it tasks')}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
       return { text };
     }
     if (this.remoteStarting) return { text: 'connecting…' };
@@ -1190,7 +1150,6 @@ export class App {
       peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
-      remoteControl: this.remoteControl, // /rc stays on through a restart
     };
     try {
       writeRestartState(state);
@@ -2196,7 +2155,7 @@ export class App {
     // Its cache still warm (a restart, a quick resume): it goes on being refreshed while idle (keepalive.js).
     this.agent.restoreCacheState(loaded.cacheState);
     if (!this.topic) this.refreshTopic(this.latestPrompt()); // a session from before topics were kept
-    this.remote?.resync(); this.liveFeed.resync();
+    this.liveFeed.resync();
     if (quiet) return;
     const restoredCount = loaded.messages.length;
     const shown = loaded.messages.slice(-30);
@@ -2239,7 +2198,7 @@ export class App {
     this.customTitle = null;
     this.firstPrompt = null;
     this.cost = 0;
-    this.remote?.resync(); this.liveFeed.resync();
+    this.liveFeed.resync();
   }
 
   // ---------------------------------------------------------------- dialogs
@@ -2394,7 +2353,7 @@ export class App {
     return {
       progress: (p, meta) => {
         // `all`: the whole output so far (the progress is its end), for the page's "the whole output"
-        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; entry.progressAll = meta?.all; this.remote?.toolProgress(tu.id, entry); this.liveFeed.toolProgress(tu.id, entry); }
+        if (typeof p === 'string') { entry.progress = p; entry.progressLines = meta?.lines; entry.progressAll = meta?.all; this.liveFeed.toolProgress(tu.id, entry); }
         else if (p?.type === 'subtool') { entry.sub.push(p.header); entry.subCount++; this.emitEvent({ t: 'sub', id: tu.id, head: p.header }); }
         this.screen.schedule();
       },
@@ -2411,7 +2370,7 @@ export class App {
     if (!this.isMain(agent)) return;
     const ctx = agent.makeCtx();
     const entry = { tu, tool, input: tu.input, status: 'rejected', rejected: true, rejectMessage: message, ctx };
-    if (this.remote || this.liveFeed.active) {
+    if (this.liveFeed.active) {
       this.emitEvent({ t: 'tool', id: tu.id, head: toolHeader(tool, tu.input, ctx, { width: REMOTE_WIDTH, dot: false }) });
       this.remoteToolDone(entry);
     }
@@ -2420,7 +2379,6 @@ export class App {
 
   // An event of the transcript, for the gateway's page and the local web console's live view (each takes its own copy).
   emitEvent(ev) {
-    this.remote?.emit({ ...ev });
     this.liveFeed.emit({ ...ev });
   }
 
@@ -2428,7 +2386,7 @@ export class App {
   liveStatus() {
     let status = {};
     try { status = this.remoteStatus(); } catch { /* the basics below */ }
-    return { ...status, busy: this.working(), turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, rc: Boolean(this.remoteControl) };
+    return { ...status, busy: this.working(), turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, };
   }
 
   // A command of the local web console's live view: the same ones the gateway's page sends (see remote.js).
@@ -2448,7 +2406,7 @@ export class App {
 
   // A tool call finished (or was refused, or interrupted): its result on the remote page, once.
   remoteToolDone(entry) {
-    if (!(this.remote || this.liveFeed.active) || !entry.tu?.id || entry.remoteDone) return;
+    if (!this.liveFeed.active || !entry.tu?.id || entry.remoteDone) return;
     entry.remoteDone = true;
     let lines = [];
     try { lines = renderToolResult(entry, { width: REMOTE_WIDTH, cwd: this.cwd }); } catch { /* shown without */ }
@@ -2670,7 +2628,7 @@ export class App {
     const home = os.homedir();
     const shown = dir.toLowerCase().startsWith(home.toLowerCase()) ? '~' + dir.slice(home.length) : dir;
     const name = this.peers || this.remote ? `@${this.peerLabel()}` : '';
-    return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online && this.remoteControl ? `⇄ ${name}` : name };
+    return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online ? `⇄ ${name}` : name };
   }
 
   // The prompt cache clock, as in Claude Code's VS Code extension: the minutes the conversation's cache has left

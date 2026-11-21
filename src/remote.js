@@ -1,31 +1,21 @@
-// Publish a local interactive session to the gateway, so that the account's browser can watch it and steer it: send
-// it messages (as if typed in its input box: /commands, !shell, #memory, pasted images), answer its questions, stop
-// it, switch model and effort, complete input, browse directories for /cd and read a tool call's whole output. The
-// session never listens on the network: it connects out to the codex-gateway with the gateway API key from /connect,
-// declares the commands it takes when it registers, and gets them on its command stream. With
-// CLAUDE_PRO_REMOTE_COMMANDS=0 it declares none and is read-only on the page.
-// The same connection carries the messages of the account's sessions on other computers (`@公司 ...`, see peers.js).
-//
-// The page is told what happens as a list of transcript items (user messages, assistant text, thinking, tool
-// calls, other terminal output) that events update. The same reducer (applyEvent) runs here, to send a snapshot
-// when one is needed, and in the page, which carries a copy of it.
+// Two things: the transcript model that the local web console's live view uses (applyEvent, hydrate, transcriptItems,
+// snapshotItems: a conversation as a list of items — user messages, assistant text, thinking, tool calls, other
+// terminal output — that events update; the page, web/app.js, carries a copy of the reducer), and this session's
+// connection to the gateway's session relay (RemoteControl), which carries the tasks of the account's sessions on
+// other computers (`@公司 ...`, see peers.js) and of contacts. The session never listens on the network: it connects
+// out to the gateway with the API key from /connect.
 
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { stripAnsi } from './ui/ansi.js';
 import { toolHeader, renderToolResult, bashModeLines } from './ui/render.js';
 import { shownQuotes } from './ui/editor.js';
 
 export const REMOTE_WIDTH = 100; // columns that tool headers and results are laid out for on the page
-const MAX_ITEMS = 800; // kept for a snapshot; the oldest are dropped beyond that
 const SEED_ITEMS = 500;
 const SNAPSHOT_ITEMS = 400; // sent in a snapshot
 const SNAPSHOT_BYTES = 1_500_000; // ... at most: the gateway takes 2 MB a POST
 const ITEM_CHARS = 60_000; // a longer text or output is cut down in a snapshot
-const SNAPSHOT_EVERY = 500; // events after which a fresh snapshot replaces them on the gateway
-const FLUSH_MS = 150;
 const STATUS_MS = 500; // how often the status is compared with what the gateway has
-const IDLE_STATUS_MS = 3000; // ... and sent at most this often while nobody watches
 const REQUEST_TIMEOUT_MS = 15_000;
 const STREAM_SILENCE_MS = 50_000; // the gateway pings every 15 s: a command stream silent this long is dead
 
@@ -181,12 +171,6 @@ export function snapshotItems(items, { max = SNAPSHOT_ITEMS, bytes = SNAPSHOT_BY
   return picked.reverse();
 }
 
-// The last lines of a running tool's output, for the page.
-function progressTail(text) {
-  const lines = String(text || '').slice(-6000).replace(/\r\n/g, '\n').trimEnd().split('\n');
-  return lines.slice(-8).map((l) => l.replace(/^.*\r/, '').slice(0, 400)).join('\n');
-}
-
 // ---------------------------------------------------------------- the connection to the gateway
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -197,68 +181,27 @@ export const newRemoteId = () => crypto.randomBytes(9).toString('base64url');
 // which only the self-check and the tests set).
 export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(env.CLAUDE_PRO_ONLINE || '');
 
-// Whether the page may steer the session, not only watch it (CLAUDE_PRO_REMOTE_COMMANDS=0: read-only).
-export const remoteCommandsEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(String(env.CLAUDE_PRO_REMOTE_COMMANDS ?? '').trim());
-
-// The commands of the page, and the handler of each (see App.connectRemote; each gets the command's body and
-// returns the result's fields, or a promise of them, or throws what to tell the page). A session declares the ones
-// it has handlers for when it registers (`commands`); the gateway forwards only those and answers the others itself.
-// A session that declares none (0.8.x, CLAUDE_PRO_REMOTE_COMMANDS=0) is read-only on the page.
-const COMMANDS = { send: 'send', interrupt: 'interrupt', dialog: 'answer', options: 'options', suggest: 'suggest', list: 'list', output: 'output' };
-
+// This session at the gateway's session relay: registered while it runs, with a stream kept open on which the tasks
+// of the account's sessions on other computers (and of contacts) and the 通讯录's news arrive, and its status (busy,
+// name, title, directory, model: what the other sessions are shown of it). Nothing of the conversation goes there.
+// (Until 2026-11-21 the transcript went there too, for the gateway's 远程控制 page, which is gone.)
 export class RemoteControl {
-  // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model}, seed() -> items, status() -> object,
-  // peerMessage(message), changed() (online or viewers changed), refused(status) (the key was refused: closed), and
-  // the page's commands: send, interrupt, answer (dialog), options, suggest, list, output (see COMMANDS).
-  // `rc`: remote control is on (/rc): the gateway's web page shows the conversation and may steer the session. Off,
-  // the session is online only for messages between sessions: no conversation is uploaded, and its status is only
-  // whether it works and its name (see setRc).
-  constructor({ gateway, id, handlers, rc = false, fetchImpl = globalThis.fetch }) {
-    this.rc = Boolean(rc);
+  // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model, version, machine, peerId}, status() -> object,
+  // peerMessage(message), contactEvent(event), changed() (online changed), refused(status) (the key was refused).
+  constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
     this.id = /^[\w-]{8,64}$/.test(id || '') ? id : newRemoteId();
     this.handlers = handlers;
     this.fetch = fetchImpl;
-    this.online = false; // the command stream is open
-    this.viewers = null; // pages watching, as the gateway counts them (null: not told yet)
+    this.online = false; // the stream is open
     this.closed = false;
-    this.seq = 0;
-    this.state = hydrate(handlers.seed?.() || []);
-    this.events = []; // waiting to be uploaded
-    this.progress = new Map(); // tool id -> its live entry, whose output goes out at the next flush
-    this.outbox = []; // messages for the next POST /events
-    this.sending = false;
-    this.needSnapshot = true;
-    this.sinceSnapshot = 0;
-    this.lastStatus = '';
-    this.lastStatusAt = 0;
-    this.flushTimer = null;
-    this.streamAbort = null;
     this.registered = false;
     this.refused = null; // the status (401/403) of the gateway refusing the key after the start: the connection ended
     this.seenPeer = new Set(); // ids of the messages from other sessions already handled (the gateway sends again what was not acknowledged)
-    this.replying = new Set(); // answers to the page's commands on their way (close() waits for them)
-  }
-
-  // The commands this session takes, as declared to the gateway.
-  get commands() { return this.rc ? Object.keys(COMMANDS).filter((type) => typeof this.handlers[COMMANDS[type]] === 'function') : []; }
-
-  // nobody watching, or remote control off: events are not uploaded (a snapshot follows when someone comes)
-  get viewing() { return this.rc && this.viewers !== 0; }
-
-  // Remote control on or off: the gateway is told at once (registering again), and a page that watched is closed by
-  // it. What happened while it was off is in the snapshot that goes out when it comes on: the conversation is kept
-  // here either way.
-  async setRc(on) {
-    on = Boolean(on);
-    if (this.rc === on) return;
-    this.rc = on;
-    this.events = [];
-    this.needSnapshot = true;
     this.lastStatus = '';
-    if (this.registered) await this.register();
-    this.scheduleFlush(0);
+    this.statusTimer = null;
+    this.streamAbort = null;
   }
 
   // `persistent`: keep trying when the gateway cannot be reached now (a restart); otherwise the first failure is thrown.
@@ -285,28 +228,25 @@ export class RemoteControl {
       signal: AbortSignal.timeout(timeout),
     });
     let res;
-    // Once more when the connection failed before any answer (a kept-alive socket the server had just closed):
-    // every request here can be repeated (registering is idempotent, the pages drop events they already have).
+    // Once more when the connection failed before any answer (a kept-alive socket the server had just closed).
     try { res = await send(); } catch (e) { if (!retry || e.name === 'TimeoutError' || this.closed) throw e; res = await send(); }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const message = data?.error?.message || (typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`);
-      throw Object.assign(new Error(res.status === 404 && route === '/v1/remote/sessions' ? `the gateway ${this.base} does not offer remote control (yet)` : String(message)), { status: res.status });
+      throw Object.assign(new Error(res.status === 404 && route === '/v1/remote/sessions' ? `the gateway ${this.base} has no session relay (yet)` : String(message)), { status: res.status });
     }
     return data;
   }
 
   async register() {
     const info = this.handlers.info?.() || {};
-    const commands = this.commands;
-    const shown = this.rc ? info : { ...info, title: '', cwd: '' };
-    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), version: info.version, ...shown, rc: this.rc, ...(commands.length ? { commands } : {}) });
+    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), ...info });
     if (data.id) this.id = data.id;
     this.registered = true;
-    this.needSnapshot = true;
+    this.lastStatus = '';
   }
 
-  // The command stream, kept open (and opened again) until close(): while it is open the session is online.
+  // The stream, kept open (and opened again) until close(): while it is open the session is online.
   async loop() {
     let wait = 1000;
     while (!this.closed) {
@@ -314,8 +254,8 @@ export class RemoteControl {
       try {
         if (!this.registered) {
           await this.register();
-          // closed while it registered (/disconnect, another account): the session that ended must not go online again,
-          // and the registration that just went through gets the bye that close() could not send yet
+          // closed while it registered (/disconnect, another account): the registration that just went through gets
+          // the bye that close() could not send yet
           if (this.closed) {
             this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'bye', restarting: false }] }, { timeout: 1500 }).catch(() => {});
             break;
@@ -328,9 +268,6 @@ export class RemoteControl {
       }
       if (this.online) {
         this.online = false;
-        // Nothing is uploaded while offline (see flush), and the stream's next opening sends a snapshot.
-        this.needSnapshot = true;
-        this.events = [];
         this.handlers.changed?.();
       }
       if (this.closed) break;
@@ -349,7 +286,6 @@ export class RemoteControl {
     this.closed = true;
     this.registered = false; // no bye with a key the gateway refuses
     this.online = false;
-    clearTimeout(this.flushTimer);
     clearInterval(this.statusTimer);
     this.streamAbort?.abort();
     try { this.handlers.refused?.(status); } catch { /* the App's problem */ }
@@ -369,9 +305,9 @@ export class RemoteControl {
       throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
     }
     this.online = true;
-    this.needSnapshot = true; // the gateway may have been restarted: it gets the whole conversation again
+    this.lastStatus = ''; // the gateway may have been restarted: it gets the status again
     this.handlers.changed?.();
-    this.scheduleFlush(0);
+    this.flush();
     let last = Date.now();
     const watchdog = setInterval(() => { if (Date.now() - last > STREAM_SILENCE_MS) abort.abort(); }, 5000);
     watchdog.unref?.();
@@ -387,9 +323,9 @@ export class RemoteControl {
           buf = buf.slice(i).replace(/^\r?\n\r?\n/, '');
           const data = block.split(/\r?\n/).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).replace(/^ /, '')).join('\n');
           if (!data) continue;
-          let cmd;
-          try { cmd = JSON.parse(data); } catch { continue; }
-          this.command(cmd);
+          let frame;
+          try { frame = JSON.parse(data); } catch { continue; }
+          this.frame(frame);
         }
       }
     } catch (e) {
@@ -399,51 +335,15 @@ export class RemoteControl {
     }
   }
 
-  command(cmd) {
-    if (this.closed) return; // the page of a session that has gone offline steers nothing
-    if (cmd.type === 'viewers') {
-      const was = this.viewers;
-      this.viewers = Math.max(0, Number(cmd.count) || 0);
-      if (!was && this.viewers) this.needSnapshot = true; // someone came: what they see starts from now
-      this.handlers.changed?.();
-      this.scheduleFlush(0);
-      return;
-    }
-    if (cmd.type === 'snapshot') { this.needSnapshot = true; this.scheduleFlush(0); return; }
+  frame(frame) {
+    if (this.closed) return;
     // 通讯录: someone asked this account to be a contact, or accepted its request
-    if (cmd.type === 'contact') { try { this.handlers.contactEvent?.(cmd); } catch { /* the App's problem */ } return; }
-    if (!cmd.cid) return;
-    if (cmd.type === 'peer') { this.peerMessage(cmd); return; }
-    // A command of the page, answered with POST …/results {cid, ok: true, …fields} or {cid, ok: false, error} (the
-    // gateway waits 15 s for it, and takes it until 3 s after the stream closed). close() waits for the answers on
-    // their way: a /cd from the page restarts the session from inside its command.
-    const reply = (result) => {
-      const sent = this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/results`, result).catch(() => { /* the page times out */ });
-      this.replying.add(sent);
-      sent.finally(() => this.replying.delete(sent));
-      this.scheduleFlush(30); // what the command changed, on the page soon
-    };
-    const failed = (e) => reply({ cid: cmd.cid, ok: false, error: e?.message || String(e) });
-    const handler = Object.hasOwn(COMMANDS, cmd.type) ? this.handlers[COMMANDS[cmd.type]] : null;
-    if (!this.rc) { failed(new Error('Remote control is off for this session: /rc in its terminal turns it on.')); return; }
-    if (typeof handler !== 'function') {
-      // an older gateway forwards every command, declared or not
-      failed(new Error(this.commands.length ? `Unknown command: ${cmd.type}` : 'This session is read-only on the web page (CLAUDE_PRO_REMOTE_COMMANDS=0 on its computer).'));
-      return;
-    }
-    let r;
-    try {
-      r = handler(cmd.body && typeof cmd.body === 'object' && !Array.isArray(cmd.body) ? cmd.body : {});
-    } catch (e) {
-      failed(e);
-      return;
-    }
-    // an answer that takes a while (the gateway's list of models, a directory) is sent when it is there
-    if (typeof r?.then === 'function') r.then((v) => reply({ ...(v || {}), cid: cmd.cid, ok: true }), failed);
-    else reply({ ...(r || {}), cid: cmd.cid, ok: true });
+    if (frame.type === 'contact') { try { this.handlers.contactEvent?.(frame); } catch { /* the App's problem */ } return; }
+    if (frame.type === 'peer' && frame.cid) this.peerMessage(frame);
+    // (anything else, such as an older gateway's page commands, is not this session's any more)
   }
 
-  // ------------------------------------------------------------ messages of the account's other sessions
+  // ------------------------------------------------------------ messages of other sessions
 
   // A message from a session on another computer: handed to the App once, then acknowledged, so that the gateway
   // drops it from the session's mailbox (it sends what was not acknowledged again when the stream reconnects).
@@ -493,156 +393,42 @@ export class RemoteControl {
     return { id: data.id, delivered: data.delivered !== false };
   }
 
-  // ------------------------------------------------------------ events
+  // ------------------------------------------------------------ status
 
-  emit(ev) {
-    ev.seq = ++this.seq;
-    applyEvent(this.state, ev);
-    if (this.state.items.length > MAX_ITEMS) this.state.items.splice(0, this.state.items.length - MAX_ITEMS + 100);
-    if (ev.t === 'done') this.progress.delete(ev.id); // also while offline, when nothing takes it: it holds all the tool's output
-    if (this.viewing && !this.needSnapshot) {
-      // A streamed reply's deltas in a row go out as one: one event each made a full snapshot (up to 1.5 MB) due every
-      // few seconds of a long reply, since SNAPSHOT_EVERY counts events. The page takes the newest seq of the merged
-      // ones; it only skips events at or below the seq it has.
-      const last = this.events[this.events.length - 1];
-      if (ev.t === 'delta' && last?.t === 'delta' && last.kind === ev.kind) { last.text += ev.text; last.seq = ev.seq; }
-      else this.events.push(ev);
-      this.scheduleFlush();
-    }
-  }
-
-  // Lines the terminal printed that no other event stands for (command output, notices, errors).
-  output(lines) {
-    const last = this.state.items[this.state.items.length - 1];
-    if (!lines.length || (last?.k !== 'output' && lines.every((l) => !stripAnsi(l).trim()))) return;
-    this.emit({ t: 'output', lines });
-  }
-
-  toolProgress(id, entry) {
-    if (!id) return;
-    this.progress.set(id, entry);
-    if (this.viewing) this.scheduleFlush();
-  }
-
-  // The conversation was replaced (/clear, /resume, /rewind): the pages start again from it.
-  resync() {
-    this.progress.clear();
-    this.events = [];
-    this.state = hydrate(this.handlers.seed?.() || []);
-    this.seq++;
-    this.needSnapshot = true;
-    this.scheduleFlush(0);
-  }
-
-  scheduleFlush(ms = FLUSH_MS) {
-    if (this.closed) return;
-    if (this.flushTimer && ms > 0) return;
-    clearTimeout(this.flushTimer);
-    this.flushTimer = setTimeout(() => { this.flushTimer = null; this.flush(); }, ms);
-  }
-
-  takeProgress() {
-    for (const [id, entry] of this.progress) {
-      const ev = { t: 'progress', id, text: progressTail(entry.progress), seq: ++this.seq };
-      if (applyEvent(this.state, ev) && this.viewing && !this.needSnapshot) this.events.push(ev);
-    }
-    this.progress.clear();
-  }
-
-  // Remote control off: only what the account's other sessions see of it (whether it works, its name, its model).
+  // What the other sessions are shown of this one, sent when it changed (and again after the stream reopened).
   status() {
-    let status;
-    try { status = this.handlers.status?.() || {}; } catch (e) { status = { error: e.message }; }
-    if (this.rc) return status;
-    const { busy, name, model } = status;
-    return { busy: Boolean(busy), name, model };
+    let status = {};
+    try { status = this.handlers.status?.() || {}; } catch { /* the basics stay as they were */ }
+    const { busy, name, title, cwd, model } = status;
+    return { busy: Boolean(busy), name, title, cwd, model };
   }
 
-  // What decides whether the status is sent again: all of it while a page watches; while none does, only what
-  // the gateway's session list shows (the token count of a busy session would otherwise go out every few seconds).
-  // `asking` (a question waits) is in it too: the gateway tells the user about it even with no page open.
-  statusKey(status) {
-    if (this.viewing) return JSON.stringify({ ...status, elapsed: 0 });
-    const { busy, asking, title, model, cwd, name } = status;
-    return JSON.stringify({ busy, asking, title, model, cwd, name });
-  }
-
-  // What is sent at once, without the wait between statuses of an unwatched session: a task that started or ended,
-  // a question that came or was answered.
-  urgentKey(status) { return `${Boolean(status.busy)}|${Boolean(status.asking)}`; }
-
-  // What has changed goes into the next upload: a snapshot when one is due, else the events; and the status.
-  // Not while the command stream is down: every upload would fail and leave a snapshot due, so a session used to
-  // build and POST (twice) a snapshot of up to 1.5 MB every 500 ms for as long as the gateway was unreachable.
   flush() {
-    if (this.closed || !this.registered || (!this.online && !this.closing)) return;
-    this.takeProgress();
+    if (this.closed || !this.registered || !this.online) return;
     const status = this.status();
-    if (this.rc && (this.needSnapshot || this.sinceSnapshot > SNAPSHOT_EVERY)) {
-      this.needSnapshot = false;
-      this.events = [];
-      this.sinceSnapshot = 0;
-      this.lastStatus = this.statusKey(status);
-      this.lastUrgent = this.urgentKey(status);
-      this.lastStatusAt = Date.now();
-      this.outbox.push({ t: 'snapshot', seq: this.seq, items: snapshotItems(this.state.items), status });
-    } else if (this.events.length) {
-      this.sinceSnapshot += this.events.length;
-      this.outbox.push({ t: 'batch', events: this.events });
-      this.events = [];
-    }
-    const key = this.statusKey(status);
-    const urgent = this.urgentKey(status);
-    if (key !== this.lastStatus && (urgent !== this.lastUrgent || Date.now() - this.lastStatusAt >= (this.viewing ? 0 : IDLE_STATUS_MS))) {
-      this.lastStatus = key;
-      this.lastUrgent = urgent;
-      this.lastStatusAt = Date.now();
-      this.outbox.push({ t: 'status', status });
-    }
-    this.pump();
-  }
-
-  // One POST at a time, so that the gateway gets the messages in order. A failed one is not sent again: the
-  // next upload is a snapshot, which stands for everything that was lost.
-  async pump() {
-    if (this.sending || this.closing || !this.outbox.length) return;
-    this.sending = true;
-    const messages = this.outbox.splice(0);
-    try {
-      await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages });
-    } catch (e) {
-      this.needSnapshot = true;
-      this.events = [];
+    const key = JSON.stringify(status);
+    if (key === this.lastStatus) return;
+    this.lastStatus = key;
+    this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'status', status }] }).catch((e) => {
+      this.lastStatus = ''; // sent again next time
       if (e.status === 404) { this.registered = false; this.streamAbort?.abort(); }
       if (e.status === 401 || e.status === 403) this.refuse(e.status);
-    } finally {
-      this.sending = false;
-    }
-    if (this.outbox.length) this.pump();
+    });
   }
 
   // Ends the connection; resolves once the gateway was told (or gave up waiting). `restarting`: the session comes
-  // back at once with the same id, and the pages wait for it.
+  // back at once with the same id.
   close({ restarting = false } = {}) {
     this.closeDone ??= this.shutdown(restarting);
     return this.closeDone;
   }
 
   async shutdown(restarting) {
-    // First the answers on their way, while the command stream is still open (the gateway takes them until 3 s
-    // after it closes). Among them the answer to the command that restarts the session: a /cd from the page closes
-    // it from inside that command (the page may not end, restart or update it otherwise, see App.remoteSend), and its answer
-    // is sent when the command returns, hence the wait for the current call to finish first.
     await null;
-    if (this.replying.size) await Promise.race([Promise.allSettled([...this.replying]), new Promise((r) => setTimeout(r, 1500).unref?.())]);
-    this.closing = true; // what flush() collects now goes out with the last message, not on its own
-    this.flush();
     this.closed = true;
-    clearTimeout(this.flushTimer);
     clearInterval(this.statusTimer);
     this.streamAbort?.abort();
     if (!this.registered) return;
-    const messages = [...this.outbox.splice(0), { t: 'bye', restarting }];
-    await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages }, { timeout: 1500 }).catch(() => {});
+    await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(this.id)}/events`, { messages: [{ t: 'bye', restarting }] }, { timeout: 1500 }).catch(() => {});
   }
 }

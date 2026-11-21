@@ -66,8 +66,7 @@ export const BASIC_SETTINGS = {
 // unrelated env entries; those are left alone, but are not advertised as configuration of this program.
 export const KNOWN_KEYS = {
   CLAUDE_PRO_GATEWAY_URL: `Gateway address (default ${GATEWAY_DEFAULT_URL})`,
-  CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online on the gateway\'s web page whenever this computer is logged in, and sessions on your other computers can send it tasks (@computer/name)',
-  CLAUDE_PRO_REMOTE_COMMANDS: 'Set to 0 to make this computer\'s sessions read-only on the gateway\'s web page: it can watch them, but not send them messages, answer their questions, stop them, switch model or effort, or change their directory (default: on; read when a session goes online)',
+  CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online at the gateway whenever this computer is logged in, and sessions on your other computers (@computer/name) and your contacts can send it tasks',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
 
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 48000; lowered automatically if the gateway allows less)',

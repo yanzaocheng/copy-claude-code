@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 的 Key 保存在 `~/.claude-pro/gateway.json`，其他厂商的保存在 `~/.claude-pro/providers.json`。远程会话发布只在连接了 7bit.fun 时才有。
+> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 的 Key 保存在 `~/.claude-pro/gateway.json`，其他厂商的保存在 `~/.claude-pro/providers.json`。跨电脑互发任务和通讯录只在连接了 7bit.fun 时才有。
 
 ## 安装与运行
 
@@ -133,7 +133,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择；`--model`、`--effort` 可覆盖本次启动。
 
-设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、远程会话、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。没有 `--provider` 或 `CLAUDE_PRO_PROVIDER` 配置：用哪家由模型名决定（`/model`、`--model deepseek/deepseek-v4-pro`、设置 `model`）。
+设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、是否连网关、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。没有 `--provider` 或 `CLAUDE_PRO_PROVIDER` 配置：用哪家由模型名决定（`/model`、`--model deepseek/deepseek-v4-pro`、设置 `model`）。
 
 ## 系统提示词
 
@@ -202,20 +202,6 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 服务是整台电脑共用的一个后台进程，没有页面打开 30 分钟后自动退出，下次 `/web` 再启动；claude-pro 更新（或源码改动）后会自动换成新版本。只监听 127.0.0.1，只接受以 127.0.0.1/localhost 访问的请求，修改类请求必须来自控制台自己的页面；第一次用 `/web` 打开时地址里带一个令牌，之后换成 cookie（令牌在 `~/.claude-pro/web.json`，只有你能读）。控制台不能打开 `gateway.json`、`providers.json` 这类存 Key 的文件，也不能打开会话记录以外的任意文件。
 
-## 远程会话：在浏览器里查看和操作
-
-本地手动启动的交互式 claude-pro 会话登录网关后自动上线，但默认只用于会话之间互发任务；在会话里输入 `/rc`（或用 `claude-pro --rc` 启动）开启远程控制后，网页才能看到并操作它，`/rc off` 关闭。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页经网关查看并操作已经在运行的本地终端会话（不能新建会话）。
-
-- **自动上线**：`/connect` 连上 7bit.fun 后当前会话立即注册；之后每个交互会话启动时自动注册，断线自动重连；`/disconnect 7bit.fun` 后停止远程连接。`CLAUDE_PRO_ONLINE=0` 可以关闭远程发布。
-- **远程控制开关 `/rc`**：没开时不上传对话，网关只知道会话在线、名字、模型和是否在忙，网页列表里不显示它（只提示“另有 N 个未开启远程控制”），网页的指令也会被拒绝。开启后补发完整对话；关闭时网关清掉暂存的对话并断开正在看的网页。开关在会话重启（包括 `/cd`、更新）后保持，新会话默认关闭。输入框右上角在开启时显示 `⇄`。
-- **网页能看到**：会话列表、在线/离线/结束状态、模型、目录、机器名、viewer 数、transcript、流式文本和 thinking、工具调用与输出、todos、后台任务、排队消息、问题文本和连接状态。
-- **网页能做**：发消息（等同在终端输入框回车：`/命令`、`!shell`、`#记忆`、`@会话`，最多 6 张图片；忙时排队）、回答对话框（选项、多选、“其他”文字、文本框、取消）、停止（等同 Esc，同时取消等待中的问题）、切换 model/effort（发 `/model`、`/effort`）、浏览目录并 `/cd`（会话在新目录重启，网页接着看）、输入补全（`/命令`、`@文件`、`@会话`）、查看某次工具调用的完整输出（最多 1 MB，运行中的也行）。
-- **只读开关**：`CLAUDE_PRO_REMOTE_COMMANDS=0`（环境变量，或 `claude-pro config set CLAUDE_PRO_REMOTE_COMMANDS 0`）让这台电脑的会话在网页上只能看、不能操作；会话上线时读取，`/status` 会显示 read-only。
-- **网页不能做**：结束、重启会话或更新 claude-pro（网页发来的 `/exit`、`/quit`、`/restart`、`/reload`、`/update` 会被拒绝：“结束、重启会话和更新 claude-pro 只能在终端里操作”，网关也拒绝；自动更新照常），新建会话、打开终端、管理电脑；这些只能在本地终端完成。
-- **协议**：远程入口是 `/user#remote`。终端用 `POST /v1/remote/sessions` 注册，并在 `commands` 里声明它接受的指令（`send`、`interrupt`、`dialog`、`options`、`suggest`、`list`、`output`；只读时不带这个字段，网关只转发声明过的类型）；`GET .../commands`（SSE）接收 viewer/snapshot/peer 帧和网页的指令 `{cid, type, body}`，用 `POST .../results` 回复 `{cid, ok, …}`；`POST .../events` 发布 snapshot/batch/status/bye。
-- **快照与保留**：网关状态在内存中保存；网关重启后终端重新注册并补发 snapshot。每个账户最多 60 个会话，优先淘汰最久未活动的离线会话；事件缓冲最多 3000 个事件或 8 MB；结束会话保留 6 小时，未结束但离线保留 24 小时。
-- **权限边界**：网页只能看到和操作同一网关账户的会话（能操作就等于能在这台电脑上运行命令：不需要时用只读开关）；会话内容会经网关中转并暂存在内存。撤销建立终端流的 API key 后，终端连接会被断开。
-
 ## 会话之间互发任务（本机和其他电脑）
 
 每个交互会话都有一个名字（默认是目录名，输入框右上角的 `@名字`），别的会话可以给它发任务，它做完后回答自动发回来。
@@ -237,7 +223,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 不同网关账户之间，双方同意后，各自的 claude-pro 会话也能互发任务。
 
-- **通讯号**：每个账户有一个公开的通讯号（默认随机，如 `cp7k3qxm`），别人用它加你，看不到你的邮箱。`/contacts handle 新名字` 或网页「远程控制 → 通讯录」里修改（3-20 个小写字母、数字、`_`、`-`，以字母开头）。
+- **通讯号**：每个账户有一个公开的通讯号（默认随机，如 `cp7k3qxm`），别人用它加你，看不到你的邮箱。`/contacts handle 新名字` 或网关网页「通讯录」里修改（3-20 个小写字母、数字、`_`、`-`，以字母开头）。
 - **加好友**：`/contacts add 对方通讯号` 发出请求；对方在线的会话会提示，对方用 `/contacts accept 你的通讯号` 同意（也可以 `reject`、`block`），或在网页通讯录里点同意。双方互相请求时直接成为好友。`/contacts remove` 删除，`/contacts block` 拉黑（对方不能再请求、不能发任务，也不会被告知）。`/contacts` 列出全部。
 - **发任务**：好友在线的会话在 `/peers` 和 ListPeers 里显示为 `@通讯号:电脑名/会话名`；`@通讯号 任务`（对方只开着一个会话时）或 `@通讯号:电脑名/会话名 任务` 发送，回答自动发回。
 - **确认**：好友发来的任务默认在终端弹窗问你「执行 / 拒绝 / 以后都执行」，拒绝时对方会收到“已拒绝”。`/contacts trust 通讯号 auto` 让这个好友的任务直接执行，`confirm` 改回每条确认。交给模型时会注明这是外人的请求、不是用户的指令，并要求它不泄露密钥和私人文件、不做破坏性操作。
@@ -282,9 +268,9 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 - 上下文用满上游输入上限时自动压缩（留出写摘要要用的余量：窗口的 5%，最多 4 万 token，这样摘要请求能读缓存而不是因超长被拒），不再读取 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`；子 agent 定义的 `autoCompactWindow` 仍有效，也可手动 `/compact`
 - 会话自动保存到 `~/.claude-pro/projects/`，`claude-pro -c` 继续上次，`claude-pro -r` 选择历史会话
 
-**`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
+**`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/rc` `/web` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/web` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 
@@ -381,7 +367,7 @@ src/prompts.js        系统提示词、压缩提示词、自动记忆提示
 src/tools/*           各工具实现（含 Skill、NotebookEdit）
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
-src/remote.js         远程会话：发布、网页指令、对话事件模型和终端 peer messaging（applyEvent，网关页面里有同一份）
+src/remote.js         对话事件模型（applyEvent，控制台页面里有同一份）和网关的会话中继连接（跨电脑、通讯录互发任务）
 src/live.js           本机 Web 控制台的实时查看：会话的对话事件流（经会话自己的 127.0.0.1 peer 服务）
 src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面
 src/commands.js       斜杠命令
