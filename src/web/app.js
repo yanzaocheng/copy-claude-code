@@ -668,6 +668,7 @@
     return `${Math.floor(s / (86400 * 365))}年`;
   }
 
+  const working = (it) => Boolean(it.peer && (it.peer.status?.turn || it.peer.status?.dialog));
   function liveState(st = {}) {
     if (st.dialog) return ["ask", "等待回答"];
     if (st.turn) return ["busy", st.verb ? `${st.verb}…` : "工作中"];
@@ -717,14 +718,14 @@
       // the projects with a session running first, then by when they last had a message (a running session counted as
       // "now" made two such projects swap places at every redraw: both were "now", a few ms apart)
       g.last = Math.max(g.last, it.mtime || 0);
-      if (it.peer) g.live = true;
+      if (working(it)) g.live = true;
     }
     const list = [...groups.values()].sort((a, b) => b.live - a.live || b.last - a.last || a.key.localeCompare(b.key));
     const here = location.hash;
     ws.tips.clear();
     let n = 0;
     box.innerHTML = list.length ? list.map((g) => {
-      g.items.sort((a, b) => Boolean(b.peer) - Boolean(a.peer) || b.mtime - a.mtime);
+      g.items.sort((a, b) => working(b) - working(a) || b.mtime - a.mtime);
       const closed = ws.closed.has(g.key) && !q;
       const limit = ws.expanded.has(g.key) || q ? Infinity : 6;
       const rows = closed ? "" : g.items.slice(0, limit).map((it) => {
@@ -732,9 +733,9 @@
         ws.tips.set(id, it);
         const [cls] = it.peer ? liveState(it.peer.status) : [""];
         const active = here === it.href || (it.alt && here === it.alt);
-        return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${it.peer ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${it.peer ? "" : esc(shortAgo(it.mtime))}</span>${it.peer || !it.id ? "" : `<span class="ws-arch" role="button" data-archive="${esc(it.id)}" title="归档" aria-label="归档">${ICON.archive}</span>`}</a>`;
+        return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${working(it) ? "" : esc(shortAgo(it.mtime))}</span>${working(it) || !it.id ? "" : `<span class="ws-arch" role="button" data-archive="${esc(it.id)}" title="归档" aria-label="归档">${ICON.archive}</span>`}</a>`;
       }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
-      const running = g.items.filter((it) => it.peer).length;
+      const running = g.items.filter(working).length;
       return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" title="更多" aria-label="项目菜单">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
     }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话"}</div>`;
   }
@@ -749,11 +750,26 @@
 
   // 归档 (or back, `archived` false): out of the workspace, kept whole, never cleaned up by age
   async function archive(ids, archived = true) {
+    if (archived) for (const id of ids) await putAway(id);
     await api("/api/sessions/archive", { method: "POST", body: { ids, archived } });
     for (const s of ws.sessions) if (ids.includes(s.id)) s.archived = archived ? Date.now() : undefined;
     drawWorkspace();
     toast(archived ? `已归档${ids.length > 1 ? ` ${ids.length} 个会话` : ""}：在「全部会话 → 已归档」里可以找回` : "已取消归档");
     loadWorkspace();
+  }
+
+  // A conversation the console runs (taken up when it was opened) is let go of, its turn stopped if `force`: before it
+  // is archived, deleted or continued in a terminal. Resolves once it is gone.
+  async function putAway(sessionId, { force = false } = {}) {
+    const l = (await api("/api/live")).sessions.find((x) => x.status?.sessionId === sessionId);
+    if (!l) return;
+    try { await api(`/api/live/${l.peerId}/end`, { method: "POST", body: { force } }); } catch (e) {
+      if (!/不在运行/.test(e.message)) throw e; // (gone meanwhile: what was wanted)
+    }
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (!(await api("/api/live").catch(() => ({ sessions: [] }))).sessions.some((x) => x.status?.sessionId === sessionId)) return;
+    }
   }
 
   function wireSidebar() {
@@ -797,9 +813,9 @@
       const a = e.target.closest("[data-tip]");
       const it = a && ws.tips.get(a.dataset.tip);
       if (!it) { tip.classList.add("hidden"); return; }
-      const [cls, label] = it.peer ? liveState(it.peer.status) : ["off", "未运行"];
+      const [cls, label] = working(it) ? liveState(it.peer.status) : ["", ""];
       const st = it.peer?.status || {};
-      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div><div class="tip-state"><span class="ws-dot ${cls}"></span>${esc(label)}${it.peer && !st.hidden ? " · 在终端窗口里运行" : ""}</div>`;
+      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div>${label || (it.peer && !st.hidden) ? `<div class="tip-state">${label ? `<span class="ws-dot ${cls}"></span>${esc(label)}` : ""}${it.peer && !st.hidden ? `${label ? " · " : ""}在终端窗口里运行` : ""}</div>` : ""}`;
       const r = a.getBoundingClientRect();
       tip.classList.remove("hidden");
       tip.style.left = `${r.right + 8}px`;
@@ -1017,38 +1033,44 @@
     $("#lmodel", el).addEventListener("click", choose("model", "模型", "models"));
     $("#leffort", el).addEventListener("click", choose("effort", "推理强度", "efforts"));
     $("#lmenu", el).addEventListener("click", (e) => {
+      const known = ws.sessions.find((s) => s.id === status.sessionId);
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
-        { label: "查看完整历史记录", value: "history" },
         { label: "改名（/rename）", value: "rename" },
         { label: "压缩上下文（/compact）", value: "compact" },
-        ...(status.hidden ? [{ label: "在终端窗口里继续", description: "在终端标签里接着这个对话（这里的会话先结束）", value: "terminal" }] : []),
-        { label: "结束会话", description: "对话会保存，以后可以继续", value: "end" },
+        ...(known ? [{ label: "导出 Markdown", value: "export" }, { label: "归档", description: "从工作区收起，内容保留", value: "archive" }] : []),
+        ...(status.hidden && known ? [{ label: "在终端窗口里继续", description: "在终端标签里接着这个对话", value: "terminal" }] : []),
+        ...(known ? [{ label: "删除（进回收站）", value: "delete" }] : []),
       ] }], async (key, value) => {
-        const known = ws.sessions.find((s) => s.id === status.sessionId);
-        if (value === "history") { if (known) location.hash = `#/session/${known.dir}/${known.id}`; else toast("这个会话还没有保存的记录"); }
-        if (value === "rename") { const name = prompt("新的名字", status.title || ""); if (name) post("send", { text: `/rename ${name}` }).catch(fail); }
-        if (value === "compact") post("send", { text: "/compact" }).catch(fail);
-        if (value === "end" || value === "terminal") {
-          const busy = Boolean(status.turn);
-          if (!confirm(busy ? "会话正在工作，结束会停止当前任务。确定结束？" : value === "terminal" ? "改在终端窗口里继续这个对话？" : "结束这个会话？对话会保存，以后可以继续。")) return;
-          const sessionId = status.sessionId;
-          try { await post("end", { force: busy }); } catch (err) { return fail(err); }
-          toast("会话已结束");
-          if (value === "terminal" && sessionId) {
-            // wait for it to be gone, then the same conversation in a terminal tab
-            for (let i = 0; i < 20; i++) {
-              await new Promise((r) => setTimeout(r, 500));
-              const still = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.some((x) => x.status?.sessionId === sessionId);
-              if (!still) break;
-            }
-            await loadWorkspace();
-            const known = ws.sessions.find((x) => x.id === sessionId);
-            if (known) { try { const r = await api(`/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}/open`, { method: "POST", body: { terminal: true } }); toast(r.opened ? `已在 ${r.how} 里继续` : `请在终端运行：${r.command}`); } catch (err) { fail(err); } }
-            return;
+        const sessionId = status.sessionId;
+        const busy = Boolean(status.turn);
+        const base = known ? `/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}` : "";
+        try {
+          if (value === "rename") { const name = prompt("新的名字", status.title || ""); if (name) await post("send", { text: `/rename ${name}` }); }
+          if (value === "compact") await post("send", { text: "/compact" });
+          if (value === "export") location.href = `${base}/export`;
+          if (value === "archive") {
+            if (busy && !confirm("它正在工作，归档会停止当前任务。确定归档？")) return;
+            await putAway(sessionId, { force: busy });
+            await archive([sessionId]);
+            location.hash = "#/new";
           }
-          await loadWorkspace();
-          location.hash = "#/new";
-        }
+          if (value === "terminal") {
+            if (busy && !confirm("它正在工作，改到终端会停止当前任务。确定？")) return;
+            await putAway(sessionId, { force: busy });
+            const r = await api(`${base}/open`, { method: "POST", body: { terminal: true } });
+            toast(r.opened ? `已在 ${r.how} 里继续` : `请在终端运行：${r.command}`);
+            await loadWorkspace();
+            location.hash = "#/new";
+          }
+          if (value === "delete") {
+            if (!confirm(`删除「${status.title || known.title}」？会先移到回收站，保留 7 天。${busy ? "它正在工作，会先停止。" : ""}`)) return;
+            await putAway(sessionId, { force: busy });
+            await api(base, { method: "DELETE" });
+            toast("已移到回收站");
+            await loadWorkspace();
+            location.hash = "#/new";
+          }
+        } catch (err) { fail(err); }
       });
     });
 
