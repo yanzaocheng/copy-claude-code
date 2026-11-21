@@ -714,7 +714,7 @@
         return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${it.peer ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${it.peer ? "" : esc(shortAgo(it.mtime))}</span></a>`;
       }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
       const running = g.items.filter((it) => it.peer).length;
-      return `<div class="ws-group"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button>${rows}</div>`;
+      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
     }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话"}</div>`;
   }
 
@@ -729,6 +729,14 @@
   function wireSidebar() {
     const box = $("#ws");
     box.addEventListener("click", (e) => {
+      const add = e.target.closest("[data-add]");
+      if (add) {
+        // a new session in this project, at once (its first message is typed in its live view)
+        if (add.disabled) return;
+        add.disabled = true;
+        startSession(add.dataset.add, "", []).catch(fail).finally(() => { add.disabled = false; });
+        return;
+      }
       const f = e.target.closest("[data-folder]"), x = e.target.closest("[data-expand]");
       if (f) {
         const key = f.dataset.folder;
@@ -916,7 +924,7 @@
     }
     if (!found) throw new Error("会话 30 秒内没有上线：可能是启动出错了，在终端里运行 claude-pro 看看");
     // sent by its live view once that watches it (sent before, what the session printed first was missed)
-    firstMessage = { peerId: found.peerId, text, images };
+    if (text || images?.length) firstMessage = { peerId: found.peerId, text, images };
     await loadWorkspace();
     location.hash = `#/live/${found.peerId}`;
   }
