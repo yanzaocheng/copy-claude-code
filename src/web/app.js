@@ -569,12 +569,13 @@
       else if (!d.items.length) log.innerHTML = '<div class="chat-empty">没有内容</div>';
     };
     step();
-    // The session started again (in the background, or in a terminal tab): resolves with its live peer id once it is up
+    // The conversation goes on (in the console, or in a terminal tab): resolves with its live peer id once it is up
     // (null: it cannot be started from here, the command to run was shown), or throws.
-    const start = async (background) => {
-      const r = await api(`${base}/open`, { method: "POST", body: { background } });
+    const start = async (inConsole) => {
+      const r = await api(`${base}/open`, { method: "POST", body: { terminal: !inConsole } });
+      if (r.peerId) return r.peerId;
       if (!r.opened) { await navigator.clipboard.writeText(r.command).catch(() => {}); toast(`请在终端运行（已复制）：${r.command}`); return null; }
-      toast(background ? "正在后台启动这个会话…" : `已在 ${r.how} 新标签中继续，等它上线…`);
+      toast(`已在 ${r.how} 新标签中继续，等它上线…`);
       for (let k = 0; k < 30; k++) {
         await new Promise((res) => setTimeout(res, 1000));
         const live = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.find((x) => x.status?.sessionId === id);
@@ -586,7 +587,7 @@
     const resume = (background) => start(background).then((peerId) => peerId && open(peerId)).catch(fail);
     // Writing to it starts it: the message goes to it once its live view watches it (as for a new session)
     const hc = composer($("#hcomp", el), {
-      placeholder: "继续这个对话：发消息就会在后台启动它（不开窗口）。Enter 发送，Shift+Enter 换行",
+      placeholder: "发消息继续这个对话，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
       dropZone: el,
       draftKey: `session:${id}`,
       onSend: async (text, images) => {
@@ -792,7 +793,7 @@
       if (!it) { tip.classList.add("hidden"); return; }
       const [cls, label] = it.peer ? liveState(it.peer.status) : ["off", "未运行"];
       const st = it.peer?.status || {};
-      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div><div class="tip-state"><span class="ws-dot ${cls}"></span>${esc(label)}${it.peer ? (st.hidden ? " · 后台运行" : " · 终端窗口") : ""}</div>`;
+      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div><div class="tip-state"><span class="ws-dot ${cls}"></span>${esc(label)}${it.peer && !st.hidden ? " · 在终端窗口里运行" : ""}</div>`;
       const r = a.getBoundingClientRect();
       tip.classList.remove("hidden");
       tip.style.left = `${r.right + 8}px`;
@@ -920,7 +921,7 @@
   // ---------------------------------------------------------------- 新会话
 
   async function newView() {
-    const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">在一个目录里开一个新的 claude-pro 会话：它在后台运行，不开窗口，你在这里看着它工作、给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
+    const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">选一个项目目录，告诉它要做什么：你在这里看着它工作、随时给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
     let projects = [];
     try { projects = (await api("/api/projects")).projects; } catch { /* typed by hand */ }
     let dir = localStorage.getItem("cpNewDir") || projects[0]?.cwd || "";
@@ -947,16 +948,14 @@
 
   let firstMessage = null; // {peerId, text, images}: for a session just started, sent by its live view (startSession)
 
-  // claude-pro in the background (a hidden window) in `dir`; once it is up it is opened here and the message goes to it.
+  // A new session in `dir`, run by the console; it is opened here and the message goes to it.
   async function startSession(dir, text, images) {
     if (!dir) throw new Error("先选一个目录");
     const before = new Set(ws.live.map((r) => r.peerId));
-    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir, background: true } });
-    if (!r.opened) throw new Error(`这个系统不能自动启动会话，请在终端运行：${r.command}`);
+    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir } });
     localStorage.setItem("cpNewDir", r.cwd);
-    toast("会话正在后台启动…");
     const until = Date.now() + 30_000;
-    let found = null;
+    let found = r.peerId ? { peerId: r.peerId } : null;
     while (!found && Date.now() < until) {
       await new Promise((res) => setTimeout(res, 1000));
       try { found = (await api("/api/live")).sessions.find((x) => !before.has(x.peerId) && projectKey(x.status?.cwd || x.cwd) === projectKey(r.cwd)); } catch { /* again */ }
@@ -988,7 +987,7 @@
     const post = (type, body = {}) => api(`/api/live/${peerId}/${type}`, { method: "POST", body });
     const near = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
     const c = composer($("#lcomp", el), {
-      placeholder: "发给这个会话：和在终端里输入一样，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
+      placeholder: "发消息继续这个对话，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
       right: `<button type="button" class="chip" id="lmodel" title="切换模型"><span></span>${ICON.caret}</button><button type="button" class="chip" id="leffort" title="切换推理强度"><span></span>${ICON.caret}</button>`,
       dropZone: el,
       draftKey: `live:${peerId}`,
@@ -1016,7 +1015,7 @@
         { label: "查看完整历史记录", value: "history" },
         { label: "改名（/rename）", value: "rename" },
         { label: "压缩上下文（/compact）", value: "compact" },
-        ...(status.hidden ? [{ label: "改到终端窗口里", description: "结束后台运行，在终端标签里接着这个对话", value: "terminal" }] : []),
+        ...(status.hidden ? [{ label: "在终端窗口里继续", description: "在终端标签里接着这个对话（这里的会话先结束）", value: "terminal" }] : []),
         { label: "结束会话", description: "对话会保存，以后可以继续", value: "end" },
       ] }], async (key, value) => {
         const known = ws.sessions.find((s) => s.id === status.sessionId);
@@ -1025,7 +1024,7 @@
         if (value === "compact") post("send", { text: "/compact" }).catch(fail);
         if (value === "end" || value === "terminal") {
           const busy = Boolean(status.turn);
-          if (!confirm(busy ? "会话正在工作，结束会停止当前任务。确定结束？" : value === "terminal" ? "结束后台运行，改在终端窗口里继续？" : "结束这个会话？对话会保存，以后可以继续。")) return;
+          if (!confirm(busy ? "会话正在工作，结束会停止当前任务。确定结束？" : value === "terminal" ? "改在终端窗口里继续这个对话？" : "结束这个会话？对话会保存，以后可以继续。")) return;
           const sessionId = status.sessionId;
           try { await post("end", { force: busy }); } catch (err) { return fail(err); }
           toast("会话已结束");
@@ -1038,7 +1037,7 @@
             }
             await loadWorkspace();
             const known = ws.sessions.find((x) => x.id === sessionId);
-            if (known) { try { const r = await api(`/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}/open`, { method: "POST", body: { background: false } }); toast(r.opened ? `已在 ${r.how} 里继续` : `请在终端运行：${r.command}`); } catch (err) { fail(err); } }
+            if (known) { try { const r = await api(`/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}/open`, { method: "POST", body: { terminal: true } }); toast(r.opened ? `已在 ${r.how} 里继续` : `请在终端运行：${r.command}`); } catch (err) { fail(err); } }
             return;
           }
           await loadWorkspace();
@@ -1089,7 +1088,7 @@
       status = next || {};
       statusAt = Date.now();
       $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
-      $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? " · 后台运行" : " · 终端窗口"}`;
+      $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? "" : " · 在终端窗口里运行"}`;
       $("#lmodel span", el).textContent = status.model || "模型";
       $("#leffort span", el).textContent = status.effort || "推理强度";
       $("#leffort", el).hidden = !status.effort;

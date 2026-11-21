@@ -359,40 +359,27 @@ function windowsTerminal() {
   return wtPath;
 }
 
-// The sessions the console runs in its own process (the 后台会话, see host.js): set by the server.
+// The sessions the console runs in its own process (see host.js): set by the server.
 let host = null;
 export function useHost(h) { host = h; }
 
-// A 后台会话 in `cwd` (a saved conversation: `resumeFile`, `resumeId`), run by the console itself.
-async function launchBackground(cwd, { resumeFile = null, resumeId = null } = {}) {
+// A session in `cwd` (a saved conversation: `resumeFile`, `resumeId`), run by the console itself: up in ~0.1 s.
+async function launchSession(cwd, { resumeFile = null, resumeId = null } = {}) {
+  if (!host) throw httpError(503, '控制台还在启动，请稍后再试');
   const app = await host.launch({ cwd, resumeFile, resumeId });
   if (app.exiting) throw httpError(500, '会话没能启动（详情在 ~/.claude-pro/web-errors.log）');
-  return { opened: true, how: '后台', background: true, peerId: app.peers?.id || null, sessionId: app.store?.id || null };
+  return { opened: true, peerId: app.peers?.id || null, sessionId: app.store?.id || null };
 }
 
-// claude-pro in `cwd`, with `args` (ids and flags only: nothing a shell would take apart): `background` in a hidden
-// console window (a 后台会话 of a console that does not run them itself; CLAUDE_PRO_BACKGROUND tells it so), else in
-// a new terminal tab (Windows Terminal when there is one, else a console window). Elsewhere than Windows only the
-// command to run is given.
-function launchTerminal(cwd, args, title, { background = false } = {}) {
+// claude-pro in `cwd` in a new terminal tab (Windows Terminal when there is one, else a console window), with `args`
+// (ids and flags only: nothing a shell would take apart). Elsewhere than Windows only the command to run is given.
+function launchTerminal(cwd, args, title) {
   const bin = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
   const command = `cd "${cwd}" && claude-pro${args.length ? ` ${args.join(' ')}` : ''}`;
   if (!isWin) return { opened: false, command };
-  if (background) {
-    // Start-Process gives it a console of its own (the interactive session needs one), hidden; the paths and arguments
-    // go through the environment, so nothing is quoted for PowerShell
-    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Process -WindowStyle Hidden -FilePath $env:CPW_NODE -ArgumentList $env:CPW_ARGS -WorkingDirectory $env:CPW_CWD'], {
-      // (not detached: a detached PowerShell has no console, and what it starts then gets none either)
-      stdio: 'ignore', windowsHide: true,
-      env: { ...process.env, CLAUDE_PRO_BACKGROUND: '1', CPW_NODE: process.execPath, CPW_ARGS: [`"${bin}"`, ...args].join(' '), CPW_CWD: cwd, FORCE_COLOR: '' },
-    });
-    child.on('error', () => {});
-    child.unref();
-    return { opened: true, how: '后台', background: true, command };
-  }
   const wt = windowsTerminal();
   const env = { ...process.env };
-  delete env.CLAUDE_PRO_BACKGROUND; // (inherited when a 后台会话 started this server)
+  delete env.CLAUDE_PRO_BACKGROUND; // (inherited when a session of an older version, in a hidden window, started this server)
   const child = wt
     ? spawn(wt, ['-w', '0', 'new-tab', '-d', cwd, '--title', String(title || 'claude-pro').replace(/;/g, ',').slice(0, 40), process.execPath, bin, ...args], { detached: true, stdio: 'ignore', windowsHide: false, env })
     : spawn('cmd.exe', ['/c', 'start', '""', '/D', `"${cwd}"`, `"${process.execPath}"`, `"${bin}"`, ...args], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true, env });
@@ -401,13 +388,14 @@ function launchTerminal(cwd, args, title, { background = false } = {}) {
   return { opened: true, how: wt ? 'Windows Terminal' : 'cmd', command };
 }
 
-async function openInTerminal(dir, id, { background = false } = {}) {
+// A saved conversation goes on: in the console (`terminal` false), or in a terminal tab.
+async function openSession(dir, id, { terminal = false } = {}) {
   const session = listAllSessions().find((s) => s.dir === dir && s.id === id);
   if (!session) throw httpError(404, '会话不存在');
   if ((await running()).has(id)) throw httpError(409, '这个会话已经在运行');
   const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
-  if (background && host) return launchBackground(cwd, { resumeFile: session.file, resumeId: id });
-  return launchTerminal(cwd, ['--resume', id], session.title, { background });
+  if (!terminal) return launchSession(cwd, { resumeFile: session.file, resumeId: id });
+  return launchTerminal(cwd, ['--resume', id], session.title);
 }
 
 // A new session in `cwd` (its first message, if any, is sent by the page once the session is up: no quoting through
@@ -419,9 +407,7 @@ async function newSession(body) {
   let st;
   try { st = fs.statSync(cwd); } catch { throw httpError(400, `目录不存在：${cwd}`); }
   if (!st.isDirectory()) throw httpError(400, `不是目录：${cwd}`);
-  const background = body?.background !== false;
-  if (background && host) return { ...(await launchBackground(cwd)), cwd };
-  return { ...launchTerminal(cwd, [], path.basename(cwd) || cwd, { background }), cwd };
+  return { ...(await launchSession(cwd)), cwd };
 }
 
 // ---------------------------------------------------------------- routes
@@ -455,7 +441,7 @@ export const routes = [
     if ((await running()).has(id)) throw httpError(409, '会话正在运行：请在它的终端里用 /rename，或在「运行中」里给它发 /rename');
     return { name: renameSession(dir, id, body?.name) };
   }],
-  ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/open$/, (req, [dir, id], body) => openInTerminal(dir, id, { background: Boolean(body?.background) })],
+  ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/open$/, (req, [dir, id], body) => openSession(dir, id, { terminal: body?.terminal === true || body?.background === false })],
   ['DELETE', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     if ((await running()).has(id)) throw httpError(409, '会话正在运行，不能删除');
     return trashSession(dir, id);
