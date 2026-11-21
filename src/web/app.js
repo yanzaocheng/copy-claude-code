@@ -1408,25 +1408,19 @@
     drawProviders(el, p);
   }
 
+  let modelTab = null; // the provider whose tab 模型列表 shows (kept across redraws; a provider just connected gets it)
   function drawProviders(el, p) {
-    const card = (x) => `<div class="panel prov${x.connected ? " connected" : ""}"><div class="prov-top"><strong>${esc(x.name)}</strong>${x.connected ? '<span class="pill ok">已连接</span>' : ""}</div>
-      <div class="meta">${esc(x.protocol === "openai" ? "OpenAI 协议" : "Anthropic 协议")} · ${esc(x.baseUrl)}</div>
-      ${x.connected ? `<div class="meta">Key ${esc(x.key || "（无需）")} · ${x.models.length} 个模型${x.model ? ` · 选的是 ${esc(x.model)}` : ""}</div>` : ""}
-      <div class="actions">${x.connected ? `<button class="button secondary small" data-connect="${esc(x.id)}">更换 Key / 模型</button><button class="button danger small" data-remove="${esc(x.id)}">断开</button>` : `<button class="button small" data-connect="${esc(x.id)}">连接</button>`}${x.keyPage ? `<a class="button secondary small" href="${esc(x.keyPage)}" target="_blank" rel="noopener">获取 Key</a>` : ""}</div></div>`;
-    const connected = [...p.presets, ...p.custom].filter((x) => x.connected);
     $("#body", el).innerHTML = `<div id="pbody">
       <div class="section-head"><div><h2>默认模型</h2><p>新会话用的模型和推理强度。会话里的 /model、/effort 只改那一个会话（并记住给下次用）</p></div></div>
       <div class="panel panel-pad" id="defaults"><div class="muted">正在读取可用模型…</div></div>
-      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型才出现在会话的模型菜单里（都不勾就显示全部）。列表只在点「刷新模型列表」时更新；点一行把它填进上面的默认模型</p></div><div class="actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button></div></div>
+      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型才出现在会话的模型菜单里（都不勾就显示全部）。列表只在点「刷新模型列表」时更新；点一行把它填进上面的默认模型</p></div><div class="actions head-actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button><button class="button small" id="addProvider" title="连接 DeepSeek、Kimi、OpenRouter 等供应商，或你自己的兼容接口">添加供应商</button></div></div>
       <div id="modelLists"><div class="panel panel-pad muted">正在读取…</div></div>
       <div class="section-head"><div><h2>7bit.fun 网关</h2><p>Claude、GPT 等模型，余额、远程控制、跨电脑和通讯录都通过它</p></div></div>
       <div class="panel prov${p.gateway.connected ? " connected" : ""}" style="max-width:640px"><div class="prov-top"><strong>7bit.fun</strong>${p.gateway.connected ? '<span class="pill ok">已连接</span>' : ""}</div>
         <div class="meta">${esc(p.gateway.url)}${p.gateway.connected ? ` · Key ${esc(p.gateway.key)}${p.gateway.account?.email ? ` · ${esc(p.gateway.account.email)}` : ""}` : ""}</div>
-        <form class="actions" id="gwForm"><input type="password" id="gwKey" placeholder="${p.gateway.connected ? "粘贴新 Key 来更换" : "粘贴 7bit.fun 的 API Key"}" style="flex:1;min-width:240px" autocomplete="off"><button class="button small" type="submit">${p.gateway.connected ? "更换" : "连接"}</button>${p.gateway.connected ? '<button class="button danger small" type="button" id="gwOut">断开</button>' : ""}<a class="button secondary small" href="${esc(p.gateway.keyPage)}" target="_blank" rel="noopener">获取 Key</a></form></div>
-      <div class="section-head"><div><h2>模型供应商</h2><p>${connected.length} 个已连接。Key 保存在 ~/.claude-pro/providers.json，页面上只显示开头和结尾</p></div><button class="button secondary small" id="addCustom">添加自定义供应商</button></div>
-      <div class="prov-grid">${[...p.presets.filter((x) => x.connected), ...p.custom, ...p.presets.filter((x) => !x.connected)].map(card).join("")}</div></div>`;
+        <form class="actions" id="gwForm"><input type="password" id="gwKey" placeholder="${p.gateway.connected ? "粘贴新 Key 来更换" : "粘贴 7bit.fun 的 API Key"}" style="flex:1;min-width:240px" autocomplete="off"><button class="button small" type="submit">${p.gateway.connected ? "更换" : "连接"}</button>${p.gateway.connected ? '<button class="button danger small" type="button" id="gwOut">断开</button>' : ""}<a class="button secondary small" href="${esc(p.gateway.keyPage)}" target="_blank" rel="noopener">获取 Key</a></form></div></div>`;
     loadDefaults(el, p);
-    loadModelLists(el);
+    loadModelLists(el, p);
     $("#gwForm", el).addEventListener("submit", async (e) => {
       e.preventDefault();
       const apiKey = $("#gwKey", el).value.trim();
@@ -1437,7 +1431,14 @@
       if (!confirm("断开 7bit.fun？这台电脑的会话会下线，网关上的模型也不能用了。")) return;
       try { drawProviders(el, await api("/api/gateway", { method: "DELETE" })); toast("已断开"); } catch (err) { fail(err); }
     });
-    $("#addCustom", el).addEventListener("click", () => connectDialog(el, null));
+    // 添加供应商: a built-in one not connected yet, or one of the user's own
+    $("#addProvider", el).addEventListener("click", (e) => {
+      const free = p.presets.filter((x) => !x.connected);
+      popMenu(e.currentTarget, [
+        { key: "preset", title: "选择供应商", items: free.map((x) => ({ label: x.name, description: x.baseUrl, value: x.id })) },
+        { key: "custom", title: "", items: [{ label: "自定义供应商…", description: "任何兼容 Anthropic 或 OpenAI 的接口", value: "" }] },
+      ], (key, value) => connectDialog(el, key === "custom" ? null : free.find((x) => x.id === value)), { dropdown: true });
+    });
     $("#refreshModels", el).addEventListener("click", async (e) => {
       const b = e.currentTarget;
       b.disabled = true;
@@ -1452,17 +1453,11 @@
         if (el.isConnected) drawProviders(el, r.view);
       } catch (err) { fail(err); b.disabled = false; b.textContent = "刷新模型列表"; }
     });
-    $("#pbody", el).addEventListener("click", async (e) => {
-      const c = e.target.closest("[data-connect]"), r = e.target.closest("[data-remove]");
-      if (c) connectDialog(el, [...p.presets, ...p.custom].find((x) => x.id === c.dataset.connect));
-      if (r && confirm(`断开 ${r.dataset.remove}？保存的 Key 会删除。`)) {
-        try { drawProviders(el, await api(`/api/providers/${encodeURIComponent(r.dataset.remove)}`, { method: "DELETE" })); toast("已断开"); } catch (err) { fail(err); }
-      }
-    });
   }
 
-  // 模型列表: the kept lists, by provider (nothing is asked of the providers here: see 刷新模型列表)
-  async function loadModelLists(el) {
+  // 模型列表: the kept lists, a tab per provider (nothing is asked of the providers here: see 刷新模型列表); each
+  // tab says how its provider is connected, with 更换 Key / 模型 and 断开.
+  async function loadModelLists(el, p) {
     const box = $("#modelLists", el);
     let r;
     try { r = await api("/api/models/kept"); } catch (e) { box.innerHTML = `<div class="panel panel-pad muted">读取失败：${esc(e.message)}</div>`; return; }
@@ -1471,11 +1466,20 @@
     const picked = new Set(r.picked || []);
     const price = (m) => (m.price ? `$${m.price.input} / $${m.price.output}` : "—");
     const pickedNote = () => (picked.size ? `菜单显示勾选的 ${picked.size} 个` : "菜单显示全部");
-    box.innerHTML = r.groups.length ? r.groups.map((g) => `<details class="panel model-group"${g.models.length <= 40 ? " open" : ""}>
-      <summary><strong>${esc(g.name)}</strong><span class="muted">${g.models.length} 个模型${g.at ? ` · ${esc(ago(g.at))}更新` : ""}</span></summary>
+    const providerOf = (id) => [...(p?.presets || []), ...(p?.custom || [])].find((x) => x.id === id);
+    if (!r.groups.some((g) => g.id === modelTab)) modelTab = r.groups[0]?.id || null;
+    const head = (g) => {
+      const x = providerOf(g.id);
+      const when = `${g.models.length} 个模型${g.at ? ` · ${esc(ago(g.at))}更新` : ""}`;
+      if (!x) return `<div class="mg-head"><div class="meta">${when} · Key 和账户在下面的「7bit.fun 网关」里管理</div></div>`;
+      return `<div class="mg-head"><div class="meta">${esc(x.protocol === "openai" ? "OpenAI 协议" : "Anthropic 协议")} · ${esc(x.baseUrl)} · Key ${esc(x.key || "（无需）")} · ${when}</div>
+        <div class="actions"><button class="button secondary small" data-connect="${esc(x.id)}">更换 Key / 模型</button><button class="button danger small" data-remove="${esc(x.id)}">断开</button>${x.keyPage ? `<a class="button secondary small" href="${esc(x.keyPage)}" target="_blank" rel="noopener">获取 Key</a>` : ""}</div></div>`;
+    };
+    box.innerHTML = r.groups.length ? `<div class="mtabs" role="tablist">${r.groups.map((g) => `<button type="button" role="tab" data-tab="${esc(g.id)}" aria-selected="${g.id === modelTab}" class="${g.id === modelTab ? "active" : ""}">${esc(g.name)}<span class="count">${g.models.length}</span></button>`).join("")}</div>` + r.groups.map((g) => `<div class="panel model-group" role="tabpanel" data-group="${esc(g.id)}"${g.id === modelTab ? "" : " hidden"}>
+      ${head(g)}<div class="empty no-match" hidden>这个供应商里没有匹配的模型</div>
       ${g.models.length ? `<table class="list"><thead><tr><th class="pick" title="勾选的模型出现在会话的模型菜单里">菜单</th><th>模型</th><th class="num">上下文</th><th class="num">最大输出</th><th>推理强度</th><th class="num" title="每百万 token 的美元价：输入 / 输出">价格（输入/输出）</th></tr></thead><tbody>
         ${g.models.map((m) => `<tr class="click" data-model="${esc(m.ref)}" data-text="${esc([m.ref, m.name, m.vendor].filter(Boolean).join(" ").toLowerCase())}"><td class="pick"><input type="checkbox" data-pick="${esc(m.ref)}" aria-label="在会话的模型菜单里显示 ${esc(m.ref)}"${picked.has(m.ref) ? " checked" : ""}></td><td class="title-cell"><strong class="mono">${esc(m.ref)}${m.ref === current ? ' <span class="pill ok">默认</span>' : ""}</strong>${m.name || m.vendor ? `<div class="path">${esc([m.name, m.vendor].filter(Boolean).join(" · "))}</div>` : ""}</td><td class="num">${m.window ? fmtTokens(m.window) : "—"}</td><td class="num">${m.maxOutput ? fmtTokens(m.maxOutput) : "—"}</td><td>${m.efforts.length ? esc(m.efforts.join(" · ")) : '<span class="faint">—</span>'}</td><td class="num">${price(m)}</td></tr>`).join("")}
-      </tbody></table>` : '<div class="empty">还没有拉取过模型列表：点「刷新模型列表」</div>'}</details>`).join("") : '<div class="panel panel-pad muted">还没有连接 7bit.fun 或其他供应商</div>';
+      </tbody></table>` : '<div class="empty">还没有拉取过模型列表：点「刷新模型列表」</div>'}</div>`).join("") : '<div class="panel panel-pad muted">还没有连接供应商：点「添加供应商」，或在下面连接 7bit.fun</div>';
     if (r.groups.length) box.insertAdjacentHTML("afterbegin", `<div class="pick-bar"><span id="pickedNote">${pickedNote()}</span><button type="button" class="button secondary small" id="clearPicked"${picked.size ? "" : " hidden"}>清除勾选</button></div>`);
     let saving = Promise.resolve();
     const savePicked = () => {
@@ -1497,19 +1501,36 @@
       toast("已清除勾选：会话的模型菜单显示全部模型");
     });
     const filter = $("#modelFilter", el);
+    // searching: every tab says how many of its models match; the tab shown lists them
     const apply = () => {
       const q = filter.value.trim().toLowerCase();
       for (const g of $$(".model-group", box)) {
         const rows = $$("tr[data-model]", g);
         let shown = 0;
         for (const tr of rows) { const hit = !q || tr.dataset.text.includes(q); tr.hidden = !hit; shown += hit; }
-        g.hidden = Boolean(q) && rows.length > 0 && !shown;
-        if (q && shown) g.open = true;
+        $(".no-match", g).hidden = !q || !rows.length || shown > 0;
+        const tab = $(`[data-tab="${CSS.escape(g.dataset.group)}"] .count`, box);
+        if (tab) tab.textContent = q ? `${shown}/${rows.length}` : rows.length;
       }
+    };
+    const show = (id) => {
+      modelTab = id;
+      for (const t of $$("[data-tab]", box)) { const on = t.dataset.tab === id; t.classList.toggle("active", on); t.setAttribute("aria-selected", String(on)); }
+      for (const g of $$(".model-group", box)) g.hidden = g.dataset.group !== id;
     };
     filter.oninput = apply;
     apply();
-    box.onclick = (e) => {
+    box.onclick = async (e) => {
+      const tab = e.target.closest("[data-tab]");
+      if (tab) return show(tab.dataset.tab);
+      const c = e.target.closest("[data-connect]"), rm = e.target.closest("[data-remove]");
+      if (c) return connectDialog(el, providerOf(c.dataset.connect));
+      if (rm) {
+        const x = providerOf(rm.dataset.remove);
+        if (!confirm(`断开 ${x?.name || rm.dataset.remove}？保存的 Key 会删除，它的模型也从列表里去掉。`)) return;
+        try { drawProviders(el, await api(`/api/providers/${encodeURIComponent(rm.dataset.remove)}`, { method: "DELETE" })); toast("已断开"); } catch (err) { fail(err); }
+        return;
+      }
       if (e.target.closest(".pick")) return; // (the checkbox's cell: ticking, not filling the default)
       const tr = e.target.closest("tr[data-model]");
       const input = $("#defModel", el);
@@ -1586,9 +1607,12 @@
       e.target.disabled = true;
       e.target.textContent = `正在测试 ${model}…`;
       try {
+        const before = new Set($$("[data-tab]", el).map((t) => t.dataset.tab));
         const p = await api("/api/providers/connect", { method: "POST", body: { ...target(), apiKey: $("#cKey", m.el).value, model, models: list.length ? list : [{ id: model }], authHeader: checked?.authHeader, useNow: $("#cUse", m.el)?.checked } });
         m.close();
         toast(`已连接，模型 ${model} 测试通过`);
+        // its tab is the one shown (a custom one: the provider that was not connected before)
+        modelTab = x?.id || [...p.custom].find((c) => c.connected && !before.has(c.id))?.id || modelTab;
         drawProviders(el, p);
       } catch (ex) { err(ex.message); e.target.disabled = false; e.target.textContent = "测试并连接"; }
     });

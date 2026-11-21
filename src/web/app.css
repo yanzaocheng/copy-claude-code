@@ -251,13 +251,18 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .model-list label:hover { background: var(--surface-2); }
 .model-list small { color: var(--muted); margin-left: auto; white-space: nowrap; }
 
+/* 模型列表: a tab per provider */
+.head-actions { flex: none; flex-wrap: nowrap; }
+.mtabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.mtabs button { display: inline-flex; align-items: baseline; gap: 6px; padding: 8px 14px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; color: var(--muted); font: inherit; font-weight: 500; cursor: pointer; }
+.mtabs button:hover { color: var(--text); }
+.mtabs button.active { color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+.mtabs .count { font-size: 11.5px; color: var(--faint); font-weight: 500; }
 .model-group { margin-bottom: 10px; overflow: hidden; }
-.model-group > summary { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px; cursor: pointer; list-style: none; }
-.model-group > summary::-webkit-details-marker { display: none; }
-.model-group > summary::before { content: "▸"; color: var(--muted); }
-.model-group[open] > summary::before { content: "▾"; }
-.model-group[open] > summary { border-bottom: 1px solid var(--line); }
-.model-group .muted { font-size: 12.5px; }
+.model-group[hidden] { display: none; }
+.mg-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.mg-head .meta { color: var(--muted); font-size: 12.5px; word-break: break-all; }
+.model-group .no-match[hidden] { display: none; }
 table.list th.pick, table.list td.pick { width: 52px; text-align: center; padding-left: 8px; padding-right: 4px; cursor: default; }
 td.pick input { width: 17px; height: 17px; margin: 2px 0 0; cursor: pointer; accent-color: var(--accent); }
 .pick-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 2px 10px; color: var(--muted); font-size: 13px; }
@@ -416,6 +421,9 @@ details.proj > div { padding: 0 0 6px 18px; }
   .it-user { max-width: 92%; }
   .it-image img { max-width: 100%; height: auto; }
   .toolbar input[type="search"] { min-width: 0; flex-basis: 100%; }
+  .section-head:has(.head-actions) { flex-wrap: wrap; }
+  .head-actions { flex: 1 1 100%; flex-wrap: wrap; }
+  .head-actions input[type="search"] { flex: 1 1 100%; width: auto !important; }
   .modal-back { padding: 0; place-items: end stretch; grid-template-columns: minmax(0, 1fr); }
   .modal { width: 100%; min-width: 0; max-height: var(--visible-height, 100dvh); border-radius: 14px 14px 0 0; }
   .modal.big { height: var(--visible-height, 100dvh); border-radius: 0; }
