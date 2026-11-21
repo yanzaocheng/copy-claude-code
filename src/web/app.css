@@ -65,8 +65,9 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 .ws-add:hover, .ws-pmenu:hover { background: var(--surface-2); color: var(--text); }
 .ws-pmenu { position: absolute; top: 50%; right: 32px; transform: translateY(-50%); display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; opacity: 0; }
 .ws-pmenu svg { width: 16px; height: 16px; }
-.ws-folder-row:hover .ws-pmenu, .ws-pmenu:focus-visible { opacity: 1; }
-.ws-folder-row:hover .ws-count { visibility: hidden; }
+.ws-folder-row:hover .ws-pmenu, .ws-pmenu:focus-visible, .ws-pmenu[aria-expanded=true] { opacity: 1; }
+.ws-pmenu[aria-expanded=true] { background: var(--surface-2); color: var(--text); }
+.ws-folder-row:hover .ws-count, .ws-folder-row:has(.ws-pmenu[aria-expanded=true]) .ws-count { visibility: hidden; }
 @media (hover: none) { .ws-add, .ws-pmenu { opacity: .7; } .ws-folder-row .ws-count { margin-right: 52px; } }
 .ws-folder svg { color: var(--muted); flex: none; }
 .ws-folder span:not(.ws-count) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

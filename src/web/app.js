@@ -661,7 +661,7 @@
   }
 
   const ws = {
-    sessions: [], live: [], q: "", loaded: false,
+    sessions: [], live: [], projectOpen: {}, q: "", loaded: false,
     closed: new Set(JSON.parse(localStorage.getItem("cpWsClosed") || "[]")),
     expanded: new Set(),
     tips: new Map(),
@@ -673,6 +673,7 @@
     try {
       const [s, l] = await Promise.all([api("/api/sessions"), api("/api/live")]);
       ws.sessions = s.sessions;
+      ws.projectOpen = s.projectOpen || {};
       ws.live = l.sessions;
       ws.loaded = true;
       if (!sidebarMenuOpen()) drawWorkspace();
@@ -681,7 +682,7 @@
     }
   }
 
-  const sidebarMenuOpen = () => $("#ws [data-session-menu][aria-expanded=true]");
+  const sidebarMenuOpen = () => $("#ws :is([data-session-menu], [data-pmenu])[aria-expanded=true]");
 
   function drawWorkspace() {
     if (sidebarMenuOpen()) closeMenu?.();
@@ -724,7 +725,7 @@
         return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
       }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
       const running = g.items.filter(working).length;
-      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" title="更多" aria-label="项目菜单">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
+      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" data-cwd="${esc(g.cwd)}" title="更多" aria-label="项目菜单" aria-expanded="false">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
     }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话"}</div>`;
   }
 
@@ -813,9 +814,20 @@
       if (pm) {
         const key = pm.dataset.pmenu;
         const ids = ws.sessions.filter((s) => !s.archived && !s.running && projectKey(s.cwd || s.dir) === key).map((s) => s.id);
-        popMenu(pm, [{ key: "p", title: "", items: [{ label: ids.length ? `归档全部会话（${ids.length} 个）` : "没有可以归档的会话", description: ids.length ? "从工作区收起，内容保留，可以在「全部会话 → 已归档」里找回" : "运行中的会话不能归档", value: "all" }] }], () => {
-          if (ids.length && confirm(`归档这个项目的 ${ids.length} 个会话？`)) archive(ids).catch(fail);
-        });
+        const items = [];
+        if (ws.projectOpen.explorer) items.push({ label: "在资源管理器中打开", value: "explorer" });
+        if (ws.projectOpen.vscode) items.push({ label: "在 VS Code 中打开", value: "vscode" });
+        items.push({ label: ids.length ? `归档全部会话（${ids.length} 个）` : "没有可以归档的会话", description: ids.length ? "从工作区收起，内容保留，可以在「全部会话 → 已归档」里找回" : "运行中的会话不能归档", value: "all" });
+        popMenu(pm, [{ key: "p", title: "", items }], async (_, value) => {
+          try {
+            if (value === "all") {
+              if (ids.length && confirm(`归档这个项目的 ${ids.length} 个会话？`)) await archive(ids);
+            } else {
+              await api("/api/projects/open", { method: "POST", body: { cwd: pm.dataset.cwd, target: value } });
+              toast(value === "vscode" ? "已在运行 claude-pro 的电脑上打开 VS Code" : "已在运行 claude-pro 的电脑上打开资源管理器");
+            }
+          } catch (e) { fail(e); }
+        }, { dropdown: true });
         return;
       }
       const add = e.target.closest("[data-add]");

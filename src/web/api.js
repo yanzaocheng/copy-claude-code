@@ -48,6 +48,62 @@ function knownProjects() {
 }
 
 const same = (a, b) => (isWin ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+
+const windowsDrivePath = (p) => typeof p === 'string' && /^[a-z]:[\\/]/i.test(p);
+const explorerPath = () => path.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe');
+const isFile = (p) => { try { return fs.statSync(p, { throwIfNoEntry: false })?.isFile() === true; } catch { return false; } };
+
+function vscodePath() {
+  if (!isWin) return null;
+  const editions = [['Microsoft VS Code', 'Code.exe'], ['Microsoft VS Code Insiders', 'Code - Insiders.exe']];
+  const roots = [process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'), process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(windowsDrivePath);
+  for (const [folder, exe] of editions) {
+    for (const root of roots) {
+      const file = path.join(root, folder, exe);
+      if (isFile(file)) return file;
+    }
+  }
+  // A non-default install can be on PATH via its executable directory or via VS Code's bin directory.
+  for (const entry of (process.env.PATH || '').split(path.delimiter)) {
+    const dir = entry.replace(/^"(.*)"$/, '$1');
+    if (!windowsDrivePath(dir)) continue;
+    for (const root of path.basename(dir).toLowerCase() === 'bin' ? [dir, path.dirname(dir)] : [dir]) {
+      for (const [, exe] of editions) {
+        const file = path.join(root, exe);
+        if (isFile(file)) return file;
+      }
+    }
+  }
+  return null;
+}
+
+async function openProject(body) {
+  const { cwd, target } = body || {};
+  if (!isWin) throw httpError(409, '当前主机不支持这个操作');
+  if (target !== 'explorer' && target !== 'vscode') throw httpError(400, '不支持这个打开方式');
+  if (!windowsDrivePath(cwd)) throw httpError(400, '项目必须是 Windows 本地目录');
+  const known = knownProjects().some((p) => same(p.cwd, cwd)) || (await runningSessions()).some((s) => {
+    const dir = s.status?.cwd || s.cwd;
+    return dir && same(dir, cwd);
+  });
+  if (!known) throw httpError(404, '工作区里没有这个项目');
+  let dir;
+  try {
+    dir = fs.realpathSync.native(cwd);
+    if (!windowsDrivePath(dir) || !fs.statSync(dir).isDirectory()) throw new Error();
+  } catch { throw httpError(404, '项目目录不存在或不是本地文件夹'); }
+  const label = target === 'explorer' ? '资源管理器' : 'VS Code';
+  const exe = target === 'explorer' ? explorerPath() : vscodePath();
+  if (!exe) throw httpError(409, '没有检测到已安装的 VS Code');
+  // The browser never supplies the executable or a command line; only the checked directory is passed.
+  await new Promise((resolve, reject) => {
+    const child = spawn(exe, [dir], { cwd: path.dirname(exe), detached: true, stdio: 'ignore' });
+    child.once('error', () => reject(httpError(500, `无法启动${label}`)));
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
+  return { opened: true };
+}
+
 const inside = (file, dir) => {
   const rel = path.relative(dir, file);
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -423,7 +479,10 @@ export const routes = [
 
   ['GET', /^\/api\/sessions$/, async () => {
     const live = await running();
-    return { sessions: listAllSessions().map(({ file, ...s }) => ({ ...s, running: live.has(s.id) ? live.get(s.id).peerId : null })) };
+    return {
+      sessions: listAllSessions().map(({ file, ...s }) => ({ ...s, running: live.has(s.id) ? live.get(s.id).peerId : null })),
+      projectOpen: { explorer: isWin, vscode: Boolean(vscodePath()) },
+    };
   }],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     const detail = sessionDetail(dir, id);
@@ -499,6 +558,7 @@ export const routes = [
 
   ['GET', /^\/api\/memory$/, () => memoryView()],
   ['GET', /^\/api\/projects$/, () => ({ projects: knownProjects() })],
+  ['POST', /^\/api\/projects\/open$/, (req, m, body) => openProject(body)],
   ['GET', /^\/api\/file$/, (req, m, b, url) => readFileInfo(checkedPath(url.searchParams.get('path')))],
   ['PUT', /^\/api\/file$/, (req, m, body) => {
     const file = checkedPath(body?.path);
