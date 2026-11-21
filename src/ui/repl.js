@@ -1158,6 +1158,7 @@ export class App {
       peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
+      restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between
     };
     try {
       writeRestartState(state);
@@ -1208,7 +1209,24 @@ export class App {
       this.seedOutput = [line];
       return;
     }
-    this.screen.log(c.dim(`${glyphs.restart} Restarted${state.reason ? `: ${state.reason}` : ''}${state.continueWith ? ' · continuing' : ''}`), '');
+    const text = `${glyphs.restart} Restarted${state.reason ? `: ${state.reason}` : ''}${state.continueWith ? ' · continuing' : ''}`;
+    // The same restart line as last time with nothing shown since (idle while the source keeps changing): one line
+    // with a count instead of a screenful of them.
+    let count = 1;
+    const prev = state.restartNote;
+    const hist = this.screen.history;
+    if (this.screen.full && prev && prev.text === text && !state.continueWith) {
+      let i = hist.length;
+      while (i > 0 && hist[i - 1] === '') i--;
+      if (i > 0 && hist[i - 1] === prev.line) {
+        hist.splice(i - 1);
+        if (Array.isArray(this.screen.wrapped)) this.screen.wrapped = [];
+        count = (prev.count || 1) + 1;
+      }
+    }
+    const line = c.dim(count > 1 ? `${text} (×${count})` : text);
+    this.screen.log(line, '');
+    this.restartNote = { text, count, line };
   }
 
   // The turn that goes on after a restart: the note for the model, and what the user had queued meanwhile.
