@@ -206,7 +206,11 @@ export class RemoteControl {
   // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model}, seed() -> items, status() -> object,
   // peerMessage(message), changed() (online or viewers changed), refused(status) (the key was refused: closed), and
   // the page's commands: send, interrupt, answer (dialog), options, suggest, list, output (see COMMANDS).
-  constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
+  // `rc`: remote control is on (/rc): the gateway's web page shows the conversation and may steer the session. Off,
+  // the session is online only for messages between sessions: no conversation is uploaded, and its status is only
+  // whether it works and its name (see setRc).
+  constructor({ gateway, id, handlers, rc = false, fetchImpl = globalThis.fetch }) {
+    this.rc = Boolean(rc);
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
     this.id = /^[\w-]{8,64}$/.test(id || '') ? id : newRemoteId();
@@ -234,9 +238,24 @@ export class RemoteControl {
   }
 
   // The commands this session takes, as declared to the gateway.
-  get commands() { return Object.keys(COMMANDS).filter((type) => typeof this.handlers[COMMANDS[type]] === 'function'); }
+  get commands() { return this.rc ? Object.keys(COMMANDS).filter((type) => typeof this.handlers[COMMANDS[type]] === 'function') : []; }
 
-  get viewing() { return this.viewers !== 0; } // nobody watching: events are not uploaded (a snapshot follows when someone comes)
+  // nobody watching, or remote control off: events are not uploaded (a snapshot follows when someone comes)
+  get viewing() { return this.rc && this.viewers !== 0; }
+
+  // Remote control on or off: the gateway is told at once (registering again), and a page that watched is closed by
+  // it. What happened while it was off is in the snapshot that goes out when it comes on: the conversation is kept
+  // here either way.
+  async setRc(on) {
+    on = Boolean(on);
+    if (this.rc === on) return;
+    this.rc = on;
+    this.events = [];
+    this.needSnapshot = true;
+    this.lastStatus = '';
+    if (this.registered) await this.register();
+    this.scheduleFlush(0);
+  }
 
   // `persistent`: keep trying when the gateway cannot be reached now (a restart); otherwise the first failure is thrown.
   async start({ persistent = false } = {}) {
@@ -276,7 +295,8 @@ export class RemoteControl {
   async register() {
     const info = this.handlers.info?.() || {};
     const commands = this.commands;
-    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), version: info.version, ...info, ...(commands.length ? { commands } : {}) });
+    const shown = this.rc ? info : { ...info, title: '', cwd: '' };
+    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), version: info.version, ...shown, rc: this.rc, ...(commands.length ? { commands } : {}) });
     if (data.id) this.id = data.id;
     this.registered = true;
     this.needSnapshot = true;
@@ -401,6 +421,7 @@ export class RemoteControl {
     };
     const failed = (e) => reply({ cid: cmd.cid, ok: false, error: e?.message || String(e) });
     const handler = Object.hasOwn(COMMANDS, cmd.type) ? this.handlers[COMMANDS[cmd.type]] : null;
+    if (!this.rc) { failed(new Error('Remote control is off for this session: /rc in its terminal turns it on.')); return; }
     if (typeof handler !== 'function') {
       // an older gateway forwards every command, declared or not
       failed(new Error(this.commands.length ? `Unknown command: ${cmd.type}` : 'This session is read-only on the web page (CLAUDE_PRO_REMOTE_COMMANDS=0 on its computer).'));
@@ -524,8 +545,13 @@ export class RemoteControl {
     this.progress.clear();
   }
 
+  // Remote control off: only what the account's other sessions see of it (whether it works, its name, its model).
   status() {
-    try { return this.handlers.status?.() || {}; } catch (e) { return { error: e.message }; }
+    let status;
+    try { status = this.handlers.status?.() || {}; } catch (e) { status = { error: e.message }; }
+    if (this.rc) return status;
+    const { busy, name, model } = status;
+    return { busy: Boolean(busy), name, model };
   }
 
   // What decides whether the status is sent again: all of it while a page watches; while none does, only what
@@ -548,7 +574,7 @@ export class RemoteControl {
     if (this.closed || !this.registered || (!this.online && !this.closing)) return;
     this.takeProgress();
     const status = this.status();
-    if (this.needSnapshot || this.sinceSnapshot > SNAPSHOT_EVERY) {
+    if (this.rc && (this.needSnapshot || this.sinceSnapshot > SNAPSHOT_EVERY)) {
       this.needSnapshot = false;
       this.events = [];
       this.sinceSnapshot = 0;

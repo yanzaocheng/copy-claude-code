@@ -278,6 +278,7 @@ export class App {
     this.turnPeers = []; // tasks from other sessions that the running turn answers: [{msg}]
     this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
     this.remote = null; // the browser page that watches and steers this session (see remote.js), when it is on
+    this.remoteControl = false; // /rc: the page shows the conversation (online without it: messages between sessions only)
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
@@ -730,6 +731,8 @@ export class App {
   // Online at the gateway from the start when this computer is logged in, and after a restart with the same
   // session id so that an already-open page keeps following it.
   autoStartRemote(restart) {
+    // Remote control (the web page shows and steers the session) only after /rc or --rc, and through restarts.
+    this.remoteControl = Boolean(restart ? restart.remoteControl : this.flags.remoteControl);
     const id = restart?.remote?.id || null;
     if (!id && !this.onlineWanted()) return;
     this.startRemote({ id }).catch((e) => {
@@ -781,6 +784,7 @@ export class App {
     const remote = new RemoteControl({
       gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
       id,
+      rc: this.remoteControl,
       handlers: {
         info: () => ({
           name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '',
@@ -823,6 +827,21 @@ export class App {
     return remote;
   }
 
+  // /rc: the web page (远程控制) shows this session's conversation and may steer it, or (off) only messages between
+  // sessions go through the gateway. Resolves with what to tell the user.
+  async setRemoteControl(on) {
+    this.remoteControl = Boolean(on);
+    this.screen.schedule();
+    if (!on) {
+      if (this.remote) await this.remote.setRc(false);
+      return 'Remote control is off: the web page no longer shows this session (messages between sessions still go through the gateway).';
+    }
+    const remote = this.remote || await this.syncRemote();
+    if (!remote) return `Remote control is on, but this session is not online at the gateway: ${stripAnsi(this.remoteState().text)}`;
+    await remote.setRc(true);
+    return 'Remote control is on: 远程控制 on the gateway\'s web page shows this session and can send it messages and commands. /rc off turns it off.';
+  }
+
   stopRemote() {
     this.remote?.close();
     this.remote = null;
@@ -836,7 +855,7 @@ export class App {
     if (r) {
       const who = r.account ? ` as ${r.account}` : '';
       const pages = r.viewers ? c.dim(` · ${r.viewers} page${r.viewers === 1 ? '' : 's'} open now`) : '';
-      const readOnly = r.commands.length ? '' : c.dim(' · read-only on the page (CLAUDE_PRO_REMOTE_COMMANDS=0)');
+      const readOnly = !r.rc ? c.dim(' · remote control off (/rc turns it on)') : r.commands.length ? c.dim(' · remote control on') : c.dim(' · remote control on, read-only on the page (CLAUDE_PRO_REMOTE_COMMANDS=0)');
       const text = r.online ? `${c.green('online')}${who}${pages}${readOnly}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
       return { text };
     }
@@ -1136,6 +1155,7 @@ export class App {
       peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
+      remoteControl: this.remoteControl, // /rc stays on through a restart
     };
     try {
       writeRestartState(state);
@@ -2587,7 +2607,7 @@ export class App {
     const home = os.homedir();
     const shown = dir.toLowerCase().startsWith(home.toLowerCase()) ? '~' + dir.slice(home.length) : dir;
     const name = this.peers || this.remote ? `@${this.peerLabel()}` : '';
-    return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online ? `⇄ ${name}` : name };
+    return { left: shown.replace(/\\/g, '/'), right: name && this.remote?.online && this.remoteControl ? `⇄ ${name}` : name };
   }
 
   // The prompt cache clock, as in Claude Code's VS Code extension: the minutes the conversation's cache has left

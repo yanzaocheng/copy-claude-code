@@ -25,14 +25,14 @@ Options:
   --verbose                        Show detailed tool output
   --no-mcp                         Do not start MCP servers
   --name <name>                    Name this session, as /rename does (other sessions reach it with @name)
+  --rc, --remote-control           Turn remote control on at the start, as /rc does (the gateway's web page shows the session)
   -v, --version                    Print version
   -h, --help                       Show help
 
 There are no permission prompts: every tool runs immediately (full access). File edits are
 checkpointed per prompt, and /rewind in a session undoes them. The old flags
 --dangerously-skip-permissions, --permission-mode, --allowedTools and --disallowedTools
-are accepted and ignored, and so are --plan (there is no plan mode: ask for a plan in the message) and
---remote-control (--rc): a session is online at the gateway whenever this computer is logged in to it.
+are accepted and ignored, and so is --plan (there is no plan mode: ask for a plan in the message).
 
 Commands:
   claude-pro config list [--advanced]     Show ordinary settings (add --advanced for optional controls)
@@ -74,7 +74,7 @@ function parseArgs(argv) {
       case '--system-prompt-file': flags.systemPromptFile = next(); break;
       case '--verbose': flags.verbose = true; break;
       case '--no-mcp': flags.noMcp = true; break;
-      case '--remote-control': case '--rc': break; // online by default now
+      case '--remote-control': case '--rc': flags.remoteControl = true; break; // as /rc at the start
       case '--name': flags.name = next(); break;
       case '-v': case '--version': flags.version = true; break;
       case '-h': case '--help': flags.help = true; break;

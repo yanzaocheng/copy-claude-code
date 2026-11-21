@@ -186,9 +186,10 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 ## 远程会话：在浏览器里查看和操作
 
-本地手动启动的交互式 claude-pro 会话登录网关后自动注册。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页经网关查看并操作已经在运行的本地终端会话（不能新建会话）。
+本地手动启动的交互式 claude-pro 会话登录网关后自动上线，但默认只用于会话之间互发任务；在会话里输入 `/rc`（或用 `claude-pro --rc` 启动）开启远程控制后，网页才能看到并操作它，`/rc off` 关闭。远程连接只由终端向 `CLAUDE_PRO_GATEWAY_URL` 发出站请求，终端不监听端口；网页经网关查看并操作已经在运行的本地终端会话（不能新建会话）。
 
 - **自动上线**：`/connect` 连上 7bit.fun 后当前会话立即注册；之后每个交互会话启动时自动注册，断线自动重连；`/disconnect 7bit.fun` 后停止远程连接。`CLAUDE_PRO_ONLINE=0` 可以关闭远程发布。
+- **远程控制开关 `/rc`**：没开时不上传对话，网关只知道会话在线、名字、模型和是否在忙，网页列表里不显示它（只提示“另有 N 个未开启远程控制”），网页的指令也会被拒绝。开启后补发完整对话；关闭时网关清掉暂存的对话并断开正在看的网页。开关在会话重启（包括 `/cd`、更新）后保持，新会话默认关闭。输入框右上角在开启时显示 `⇄`。
 - **网页能看到**：会话列表、在线/离线/结束状态、模型、目录、机器名、viewer 数、transcript、流式文本和 thinking、工具调用与输出、todos、后台任务、排队消息、问题文本和连接状态。
 - **网页能做**：发消息（等同在终端输入框回车：`/命令`、`!shell`、`#记忆`、`@会话`，最多 6 张图片；忙时排队）、回答对话框（选项、多选、“其他”文字、文本框、取消）、停止（等同 Esc，同时取消等待中的问题）、切换 model/effort（发 `/model`、`/effort`）、浏览目录并 `/cd`（会话在新目录重启，网页接着看）、输入补全（`/命令`、`@文件`、`@会话`）、查看某次工具调用的完整输出（最多 1 MB，运行中的也行）。
 - **只读开关**：`CLAUDE_PRO_REMOTE_COMMANDS=0`（环境变量，或 `claude-pro config set CLAUDE_PRO_REMOTE_COMMANDS 0`）让这台电脑的会话在网页上只能看、不能操作；会话上线时读取，`/status` 会显示 read-only。
@@ -210,9 +211,20 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
   - 文件和会话同名时，行首 `@名字 任务` 按会话处理；要强制引用文件可写 `@./名字`。
 - **`@` 可以写在句子中间**：输入时在空格后面打 `@` 也会弹出文件和会话列表；在发给当前 agent 的消息里提到 `@名字`，agent 会被告知那是哪个会话、怎么联系它。文件引用仍会展开为文件内容。输入法打出全角 `＆` 不再是会话语法。
 - **`/rename 新名字`**：给当前会话改名（比如 `/rename web-server`），别的会话从此用 `@web-server` 找它；这个名字也成为对话标题（终端标签页、`/resume` 列表、网页），不再自动按话题改；`/resume` 这个对话时名字一起回来。
-- **`/peers`**：列出本机和其他电脑上在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
+- **`/peers`**：列出本机、其他电脑和通讯录好友在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
 - 回答会在对方这一轮做完后自动发回；对方正忙时，任务排在它当前工作之后。网关替离线的会话暂存回答（24 小时；网关重启会丢失还没送达的消息）。
 - **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时 `/disconnect 7bit.fun`。
+
+## 通讯录：和别人的会话互发任务
+
+不同网关账户之间，双方同意后，各自的 claude-pro 会话也能互发任务。
+
+- **通讯号**：每个账户有一个公开的通讯号（默认随机，如 `cp7k3qxm`），别人用它加你，看不到你的邮箱。`/contacts handle 新名字` 或网页「远程控制 → 通讯录」里修改（3-20 个小写字母、数字、`_`、`-`，以字母开头）。
+- **加好友**：`/contacts add 对方通讯号` 发出请求；对方在线的会话会提示，对方用 `/contacts accept 你的通讯号` 同意（也可以 `reject`、`block`），或在网页通讯录里点同意。双方互相请求时直接成为好友。`/contacts remove` 删除，`/contacts block` 拉黑（对方不能再请求、不能发任务，也不会被告知）。`/contacts` 列出全部。
+- **发任务**：好友在线的会话在 `/peers` 和 ListPeers 里显示为 `@通讯号:电脑名/会话名`；`@通讯号 任务`（对方只开着一个会话时）或 `@通讯号:电脑名/会话名 任务` 发送，回答自动发回。
+- **确认**：好友发来的任务默认在终端弹窗问你「执行 / 拒绝 / 以后都执行」，拒绝时对方会收到“已拒绝”。`/contacts trust 通讯号 auto` 让这个好友的任务直接执行，`confirm` 改回每条确认。交给模型时会注明这是外人的请求、不是用户的指令，并要求它不泄露密钥和私人文件、不做破坏性操作。
+- **好友能看到什么**：只有你在线会话的名字、电脑名和是否在忙；看不到目录、标题和对话，发来的消息里也不带你的目录。
+- **要求**：双方都要在 claude-pro 里 `/connect` 连上 7bit.fun（模型用别家也可以，这个 key 只用于通讯）。
 
 ## 完全访问与安全网
 
@@ -254,7 +266,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办、网页上的远程会话（同一个链接）不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/rc` `/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 

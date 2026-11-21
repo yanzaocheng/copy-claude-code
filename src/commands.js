@@ -400,15 +400,16 @@ export function buildCommands(app) {
       app.screen.schedule();
     }
   };
-  // The gateway connected: this session goes online there at once, for its web page and peer messaging. The page
-  // can steer the session too (send messages, `!` commands, /cd...) unless CLAUDE_PRO_REMOTE_COMMANDS=0: said as it
-  // is, since this message called the page read-only.
+  // The gateway connected: this session goes online there at once, for messages between sessions; its web page shows
+  // it (and can steer it, unless CLAUDE_PRO_REMOTE_COMMANDS=0) only with remote control on (/rc).
   const goOnline = async () => {
     const remote = await app.syncRemote();
     if (!remote) return;
-    const page = remote.commands?.length
-      ? 'its web page shows it and can send it messages and commands (CLAUDE_PRO_REMOTE_COMMANDS=0 makes the page read-only)'
-      : 'the read-only web page shows it';
+    const page = !remote.rc
+      ? 'sessions on your other computers and your contacts can send it tasks; /rc lets the web page (远程控制) show and steer it'
+      : remote.commands?.length
+        ? 'its web page shows it and can send it messages and commands (CLAUDE_PRO_REMOTE_COMMANDS=0 makes the page read-only)'
+        : 'the read-only web page shows it';
     out(remote.registered
       ? `${c.green('⇄')} This session is online at the gateway: ${page}.`
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
@@ -887,6 +888,19 @@ export function buildCommands(app) {
           ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
           : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/connect 7bit.fun; /status says why it is not).'),
       ]);
+    },
+  });
+
+  add({
+    name: 'rc',
+    aliases: ['remote-control'],
+    argHint: '[off]',
+    description: 'Remote control: the gateway\'s web page (远程控制) shows this session and can steer it; /rc off stops that',
+    async run(args) {
+      const off = /^(off|stop|0|false|no)$/i.test(args.trim());
+      if (!off && app.remoteControl && app.remote?.rc) { out(`Remote control is on already: ${c.dim('/rc off turns it off.')}`); return; }
+      const said = await app.setRemoteControl(!off);
+      out(off ? c.dim(said) : said);
     },
   });
 
