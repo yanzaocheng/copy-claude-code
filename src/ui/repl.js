@@ -1071,7 +1071,8 @@ export class App {
   // <value> or /effort <value>), what is chosen (`current`), and the model and effort in use, as the status says.
   async remoteOptions() {
     const cfg = this.config;
-    const [models, efforts] = await Promise.all([modelChoices(cfg), effortChoices(cfg)]);
+    // (the lists kept from before: the page's menus open at once; 刷新模型列表 on the console renews them)
+    const [models, efforts] = await Promise.all([modelChoices(cfg, { cached: true }), effortChoices(cfg, { cached: true })]);
     const chosen = cfg.modelOverride || 'default';
     const same = (m) => m.id === cfg.model.id && m.provider === cfg.model.provider;
     const current = models.find((o) => o.value === chosen) || models.find((o) => o.value !== 'default' && same(cfg.resolveModel(o.value)));

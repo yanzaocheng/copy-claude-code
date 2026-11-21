@@ -17,7 +17,7 @@ import {
 import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels } from '../gateway.js';
 import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
-import { modelChoices as sessionModels, effortChoices as sessionEfforts } from '../commands.js';
+import { modelChoices as sessionModels, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
 import { setArchived, archivedSessions } from '../session.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
@@ -623,8 +623,8 @@ async function newSessionOptions(url) {
   if ('effort' in choices) config.effortOverride = choices.effort;
   const kind = url.searchParams.get('kind');
   const base = { model: config.modelSpec, effort: config.effort || 'auto', modelChoice: config.modelOverride || 'default', effortChoice: config.effortOverride || 'default' };
-  if (kind === 'models') return { ...base, models: await sessionModels(config) };
-  if (kind === 'efforts') return { ...base, efforts: (await sessionEfforts(config)).options };
+  if (kind === 'models') return { ...base, models: await sessionModels(config, { cached: true }) };
+  if (kind === 'efforts') return { ...base, efforts: (await sessionEfforts(config, { cached: true })).options };
   return base;
 }
 
@@ -714,6 +714,7 @@ export const routes = [
 
   ['GET', /^\/api\/providers$/, () => providersView()],
   ['GET', /^\/api\/models$/, () => modelChoices()],
+  ['POST', /^\/api\/models\/refresh$/, async () => ({ ...(await refreshModelLists(loadConfig({ cwd: home }))), view: providersView() })],
   ['POST', /^\/api\/providers\/check$/, (req, m, body) => checkProvider(body)],
   ['POST', /^\/api\/providers\/connect$/, (req, m, body) => connectProvider(body)],
   ['DELETE', /^\/api\/providers\/([a-z0-9-]+)$/, (req, [id]) => {

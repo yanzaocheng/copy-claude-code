@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { CONFIG_DIR, GATEWAY_DEFAULT_URL, normalizeGatewayUrl, noteServedModels, readGatewayLogin, forgetGatewayLogin } from './config.js';
 
 export { GATEWAY_DEFAULT_URL, normalizeGatewayUrl };
@@ -66,6 +67,34 @@ const MODELS_MAX_AGE_MS = 10 * 60_000;
 
 const listKey = ({ url, apiKey }) => `${normalizeGatewayUrl(url)}\n${apiKey}`;
 
+// The last list of each gateway and key, on disk too (cache/gateway-model-lists.json; the key only as a hash): the
+// web console's pickers read it instead of asking the gateway each time they open, also after a restart. Refreshed
+// by every fetch, and by the console's 刷新模型列表 button.
+const listFile = () => path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'cache', 'gateway-model-lists.json');
+const diskKey = ({ url, apiKey }) => `${normalizeGatewayUrl(url)} ${crypto.createHash('sha256').update(String(apiKey)).digest('hex').slice(0, 16)}`;
+const readListFile = () => { try { return JSON.parse(fs.readFileSync(listFile(), 'utf8')) || {}; } catch { return {}; } };
+function keepListOnDisk(login, list) {
+  try {
+    const all = readListFile();
+    all[diskKey(login)] = { at: Date.now(), list };
+    fs.mkdirSync(path.dirname(listFile()), { recursive: true });
+    const tmp = `${listFile()}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(all));
+    fs.renameSync(tmp, listFile());
+  } catch { /* kept in memory still */ }
+}
+
+// The list kept for this login (in memory, else on disk), without asking the gateway: null when there is none yet.
+export function keptGatewayModels(login) {
+  if (!login?.url || !login?.apiKey) return null;
+  const key = listKey(login);
+  if (modelLists.has(key)) return modelLists.get(key).list;
+  const kept = readListFile()[diskKey(login)];
+  if (!Array.isArray(kept?.list)) return null;
+  modelLists.set(key, { list: kept.list, at: kept.at || 0 });
+  return kept.list;
+}
+
 // One GET /v1/models at a time per key. It carries only its own timeout: a caller that gives up (its signal) leaves
 // it running for the others and the cache (see untilAborted).
 function requestModels(key, { url, apiKey }, { fetchImpl, timeoutMs }) {
@@ -83,6 +112,7 @@ function requestModels(key, { url, apiKey }, { fetchImpl, timeoutMs }) {
       modelLists.set(key, { list, at: Date.now() });
       modelListFailures.delete(key);
       noteServedModels(base, list);
+      keepListOnDisk({ url, apiKey }, list);
       return list;
     }, (e) => {
       modelListFailures.set(key, { at: Date.now(), error: e });

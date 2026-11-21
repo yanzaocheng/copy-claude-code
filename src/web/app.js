@@ -1415,7 +1415,7 @@
       <div class="actions">${x.connected ? `<button class="button secondary small" data-connect="${esc(x.id)}">更换 Key / 模型</button><button class="button danger small" data-remove="${esc(x.id)}">断开</button>` : `<button class="button small" data-connect="${esc(x.id)}">连接</button>`}${x.keyPage ? `<a class="button secondary small" href="${esc(x.keyPage)}" target="_blank" rel="noopener">获取 Key</a>` : ""}</div></div>`;
     const connected = [...p.presets, ...p.custom].filter((x) => x.connected);
     $("#body", el).innerHTML = `<div id="pbody">
-      <div class="section-head"><div><h2>默认模型</h2><p>新会话用的模型和推理强度。会话里的 /model、/effort 只改那一个会话（并记住给下次用）</p></div></div>
+      <div class="section-head"><div><h2>默认模型</h2><p>新会话用的模型和推理强度。会话里的 /model、/effort 只改那一个会话（并记住给下次用）</p></div><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表；会话里的模型菜单用的就是这份列表">刷新模型列表</button></div>
       <div class="panel panel-pad" id="defaults"><div class="muted">正在读取可用模型…</div></div>
       <div class="section-head"><div><h2>7bit.fun 网关</h2><p>Claude、GPT 等模型，余额、远程控制、跨电脑和通讯录都通过它</p></div></div>
       <div class="panel prov${p.gateway.connected ? " connected" : ""}" style="max-width:640px"><div class="prov-top"><strong>7bit.fun</strong>${p.gateway.connected ? '<span class="pill ok">已连接</span>' : ""}</div>
@@ -1435,6 +1435,20 @@
       try { drawProviders(el, await api("/api/gateway", { method: "DELETE" })); toast("已断开"); } catch (err) { fail(err); }
     });
     $("#addCustom", el).addEventListener("click", () => connectDialog(el, null));
+    $("#refreshModels", el).addEventListener("click", async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      b.textContent = "正在刷新…";
+      try {
+        const r = await api("/api/models/refresh", { method: "POST", body: {} });
+        const parts = [...(r.gateway ? [{ name: "7bit.fun", ...r.gateway }] : []), ...r.providers];
+        const ok = parts.filter((x) => !x.error).map((x) => `${x.name} ${x.count} 个`);
+        const bad = parts.filter((x) => x.error).map((x) => `${x.name}（${x.error}）`);
+        if (!parts.length) toast("还没有连接任何供应商", "error");
+        else toast([ok.length ? `已刷新：${ok.join("，")}` : "", bad.length ? `失败：${bad.join("，")}` : ""].filter(Boolean).join("；"), bad.length && !ok.length ? "error" : "ok");
+        if (el.isConnected) drawProviders(el, r.view);
+      } catch (err) { fail(err); b.disabled = false; b.textContent = "刷新模型列表"; }
+    });
     $("#pbody", el).addEventListener("click", async (e) => {
       const c = e.target.closest("[data-connect]"), r = e.target.closest("[data-remove]");
       if (c) connectDialog(el, [...p.presets, ...p.custom].find((x) => x.id === c.dataset.connect));

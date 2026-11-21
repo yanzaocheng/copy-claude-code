@@ -6,7 +6,7 @@ import { c, glyphs, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog, TextInputDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
 import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
-import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
+import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnections, saveConnection, removeConnection, normalizeBaseUrl, validBaseUrl, cleanProviderId, reservedProviderId, listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels } from './providers.js';
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
@@ -32,10 +32,11 @@ const effortLevels = (modelId, modelInfo = null) => {
 
 // The models of the providers connected with /connect, for /model: each provider's list asked for anew (4 seconds at
 // most), with what was kept at /connect about them (windows, prices); without an answer, the list kept then.
-async function providerModelChoices() {
+// `cached` (the web console's pickers): the kept lists only, nothing asked (its 刷新模型列表 button renews them).
+async function providerModelChoices({ cached = false } = {}) {
   const groups = await Promise.all(connectedProviders().map(async (info) => {
     let listed = null;
-    try {
+    if (!cached) try {
       listed = (await listProviderModels({ ...info, ...info.connection, baseUrl: info.connection.baseUrl || info.baseUrl }, { timeoutMs: 4000, kinds: [info.connection.authHeader || 'x-api-key'] })).models;
     } catch { /* the kept list */ }
     const kept = info.connection.models || [];
@@ -54,7 +55,8 @@ async function providerModelChoices() {
 // among them (asked for anew each time, 4 seconds at most, so that a model just added is there without a restart;
 // without an answer the list given last, else gpt-6.1-sol for its GPT models); the Claude aliases where a provider of
 // Claude is connected. A provider that is not connected offers nothing.
-export async function modelChoices(cfg) {
+// `cached`: the lists kept from before (see providerModelChoices); the gateway is asked only when none is kept yet.
+export async function modelChoices(cfg, { cached = false } = {}) {
   const configured = cfg.configuredModelSpec;
   const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).label}` }];
   const tag = (m) => `${m.provider}/${m.id}`;
@@ -66,11 +68,11 @@ export async function modelChoices(cfg) {
       opts.push({ value: a, label: a, description: `→ ${target.label}` });
     }
   }
-  const others = providerModelChoices();
+  const others = providerModelChoices({ cached });
   const login = gatewayLogin(cfg.gatewayUrl);
   if (login) {
-    let served = null;
-    try { served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true }); } catch { /* offline: the fallback below */ }
+    let served = cached ? keptGatewayModels(login) : null;
+    if (!served) try { served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: !cached }); } catch { /* offline: the fallback below */ }
     for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
       if (aliased.has(`${GATEWAY_PROVIDER}/${m.id}`)) continue;
       opts.push({ value: `${GATEWAY_PROVIDER}/${m.id}`, label: `${GATEWAY_PROVIDER}/${m.id}`, description: ['7bit.fun', isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || ''].filter(Boolean).join(' · ') });
@@ -80,14 +82,47 @@ export async function modelChoices(cfg) {
   return opts;
 }
 
+// Ask the gateway and every connected provider for their models now, and keep what they say (the gateway's list on
+// disk, each provider's in its connection): what `cached` choices offer from then on. Resolves with what each said.
+export async function refreshModelLists(cfg) {
+  const out = { gateway: null, providers: [] };
+  const jobs = [];
+  const login = gatewayLogin(cfg.gatewayUrl);
+  if (login) {
+    jobs.push(fetchGatewayModels(login, { fresh: true, timeoutMs: 15_000 })
+      .then((list) => { out.gateway = { count: list.length }; }, (e) => { out.gateway = { error: e.message }; }));
+  }
+  let catalogue = null;
+  for (const info of connectedProviders(readConnections({ fresh: true }))) {
+    jobs.push((async () => {
+      try {
+        const listed = await listProviderModels({ ...info, ...info.connection, baseUrl: info.connection.baseUrl || info.baseUrl }, { timeoutMs: 20_000, kinds: [info.connection.authHeader || 'x-api-key'] });
+        if (!listed.models?.length) throw new Error('no models listed');
+        if (info.modelsDev) catalogue ??= modelsDevCatalogue().catch(() => null);
+        const kept = info.connection.models || [];
+        const models = enrichModels(listed.models, info.modelsDev ? await catalogue : null, info.modelsDev)
+          .map((m) => ({ ...kept.find((k) => k.id === m.id), ...m })).slice(0, 2000);
+        saveConnection(info.id, { ...readConnections({ fresh: true })[info.id], models });
+        out.providers.push({ id: info.id, name: info.name, count: models.length });
+      } catch (e) {
+        out.providers.push({ id: info.id, name: info.name, error: e.message });
+      }
+    })());
+  }
+  await Promise.all(jobs);
+  return out;
+}
+
 // What /effort offers for the current model: {levels, options: [{value, label, description}]} in plain text (the
 // levels, auto, default).
-export async function effortChoices(cfg) {
+export async function effortChoices(cfg, { cached = false } = {}) {
   const id = cfg.model.id;
   let info = null;
   if (isGpt(id) && cfg.model.provider === GATEWAY_PROVIDER) {
     const login = gatewayLogin(cfg.gatewayUrl);
-    try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: true })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
+    const kept = cached ? keptGatewayModels(login) : null;
+    if (kept) info = kept.find((m) => m.id === id) || null;
+    else try { if (login) info = (await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: !cached })).find((m) => m.id === id) || null; } catch { /* use local cache or generic levels */ }
   }
   const levels = effortLevels(id, info);
   const configured = cfg.configuredEffort;
