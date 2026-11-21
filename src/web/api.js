@@ -14,7 +14,7 @@ import {
   listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels, cleanProviderId, reservedProviderId,
   normalizeBaseUrl, validBaseUrl,
 } from '../providers.js';
-import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels } from '../gateway.js';
+import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayList } from '../gateway.js';
 import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
 import { modelChoices as sessionModels, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
@@ -370,6 +370,37 @@ async function connectProvider(body) {
   return providersView();
 }
 
+// The model lists kept for the console's 模型列表 (what the pickers offer), nothing asked: the gateway's (as fetched
+// last, see keptGatewayList) and each connected provider's (as /connect or 刷新模型列表 kept it), with what is known
+// of each model: window, output limit, effort levels, price per million tokens.
+function keptModelLists() {
+  const config = loadConfig({ cwd: home });
+  const groups = [];
+  const login = gatewayLogin(config.gatewayUrl);
+  if (login) {
+    const kept = keptGatewayList(login);
+    groups.push({
+      id: GATEWAY_PROVIDER, name: '7bit.fun', at: kept?.at || null,
+      models: (kept?.list || []).map((m) => ({
+        ref: `${GATEWAY_PROVIDER}/${m.id}`, id: m.id, name: m.display_name || null, vendor: m.vendor || m.owned_by || null,
+        window: m.max_input_tokens || null, maxOutput: m.max_tokens || null, efforts: m.supported_reasoning_levels || [],
+        price: m.pricing && Number.isFinite(m.pricing.input_per_million_usd) ? { input: m.pricing.input_per_million_usd, output: m.pricing.output_per_million_usd } : null,
+      })),
+    });
+  }
+  for (const p of connectedProviders(readConnections({ fresh: true }))) {
+    const at = Date.parse(p.connection.savedAt || '');
+    groups.push({
+      id: p.id, name: p.name, at: Number.isFinite(at) ? at : null,
+      models: (p.connection.models || []).map((m) => ({
+        ref: `${p.id}/${m.id}`, id: m.id, name: m.name || null, vendor: null, window: m.window || null, maxOutput: m.maxOutput || null, efforts: [],
+        price: m.price ? { input: m.price.input, output: m.price.output } : null,
+      })),
+    });
+  }
+  return { groups, current: config.setting('model'), remembered: rememberedChoice() };
+}
+
 // The models the console offers for the default model: those of the connected providers and of the gateway.
 async function modelChoices() {
   const config = loadConfig({ cwd: home });
@@ -380,7 +411,7 @@ async function modelChoices() {
   const login = gatewayLogin(config.gatewayUrl);
   if (login) {
     try {
-      const list = await fetchGatewayModels(login, { signal: AbortSignal.timeout(8000) });
+      const list = keptGatewayList(login)?.list || await fetchGatewayModels(login, { signal: AbortSignal.timeout(8000) });
       for (const m of list || []) out.push({ ref: `7bit/${m.id}`, provider: '7bit.fun', window: m.max_input_tokens || null, efforts: m.supported_reasoning_levels || null });
     } catch { /* the gateway's models are left out */ }
   }
@@ -714,6 +745,7 @@ export const routes = [
 
   ['GET', /^\/api\/providers$/, () => providersView()],
   ['GET', /^\/api\/models$/, () => modelChoices()],
+  ['GET', /^\/api\/models\/kept$/, () => keptModelLists()],
   ['POST', /^\/api\/models\/refresh$/, async () => ({ ...(await refreshModelLists(loadConfig({ cwd: home }))), view: providersView() })],
   ['POST', /^\/api\/providers\/check$/, (req, m, body) => checkProvider(body)],
   ['POST', /^\/api\/providers\/connect$/, (req, m, body) => connectProvider(body)],

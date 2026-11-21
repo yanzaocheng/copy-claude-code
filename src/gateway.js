@@ -84,16 +84,19 @@ function keepListOnDisk(login, list) {
   } catch { /* kept in memory still */ }
 }
 
-// The list kept for this login (in memory, else on disk), without asking the gateway: null when there is none yet.
-export function keptGatewayModels(login) {
+// The list kept for this login (in memory, else on disk) and when it was fetched, without asking the gateway:
+// {list, at}, or null when there is none yet.
+export function keptGatewayList(login) {
   if (!login?.url || !login?.apiKey) return null;
   const key = listKey(login);
-  if (modelLists.has(key)) return modelLists.get(key).list;
+  if (modelLists.has(key)) return modelLists.get(key);
   const kept = readListFile()[diskKey(login)];
   if (!Array.isArray(kept?.list)) return null;
-  modelLists.set(key, { list: kept.list, at: kept.at || 0 });
-  return kept.list;
+  const entry = { list: kept.list, at: kept.at || 0 };
+  modelLists.set(key, entry);
+  return entry;
 }
+export const keptGatewayModels = (login) => keptGatewayList(login)?.list || null;
 
 // One GET /v1/models at a time per key. It carries only its own timeout: a caller that gives up (its signal) leaves
 // it running for the others and the cache (see untilAborted).

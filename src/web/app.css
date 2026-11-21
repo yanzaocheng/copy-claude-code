@@ -251,6 +251,14 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .model-list label:hover { background: var(--surface-2); }
 .model-list small { color: var(--muted); margin-left: auto; white-space: nowrap; }
 
+.model-group { margin-bottom: 10px; overflow: hidden; }
+.model-group > summary { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px; cursor: pointer; list-style: none; }
+.model-group > summary::-webkit-details-marker { display: none; }
+.model-group > summary::before { content: "▸"; color: var(--muted); }
+.model-group[open] > summary::before { content: "▾"; }
+.model-group[open] > summary { border-bottom: 1px solid var(--line); }
+.model-group .muted { font-size: 12.5px; }
+
 /* settings */
 .setting { display: grid; grid-template-columns: minmax(200px, 280px) 1fr; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
 .setting:last-child { border-bottom: 0; }
