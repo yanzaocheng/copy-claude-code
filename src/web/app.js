@@ -82,7 +82,19 @@
       if (!text) return;
       let fg = style.fg, bg = style.bg;
       if (style.inverse) { const old = fg; fg = bg || "var(--rc-bg)"; bg = old || "var(--rc-fg)"; }
-      const classes = [style.bold && "a-b", style.dim && "a-d", style.italic && "a-i", style.underline && "a-u", style.strike && "a-s"].filter(Boolean);
+      // A background is the terminal's diff (dark red and green for a dark terminal): shown as the page's own added /
+      // removed colours, with its text in the page's colour, so that it reads on a light page as on a dark one.
+      let tone = "";
+      if (bg && !style.inverse) {
+        const rgb = /rgb\((\d+),(\d+),(\d+)\)/.exec(bg) || /^#(..)(..)(..)$/.exec(bg);
+        const [r, g] = rgb ? [rgb[1], rgb[2]].map((v) => (v.length === 2 && rgb[0].startsWith("#") ? parseInt(v, 16) : Number(v))) : [0, 0];
+        const b = rgb ? (rgb[0].startsWith("#") ? parseInt(rgb[3], 16) : Number(rgb[3])) : 0;
+        tone = g > r + 12 ? "a-add" : r > g + 12 ? "a-del" : "a-bg";
+        if (tone !== "a-bg" && r + g + b > 300) tone += " a-word"; // the changed words, brighter than their line
+        bg = null;
+        fg = null;
+      }
+      const classes = [tone, style.bold && "a-b", style.dim && !tone && "a-d", style.italic && "a-i", style.underline && "a-u", style.strike && "a-s"].filter(Boolean);
       const css = (fg ? `color:${fg};` : "") + (bg ? `background:${bg};` : "");
       const attrs = (classes.length ? ` class="${classes.join(" ")}"` : "") + (css ? ` style="${esc(css)}"` : "");
       out += attrs ? `<span${attrs}>${esc(text)}</span>` : esc(text);
@@ -249,7 +261,7 @@
       // a shortened output ("… +N lines") is fetched whole when it comes into view (see wholeOutputs), except for
       // the edits, whose diff says more than their result
       const cut = !running && whole == null && item.id && truncated(item);
-      return `<div class="it it-tool ${running ? "running" : item.status === "error" ? "error" : "done"}"${cut ? ` data-cut="${esc(item.id)}"` : ""}><div class="head"><span class="dot"></span><span>${ansi(item.head || "")}</span></div>${body ? `<pre>${body}</pre>` : ""}</div>`;
+      return `<div class="it it-tool ${running ? "running" : item.status === "error" ? "error" : "done"}"${cut ? ` data-cut="${esc(item.id)}"` : ""}><div class="head"><span class="dot"></span><span>${ansi(item.head || "")}</span></div>${body ? (running ? `<pre>${body}</pre>` : folded(body)) : ""}</div>`;
     }
     return "";
   }
@@ -291,6 +303,22 @@
     });
     return { media_type: IMAGE_TYPES.includes(blob.type) ? blob.type : file.type, data, size: blob.size, url: URL.createObjectURL(blob) };
   }
+
+  // A tool's output: whole, but folded to its first lines when it is long (展开 shows the rest, 收起 folds it again).
+  const FOLD_LINES = 12;
+  function folded(html) {
+    const n = html.split("\n").length;
+    if (n <= FOLD_LINES + 3) return `<pre>${html}</pre>`;
+    return `<div class="fold"><pre>${html}</pre><button type="button" class="fold-btn" data-fold>展开全部 · ${n} 行</button></div>`;
+  }
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-fold]");
+    if (!b) return;
+    const box = b.closest(".fold");
+    const open = box.classList.toggle("open");
+    b.textContent = open ? "收起" : `展开全部 · ${box.querySelector("pre").textContent.split("\n").length} 行`;
+    if (!open) box.scrollIntoView({ block: "nearest" });
+  });
 
   // ---------------------------------------------------------------- whole tool outputs
 
@@ -496,8 +524,9 @@
     // drawn in pieces: a long conversation has thousands of items
     let i = 0;
     const wholes = wholeOutputs(log, async (tool) => (await api(`${base}/output/${encodeURIComponent(tool)}`)).text, (tool, text) => {
-      const pre = log.querySelector(`[data-cut="${CSS.escape(tool)}"] pre`);
-      if (pre) pre.innerHTML = esc(text);
+      const node = log.querySelector(`[data-cut="${CSS.escape(tool)}"]`);
+      const old = node?.querySelector(".fold, pre");
+      if (old) old.outerHTML = folded(esc(text));
     });
     cleanup = () => wholes.disconnect();
     const step = () => {
@@ -935,7 +964,6 @@
       if (status.context?.window) stats.push(`上下文 ${fmtTokens(status.context.used || 0)} / ${fmtTokens(status.context.window)}（${Math.round(((status.context.used || 0) / status.context.window) * 100)}%）`);
       if (Number.isFinite(status.cost)) stats.push(`花费 ${fmtUsd(status.cost)}`);
       if (status.tasks) stats.push(`${status.tasks} 个后台 agent`);
-      if (status.rc) stats.push("⇄ 远程控制已开");
       $("#lstats", el).textContent = stats.join("  ·  ");
       const todos = Array.isArray(status.todos) ? status.todos : [];
       $("#ltodos", el).innerHTML = todos.length ? `<details open><summary class="muted">待办 ${todos.filter((t) => t.status === "completed").length}/${todos.length}</summary>${todos.map((t) => `<div class="${t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : ""}">${t.status === "completed" ? "☒" : t.status === "in_progress" ? "◼" : "☐"} ${esc(t.content)}</div>`).join("")}</details>` : "";
@@ -1130,8 +1158,7 @@
     subagentPromptCacheTtl: "子 agent、压缩和辅助请求的提示词缓存时长：5m 或 1h",
     cleanupPeriodDays: "会话最后一次使用后保留多少天（之后连同运行记录一起删除，和 Claude Code 一样；至少 1 天，想长期保留可以填 3650）",
     CLAUDE_PRO_GATEWAY_URL: "网关地址（默认 https://7bit.fun）",
-    CLAUDE_PRO_ONLINE: "设为 0：交互会话不连网关（也就不能跨电脑通讯、不能远程控制）",
-    CLAUDE_PRO_REMOTE_COMMANDS: "设为 0：网关网页上只能看这台电脑的会话，不能发消息、回答问题、停止或切换模型和目录",
+    CLAUDE_PRO_ONLINE: "设为 0：交互会话不连网关（也就不能跨电脑互发任务、不能和通讯录好友通讯）",
     CLAUDE_PRO_MACHINE_NAME: "这台电脑在其他电脑的会话里显示的名字（如 公司、家里；默认是主机名）",
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: "每次回复的 max_tokens（默认 48000；网关允许的更少时会自动降低）",
     MAX_THINKING_TOKENS: "思考预算：0 关闭思考，N 表示预算 N 个 token",

@@ -173,13 +173,27 @@ async function serve() {
     }
   });
 
-  await new Promise((resolve, reject) => {
-    server.once('error', (e) => {
-      if (e.code !== 'EADDRINUSE') return reject(e);
-      server.listen(0, '127.0.0.1', resolve); // 7878 is taken: any port
-    });
-    server.listen(PORT, '127.0.0.1', resolve);
+  // 7878, or the port the server before this one had (it may still be letting go of it for a moment: tried for 3 s),
+  // else any port
+  const wanted = Number(readState()?.port) || PORT;
+  const listen = (p) => new Promise((resolve, reject) => {
+    const onError = (e) => { server.off('listening', onListening); reject(e); };
+    const onListening = () => { server.off('error', onError); resolve(); };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(p, '127.0.0.1');
   });
+  let bound = false;
+  for (const p of [...new Set([wanted, PORT])]) {
+    for (let i = 0; i < 15 && !bound; i++) {
+      try { await listen(p); bound = true; } catch (e) {
+        if (e.code !== 'EADDRINUSE') throw e;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    if (bound) break;
+  }
+  if (!bound) await listen(0);
   port = server.address().port;
   const state = { pid: process.pid, port, token, version: VERSION, code, startedAt: Date.now() };
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -190,6 +204,20 @@ async function serve() {
   // (web.json stays: the next server takes its secret over, so that the page's cookie still works)
   const quit = () => process.exit(0);
   setInterval(() => { if (!streams && Date.now() - lastActivity > IDLE_MS) quit(); }, 60_000).unref();
+  // Its code changed (an update, or an edit in a source checkout): a new server takes over at once, on the same port
+  // and with the same secret, so that an open page keeps working with the new page code (it is read from disk at
+  // every load) instead of new pages talking to an old server.
+  const handOver = setInterval(() => {
+    if (codeStamp() === code) return;
+    clearInterval(handOver);
+    server.close();
+    server.closeAllConnections?.();
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
+    child.on('error', () => {});
+    child.unref();
+    setTimeout(() => process.exit(0), 200);
+  }, 15_000);
+  handOver.unref();
   process.on('SIGTERM', quit);
   process.on('SIGINT', quit);
 }

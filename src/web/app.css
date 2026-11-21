@@ -5,7 +5,7 @@
   --ok: #15803d; --ok-soft: #e8f6ec; --warn: #b45309; --warn-soft: #fdf3e2; --danger: #dc2626; --danger-soft: #fdecec;
   --code-bg: #f3f4f6; --term-bg: #fbfbfc; --shadow: 0 1px 2px rgba(16, 24, 40, .05); --radius: 10px;
   --rc-fg: #111827; --rc-bg: #fff;
-  --side-bg: #f7f7f8; --main-bg: #ffffff; --bubble: #eff1f5; --hover: rgba(0, 0, 0, .05); --active: rgba(0, 0, 0, .075);
+  --side-bg: #f7f7f8; --main-bg: #ffffff; --bubble: #eff1f5; --diff-add-bg: #e6ffec; --diff-add-fg: #116329; --diff-del-bg: #ffebe9; --diff-del-fg: #a40e26; --diff-add-word: #abf2bc; --diff-del-word: #ffc1c0; --hover: rgba(0, 0, 0, .05); --active: rgba(0, 0, 0, .075);
   --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, "Microsoft YaHei UI", monospace;
   color-scheme: light;
 }
@@ -15,7 +15,7 @@
   --accent: #e08a6a; --accent-hover: #ea9c7e; --accent-soft: rgba(224, 138, 106, .14); --accent-text: #f0a487;
   --ok: #4ade80; --ok-soft: rgba(74, 222, 128, .12); --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .12); --danger: #f87171; --danger-soft: rgba(248, 113, 113, .12);
   --code-bg: #1f2430; --term-bg: #12151b; --shadow: none; --rc-fg: #e5e7eb; --rc-bg: #171a21;
-  --side-bg: #15171c; --main-bg: #0f1115; --bubble: #262a33; --hover: rgba(255, 255, 255, .06); --active: rgba(255, 255, 255, .1);
+  --side-bg: #15171c; --main-bg: #0f1115; --bubble: #262a33; --diff-add-bg: rgba(46, 160, 67, .2); --diff-add-fg: #7ee787; --diff-del-bg: rgba(248, 81, 73, .2); --diff-del-fg: #ffa198; --diff-add-word: rgba(46, 160, 67, .45); --diff-del-word: rgba(248, 81, 73, .45); --hover: rgba(255, 255, 255, .06); --active: rgba(255, 255, 255, .1);
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -271,7 +271,16 @@ details.proj > div { padding: 0 0 6px 18px; }
 .it-tool.error .dot { background: var(--danger); }
 .it-tool.running .dot { background: var(--faint); animation: blink 1s infinite; }
 @keyframes blink { 50% { opacity: .2; } }
-.it-tool pre, .it-output pre { margin: 4px 0 0 16px; white-space: pre-wrap; word-break: break-all; color: var(--text-2); max-height: 420px; overflow-y: auto; }
+.it-tool pre, .it-output pre { margin: 4px 0 0 16px; white-space: pre-wrap; word-break: break-all; color: var(--text-2); }
+.fold { position: relative; }
+.fold:not(.open) pre { max-height: calc(12 * 1.55em); overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.fold-btn { margin: 4px 0 0 16px; padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: 99px; background: var(--surface); color: var(--muted); font: 12px/1.4 system-ui, sans-serif; cursor: pointer; }
+.fold-btn:hover { color: var(--text); border-color: var(--accent); }
+.a-add { background: var(--diff-add-bg); color: var(--diff-add-fg); }
+.a-del { background: var(--diff-del-bg); color: var(--diff-del-fg); }
+.a-add.a-word { background: var(--diff-add-word); }
+.a-del.a-word { background: var(--diff-del-word); }
+.a-bg { background: var(--surface-2); }
 .it-tool .more { margin-left: auto; font-family: inherit; font-size: 12px; background: none; border: 0; color: var(--accent-text); cursor: pointer; }
 .it-tool details > summary { cursor: pointer; list-style: none; }
 .it-tool details > summary::-webkit-details-marker { display: none; }
