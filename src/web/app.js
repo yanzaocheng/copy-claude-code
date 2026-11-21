@@ -1417,7 +1417,7 @@
     $("#body", el).innerHTML = `<div id="pbody">
       <div class="section-head"><div><h2>默认模型</h2><p>新会话用的模型和推理强度。会话里的 /model、/effort 只改那一个会话（并记住给下次用）</p></div></div>
       <div class="panel panel-pad" id="defaults"><div class="muted">正在读取可用模型…</div></div>
-      <div class="section-head"><div><h2>模型列表</h2><p>会话里模型菜单用的就是这份列表，只在点「刷新模型列表」时更新。点一行把它填进上面的默认模型</p></div><div class="actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button></div></div>
+      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型才出现在会话的模型菜单里（都不勾就显示全部）。列表只在点「刷新模型列表」时更新；点一行把它填进上面的默认模型</p></div><div class="actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button></div></div>
       <div id="modelLists"><div class="panel panel-pad muted">正在读取…</div></div>
       <div class="section-head"><div><h2>7bit.fun 网关</h2><p>Claude、GPT 等模型，余额、远程控制、跨电脑和通讯录都通过它</p></div></div>
       <div class="panel prov${p.gateway.connected ? " connected" : ""}" style="max-width:640px"><div class="prov-top"><strong>7bit.fun</strong>${p.gateway.connected ? '<span class="pill ok">已连接</span>' : ""}</div>
@@ -1468,12 +1468,34 @@
     try { r = await api("/api/models/kept"); } catch (e) { box.innerHTML = `<div class="panel panel-pad muted">读取失败：${esc(e.message)}</div>`; return; }
     if (!el.isConnected) return;
     const current = r.remembered?.model || r.current;
+    const picked = new Set(r.picked || []);
     const price = (m) => (m.price ? `$${m.price.input} / $${m.price.output}` : "—");
+    const pickedNote = () => (picked.size ? `菜单显示勾选的 ${picked.size} 个` : "菜单显示全部");
     box.innerHTML = r.groups.length ? r.groups.map((g) => `<details class="panel model-group"${g.models.length <= 40 ? " open" : ""}>
       <summary><strong>${esc(g.name)}</strong><span class="muted">${g.models.length} 个模型${g.at ? ` · ${esc(ago(g.at))}更新` : ""}</span></summary>
-      ${g.models.length ? `<table class="list"><thead><tr><th>模型</th><th class="num">上下文</th><th class="num">最大输出</th><th>推理强度</th><th class="num" title="每百万 token 的美元价：输入 / 输出">价格（输入/输出）</th></tr></thead><tbody>
-        ${g.models.map((m) => `<tr class="click" data-model="${esc(m.ref)}" data-text="${esc([m.ref, m.name, m.vendor].filter(Boolean).join(" ").toLowerCase())}"><td class="title-cell"><strong class="mono">${esc(m.ref)}${m.ref === current ? ' <span class="pill ok">默认</span>' : ""}</strong>${m.name || m.vendor ? `<div class="path">${esc([m.name, m.vendor].filter(Boolean).join(" · "))}</div>` : ""}</td><td class="num">${m.window ? fmtTokens(m.window) : "—"}</td><td class="num">${m.maxOutput ? fmtTokens(m.maxOutput) : "—"}</td><td>${m.efforts.length ? esc(m.efforts.join(" · ")) : '<span class="faint">—</span>'}</td><td class="num">${price(m)}</td></tr>`).join("")}
+      ${g.models.length ? `<table class="list"><thead><tr><th class="pick" title="勾选的模型出现在会话的模型菜单里">菜单</th><th>模型</th><th class="num">上下文</th><th class="num">最大输出</th><th>推理强度</th><th class="num" title="每百万 token 的美元价：输入 / 输出">价格（输入/输出）</th></tr></thead><tbody>
+        ${g.models.map((m) => `<tr class="click" data-model="${esc(m.ref)}" data-text="${esc([m.ref, m.name, m.vendor].filter(Boolean).join(" ").toLowerCase())}"><td class="pick"><input type="checkbox" data-pick="${esc(m.ref)}" aria-label="在会话的模型菜单里显示 ${esc(m.ref)}"${picked.has(m.ref) ? " checked" : ""}></td><td class="title-cell"><strong class="mono">${esc(m.ref)}${m.ref === current ? ' <span class="pill ok">默认</span>' : ""}</strong>${m.name || m.vendor ? `<div class="path">${esc([m.name, m.vendor].filter(Boolean).join(" · "))}</div>` : ""}</td><td class="num">${m.window ? fmtTokens(m.window) : "—"}</td><td class="num">${m.maxOutput ? fmtTokens(m.maxOutput) : "—"}</td><td>${m.efforts.length ? esc(m.efforts.join(" · ")) : '<span class="faint">—</span>'}</td><td class="num">${price(m)}</td></tr>`).join("")}
       </tbody></table>` : '<div class="empty">还没有拉取过模型列表：点「刷新模型列表」</div>'}</details>`).join("") : '<div class="panel panel-pad muted">还没有连接 7bit.fun 或其他供应商</div>';
+    if (r.groups.length) box.insertAdjacentHTML("afterbegin", `<div class="pick-bar"><span id="pickedNote">${pickedNote()}</span><button type="button" class="button secondary small" id="clearPicked"${picked.size ? "" : " hidden"}>清除勾选</button></div>`);
+    let saving = Promise.resolve();
+    const savePicked = () => {
+      const models = [...picked];
+      $("#pickedNote", box).textContent = pickedNote();
+      $("#clearPicked", box).hidden = !picked.size;
+      saving = saving.then(() => api("/api/models/picked", { method: "POST", body: { models } })).catch((e) => fail(e));
+    };
+    box.onchange = (e) => {
+      const cb = e.target.closest("input[data-pick]");
+      if (!cb) return;
+      if (cb.checked) picked.add(cb.dataset.pick); else picked.delete(cb.dataset.pick);
+      savePicked();
+    };
+    $("#clearPicked", box)?.addEventListener("click", () => {
+      picked.clear();
+      for (const cb of $$("input[data-pick]", box)) cb.checked = false;
+      savePicked();
+      toast("已清除勾选：会话的模型菜单显示全部模型");
+    });
     const filter = $("#modelFilter", el);
     const apply = () => {
       const q = filter.value.trim().toLowerCase();
@@ -1488,6 +1510,7 @@
     filter.oninput = apply;
     apply();
     box.onclick = (e) => {
+      if (e.target.closest(".pick")) return; // (the checkbox's cell: ticking, not filling the default)
       const tr = e.target.closest("tr[data-model]");
       const input = $("#defModel", el);
       if (!tr || !input) return;

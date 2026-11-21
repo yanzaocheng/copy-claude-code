@@ -56,7 +56,9 @@ async function providerModelChoices({ cached = false } = {}) {
 // without an answer the list given last, else gpt-6.1-sol for its GPT models); the Claude aliases where a provider of
 // Claude is connected. A provider that is not connected offers nothing.
 // `cached`: the lists kept from before (see providerModelChoices); the gateway is asked only when none is kept yet.
-export async function modelChoices(cfg, { cached = false } = {}) {
+// `picked` (the web console's menus, see pickedModels): a set of provider/model; when it has any, only those are
+// offered by their full names (not the aliases), with the default and the model in use.
+export async function modelChoices(cfg, { cached = false, picked = null } = {}) {
   const configured = cfg.configuredModelSpec;
   const opts = [{ value: 'default', label: 'Default', description: `${configured} → ${cfg.resolveModel(configured).label}` }];
   const tag = (m) => `${m.provider}/${m.id}`;
@@ -69,17 +71,27 @@ export async function modelChoices(cfg, { cached = false } = {}) {
     }
   }
   const others = providerModelChoices({ cached });
+  const gateway = [];
   const login = gatewayLogin(cfg.gatewayUrl);
   if (login) {
     let served = cached ? keptGatewayModels(login) : null;
     if (!served) try { served = await fetchGatewayModels(login, { signal: AbortSignal.timeout(4000), fresh: !cached }); } catch { /* offline: the fallback below */ }
     for (const m of served?.length ? served : [{ id: 'gpt-6.1-sol' }]) {
-      if (aliased.has(`${GATEWAY_PROVIDER}/${m.id}`)) continue;
-      opts.push({ value: `${GATEWAY_PROVIDER}/${m.id}`, label: `${GATEWAY_PROVIDER}/${m.id}`, description: ['7bit.fun', isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || ''].filter(Boolean).join(' · ') });
+      gateway.push({ value: `${GATEWAY_PROVIDER}/${m.id}`, label: `${GATEWAY_PROVIDER}/${m.id}`, description: ['7bit.fun', isGpt(m.id) ? 'OpenAI, through the gateway\'s Codex login' : m.display_name || ''].filter(Boolean).join(' · ') });
     }
   }
-  opts.push(...(await others).filter((o) => !aliased.has(o.value)));
-  return opts;
+  const providers = await others;
+  opts.push(...gateway.filter((o) => !aliased.has(o.value)), ...providers.filter((o) => !aliased.has(o.value)));
+  if (!picked?.size) return opts;
+  const kept = [opts[0], ...[...gateway, ...providers].filter((o) => picked.has(o.value))];
+  // the model in use stays listed (it is shown as the current one), unless a ticked entry is that model already
+  const chosen = cfg.modelOverride;
+  const sameModel = (o) => { try { const m = cfg.resolveModel(o.value); return m.id === cfg.model.id && m.provider === cfg.model.provider; } catch { return false; } };
+  if (chosen && !kept.some((o) => o.value === chosen || (o.value !== 'default' && sameModel(o)))) {
+    const current = opts.find((o) => o.value === chosen) || { value: chosen, label: chosen, description: '' };
+    kept.splice(1, 0, current);
+  }
+  return kept;
 }
 
 // Ask the gateway and every connected provider for their models now, and keep what they say (the gateway's list on

@@ -258,6 +258,10 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .model-group[open] > summary::before { content: "▾"; }
 .model-group[open] > summary { border-bottom: 1px solid var(--line); }
 .model-group .muted { font-size: 12.5px; }
+table.list th.pick, table.list td.pick { width: 52px; text-align: center; padding-left: 8px; padding-right: 4px; cursor: default; }
+td.pick input { width: 17px; height: 17px; margin: 2px 0 0; cursor: pointer; accent-color: var(--accent); }
+.pick-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 2px 10px; color: var(--muted); font-size: 13px; }
+.pick-bar [hidden] { display: none; }
 
 /* settings */
 .setting { display: grid; grid-template-columns: minmax(200px, 280px) 1fr; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--line); }

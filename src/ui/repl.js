@@ -16,7 +16,7 @@ import {
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
-import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
+import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, pickedModels } from '../config.js';
 import { gatewayLogin, loadGatewayModels, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { connectedProviders } from '../providers.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
@@ -1072,7 +1072,8 @@ export class App {
   async remoteOptions() {
     const cfg = this.config;
     // (the lists kept from before: the page's menus open at once; 刷新模型列表 on the console renews them)
-    const [models, efforts] = await Promise.all([modelChoices(cfg, { cached: true }), effortChoices(cfg, { cached: true })]);
+    // (and only the models ticked in its 模型列表, when any are)
+    const [models, efforts] = await Promise.all([modelChoices(cfg, { cached: true, picked: new Set(pickedModels()) }), effortChoices(cfg, { cached: true })]);
     const chosen = cfg.modelOverride || 'default';
     const same = (m) => m.id === cfg.model.id && m.provider === cfg.model.provider;
     const current = models.find((o) => o.value === chosen) || models.find((o) => o.value !== 'default' && same(cfg.resolveModel(o.value)));

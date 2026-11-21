@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import {
   CONFIG_DIR, INSTALL_DIR, SOURCE_CHECKOUT, VERSION, BASIC_SETTINGS, KNOWN_KEYS, loadConfig, settingsFiles,
-  writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile, applyRememberedChoices,
+  writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile, applyRememberedChoices, pickedModels, savePickedModels,
 } from '../config.js';
 import {
   PRESETS, GATEWAY_PROVIDER, readConnections, saveConnection, removeConnection, providerInfo, connectedProviders,
@@ -398,7 +398,7 @@ function keptModelLists() {
       })),
     });
   }
-  return { groups, current: config.setting('model'), remembered: rememberedChoice() };
+  return { groups, picked: pickedModels(), current: config.setting('model'), remembered: rememberedChoice() };
 }
 
 // The models the console offers for the default model: those of the connected providers and of the gateway.
@@ -654,7 +654,7 @@ async function newSessionOptions(url) {
   if ('effort' in choices) config.effortOverride = choices.effort;
   const kind = url.searchParams.get('kind');
   const base = { model: config.modelSpec, effort: config.effort || 'auto', modelChoice: config.modelOverride || 'default', effortChoice: config.effortOverride || 'default' };
-  if (kind === 'models') return { ...base, models: await sessionModels(config, { cached: true }) };
+  if (kind === 'models') return { ...base, models: await sessionModels(config, { cached: true, picked: new Set(pickedModels()) }) };
   if (kind === 'efforts') return { ...base, efforts: (await sessionEfforts(config, { cached: true })).options };
   return base;
 }
@@ -746,6 +746,7 @@ export const routes = [
   ['GET', /^\/api\/providers$/, () => providersView()],
   ['GET', /^\/api\/models$/, () => modelChoices()],
   ['GET', /^\/api\/models\/kept$/, () => keptModelLists()],
+  ['POST', /^\/api\/models\/picked$/, (req, m, body) => ({ picked: savePickedModels(body?.models) })],
   ['POST', /^\/api\/models\/refresh$/, async () => ({ ...(await refreshModelLists(loadConfig({ cwd: home }))), view: providersView() })],
   ['POST', /^\/api\/providers\/check$/, (req, m, body) => checkProvider(body)],
   ['POST', /^\/api\/providers\/connect$/, (req, m, body) => connectProvider(body)],

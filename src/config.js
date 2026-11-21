@@ -484,6 +484,22 @@ const userSettingsFile = () => path.join(CONFIG_DIR, 'settings.json');
 // Kept under the name of the provider they were made with, from when there were others: the gateway's.
 const REMEMBERED_KEY = 'gateway';
 
+// The models ticked in the web console's 模型列表 (provider/model): its model menus offer only these (and the
+// default and the model in use); none ticked, all. CONFIG_DIR/picker-models.json, {models: [...]}.
+const pickedFile = () => path.join(CONFIG_DIR, 'picker-models.json');
+export function pickedModels() {
+  const list = readJson(pickedFile())?.models;
+  return Array.isArray(list) ? list.filter((m) => typeof m === 'string' && m.trim()) : [];
+}
+export function savePickedModels(models) {
+  const list = [...new Set((Array.isArray(models) ? models : []).filter((m) => typeof m === 'string' && /^[^\s\x00-\x1f]{1,200}$/.test(m)))].slice(0, 500);
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const tmp = `${pickedFile()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ models: list }, null, 2));
+  fs.renameSync(tmp, pickedFile());
+  return list;
+}
+
 function rememberedChoices() {
   const entry = readJson(userSettingsFile())?.remembered?.[REMEMBERED_KEY];
   return entry && typeof entry === 'object' ? entry : {};
