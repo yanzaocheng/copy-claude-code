@@ -978,7 +978,7 @@
 
   function liveView(peerId) {
     const el = page(`<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle" title="点击改名">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill">连接中</span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill">连接中</span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-extra"><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
         <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
@@ -1017,29 +1017,6 @@
     };
     $("#lmodel", el).addEventListener("click", choose("model", "模型", "models"));
     $("#leffort", el).addEventListener("click", choose("effort", "推理强度", "efforts"));
-    // the title is renamed where it is: click, type, Enter (Esc: as it was)
-    const titleEl = $("#ltitle", el);
-    titleEl.addEventListener("click", () => {
-      if (titleEl.isContentEditable) return;
-      const before = titleEl.textContent;
-      titleEl.contentEditable = "plaintext-only";
-      titleEl.classList.add("editing");
-      titleEl.focus();
-      document.getSelection().selectAllChildren(titleEl);
-      const finish = (save) => {
-        titleEl.removeEventListener("keydown", onKey);
-        titleEl.removeEventListener("blur", onBlur);
-        titleEl.contentEditable = "false";
-        titleEl.classList.remove("editing");
-        const name = titleEl.textContent.replace(/\s+/g, " ").trim();
-        if (!save || !name || name === before) { titleEl.textContent = before; return; }
-        post("send", { text: `/rename ${name}` }).then(() => loadWorkspace()).catch((err) => { titleEl.textContent = before; fail(err); });
-      };
-      const onKey = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); finish(true); } if (ev.key === "Escape") finish(false); };
-      const onBlur = () => finish(true);
-      titleEl.addEventListener("keydown", onKey);
-      titleEl.addEventListener("blur", onBlur);
-    });
     $("#lmenu", el).addEventListener("click", (e) => {
       const known = ws.sessions.find((s) => s.id === status.sessionId);
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
@@ -1112,7 +1089,7 @@
     function setStatus(next) {
       status = next || {};
       statusAt = Date.now();
-      if (!$("#ltitle", el).isContentEditable) $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
+      $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
       $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? "" : " · 在终端窗口里运行"}`;
       $("#lmodel span", el).textContent = status.model || "模型";
       $("#leffort span", el).textContent = status.effort || "推理强度";

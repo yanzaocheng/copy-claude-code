@@ -114,9 +114,6 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 .chat-head { display: flex; align-items: center; gap: 10px; padding: 14px 24px 12px; border-bottom: 1px solid var(--line); }
 .chat-titles { flex: 1; min-width: 0; }
 .chat-titles h2 { font-size: 17px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#ltitle { cursor: text; border-radius: 6px; padding: 1px 4px; margin-left: -4px; }
-#ltitle:hover { background: var(--hover); }
-#ltitle.editing { background: var(--surface); outline: 2px solid var(--accent); text-overflow: clip; }
 .chat-sub { color: var(--muted); font-size: 12px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .chat-log { max-width: 860px; margin: 0 auto; padding: 22px 28px 30px; display: grid; gap: 14px; }
