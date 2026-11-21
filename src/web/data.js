@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { CONFIG_DIR, loadConfig } from '../config.js';
-import { SessionStore, firstUserText } from '../session.js';
+import { SessionStore, firstUserText, archivedSessions } from '../session.js';
 import { transcriptItems } from '../remote.js';
 import { buildTools } from '../tools/index.js';
 import { loadAgents, loadSkills } from '../agents.js';
@@ -122,6 +122,8 @@ export function listAllSessions() {
   }
   for (const file of cache.keys()) if (!seen.has(file)) { cache.delete(file); changed = true; }
   if (changed) saveSummaries();
+  const archived = archivedSessions();
+  for (const s of out) if (archived[s.id]) s.archived = archived[s.id].at || true;
   return out.sort((a, b) => b.mtime - a.mtime);
 }
 

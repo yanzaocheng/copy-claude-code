@@ -93,12 +93,38 @@ export function checkpointsDir(cwd) {
   return path.join(projectDir(cwd), 'checkpoints');
 }
 
+// 归档 (archived) conversations: put away from the web console's workspace, kept whole, and never deleted by age
+// (sweepOldData). A mark in CONFIG_DIR/archived.json ({id: {at}}); the conversation's file stays where it is, so
+// /resume and --resume still find it.
+const archivedFile = () => path.join(CONFIG_DIR, 'archived.json');
+export function archivedSessions() {
+  try {
+    const data = JSON.parse(fs.readFileSync(archivedFile(), 'utf8'));
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch { return {}; }
+}
+export function setArchived(ids, archived = true) {
+  const data = archivedSessions();
+  const at = Date.now();
+  for (const id of ids) {
+    if (typeof id !== 'string' || !id) continue;
+    if (archived) data[id] = { at };
+    else delete data[id];
+  }
+  fs.mkdirSync(path.dirname(archivedFile()), { recursive: true });
+  const tmp = `${archivedFile()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, archivedFile());
+  return data;
+}
+
 // Delete what is older than `days` (the cleanupPeriodDays setting, as in Claude Code: 30 by default), in every
 // project: conversations not written to since (they no longer appear in /resume), their traces, saved tool outputs
 // (at most 7 days) and /rewind snapshots (at most 14 days). The memory is never touched. Conversations were kept
 // for good before: 646 MB in 176 files in a month (2026-11-11), of which only the current project's tool outputs,
 // snapshots and traces were deleted, and only when a session started there. Runs in the background, at most once
-// an hour on the machine (`marker`); `keep`: conversation ids not to delete whatever their age. Returns what went.
+// an hour on the machine (`marker`); `keep`: conversation ids not to delete whatever their age (and the archived
+// ones are never deleted). Returns what went.
 export async function sweepOldData({ days, keep = [], root = path.join(CONFIG_DIR, 'projects'), now = Date.now() } = {}) {
   const done = { conversations: 0, files: 0, bytes: 0 };
   if (!(days >= 1)) return done;
@@ -106,7 +132,7 @@ export async function sweepOldData({ days, keep = [], root = path.join(CONFIG_DI
   try { if (now - fs.statSync(marker).mtimeMs < 3600_000) return done; } catch { /* never swept */ }
   try { fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(marker, ''); } catch { return done; }
   const day = 24 * 3600_000;
-  const keepIds = new Set(keep.filter(Boolean));
+  const keepIds = new Set([...keep.filter(Boolean), ...Object.keys(archivedSessions())]);
   const fsp = fs.promises;
   const list = async (dir) => { try { return await fsp.readdir(dir, { withFileTypes: true }); } catch { return []; } };
   const old = async (file, maxAgeMs) => { try { return now - (await fsp.stat(file)).mtimeMs > maxAgeMs; } catch { return false; } };

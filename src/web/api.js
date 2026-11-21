@@ -17,6 +17,7 @@ import {
 import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels } from '../gateway.js';
 import { checkForUpdate } from '../updater.js';
 import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
+import { setArchived, archivedSessions } from '../session.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
   purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError,
@@ -441,7 +442,7 @@ export const routes = [
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     const detail = sessionDetail(dir, id);
     const live = await running();
-    return { ...detail, running: live.has(id) ? live.get(id).peerId : null };
+    return { ...detail, archived: Boolean(archivedSessions()[id]), running: live.has(id) ? live.get(id).peerId : null };
   }],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/image\/(\d+)$/, (req, [dir, id, n]) => {
     const image = sessionImage(dir, id, Number(n));
@@ -458,6 +459,13 @@ export const routes = [
   ['DELETE', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     if ((await running()).has(id)) throw httpError(409, '会话正在运行，不能删除');
     return trashSession(dir, id);
+  }],
+  // 归档: put conversations away from the workspace (or back), several at once (a whole project)
+  ['POST', /^\/api\/sessions\/archive$/, (req, m, body) => {
+    const ids = Array.isArray(body?.ids) ? body.ids.filter((id) => typeof id === 'string' && /^[\w-]{1,80}$/.test(id)) : [];
+    if (!ids.length) throw httpError(400, 'ids required');
+    setArchived(ids, body?.archived !== false);
+    return { ok: true, count: ids.length };
   }],
   ['GET', /^\/api\/trash$/, () => ({ items: listTrash() })],
   ['POST', /^\/api\/trash\/([\w.-]+)\/restore$/, (req, [trashId]) => restoreSession(trashId)],

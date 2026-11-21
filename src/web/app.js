@@ -415,7 +415,7 @@
 
   let cleanup = null; // what the current view leaves behind (timers, streams)
   function route() {
-    const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+    const parts = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").map(decodeURIComponent); // (?tab=… is the view's own)
     const page = parts[0] || "new";
     $$("#nav a, .side-new").forEach((a) => a.classList.toggle("active", a.dataset.nav === page));
     $("#sideMe").classList.toggle("active", $$("#nav a").some((a) => a.dataset.nav === page)); // a page of its menu
@@ -475,9 +475,9 @@
   let sessionCache = null;
   async function sessions() {
     const params = new URLSearchParams(location.hash.split("?")[1] || "");
-    const tab = params.get("tab") === "trash" ? "trash" : "list";
+    const tab = ["trash", "archived"].includes(params.get("tab")) ? params.get("tab") : "list";
     const el = page(`<h1>会话</h1><p class="sub">所有项目的对话记录：搜索、查看、改名、导出、在终端中继续</p>
-      <div class="tabs"><a href="#/sessions" class="${tab === "list" ? "active" : ""}">全部会话</a><a href="#/sessions?tab=trash" class="${tab === "trash" ? "active" : ""}">回收站</a></div><div id="body"><div class="empty">正在加载…</div></div>`);
+      <div class="tabs"><a href="#/sessions" class="${tab === "list" ? "active" : ""}">全部会话</a><a href="#/sessions?tab=archived" class="${tab === "archived" ? "active" : ""}">已归档</a><a href="#/sessions?tab=trash" class="${tab === "trash" ? "active" : ""}">回收站</a></div><div id="body"><div class="empty">正在加载…</div></div>`);
     const body = $("#body", el);
     if (tab === "trash") return trash(body);
     let data;
@@ -494,21 +494,31 @@
       const proj = $("#proj").value;
       const sort = $("#sort").value;
       sessionStorage.setItem("sessionFilter", JSON.stringify({ q, proj, sort }));
-      let list = sessionCache.filter((s) => (!proj || s.dir === proj) && (!q || [s.title, s.firstPrompt, s.id, s.cwd, s.topic].some((v) => String(v || "").toLowerCase().includes(q))));
+      let list = sessionCache.filter((s) => (tab === "archived" ? s.archived : !s.archived) && (!proj || s.dir === proj) && (!q || [s.title, s.firstPrompt, s.id, s.cwd, s.topic].some((v) => String(v || "").toLowerCase().includes(q))));
       if (sort === "size") list = list.slice().sort((a, b) => b.size - a.size);
       if (sort === "cost") list = list.slice().sort((a, b) => b.cost - a.cost);
       const shown = list.slice(0, 300);
       $("#table").innerHTML = shown.length ? `<table class="list"><thead><tr><th>会话</th><th>最后使用</th><th class="num">消息</th><th class="num">大小</th><th class="num">花费</th></tr></thead><tbody>
         ${shown.map((s) => `<tr class="click" data-open="${esc(s.dir)}/${esc(s.id)}"><td class="title-cell"><strong>${s.running ? '<span class="pill ok">运行中</span> ' : ""}${esc(s.title)}</strong><div class="path">${esc(shortPath(s.cwd || s.dir))} · ${esc(s.id.slice(0, 8))}</div></td>
-          <td title="${esc(fmtTime(s.mtime))}">${ago(s.mtime)}</td><td class="num">${s.count}</td><td class="num">${fmtBytes(s.size)}</td><td class="num">${s.cost ? fmtUsd(s.cost) : "—"}</td></tr>`).join("")}
-      </tbody></table>` : '<div class="empty">没有符合条件的会话</div>';
+          <td title="${esc(fmtTime(s.mtime))}">${ago(s.mtime)}</td><td class="num">${s.count}</td><td class="num">${fmtBytes(s.size)}</td><td class="num">${s.cost ? fmtUsd(s.cost) : "—"}${tab === "archived" ? ` <button class="button secondary small" data-unarchive="${esc(s.id)}">取消归档</button>` : ""}</td></tr>`).join("")}
+      </tbody></table>` : `<div class="empty">${tab === "archived" ? "没有归档的会话：在工作区里鼠标移到会话上，点右边的归档按钮" : "没有符合条件的会话"}</div>`;
       $("#count").textContent = `共 ${list.length} 个${list.length > shown.length ? `，显示前 ${shown.length} 个（用搜索缩小范围）` : ""}`;
     };
     draw();
     $("#q").addEventListener("input", draw);
     $("#proj").addEventListener("change", draw);
     $("#sort").addEventListener("change", draw);
-    $("#table").addEventListener("click", (e) => { const row = e.target.closest("[data-open]"); if (row) location.hash = `#/session/${row.dataset.open}`; });
+    $("#table").addEventListener("click", async (e) => {
+      const un = e.target.closest("[data-unarchive]");
+      if (un) {
+        try { await archive([un.dataset.unarchive], false); } catch (err) { return fail(err); }
+        const s = sessionCache.find((x) => x.id === un.dataset.unarchive);
+        if (s) delete s.archived;
+        return draw();
+      }
+      const row = e.target.closest("[data-open]");
+      if (row) location.hash = `#/session/${row.dataset.open}`;
+    });
     $("#q").focus();
   }
 
@@ -595,6 +605,7 @@
         { label: "在终端窗口里继续", value: "terminal" },
         { label: "导出 Markdown", value: "export" },
         { label: toolsShown ? "隐藏工具调用" : "显示工具调用", value: "tools" },
+        { label: d.archived ? "取消归档" : "归档", description: d.archived ? "回到工作区" : "从工作区收起，内容保留", value: "archive" },
         { label: "删除（进回收站）", value: "delete" },
       ] }], async (key, value) => {
         try {
@@ -608,6 +619,7 @@
           }
           if (value === "export") location.href = `${base}/export`;
           if (value === "terminal") resume(false);
+          if (value === "archive") { await archive([id], !d.archived); d.archived = !d.archived; }
           if (value === "tools") { toolsShown = !toolsShown; $$(".it-tool", log).forEach((n) => n.classList.toggle("hidden", !toolsShown)); }
           if (value === "delete" && confirm(`删除「${d.title}」？会先移到回收站，保留 7 天。`)) {
             await api(base, { method: "DELETE" });
@@ -631,6 +643,7 @@
     newChat: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
     send: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
     stop: '<svg viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg>',
+    archive: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
     add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     caret: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
     more: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
@@ -679,9 +692,10 @@
     const box = $("#ws");
     const liveById = new Map(ws.live.map((l) => [l.peerId, l]));
     const known = new Set(ws.sessions.map((s) => s.id));
-    const items = ws.sessions.map((s) => {
+    // (an archived conversation is not listed, unless it runs again)
+    const items = ws.sessions.filter((s) => !s.archived || s.running).map((s) => {
       const peer = s.running ? liveById.get(s.running) : null;
-      return { href: peer ? `#/live/${peer.peerId}` : `#/session/${s.dir}/${s.id}`, title: peer?.status?.title || s.title, cwd: s.cwd || s.dir, mtime: s.mtime, peer, alt: peer ? `#/session/${s.dir}/${s.id}` : null };
+      return { id: s.id, href: peer ? `#/live/${peer.peerId}` : `#/session/${s.dir}/${s.id}`, title: peer?.status?.title || s.title, cwd: s.cwd || s.dir, mtime: s.mtime, peer, alt: peer ? `#/session/${s.dir}/${s.id}` : null };
     });
     // running sessions with nothing written yet (just started)
     for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: l.startedAt || 0, peer: l });
@@ -711,10 +725,10 @@
         ws.tips.set(id, it);
         const [cls] = it.peer ? liveState(it.peer.status) : [""];
         const active = here === it.href || (it.alt && here === it.alt);
-        return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${it.peer ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${it.peer ? "" : esc(shortAgo(it.mtime))}</span></a>`;
+        return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${it.peer ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${it.peer ? "" : esc(shortAgo(it.mtime))}</span>${it.peer || !it.id ? "" : `<span class="ws-arch" role="button" data-archive="${esc(it.id)}" title="归档" aria-label="归档">${ICON.archive}</span>`}</a>`;
       }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
       const running = g.items.filter((it) => it.peer).length;
-      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
+      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" title="更多" aria-label="项目菜单">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
     }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话"}</div>`;
   }
 
@@ -726,9 +740,34 @@
     });
   }
 
+  // 归档 (or back, `archived` false): out of the workspace, kept whole, never cleaned up by age
+  async function archive(ids, archived = true) {
+    await api("/api/sessions/archive", { method: "POST", body: { ids, archived } });
+    for (const s of ws.sessions) if (ids.includes(s.id)) s.archived = archived ? Date.now() : undefined;
+    drawWorkspace();
+    toast(archived ? `已归档${ids.length > 1 ? ` ${ids.length} 个会话` : ""}：在「全部会话 → 已归档」里可以找回` : "已取消归档");
+    loadWorkspace();
+  }
+
   function wireSidebar() {
     const box = $("#ws");
     box.addEventListener("click", (e) => {
+      const arch = e.target.closest("[data-archive]");
+      if (arch) {
+        e.preventDefault();
+        e.stopPropagation();
+        archive([arch.dataset.archive]).catch(fail);
+        return;
+      }
+      const pm = e.target.closest("[data-pmenu]");
+      if (pm) {
+        const key = pm.dataset.pmenu;
+        const ids = ws.sessions.filter((s) => !s.archived && !s.running && projectKey(s.cwd || s.dir) === key).map((s) => s.id);
+        popMenu(pm, [{ key: "p", title: "", items: [{ label: ids.length ? `归档全部会话（${ids.length} 个）` : "没有可以归档的会话", description: ids.length ? "从工作区收起，内容保留，可以在「全部会话 → 已归档」里找回" : "运行中的会话不能归档", value: "all" }] }], () => {
+          if (ids.length && confirm(`归档这个项目的 ${ids.length} 个会话？`)) archive(ids).catch(fail);
+        });
+        return;
+      }
       const add = e.target.closest("[data-add]");
       if (add) {
         // a new session in this project, at once (its first message is typed in its live view)
