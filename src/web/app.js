@@ -538,7 +538,7 @@
     el.innerHTML = `<div class="chat-page">
       <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><span class="pill">未运行</span><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
-      <div class="chat-foot"><div class="resume-bar"><span class="muted">这个会话现在没有在运行。在终端里继续它，就能在这里实时查看和发消息。</span><button class="button" id="resume">在终端中继续</button></div></div></div>`;
+      <div class="chat-foot"><div class="resume-bar"><span class="muted">这个会话现在没有在运行。继续它（在后台运行，不开窗口），就能在这里实时查看和发消息。</span><button class="button" id="resume">继续这个会话</button></div></div></div>`;
     const log = $("#log", el);
     const image = (n) => `${base}/image/${n}`;
     // drawn in pieces: a long conversation has thousands of items
@@ -557,22 +557,25 @@
       else if (!d.items.length) log.innerHTML = '<div class="chat-empty">没有内容</div>';
     };
     step();
-    $("#resume", el).addEventListener("click", async () => {
+    const resume = async (background) => {
       try {
-        const r = await api(`${base}/open`, { method: "POST" });
+        const r = await api(`${base}/open`, { method: "POST", body: { background } });
         if (!r.opened) { await navigator.clipboard.writeText(r.command).catch(() => {}); toast(`请在终端运行（已复制）：${r.command}`); return; }
-        toast(`已在 ${r.how} 新标签中继续，等它上线…`);
+        toast(background ? "正在后台继续这个会话…" : `已在 ${r.how} 新标签中继续，等它上线…`);
         for (let k = 0; k < 20; k++) {
           await new Promise((res) => setTimeout(res, 1000));
           const live = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.find((x) => x.status?.sessionId === id);
           if (live) { await loadWorkspace(); location.hash = `#/live/${live.peerId}`; return; }
         }
+        toast("会话 20 秒内没有上线", "error");
       } catch (e) { fail(e); }
-    });
+    };
+    $("#resume", el).addEventListener("click", () => resume(true));
     let toolsShown = true;
     $("#hmenu", el).addEventListener("click", (e) => {
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
         { label: "改名", value: "rename" },
+        { label: "在终端窗口里继续", value: "terminal" },
         { label: "导出 Markdown", value: "export" },
         { label: toolsShown ? "隐藏工具调用" : "显示工具调用", value: "tools" },
         { label: "删除（进回收站）", value: "delete" },
@@ -587,6 +590,7 @@
             sessionView(dir, id);
           }
           if (value === "export") location.href = `${base}/export`;
+          if (value === "terminal") resume(false);
           if (value === "tools") { toolsShown = !toolsShown; $$(".it-tool", log).forEach((n) => n.classList.toggle("hidden", !toolsShown)); }
           if (value === "delete" && confirm(`删除「${d.title}」？会先移到回收站，保留 7 天。`)) {
             await api(base, { method: "DELETE" });
@@ -721,7 +725,7 @@
       if (!it) { tip.classList.add("hidden"); return; }
       const [cls, label] = it.peer ? liveState(it.peer.status) : ["off", "未运行"];
       const st = it.peer?.status || {};
-      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div><div class="tip-state"><span class="ws-dot ${cls}"></span>${esc(label)}</div>`;
+      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div><div class="tip-state"><span class="ws-dot ${cls}"></span>${esc(label)}${it.peer ? (st.hidden ? " · 后台运行" : " · 终端窗口") : ""}</div>`;
       const r = a.getBoundingClientRect();
       tip.classList.remove("hidden");
       tip.style.left = `${r.right + 8}px`;
@@ -833,7 +837,7 @@
   // ---------------------------------------------------------------- 新会话
 
   async function newView() {
-    const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">在一个目录里开一个新的 claude-pro 会话：它会在新的终端标签里启动，你可以在这里实时看着它工作。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
+    const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">在一个目录里开一个新的 claude-pro 会话：它在后台运行，不开窗口，你在这里看着它工作、给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
     let projects = [];
     try { projects = (await api("/api/projects")).projects; } catch { /* typed by hand */ }
     let dir = localStorage.getItem("cpNewDir") || projects[0]?.cwd || "";
@@ -857,28 +861,25 @@
     c.input.focus();
   }
 
-  // claude-pro in a new terminal tab in `dir`; once it is up it is opened here and the message goes to it.
+  let firstMessage = null; // {peerId, text, images}: for a session just started, sent by its live view (startSession)
+
+  // claude-pro in the background (a hidden window) in `dir`; once it is up it is opened here and the message goes to it.
   async function startSession(dir, text, images) {
     if (!dir) throw new Error("先选一个目录");
     const before = new Set(ws.live.map((r) => r.peerId));
-    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir } });
-    if (!r.opened) throw new Error(`这个系统不能自动打开终端，请运行：${r.command}`);
+    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir, background: true } });
+    if (!r.opened) throw new Error(`这个系统不能自动启动会话，请在终端运行：${r.command}`);
     localStorage.setItem("cpNewDir", r.cwd);
-    toast(`已在 ${r.how} 里启动，等待会话上线…`);
+    toast("会话正在后台启动…");
     const until = Date.now() + 30_000;
     let found = null;
     while (!found && Date.now() < until) {
       await new Promise((res) => setTimeout(res, 1000));
       try { found = (await api("/api/live")).sessions.find((x) => !before.has(x.peerId) && projectKey(x.status?.cwd || x.cwd) === projectKey(r.cwd)); } catch { /* again */ }
     }
-    if (!found) throw new Error(`已在 ${r.how} 里打开，但 30 秒内没看到会话上线：请看一下那个终端窗口`);
-    // the session may still be drawing its first screen: tried again for a few seconds
-    for (let i = 0; i < 10; i++) {
-      try { await api(`/api/live/${found.peerId}/send`, { method: "POST", body: { text, images } }); break; } catch (ex) {
-        if (i === 9) toast(`会话已创建，但消息没发出去：${ex.message}`, "error");
-        await new Promise((res) => setTimeout(res, 800));
-      }
-    }
+    if (!found) throw new Error("会话 30 秒内没有上线：可能是启动出错了，在终端里运行 claude-pro 看看");
+    // sent by its live view once that watches it (sent before, what the session printed first was missed)
+    firstMessage = { peerId: found.peerId, text, images };
     await loadWorkspace();
     location.hash = `#/live/${found.peerId}`;
   }
@@ -928,11 +929,34 @@
         { label: "查看完整历史记录", value: "history" },
         { label: "改名（/rename）", value: "rename" },
         { label: "压缩上下文（/compact）", value: "compact" },
-      ] }], (key, value) => {
+        ...(status.hidden ? [{ label: "改到终端窗口里", description: "结束后台运行，在终端标签里接着这个对话", value: "terminal" }] : []),
+        { label: "结束会话", description: "对话会保存，以后可以继续", value: "end" },
+      ] }], async (key, value) => {
         const known = ws.sessions.find((s) => s.id === status.sessionId);
         if (value === "history") { if (known) location.hash = `#/session/${known.dir}/${known.id}`; else toast("这个会话还没有保存的记录"); }
         if (value === "rename") { const name = prompt("新的名字", status.title || ""); if (name) post("send", { text: `/rename ${name}` }).catch(fail); }
         if (value === "compact") post("send", { text: "/compact" }).catch(fail);
+        if (value === "end" || value === "terminal") {
+          const busy = Boolean(status.turn);
+          if (!confirm(busy ? "会话正在工作，结束会停止当前任务。确定结束？" : value === "terminal" ? "结束后台运行，改在终端窗口里继续？" : "结束这个会话？对话会保存，以后可以继续。")) return;
+          const sessionId = status.sessionId;
+          try { await post("end", { force: busy }); } catch (err) { return fail(err); }
+          toast("会话已结束");
+          if (value === "terminal" && sessionId) {
+            // wait for it to be gone, then the same conversation in a terminal tab
+            for (let i = 0; i < 20; i++) {
+              await new Promise((r) => setTimeout(r, 500));
+              const still = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.some((x) => x.status?.sessionId === sessionId);
+              if (!still) break;
+            }
+            await loadWorkspace();
+            const known = ws.sessions.find((x) => x.id === sessionId);
+            if (known) { try { const r = await api(`/api/sessions/${encodeURIComponent(known.dir)}/${encodeURIComponent(known.id)}/open`, { method: "POST", body: { background: false } }); toast(r.opened ? `已在 ${r.how} 里继续` : `请在终端运行：${r.command}`); } catch (err) { fail(err); } }
+            return;
+          }
+          await loadWorkspace();
+          location.hash = "#/new";
+        }
       });
     });
 
@@ -978,7 +1002,7 @@
       status = next || {};
       statusAt = Date.now();
       $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
-      $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}`;
+      $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? " · 后台运行" : " · 终端窗口"}`;
       $("#lmodel span", el).textContent = `${status.model || "模型"}${status.effort ? ` · ${status.effort}` : ""}`;
       const stats = [];
       if (status.context?.window) stats.push(`上下文 ${fmtTokens(status.context.used || 0)} / ${fmtTokens(status.context.window)}（${Math.round(((status.context.used || 0) / status.context.window) * 100)}%）`);
@@ -1030,7 +1054,25 @@
     });
 
     function handle(msg) {
-      if (msg.t === "snapshot") { state = hydrate(msg.items || []); renderAll(); if (msg.status) setStatus(msg.status); return; }
+      if (msg.t === "snapshot") {
+        state = hydrate(msg.items || []);
+        renderAll();
+        if (msg.status) setStatus(msg.status);
+        if (firstMessage?.peerId === peerId) {
+          const { text, images } = firstMessage;
+          firstMessage = null;
+          (async () => {
+            // the session may still be drawing its first screen: tried again for a few seconds
+            for (let i = 0; i < 10; i++) {
+              try { await post("send", { text, images }); return; } catch (ex) {
+                if (i === 9) toast(`消息没发出去：${ex.message}`, "error");
+                await new Promise((res) => setTimeout(res, 800));
+              }
+            }
+          })();
+        }
+        return;
+      }
       if (msg.t === "status") { setStatus(msg.status); return; }
       if (msg.t === "batch") {
         const stick = near();

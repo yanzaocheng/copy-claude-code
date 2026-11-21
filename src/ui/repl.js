@@ -287,6 +287,8 @@ export class App {
       ],
       status: () => this.liveStatus(),
     });
+    // started by the web console in a hidden window (a 后台会话): only the console shows it, and ends it
+    this.hidden = /^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_BACKGROUND || '');
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
@@ -2392,7 +2394,7 @@ export class App {
   liveStatus() {
     let status = {};
     try { status = this.remoteStatus(); } catch { /* the basics below */ }
-    return { ...status, busy: this.working(), turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, };
+    return { ...status, busy: this.working(), turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, hidden: this.hidden };
   }
 
   // A command of the local web console's live view: the same ones the gateway's page sends (see remote.js).
@@ -2405,9 +2407,18 @@ export class App {
       suggest: (b) => this.remoteSuggest(b),
       list: (b) => this.remoteList(b),
       output: (b) => this.remoteOutput(b),
+      end: (b) => this.pageEnd(b),
     };
     if (!Object.hasOwn(handlers, type)) throw new Error(`Unknown command: ${type}`);
     return handlers[type](body);
+  }
+
+  // The web console ends the session (a 后台会话 has no window to type /exit in): not in the middle of a task unless
+  // `force` (then the task is stopped first). The answer goes out before the process ends.
+  pageEnd({ force = false } = {}) {
+    if (this.isTurnRunning() && !force) throw new Error('会话正在工作：先停止当前任务，或选择强制结束');
+    setTimeout(() => this.exit(0), 150).unref?.();
+    return { ending: true };
   }
 
   // A tool call finished (or was refused, or interrupted): its result on the remote page, once.

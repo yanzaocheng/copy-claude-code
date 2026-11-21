@@ -358,26 +358,42 @@ function windowsTerminal() {
   return wtPath;
 }
 
-// claude-pro in a new terminal window or tab, in `cwd`, with `args` (ids and flags only: nothing a shell would
-// take apart). Windows Terminal when there is one, else a console window; elsewhere only the command to run.
-function launchTerminal(cwd, args, title) {
+// claude-pro in `cwd`, with `args` (ids and flags only: nothing a shell would take apart): `background` in a hidden
+// console window (a 后台会话, seen and ended in the web console only; CLAUDE_PRO_BACKGROUND tells it so), else in a new
+// terminal tab (Windows Terminal when there is one, else a console window). Elsewhere than Windows only the command
+// to run is given.
+function launchTerminal(cwd, args, title, { background = false } = {}) {
   const bin = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
   const command = `cd "${cwd}" && claude-pro${args.length ? ` ${args.join(' ')}` : ''}`;
   if (!isWin) return { opened: false, command };
+  if (background) {
+    // Start-Process gives it a console of its own (the interactive session needs one), hidden; the paths and arguments
+    // go through the environment, so nothing is quoted for PowerShell
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Process -WindowStyle Hidden -FilePath $env:CPW_NODE -ArgumentList $env:CPW_ARGS -WorkingDirectory $env:CPW_CWD'], {
+      // (not detached: a detached PowerShell has no console, and what it starts then gets none either)
+      stdio: 'ignore', windowsHide: true,
+      env: { ...process.env, CLAUDE_PRO_BACKGROUND: '1', CPW_NODE: process.execPath, CPW_ARGS: [`"${bin}"`, ...args].join(' '), CPW_CWD: cwd, FORCE_COLOR: '' },
+    });
+    child.on('error', () => {});
+    child.unref();
+    return { opened: true, how: '后台', background: true, command };
+  }
   const wt = windowsTerminal();
+  const env = { ...process.env };
+  delete env.CLAUDE_PRO_BACKGROUND; // (inherited when a 后台会话 started this server)
   const child = wt
-    ? spawn(wt, ['-w', '0', 'new-tab', '-d', cwd, '--title', String(title || 'claude-pro').replace(/;/g, ',').slice(0, 40), process.execPath, bin, ...args], { detached: true, stdio: 'ignore', windowsHide: false })
-    : spawn('cmd.exe', ['/c', 'start', '""', '/D', `"${cwd}"`, `"${process.execPath}"`, `"${bin}"`, ...args], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true });
+    ? spawn(wt, ['-w', '0', 'new-tab', '-d', cwd, '--title', String(title || 'claude-pro').replace(/;/g, ',').slice(0, 40), process.execPath, bin, ...args], { detached: true, stdio: 'ignore', windowsHide: false, env })
+    : spawn('cmd.exe', ['/c', 'start', '""', '/D', `"${cwd}"`, `"${process.execPath}"`, `"${bin}"`, ...args], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true, env });
   child.on('error', () => {});
   child.unref();
   return { opened: true, how: wt ? 'Windows Terminal' : 'cmd', command };
 }
 
-function openInTerminal(dir, id) {
+function openInTerminal(dir, id, { background = false } = {}) {
   const session = listAllSessions().find((s) => s.dir === dir && s.id === id);
   if (!session) throw httpError(404, '会话不存在');
   const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
-  return launchTerminal(cwd, ['--resume', id], session.title);
+  return launchTerminal(cwd, ['--resume', id], session.title, { background });
 }
 
 // A new session in `cwd` (its first message, if any, is sent by the page once the session is up: no quoting through
@@ -389,7 +405,7 @@ function newSession(body) {
   let st;
   try { st = fs.statSync(cwd); } catch { throw httpError(400, `目录不存在：${cwd}`); }
   if (!st.isDirectory()) throw httpError(400, `不是目录：${cwd}`);
-  return { ...launchTerminal(cwd, [], path.basename(cwd) || cwd), cwd };
+  return { ...launchTerminal(cwd, [], path.basename(cwd) || cwd, { background: body?.background !== false }), cwd };
 }
 
 // ---------------------------------------------------------------- routes
@@ -423,7 +439,7 @@ export const routes = [
     if ((await running()).has(id)) throw httpError(409, '会话正在运行：请在它的终端里用 /rename，或在「运行中」里给它发 /rename');
     return { name: renameSession(dir, id, body?.name) };
   }],
-  ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/open$/, (req, [dir, id]) => openInTerminal(dir, id)],
+  ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/open$/, (req, [dir, id], body) => openInTerminal(dir, id, { background: Boolean(body?.background) })],
   ['DELETE', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     if ((await running()).has(id)) throw httpError(409, '会话正在运行，不能删除');
     return trashSession(dir, id);
@@ -435,7 +451,7 @@ export const routes = [
 
   ['GET', /^\/api\/live$/, async () => ({ sessions: await runningSessions() })],
   ['POST', /^\/api\/live\/new$/, (req, m, body) => newSession(body)],
-  ['POST', /^\/api\/live\/([0-9a-f]{12})\/(send|interrupt|dialog|options|suggest|list|output)$/, async (req, [peerId, type], body) => {
+  ['POST', /^\/api\/live\/([0-9a-f]{12})\/(send|interrupt|dialog|options|suggest|list|output|end)$/, async (req, [peerId, type], body) => {
     const peer = findPeerById(peerId);
     const r = await peerRequest(peer, 'POST', '/command', { type, body: body || {} }, { timeout: type === 'options' ? 20_000 : 10_000 });
     if (r.status === 404) throw httpError(409, '这个会话的 claude-pro 版本较旧，不支持网页操作');

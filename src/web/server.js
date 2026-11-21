@@ -348,6 +348,7 @@ export async function ensureWebServer() {
   if (!alive) {
     const env = { ...process.env, FORCE_COLOR: '1' }; // the tool headers it renders keep their colours for the page
     delete env.NO_COLOR;
+    delete env.CLAUDE_PRO_BACKGROUND; // (the server is no session: a 后台会话 that starts it must not pass that on)
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env });
     child.on('error', () => {});
     child.unref();
