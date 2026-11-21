@@ -538,7 +538,7 @@
     el.innerHTML = `<div class="chat-page">
       <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><span class="pill">未运行</span><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
-      <div class="chat-foot"><div class="resume-bar"><span class="muted">这个会话现在没有在运行。继续它（在后台运行，不开窗口），就能在这里实时查看和发消息。</span><button class="button" id="resume">继续这个会话</button></div></div></div>`;
+      <div class="chat-foot"><div class="chat-composer" id="hcomp"></div></div></div>`;
     const log = $("#log", el);
     const image = (n) => `${base}/image/${n}`;
     // drawn in pieces: a long conversation has thousands of items
@@ -557,20 +557,35 @@
       else if (!d.items.length) log.innerHTML = '<div class="chat-empty">没有内容</div>';
     };
     step();
-    const resume = async (background) => {
-      try {
-        const r = await api(`${base}/open`, { method: "POST", body: { background } });
-        if (!r.opened) { await navigator.clipboard.writeText(r.command).catch(() => {}); toast(`请在终端运行（已复制）：${r.command}`); return; }
-        toast(background ? "正在后台继续这个会话…" : `已在 ${r.how} 新标签中继续，等它上线…`);
-        for (let k = 0; k < 20; k++) {
-          await new Promise((res) => setTimeout(res, 1000));
-          const live = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.find((x) => x.status?.sessionId === id);
-          if (live) { await loadWorkspace(); location.hash = `#/live/${live.peerId}`; return; }
-        }
-        toast("会话 20 秒内没有上线", "error");
-      } catch (e) { fail(e); }
+    // The session started again (in the background, or in a terminal tab): resolves with its live peer id once it is up
+    // (null: it cannot be started from here, the command to run was shown), or throws.
+    const start = async (background) => {
+      const r = await api(`${base}/open`, { method: "POST", body: { background } });
+      if (!r.opened) { await navigator.clipboard.writeText(r.command).catch(() => {}); toast(`请在终端运行（已复制）：${r.command}`); return null; }
+      toast(background ? "正在后台启动这个会话…" : `已在 ${r.how} 新标签中继续，等它上线…`);
+      for (let k = 0; k < 30; k++) {
+        await new Promise((res) => setTimeout(res, 1000));
+        const live = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.find((x) => x.status?.sessionId === id);
+        if (live) return live.peerId;
+      }
+      throw new Error("会话 30 秒内没有上线");
     };
-    $("#resume", el).addEventListener("click", () => resume(true));
+    const open = async (peerId) => { await loadWorkspace(); location.hash = `#/live/${peerId}`; };
+    const resume = (background) => start(background).then((peerId) => peerId && open(peerId)).catch(fail);
+    // Writing to it starts it: the message goes to it once its live view watches it (as for a new session)
+    const hc = composer($("#hcomp", el), {
+      placeholder: "继续这个对话：发消息就会在后台启动它（不开窗口）。Enter 发送，Shift+Enter 换行",
+      dropZone: el,
+      draftKey: `session:${id}`,
+      onSend: async (text, images) => {
+        const peerId = await start(true);
+        if (!peerId) throw new Error("这个系统不能自动启动会话");
+        firstMessage = { peerId, text, images };
+        setTimeout(() => open(peerId), 0); // after the box is emptied
+      },
+    });
+    const done = cleanup;
+    cleanup = () => { done(); hc.dispose(); };
     let toolsShown = true;
     $("#hmenu", el).addEventListener("click", (e) => {
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
