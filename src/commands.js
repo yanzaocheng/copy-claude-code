@@ -19,7 +19,7 @@ import { hasRipgrep } from './utils/shell.js';
 import { displayPath, normalizeDir, resolvePath } from './utils/paths.js';
 import { cleanName, machineName } from './peers.js';
 import { rewind, promptAt } from './checkpoints.js';
-import { canRestart, runSelfCheck } from './restart.js';
+import { runSelfCheck } from './restart.js';
 
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const isGpt = (modelId) => /^gpt-/i.test(modelId);
@@ -219,7 +219,7 @@ export function buildCommands(app) {
     argHint: '[force]',
     description: "Restart to load changes to the program's own source code (the conversation continues)",
     async run(args) {
-      if (!canRestart()) {
+      if (!app.canRestart()) {
         out(c.red(`Restarting needs an interactive session started with \`${APP_NAME}\` (not -p, and without CLAUDE_PRO_NO_SUPERVISOR). Quit and start it again.`));
         return;
       }
@@ -1209,7 +1209,7 @@ export function buildCommands(app) {
     name: 'bashes',
     description: 'List background shells',
     run() {
-      const list = listBackgroundShells();
+      const list = listBackgroundShells(app.config.owner);
       out(list.length ? list.map((b) => `${c.bold(b.id)} ${b.status}${b.exitCode !== null ? ` (exit ${b.exitCode})` : ''} ${c.dim(truncate(b.command, 60))}`) : [c.dim('No background shells')]);
     },
   });

@@ -462,3 +462,27 @@ export class Screen {
     this.out.write(restore + ESC.showCursor);
   }
 }
+
+// A session with no terminal (one the web console runs, see web/host.js): what it logs is only kept (the history,
+// carried over by a restart) and passed to onLog (the live view); nothing is drawn.
+export class HeadlessScreen extends Screen {
+  constructor(out) {
+    super(out, { pin: false });
+    this.dimensions = [out.columns || 100, out.rows || 40];
+  }
+
+  readSize() { return this.dimensions || [this.out.columns || 100, this.out.rows || 40]; }
+  checkSize() { return false; }
+  onResize() {}
+  setTitle(provider) { this.titleProvider = provider; }
+  schedule() { this.flush(); }
+  flush() { if (!this.closed && this.staticQueue.length) this.takeStatic(); }
+  repaint() { this.flush(); }
+  clearLive() {}
+  clearScreen() { this.history = []; this.staticQueue = []; }
+  close() {
+    if (this.closed) return;
+    this.takeStatic();
+    this.closed = true;
+  }
+}

@@ -358,10 +358,21 @@ function windowsTerminal() {
   return wtPath;
 }
 
+// The sessions the console runs in its own process (the 后台会话, see host.js): set by the server.
+let host = null;
+export function useHost(h) { host = h; }
+
+// A 后台会话 in `cwd` (a saved conversation: `resumeFile`, `resumeId`), run by the console itself.
+async function launchBackground(cwd, { resumeFile = null, resumeId = null } = {}) {
+  const app = await host.launch({ cwd, resumeFile, resumeId });
+  if (app.exiting) throw httpError(500, '会话没能启动（详情在 ~/.claude-pro/web-errors.log）');
+  return { opened: true, how: '后台', background: true, peerId: app.peers?.id || null, sessionId: app.store?.id || null };
+}
+
 // claude-pro in `cwd`, with `args` (ids and flags only: nothing a shell would take apart): `background` in a hidden
-// console window (a 后台会话, seen and ended in the web console only; CLAUDE_PRO_BACKGROUND tells it so), else in a new
-// terminal tab (Windows Terminal when there is one, else a console window). Elsewhere than Windows only the command
-// to run is given.
+// console window (a 后台会话 of a console that does not run them itself; CLAUDE_PRO_BACKGROUND tells it so), else in
+// a new terminal tab (Windows Terminal when there is one, else a console window). Elsewhere than Windows only the
+// command to run is given.
 function launchTerminal(cwd, args, title, { background = false } = {}) {
   const bin = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
   const command = `cd "${cwd}" && claude-pro${args.length ? ` ${args.join(' ')}` : ''}`;
@@ -389,23 +400,27 @@ function launchTerminal(cwd, args, title, { background = false } = {}) {
   return { opened: true, how: wt ? 'Windows Terminal' : 'cmd', command };
 }
 
-function openInTerminal(dir, id, { background = false } = {}) {
+async function openInTerminal(dir, id, { background = false } = {}) {
   const session = listAllSessions().find((s) => s.dir === dir && s.id === id);
   if (!session) throw httpError(404, '会话不存在');
+  if ((await running()).has(id)) throw httpError(409, '这个会话已经在运行');
   const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
+  if (background && host) return launchBackground(cwd, { resumeFile: session.file, resumeId: id });
   return launchTerminal(cwd, ['--resume', id], session.title, { background });
 }
 
 // A new session in `cwd` (its first message, if any, is sent by the page once the session is up: no quoting through
 // a terminal's command line).
-function newSession(body) {
+async function newSession(body) {
   let cwd = String(body?.cwd || '').trim().replace(/^~(?=$|[\\/])/, home);
   if (!cwd) throw httpError(400, '请填写目录');
   cwd = path.resolve(cwd);
   let st;
   try { st = fs.statSync(cwd); } catch { throw httpError(400, `目录不存在：${cwd}`); }
   if (!st.isDirectory()) throw httpError(400, `不是目录：${cwd}`);
-  return { ...launchTerminal(cwd, [], path.basename(cwd) || cwd, { background: body?.background !== false }), cwd };
+  const background = body?.background !== false;
+  if (background && host) return { ...(await launchBackground(cwd)), cwd };
+  return { ...launchTerminal(cwd, [], path.basename(cwd) || cwd, { background }), cwd };
 }
 
 // ---------------------------------------------------------------- routes

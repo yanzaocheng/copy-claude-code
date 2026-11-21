@@ -4,10 +4,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { browserSession, BrowserError, CdpError, refId, safeUrl } from '../browser/session.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { browserSessionFor, BrowserError, CdpError, refId, safeUrl } from '../browser/session.js';
 import { snapshotLines, renderLines, diffLines, renderDiff, findLines } from '../browser/snapshot.js';
 import { CONFIG_DIR } from '../config.js';
 import { resolvePath } from '../utils/paths.js';
+
+// The browser session of the call being run: the session's own (see browserSessionFor), passed down the call.
+const current = new AsyncLocalStorage();
+const session = () => current.getStore();
 
 export const browserToolLimits = { snapshotChars: 10_000, diffLines: 60, diffChars: 5_000, textChars: 30_000, evalChars: 20_000, findMatches: 30 };
 
@@ -78,7 +83,7 @@ const header = (tab) => `${tab.id} ${cut(tab.url || '', 200)}${tab.title ? ` —
 // text and the links' addresses too (what find searches, and what the changes after an action are taken from, so
 // that a message or a counter that changes shows up).
 async function readPage(tab) {
-  const trees = await browserSession.trees(tab);
+  const trees = await session().trees(tab);
   const title = trees.main?.find((n) => !n.parentId)?.name?.value; // the document's title, before the browser reports it
   if (title) tab.title = title;
   return {
@@ -104,7 +109,7 @@ function named(tab, ref) {
 
 // A tab by id (t3f9a; see BrowserSession.relabel) or by words of its title or address.
 function findTab(spec) {
-  const s = browserSession;
+  const s = session();
   const want = String(spec ?? '').trim();
   if (!want) throw new BrowserError('switch needs tab: an id from tabs, or words of its title or address');
   if (/^t(?:\d+|[0-9a-f]{4,})$/i.test(want)) return s.tab(want);
@@ -116,7 +121,7 @@ function findTab(spec) {
 }
 
 async function step(input, ctx) {
-  const s = browserSession;
+  const s = session();
   const a = input.action;
   const need = (field) => {
     if (input[field] === undefined || input[field] === null || input[field] === '') throw new BrowserError(`${a} needs ${field}`);
@@ -234,7 +239,7 @@ async function step(input, ctx) {
 
 // The page after what was done: what changed since the last snapshot, or the page itself.
 async function pageState(tab, kind) {
-  const s = browserSession;
+  const s = session();
   await s.settle(tab);
   if (tab.dialog) return `A ${tab.dialog.type} dialog is open: ${JSON.stringify(tab.dialog.message)}. Answer it with dialog (accept: true or false${tab.dialog.type === 'prompt' ? ', text' : ''}).`;
   const page = await readPage(tab);
@@ -254,13 +259,13 @@ async function pageState(tab, kind) {
 // When the last step read the page (switch, then find): only where the tab is, the page not shown again. It is
 // still recorded, so that the next action shows what it changed instead of the whole page.
 async function quietState(tab, unsettled) {
-  if (unsettled) await browserSession.settle(tab);
+  if (unsettled) await session().settle(tab);
   if (!tab.dialog) remember(tab, await readPage(tab));
   return header(tab);
 }
 
 async function run(input, ctx) {
-  const s = browserSession;
+  const s = session();
   const steps = Array.isArray(input.steps) && input.steps.length ? input.steps : [input];
   if (steps.some((x) => !x || typeof x !== 'object' || !x.action)) {
     return { isError: true, content: 'Each call needs an action (or steps: a list of {action, …}).' };
@@ -359,7 +364,8 @@ export function makeBrowserTool() {
       return one(input);
     },
     async call(input, ctx) {
-      return browserSession.run(ctx.signal, () => run(input, ctx));
+      const s = browserSessionFor(ctx.config?.owner);
+      return s.run(ctx.signal, () => current.run(s, () => run(input, ctx)));
     },
   };
 }

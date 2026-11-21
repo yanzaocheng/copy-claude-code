@@ -329,11 +329,17 @@ class Interpreter {
   }
 }
 
-const interpreters = new Map(); // language -> Interpreter
+// "<owner> <language>" -> Interpreter. The owner is the session's (config.owner): the web console runs several
+// sessions in one process, and each has its own interpreters.
+const interpreters = new Map();
 
-export function shutdownInterpreters() {
-  for (const i of interpreters.values()) i.kill(true); // the program is exiting
-  interpreters.clear();
+// The session `owner` ends (all of them when not given: the program is exiting).
+export function shutdownInterpreters(owner) {
+  for (const [key, i] of interpreters) {
+    if (owner && !key.startsWith(`${owner} `)) continue;
+    i.kill(true);
+    interpreters.delete(key);
+  }
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -367,15 +373,16 @@ Use it to work with data: load a log, a JSON or CSV file, a database or an API r
       if (!lang) return { isError: true, content: 'language must be python or node' };
       const { label } = LANGUAGES[lang];
       const code = typeof input.code === 'string' ? input.code : '';
-      let interp = interpreters.get(lang);
+      const key = `${config?.owner || ''} ${lang}`;
+      let interp = interpreters.get(key);
       const notes = [];
       if (input.reset && interp) {
         interp.kill();
-        interpreters.delete(lang);
+        interpreters.delete(key);
         interp = null;
         notes.push(`(a new ${label} process: the old one's variables are gone)`);
       } else if (interp && !interp.alive) {
-        interpreters.delete(lang);
+        interpreters.delete(key);
         interp = null;
         notes.push(`(the ${label} process had ended, so this is a new one: earlier variables are gone)`);
       }
@@ -386,24 +393,24 @@ Use it to work with data: load a log, a JSON or CSV file, a database or an API r
       const cwd = fs.existsSync(ctx.cwd) ? ctx.cwd : ctx.projectRoot;
       if (!interp) {
         interp = new Interpreter(lang, { cwd, env: ctx.config?.env });
-        interpreters.set(lang, interp);
+        interpreters.set(key, interp);
       }
       const timeoutMs = Math.min(Math.max(1000, Number(input.timeout) || replLimits.defaultTimeoutMs), replLimits.maxTimeoutMs);
       const started = Date.now();
       const r = await interp.run(lang === 'node' ? rewriteDynamicImports(code) : code, { cwd, timeoutMs, signal: ctx.signal });
       if (r.startError) {
-        interpreters.delete(lang);
+        interpreters.delete(key);
         const hint = lang === 'python' ? ` Is Python installed and on PATH? CLAUDE_PRO_PYTHON can name the interpreter (now: ${pythonCommand(ctx.config?.env)}).` : '';
         return { isError: true, content: `Cannot start ${label}: ${r.startError.message}.${hint}` };
       }
       if (r.aborted || ctx.signal?.aborted) {
-        interpreters.delete(lang);
+        interpreters.delete(key);
         throw Object.assign(new Error('aborted'), { name: 'AbortError', partialOutput: r.output });
       }
       let text = stripAnsi([r.output, r.stderr ? `[stderr]\n${r.stderr.replace(/\s+$/, '')}` : ''].filter(Boolean).join('\n')).replace(/\r\n/g, '\n').replace(/\s+$/, '');
       let isError = false;
       if (r.died) {
-        interpreters.delete(lang);
+        interpreters.delete(key);
         isError = true;
         const why = r.timedOut ? `timed out after ${timeoutMs / 1000} s and was stopped` : `ended (exit code ${interp.exited?.code ?? '?'})`;
         text += `${text ? '\n' : ''}The ${label} process ${why}: its variables are gone, and the next call starts a new one.`;

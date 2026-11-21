@@ -174,6 +174,7 @@ export function moveSession(file, id, cwd) {
 
 export class SessionStore {
   static onError = null; // (error, store): a write of the conversation failed (the first time for a store)
+  onError = null; // the same for this store alone (its session's: the web console runs several in one process)
 
   constructor(cwd, id = crypto.randomUUID()) {
     this.cwd = cwd;
@@ -195,7 +196,7 @@ export class SessionStore {
       // Best effort, but a message that did not get in leaves the file without it, and a restart or /resume would go
       // on from a conversation that lacks it: noted (`lost`, see App.restartNow), and said once (SessionStore.onError).
       this.lost = true;
-      if (!this.warned) { this.warned = true; try { SessionStore.onError?.(e, this); } catch { /* ignore */ } }
+      if (!this.warned) { this.warned = true; try { (this.onError || SessionStore.onError)?.(e, this); } catch { /* ignore */ } }
     }
   }
 

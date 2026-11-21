@@ -6,7 +6,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { c, ESC, glyphs, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
-import { Screen, queryCursorRow } from './screen.js';
+import { Screen, HeadlessScreen, queryCursorRow } from './screen.js';
 import { Editor, shownQuotes } from './editor.js';
 import { SelectDialog } from './dialogs.js';
 import { MarkdownStream, renderMarkdown } from './markdown.js';
@@ -28,7 +28,7 @@ import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
 import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
 import { shutdownInterpreters } from '../tools/code.js';
-import { browserSession } from '../browser/session.js';
+import { browserSessionFor, closeBrowserSession } from '../browser/session.js';
 import { estimateTokens } from '../agent.js';
 import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } from '../utils/clipboard.js';
 import { fitImagesIn, imageSize } from '../utils/images.js';
@@ -232,14 +232,17 @@ export class App {
   // `noProcessExit`: the tests, which drive the App themselves; it never ends the process, and it has no peers, no
   // gateway connection, no update checks and the default renderer. `selfCheck` (see selfcheck.js): it never ends the
   // process either, but otherwise starts as a session does, so that code only a real start runs is checked too.
-  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false }) {
+  // `host`: a 后台会话, one of the sessions the web console runs in its own process (see web/host.js): no terminal
+  // (what it prints goes to the console's live view only), the process is the host's, and so are restarts.
+  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false, host = null }) {
     this.flags = flags;
     this.cwd = cwd;
     this.stdin = stdin;
     this.stdout = stdout;
-    this.noProcessExit = noProcessExit || selfCheck;
+    this.host = host;
+    this.noProcessExit = noProcessExit || selfCheck || Boolean(host);
     this.driven = noProcessExit;
-    this.screen = new Screen(stdout);
+    this.screen = host ? new HeadlessScreen(stdout) : new Screen(stdout);
     this.busy = false;
     // Attachment expansion is asynchronous. Claim the turn before the first await so two
     // rapid submits cannot start two Agent.run() calls against the same message array.
@@ -286,7 +289,7 @@ export class App {
       status: () => this.liveStatus(),
     });
     // started by the web console in a hidden window (a 后台会话): only the console shows it, and ends it
-    this.hidden = /^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_BACKGROUND || '');
+    this.hidden = Boolean(host) || /^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_BACKGROUND || '');
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
@@ -309,8 +312,9 @@ export class App {
       else e.refreshSuggestions();
       this.screen?.schedule();
     });
+    this.storeError = (e, store) => this.notice(`Could not save the conversation to ${store.file} (${e.code || e.message}): it is written again whole before a restart, but /resume may miss what was not saved.`, 'warn');
     this.store = new SessionStore(cwd);
-    SessionStore.onError = (e, store) => this.notice(`Could not save the conversation to ${store.file} (${e.code || e.message}): it is written again whole before a restart, but /resume may miss what was not saved.`, 'warn');
+    this.store.onError = this.storeError;
     // What the terminal prints goes to the remote page too, except what it is told about as events.
     this.screen.onLog = (items) => {
       const lines = () => items.flatMap((i) => (Array.isArray(i) ? i : [i])).flatMap((l) => String(l).split(/\r?\n/));
@@ -332,6 +336,9 @@ export class App {
   }
 
   get agent() { return this.runtime.agent; }
+  // Whether this session can restart (to load new code, or for /cd): under the supervisor, or in the web console.
+  canRestart() { return Boolean(this.host) || canRestart(); }
+  get owner() { return this.runtime?.config.owner; }
   get config() { return this.runtime.config; }
   get width() { return this.screen.width; }
   isTurnRunning() { return this.busy || this.turnStarting; }
@@ -346,10 +353,11 @@ export class App {
     if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
-    const cleanup = () => this.restoreTerminal();
-    process.on('exit', cleanup);
-    process.on('SIGTERM', () => this.exit(143));
-    process.on('SIGHUP', () => this.exit(129));
+    if (!this.host) { // (the host's process is not this session's)
+      process.on('exit', () => this.restoreTerminal());
+      process.on('SIGTERM', () => this.exit(143));
+      process.on('SIGHUP', () => this.exit(129));
+    }
 
     await this.startPeer();
     this.runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this, sessionId: this.store.id });
@@ -389,7 +397,7 @@ export class App {
     if (!restart && this.flags.name?.trim()) this.renameSession(this.flags.name); // --name, as /rename does
     this.autoStartRemote(restart);
     // 远程访问 on: the console's server (and its tunnel) is brought up again by any session that starts
-    if (!this.driven && !this.selfCheck) {
+    if (!this.driven && !this.selfCheck && !this.host) { // (in the console's process it is up already)
       import('../web/remote-access.js')
         .then((ra) => (ra.readRemote().enabled ? import('../web/server.js').then((w) => w.ensureWebServer()) : null))
         .catch(() => { /* /web remote says what is wrong */ });
@@ -497,8 +505,12 @@ export class App {
     clearInterval(this.spinnerTimer);
     clearTimeout(this.reloadTimer);
     this.sourceWatch?.close();
-    shutdownBackgroundShells();
-    shutdownInterpreters();
+    clearTimeout(this.updateRetry);
+    // only this session's: in the web console's process the other sessions go on
+    shutdownBackgroundShells(this.host ? this.owner : undefined);
+    shutdownInterpreters(this.host ? this.owner : undefined);
+    if (this.host && this.owner) closeBrowserSession(this.owner);
+    this.runtime?.agent?.keepAlive?.stop(); // (a process that ends stops it too; the host's does not end)
     this.runtime?.tasks.killAll();
     this.runtime?.mcp.close();
     this.peers?.close();
@@ -901,7 +913,7 @@ export class App {
       cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'),
       name: this.peerLabel(),
       tasks: this.runtime.tasks.running().length,
-      restarting: Boolean(this.restartRequest),
+      restarting: Boolean(this.restartRequest || this.host?.restartWaits(this)),
       asking: this.dialogs.length > 0, // a question waits for an answer (the page reminds the user of it)
       conversationId: this.store.id,
       cost: Number(this.cost.toFixed(6)),
@@ -931,7 +943,7 @@ export class App {
   // What runs in the background: the agent's background agents and shells.
   backgroundWork() {
     const agents = this.runtime.tasks.list().map((t) => ({ id: t.id, kind: 'agent', description: t.description, status: t.status, startedAt: t.started }));
-    const shells = listBackgroundShells().map((s) => ({ id: s.id, kind: 'shell', description: s.description || s.command, status: s.status, startedAt: s.startedAt || null }));
+    const shells = listBackgroundShells(this.owner).map((s) => ({ id: s.id, kind: 'shell', description: s.description || s.command, status: s.status, startedAt: s.startedAt || null }));
     return [...agents, ...shells];
   }
 
@@ -1095,7 +1107,7 @@ export class App {
   restartBlockers() {
     const found = [];
     for (const t of this.runtime.tasks.running()) found.push(`background agent ${t.id} "${t.description}"`);
-    for (const s of listBackgroundShells()) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
+    for (const s of listBackgroundShells(this.owner)) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
     return found;
   }
 
@@ -1104,7 +1116,7 @@ export class App {
   // the new process and goes on by itself. Returns {ok, message}.
   // `cwd`: the session goes on in that directory (/cd).
   requestRestart({ reason = '', then = '', continueTurn = false, force = false, cwd = null } = {}) {
-    if (!canRestart()) return { ok: false, message: 'This session cannot restart itself.' };
+    if (!this.canRestart()) return { ok: false, message: 'This session cannot restart itself.' };
     const now = Date.now();
     const recent = this.restarts.filter((t) => now - t < RESTART_WINDOW_MS);
     if (recent.length >= MAX_RESTARTS && !cwd) {
@@ -1118,21 +1130,45 @@ export class App {
     return { ok: true };
   }
 
-  // Leave the state of the session for the next process and go; the supervisor starts it again.
+  // Leave the state of the session for the next process and go; the supervisor starts it again. In the web console
+  // (`host`) a restart that loads new code restarts the console's process with all its sessions, once all of them
+  // are idle (see web/host.js); a /cd needs no new code, and this session alone starts again, at once.
   restartNow() {
     const request = this.restartRequest || {};
     this.restartRequest = null;
-    const cfg = this.config;
-    const now = Date.now();
+    if (this.host && !request.cwd) { this.host.restartFor(this, request); return; }
     // /cd: the conversation's file goes along to the new directory's project (see moveSession); the old one is
     // removed once the next process is sure to find the new one
     let moved = null;
     if (request.cwd) {
       try { moved = moveSession(this.store.file, this.store.id, request.cwd); } catch (e) { this.notice(`Could not change the directory: ${e.message}`, 'warn'); return; }
     }
+    const state = this.restartState(request, { moved });
+    if (this.host) {
+      moved?.commit();
+      this.host.relaunch(this, state);
+      return;
+    }
+    try {
+      writeRestartState(state);
+    } catch (e) {
+      moved?.undo();
+      this.notice(`Could not restart: ${e.message}`, 'warn');
+      return;
+    }
+    moved?.commit();
+    this.exit(RESTART_EXIT_CODE, { restart: true });
+  }
+
+  // What the next process (in the web console: the next App) needs to take the session up where it is now.
+  // `counts`: towards the restarts that look like a loop; not a /cd (the user's), nor a restart of the web console that
+  // another of its sessions or a change of the source caused.
+  restartState(request = {}, { moved = null, counts = !request.cwd } = {}) {
+    const cfg = this.config;
+    const now = Date.now();
     // a write of the conversation failed at some point: the file lacks part of it, and the next process goes on from it
     if (this.store.lost) { this.store.lost = false; this.store.reset(this.agent.messages); }
-    const state = {
+    return {
       at: now,
       reason: request.reason || '',
       continueWith: request.continueTurn ? restartNote(request) : '',
@@ -1140,7 +1176,7 @@ export class App {
       changedDirectory: Boolean(request.cwd),
       // the browser instance in use (it may be any of several): the next process connects to it again, where the
       // tab ids in the conversation are still its tabs'
-      browser: browserSession.preferred || null,
+      browser: browserSessionFor(this.owner).preferred || null,
       sessionId: this.store.id,
       sessionFile: moved?.file || this.store.file,
       modelOverride: cfg.modelOverride,
@@ -1154,23 +1190,13 @@ export class App {
       // `peer`: a task of another session, which gets the answer of the turn that handles it
       queue: this.queue.map((q) => ({ text: q.text, images: q.images || [], display: q.display ?? null, peer: q.peer || null })),
       checkpoints: this.runtime.checkpoints.snapshot(),
-      // a /cd is the user's: it does not count towards the restarts that look like a loop
-      restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), ...(request.cwd ? [] : [now])],
+      restarts: [...this.restarts.filter((t) => now - t < RESTART_WINDOW_MS), ...(counts ? [now] : [])],
       // a name given with /rename or --name stays; the one taken from the directory follows it
       peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
       restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between
     };
-    try {
-      writeRestartState(state);
-    } catch (e) {
-      moved?.undo();
-      this.notice(`Could not restart: ${e.message}`, 'warn');
-      return;
-    }
-    moved?.commit();
-    this.exit(RESTART_EXIT_CODE, { restart: true });
   }
 
   // /cd: the session goes on in `dir` (an existing directory). It restarts there, so that everything that belongs to
@@ -1179,7 +1205,7 @@ export class App {
   // page's id and a name given with /rename stay. Returns {ok, message}.
   changeDirectory(dir) {
     if (this.isTurnRunning()) return { ok: false, message: 'Wait for the current task to finish (or press Esc) before changing the directory.' };
-    if (!canRestart()) return { ok: false, message: 'This session cannot change its directory: that restarts it, and it was not started by the claude-pro launcher. Start claude-pro in that directory instead.' };
+    if (!this.canRestart()) return { ok: false, message: 'This session cannot change its directory: that restarts it, and it was not started by the claude-pro launcher. Start claude-pro in that directory instead.' };
     return this.requestRestart({ reason: `working directory ${dir}`, cwd: dir });
   }
 
@@ -1199,7 +1225,7 @@ export class App {
       if (Array.isArray(state.todos)) this.agent.todos = state.todos;
       if (state.checkpoints) this.runtime.checkpoints.adopt(state.checkpoints);
     }
-    if (state.browser && typeof state.browser === 'object' && typeof state.browser.dir === 'string') browserSession.preferred = state.browser;
+    if (state.browser && typeof state.browser === 'object' && typeof state.browser.dir === 'string') browserSessionFor(this.owner).preferred = state.browser;
     if (typeof state.draft === 'string' && state.draft) this.editor.restoreDraft(state.draft, state.draftCursor, state.draftParts);
     if (state.changedDirectory) {
       // /cd: the line it answers with, here and on the remote page (which starts again from the conversation)
@@ -1251,7 +1277,7 @@ export class App {
   // once, every edit of one session made each of the other open sessions check and restart, into a half-made
   // change: 8 of them, a dozen times in a day's work.)
   startSourceWatch() {
-    if (!canRestart()) return;
+    if (!canRestart() || this.host) return; // (the web console follows the source for all its sessions: web/host.js)
     this.sourceWatch = watchSource(INSTALL_DIR, (file) => {
       this.sourceChanged = file || true;
       if (this.isTurnRunning()) this.sourceChangedInTurn = true;
@@ -1269,6 +1295,7 @@ export class App {
   }
 
   async maybeAutoReload() {
+    if (this.host) { this.host.check(); return; } // all the console's sessions restart together, once all are idle
     if (!this.sourceChanged || this.updating || this.reloading || this.isTurnRunning() || this.exiting || this.restartRequest || this.dialogs.length || this.queue.length) return;
     if (this.skipAutoReload) { this.skipAutoReload = false; return; } // the user just interrupted: not now
     if (this.restartBlockers().length) return; // looked at again whenever the program is next idle
@@ -1320,7 +1347,7 @@ export class App {
     } else if (r.status === 'installed') {
       this.notice(`${APP_NAME} ${r.version} is installed already; this session restarts to load it ${this.working() ? 'once its work is done' : 'now'}.`);
       this.updateRestart = r.version;
-      if (canRestart()) { this.sourceChanged ||= true; if (!this.isTurnRunning()) this.maybeAutoReload(); }
+      if (this.canRestart()) { this.sourceChanged ||= true; if (!this.isTurnRunning()) this.maybeAutoReload(); }
     } else if (r.status === 'failed') {
       this.notice(`Could not update ${APP_NAME}${r.version ? ` to ${r.version}` : ''}: ${r.error}`, 'warn');
     } else {
@@ -1368,7 +1395,7 @@ export class App {
     if (r.status === 'updated' || r.status === 'installed') {
       this.pendingUpdate = null;
       this.updateRestart = r.version;
-      if (canRestart()) {
+      if (this.canRestart()) {
         this.notice(`${APP_NAME} was updated to ${r.version} (from ${VERSION}); restarting to load it. The conversation carries over.`);
         this.sourceChanged = true;
         this.maybeAutoReload();
@@ -1981,6 +2008,7 @@ export class App {
     this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
     this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
+    this.store.onError = this.storeError;
     this.runtime.trace?.setSessionId(id);
     this.topic = loaded.topic;
     this.customTitle = loaded.name;
@@ -2040,6 +2068,7 @@ export class App {
 
   newSession() {
     this.store = new SessionStore(this.cwd);
+    this.store.onError = this.storeError;
     this.runtime.trace?.setSessionId(this.store.id);
     this.seedOutput = [];
     this.topic = null;

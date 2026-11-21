@@ -28,7 +28,7 @@ How it works:
   summarize(input) { return input.reason || ''; },
   async call(input, ctx) {
     const io = ctx.io;
-    if (!canRestart() || typeof io?.requestRestart !== 'function') {
+    if (!(io?.canRestart ? io.canRestart() : canRestart()) || typeof io?.requestRestart !== 'function') {
       return { isError: true, content: `Restart is not available here: it needs an interactive session started with \`${APP_NAME}\` (not -p, and not with CLAUDE_PRO_NO_SUPERVISOR set). Ask the user to restart the program themselves.` };
     }
     const blockers = io.restartBlockers?.() || [];

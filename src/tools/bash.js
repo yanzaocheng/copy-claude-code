@@ -8,7 +8,11 @@ import { stripAnsi } from '../ui/ansi.js';
 import { OutputDecoder } from '../utils/encoding.js';
 import { toolResultsDir } from '../session.js';
 
-const background = new Map(); // id -> {child, command, output, readPos, status, exitCode, startedAt}
+// id -> {owner, child, command, output, readPos, status, exitCode, startedAt}. `owner`: the session's (config.owner):
+// the web console runs several sessions in one process, and each sees and stops only its own shells.
+const background = new Map();
+const ownedBy = (bg, owner) => !owner || !bg.owner || bg.owner === owner;
+const shellOf = (id, owner) => { const bg = background.get(id); return bg && ownedBy(bg, owner) ? bg : null; };
 let bgCounter = 0;
 const PROGRESS_CHARS = 8192; // the end of the output the live view gets while a command runs
 
@@ -46,13 +50,18 @@ export function appendOutput(bg, text, max = 5_000_000, keep = 2_000_000) {
 
 export { childEnv };
 
-export function shutdownBackgroundShells() {
-  // the program is exiting; `orphans`: a shell that has ended but is still "running" left something holding its output
-  for (const bg of background.values()) if (bg.status === 'running') killTreeSync(bg.child, { orphans: true });
+// The session `owner` ends (every session when not given: the program is exiting).
+export function shutdownBackgroundShells(owner) {
+  for (const [id, bg] of background) {
+    if (!ownedBy(bg, owner)) continue;
+    // `orphans`: a shell that has ended but is still "running" left something holding its output
+    if (bg.status === 'running') killTreeSync(bg.child, { orphans: true });
+    if (owner) background.delete(id);
+  }
 }
 
-export function listBackgroundShells() {
-  return [...background.entries()].map(([id, bg]) => ({ id, command: bg.command, description: bg.description || '', status: bg.status, exitCode: bg.exitCode, startedAt: bg.startedAt }));
+export function listBackgroundShells(owner) {
+  return [...background.entries()].filter(([, bg]) => ownedBy(bg, owner)).map(([id, bg]) => ({ id, command: bg.command, description: bg.description || '', status: bg.status, exitCode: bg.exitCode, startedAt: bg.startedAt }));
 }
 
 export function makeBashTool(config) {
@@ -98,10 +107,10 @@ When you commit (the system prompt says when): run git status, git diff and git 
       if (input.run_in_background) {
         const child = spawnShell(shell, command, { cwd, env: childEnv(), stdin: stdinText });
         const id = `bash_${++bgCounter}`;
-        const bg = { child, command, description: String(input.description || ''), output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
+        const bg = { owner: config.owner || null, child, command, description: String(input.description || ''), output: '', readPos: 0, status: 'running', exitCode: null, startedAt: Date.now() };
         background.set(id, bg);
         // the shells that ended stay listed, with what was not read of their output: the oldest go past 50
-        const ended = [...background].filter(([, b]) => b.status !== 'running');
+        const ended = [...background].filter(([, b]) => b.status !== 'running' && b.owner === bg.owner);
         for (const [old] of ended.slice(0, Math.max(0, ended.length - 50))) background.delete(old);
         // Line by line, UTF-8 or the console code page (GBK here), never cutting a character (see OutputDecoder).
         for (const stream of [child.stdout, child.stderr]) {
@@ -189,8 +198,8 @@ export const BashOutputTool = {
   },
   summarize(input) { return input.bash_id; },
   async call(input, ctx = {}) {
-    const bg = background.get(input.bash_id);
-    if (!bg) return { isError: true, content: `No background shell with id ${input.bash_id}. Known: ${[...background.keys()].join(', ') || 'none'}` };
+    const bg = shellOf(input.bash_id, ctx.config?.owner);
+    if (!bg) return { isError: true, content: `No background shell with id ${input.bash_id}. Known: ${listBackgroundShells(ctx.config?.owner).map((s) => s.id).join(', ') || 'none'}` };
     let fresh = bg.output.slice(bg.readPos);
     bg.output = ''; // what was read is not read again (up to 5 MB a shell, kept for good before)
     bg.readPos = 0;
@@ -222,8 +231,8 @@ export const KillShellTool = {
     required: ['shell_id'],
   },
   summarize(input) { return input.shell_id; },
-  async call(input) {
-    const bg = background.get(input.shell_id);
+  async call(input, ctx = {}) {
+    const bg = shellOf(input.shell_id, ctx.config?.owner);
     if (!bg) return { isError: true, content: `No background shell with id ${input.shell_id}` };
     if (bg.status !== 'running') return { content: `Shell ${input.shell_id} is not running (status: ${bg.status})` };
     bg.status = 'killed';

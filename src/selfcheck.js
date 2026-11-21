@@ -17,7 +17,7 @@ async function check() {
   let App;
   try {
     ({ App } = await import('./ui/repl.js'));
-    for (const file of ['./main.js', './print.js', './restart.js', './supervisor.js']) await import(file);
+    for (const file of ['./main.js', './print.js', './restart.js', './supervisor.js', './web/server.js', './web/api.js', './web/host.js']) await import(file);
   } catch (e) {
     return [`A module does not load: ${e?.stack || e}`];
   }

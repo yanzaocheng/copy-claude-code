@@ -948,12 +948,32 @@ export const safeUrl = (u) => {
   } catch { return u; }
 };
 
-export const browserSession = new BrowserSession();
+export const browserSession = new BrowserSession(); // a session without an owner's
+
+// Each session its own (by config.owner): the web console runs several sessions in one process, and each has its
+// own tabs and connection (shared with the others through the broker, see broker.js).
+const owned = new Map();
+export function browserSessionFor(owner) {
+  if (!owner) return browserSession;
+  let s = owned.get(owner);
+  if (!s) owned.set(owner, (s = new BrowserSession()));
+  return s;
+}
+
+// The session `owner` ends: its connection goes (the browser and its tabs stay).
+export function closeBrowserSession(owner) {
+  const s = owned.get(owner);
+  if (!s) return;
+  owned.delete(owner);
+  s.close();
+}
 
 // For a process that ends by itself (claude-pro -p): an open connection would keep it alive, and so would the
 // pipe of WebFetch's headless browser (render.js).
 export function closeBrowser() {
   browserSession.close();
+  for (const s of owned.values()) s.close();
+  owned.clear();
   closeRenderer();
 }
 

@@ -5,8 +5,10 @@
 // One server for the user, shared by every session: `node server.js --serve`, started by the first /web
 // (ensureWebServer). Its address and secret are in CONFIG_DIR/web.json (readable by the user alone); /web opens the
 // page with the secret once, and the page keeps it as a cookie. It answers only on 127.0.0.1, only requests that name
-// it as their host (no DNS rebinding), and changes only from its own page (Origin). It exits 30 minutes after the
-// last page went away, and gives way to a newer one (another version, or its code changed in a source checkout).
+// it as their host (no DNS rebinding), and changes only from its own page (Origin). It also runs the 后台会话, the
+// sessions started from the page, in its own process (see host.js). It exits 30 minutes after the last page went
+// away when it runs no session, and gives way to a newer one (another version, or its code changed in a source
+// checkout) once its sessions are idle, handing them over.
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -79,9 +81,14 @@ async function serve() {
   const before = readState()?.token;
   const token = typeof before === 'string' && /^[\w-]{32}$/.test(before) ? before : crypto.randomBytes(24).toString('base64url');
   const code = codeStamp(); // the code this server runs (a later start compares it with the files as they are then)
-  const { routes } = await import('./api.js');
+  const { routes, useHost } = await import('./api.js');
   const data = await import('./data.js');
   const ra = await import('./remote-access.js');
+  const { SessionHost } = await import('./host.js');
+  // the 后台会话 run here: a crash in one of them must not end the others (nor the console)
+  let host = null;
+  process.on('uncaughtException', (e) => host?.log(e, 'uncaught'));
+  process.on('unhandledRejection', (e) => host?.log(e, 'unhandled rejection'));
   // 远程访问: what marks a request that came through the tunnel (made by this process to itself; never leaves it)
   const tunnelSecret = crypto.randomBytes(24).toString('base64url');
   let tunnel = null;
@@ -97,6 +104,15 @@ async function serve() {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
     res.end(text);
   };
+
+  // A running session by its peer id; one the console is taking up again (a hand-over) is waited for a moment.
+  async function livePeer(peerId) {
+    try { return data.findPeerById(peerId); } catch (e) {
+      const peer = await host?.waitForPeer(peerId);
+      if (peer) return peer;
+      throw e;
+    }
+  }
 
   // POST /__login {password, remember}: the remote login page's form.
   async function remoteLogin(req, res, ip, origin) {
@@ -189,14 +205,18 @@ async function serve() {
         return res.end(fs.readFileSync(path.join(HERE, file)));
       }
       if (!url.pathname.startsWith('/api/')) return send(res, 404, { error: 'not found' });
-      const authed = remote || equal(cookieOf(req, COOKIE), token) || equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
+      const bearer = equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
+      const authed = remote || bearer || equal(cookieOf(req, COOKIE), token);
       if (!authed) return send(res, 401, { error: '需要从 claude-pro 打开：在会话里输入 /web，或运行 claude-pro web' });
-      if (!remote && req.method !== 'GET' && req.method !== 'HEAD') {
+      // (a request with the secret in its header is claude-pro's, not a page's: no cross-site question)
+      if (!remote && !bearer && req.method !== 'GET' && req.method !== 'HEAD') {
         // a change only from the console's own page
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote });
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote, hosted: host?.size ?? 0 });
+      // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
+      if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }
       // 远程访问's own settings: on or off, the password, the devices logged in, the recent logins
       if (url.pathname === '/api/remote' && req.method === 'GET') return send(res, 200, remoteView());
       if (url.pathname === '/api/remote' && req.method === 'POST') {
@@ -216,7 +236,7 @@ async function serve() {
       // an image of a running session's conversation, from its peer server
       const liveImage = /^\/api\/live\/([0-9a-f]{12})\/image\/(\d+)$/.exec(url.pathname);
       if (liveImage && req.method === 'GET') {
-        const peer = data.findPeerById(liveImage[1]);
+        const peer = await livePeer(liveImage[1]);
         const upstream = http.get({ host: '127.0.0.1', port: peer.port, path: `/image/${liveImage[2]}`, headers: { authorization: `Bearer ${peer.token}` } }, (up) => {
           if (up.statusCode !== 200) { up.resume(); return send(res, 404, { error: 'no such image' }); }
           res.writeHead(200, { 'content-type': up.headers['content-type'] || 'application/octet-stream', 'cache-control': 'private, max-age=3600' });
@@ -228,7 +248,7 @@ async function serve() {
       // a running session's live view: its peer server's event stream, passed through
       const live = /^\/api\/live\/([0-9a-f]{12})\/events$/.exec(url.pathname);
       if (live && req.method === 'GET') {
-        const peer = data.findPeerById(live[1]);
+        const peer = await livePeer(live[1]);
         const upstream = http.get({ host: '127.0.0.1', port: peer.port, path: '/events', headers: { authorization: `Bearer ${peer.token}` } }, (up) => {
           if (up.statusCode !== 200) { up.resume(); return send(res, up.statusCode === 404 ? 409 : 502, { error: up.statusCode === 404 ? '这个会话的 claude-pro 版本较旧，不支持实时查看' : '会话没有回应' }); }
           streams++;
@@ -296,25 +316,29 @@ async function serve() {
   syncTunnel();
   setInterval(syncTunnel, 3000).unref();
 
-  // (web.json stays: the next server takes its secret over, so that the page's cookie still works)
+  // Its code changed (an update, an edit in a source checkout, see SessionHost.watch), or a session asked for a
+  // restart: once the sessions are idle a new server takes over, on the same port and with the same secret (an open
+  // page keeps working, with the new page code, read from disk at every load), and takes the sessions up again.
+  host = new SessionHost({
+    restartProcess: () => {
+      tunnel?.close();
+      server.close();
+      server.closeAllConnections?.();
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
+      child.on('error', () => {});
+      child.unref();
+      setTimeout(() => process.exit(0), 200);
+    },
+  });
+  useHost(host);
+  host.watch();
+  host.recover().catch((e) => host.log(e, 'recover'));
+
+  // (web.json stays: the next server takes its secret over, so that the page's cookie still works; the list of
+  // sessions stays too: the next server brings them back)
   const quit = () => process.exit(0);
-  // with 远程访问 on, it stays (a phone may come any time)
-  setInterval(() => { if (!streams && !tunnel && Date.now() - lastActivity > IDLE_MS) quit(); }, 60_000).unref();
-  // Its code changed (an update, or an edit in a source checkout): a new server takes over at once, on the same port
-  // and with the same secret, so that an open page keeps working with the new page code (it is read from disk at
-  // every load) instead of new pages talking to an old server.
-  const handOver = setInterval(() => {
-    if (codeStamp() === code) return;
-    clearInterval(handOver);
-    tunnel?.close();
-    server.close();
-    server.closeAllConnections?.();
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env: process.env });
-    child.on('error', () => {});
-    child.unref();
-    setTimeout(() => process.exit(0), 200);
-  }, 15_000);
-  handOver.unref();
+  // with 远程访问 on, or a session running, it stays (a phone may come any time)
+  setInterval(() => { if (!streams && !tunnel && !host.size && Date.now() - lastActivity > IDLE_MS) quit(); }, 60_000).unref();
   process.on('SIGTERM', quit);
   process.on('SIGINT', quit);
 }
@@ -340,9 +364,14 @@ export async function ensureWebServer() {
   let state = readState();
   let alive = state ? await ping(state) : null;
   if (alive && alive.code !== codeStamp()) {
-    try { process.kill(alive.pid); } catch { /* gone already */ }
-    await sleep(300);
-    alive = null;
+    if (alive.hosted) {
+      // it runs sessions: they are not cut off, it gives way once they are idle, handing them over (it is used meanwhile)
+      await fetch(`http://127.0.0.1:${state.port}/api/handover`, { method: 'POST', headers: { authorization: `Bearer ${state.token}` }, signal: AbortSignal.timeout(1500) }).catch(() => {});
+    } else {
+      try { process.kill(alive.pid); } catch { /* gone already */ }
+      await sleep(300);
+      alive = null;
+    }
   }
   let started = false;
   if (!alive) {

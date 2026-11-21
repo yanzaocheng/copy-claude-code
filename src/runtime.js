@@ -20,6 +20,9 @@ import { RuntimeTrace } from './trace.js';
 
 export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const config = loadConfig({ cwd, flags });
+  // Whose background shells, interpreters and browser tabs are whose (tools/bash.js, code.js, browser.js): the web
+  // console runs several sessions in one process.
+  config.owner = crypto.randomUUID();
   const trace = new RuntimeTrace({ cwd, sessionId, enabled: config.traceEnabled });
   applyRememberedChoices(config, flags); // what /model and /effort chose last time
   if (flags.verify) config.verifyOverride = flags.verify;
@@ -47,7 +50,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   const runtime = { config, checkpoints, agents, mcp, shell, io, cwd, hooks, tasks, memoryDir, trace };
   runtime.skills = loadSkills(cwd);
   // The self-check builds the Restart tool too, so that a mistake in it is found before a restart relies on it.
-  const restartable = canRestart() || process.env.CLAUDE_PRO_SELF_CHECK === '1';
+  const restartable = (io?.canRestart ? io.canRestart() : canRestart()) || process.env.CLAUDE_PRO_SELF_CHECK === '1';
   // The agent fixes its own code (and restarts for it) only in a source checkout: an installed copy is replaced by
   // the next update, so there it reports its defects instead.
   const selfEdit = restartable && SOURCE_CHECKOUT;
