@@ -1411,11 +1411,10 @@
   let modelTab = null; // the provider whose tab 模型列表 shows (kept across redraws; a provider just connected gets it)
   function drawProviders(el, p) {
     $("#body", el).innerHTML = `<div id="pbody">
-      <div class="section-head"><div><h2>默认模型</h2><p>新会话用的模型和推理强度。会话里的 /model、/effort 只改那一个会话（并记住给下次用）</p></div></div>
-      <div class="panel panel-pad" id="defaults"><div class="muted">正在读取可用模型…</div></div>
-      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型才出现在会话的模型菜单里（都不勾就显示全部）。列表只在点「刷新模型列表」时更新；点一行把它填进上面的默认模型</p></div><div class="actions head-actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button><button class="button small" id="addProvider" title="连接 7bit.fun、DeepSeek、Kimi、OpenRouter 等供应商，或你自己的兼容接口">添加供应商</button></div></div>
+      <div class="section-head"><div><h2>默认设置</h2><p>新会话用的模型和思考强度，选了就保存。会话里的 /model、/effort 只改那一个会话（并记住给下次用）；已经开着的会话要 /model default 或重启才换</p></div></div>
+      <div class="panel" id="defaults"><div class="panel-pad muted">正在读取…</div></div>
+      <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型出现在会话的模型菜单里，也是「默认模型」的选项（都不勾就列出全部）。列表只在点「刷新模型列表」时更新</p></div><div class="actions head-actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button><button class="button small" id="addProvider" title="连接 7bit.fun、DeepSeek、Kimi、OpenRouter 等供应商，或你自己的兼容接口">添加供应商</button></div></div>
       <div id="modelLists"><div class="panel panel-pad muted">正在读取…</div></div></div>`;
-    loadDefaults(el, p);
     loadModelLists(el, p);
     // 添加供应商: a built-in one not connected yet, or one of the user's own
     $("#addProvider", el).addEventListener("click", (e) => {
@@ -1447,7 +1446,11 @@
   async function loadModelLists(el, p) {
     const box = $("#modelLists", el);
     let r;
-    try { r = await api("/api/models/kept"); } catch (e) { box.innerHTML = `<div class="panel panel-pad muted">读取失败：${esc(e.message)}</div>`; return; }
+    try { r = await api("/api/models/kept"); } catch (e) {
+      box.innerHTML = `<div class="panel panel-pad muted">读取失败：${esc(e.message)}</div>`;
+      $("#defaults", el).innerHTML = `<div class="panel-pad muted">读取失败：${esc(e.message)}</div>`;
+      return;
+    }
     if (!el.isConnected) return;
     const current = r.remembered?.model || r.current;
     const picked = new Set(r.picked || []);
@@ -1470,14 +1473,60 @@
     box.innerHTML = r.groups.length ? `<div class="mtabs" role="tablist">${r.groups.map((g) => `<button type="button" role="tab" data-tab="${esc(g.id)}" aria-selected="${g.id === modelTab}" class="${g.id === modelTab ? "active" : ""}">${esc(g.name)}<span class="count">${g.models.length}</span></button>`).join("")}</div>` + r.groups.map((g) => `<div class="panel model-group" role="tabpanel" data-group="${esc(g.id)}"${g.id === modelTab ? "" : " hidden"}>
       ${head(g)}<div class="empty no-match" hidden>这个供应商里没有匹配的模型</div>
       ${g.models.length ? `<table class="list"><thead><tr><th class="pick" title="勾选的模型出现在会话的模型菜单里">菜单</th><th>模型</th><th class="num">上下文</th><th class="num">最大输出</th><th>推理强度</th><th class="num" title="每百万 token 的美元价：输入 / 输出">价格（输入/输出）</th></tr></thead><tbody>
-        ${g.models.map((m) => `<tr class="click" data-model="${esc(m.ref)}" data-text="${esc([m.ref, m.name, m.vendor].filter(Boolean).join(" ").toLowerCase())}"><td class="pick"><input type="checkbox" data-pick="${esc(m.ref)}" aria-label="在会话的模型菜单里显示 ${esc(m.ref)}"${picked.has(m.ref) ? " checked" : ""}></td><td class="title-cell"><strong class="mono">${esc(m.ref)}${m.ref === current ? ' <span class="pill ok">默认</span>' : ""}</strong>${m.name || m.vendor ? `<div class="path">${esc([m.name, m.vendor].filter(Boolean).join(" · "))}</div>` : ""}</td><td class="num">${m.window ? fmtTokens(m.window) : "—"}</td><td class="num">${m.maxOutput ? fmtTokens(m.maxOutput) : "—"}</td><td>${m.efforts.length ? esc(m.efforts.join(" · ")) : '<span class="faint">—</span>'}</td><td class="num">${price(m)}</td></tr>`).join("")}
-      </tbody></table>` : '<div class="empty">还没有拉取过模型列表：点「刷新模型列表」</div>'}</div>`).join("") : '<div class="panel panel-pad muted">还没有连接供应商：点「添加供应商」，或在下面连接 7bit.fun</div>';
+        ${g.models.map((m) => `<tr class="click" data-model="${esc(m.ref)}" data-text="${esc([m.ref, m.name, m.vendor].filter(Boolean).join(" ").toLowerCase())}"><td class="pick"><input type="checkbox" data-pick="${esc(m.ref)}" aria-label="在会话的模型菜单里显示 ${esc(m.ref)}"${picked.has(m.ref) ? " checked" : ""}></td><td class="title-cell"><strong class="mono">${esc(m.ref)}${m.ref === current ? ' <span class="pill ok def-pill">默认</span>' : ""}</strong>${m.name || m.vendor ? `<div class="path">${esc([m.name, m.vendor].filter(Boolean).join(" · "))}</div>` : ""}</td><td class="num">${m.window ? fmtTokens(m.window) : "—"}</td><td class="num">${m.maxOutput ? fmtTokens(m.maxOutput) : "—"}</td><td>${m.efforts.length ? esc(m.efforts.join(" · ")) : '<span class="faint">—</span>'}</td><td class="num">${price(m)}</td></tr>`).join("")}
+      </tbody></table>` : '<div class="empty">还没有拉取过模型列表：点「刷新模型列表」</div>'}</div>`).join("") : '<div class="panel panel-pad muted">还没有连接供应商：点「添加供应商」</div>';
     if (r.groups.length) box.insertAdjacentHTML("afterbegin", `<div class="pick-bar"><span id="pickedNote">${pickedNote()}</span><button type="button" class="button secondary small" id="clearPicked"${picked.size ? "" : " hidden"}>清除勾选</button></div>`);
+    // 默认设置: the default model, among the models ticked below (all when none is), and the default effort; each
+    // saved when chosen (settings.json), and what a session's /model or /effort remembered of it forgotten
+    let defModel = r.remembered?.model || r.current;
+    let defEffort = p?.remembered?.effort || p?.effort || "auto";
+    let remembered = { model: r.remembered?.model || null, effort: p?.remembered?.effort || null };
+    const allModels = r.groups.flatMap((g) => g.models.map((m) => ({ ref: m.ref, group: g.name, name: m.name })));
+    const paintDefaults = () => {
+      const dbox = $("#defaults", el);
+      if (!dbox) return;
+      const choices = picked.size ? allModels.filter((m) => picked.has(m.ref)) : allModels;
+      const groups = [...new Set(choices.map((m) => m.group))];
+      const listed = choices.some((m) => m.ref === defModel);
+      const efforts = ["auto", "low", "medium", "high", "xhigh", "max"];
+      dbox.innerHTML = `<div class="def-row"><div class="def-label"><strong>默认模型</strong><small>选项是下面「模型列表」里勾选的模型${picked.size ? `（${picked.size} 个）` : "（没勾选：列出全部）"}</small></div>
+          <div><select id="defModel">${listed || !defModel ? "" : `<option value="${esc(defModel)}" selected>${esc(defModel)}（当前）</option>`}${groups.map((gname) => `<optgroup label="${esc(gname)}">${choices.filter((m) => m.group === gname).map((m) => `<option value="${esc(m.ref)}"${m.ref === defModel ? " selected" : ""}>${esc(m.ref)}${m.name ? ` · ${esc(m.name)}` : ""}</option>`).join("")}</optgroup>`).join("")}</select>
+          ${remembered.model ? `<div class="def-note">现在生效的是会话里 /model 记住的选择；在这里选一次就以这里为准</div>` : ""}</div></div>
+        <div class="def-row"><div class="def-label"><strong>思考强度</strong><small>auto 用模型自己的默认；不支持的模型会取最接近的一档</small></div>
+          <div><select id="defEffort">${efforts.map((x) => `<option${x === defEffort ? " selected" : ""}>${x}</option>`).join("")}${efforts.includes(defEffort) ? "" : `<option selected>${esc(defEffort)}</option>`}</select>
+          ${remembered.effort ? `<div class="def-note">现在生效的是会话里 /effort 记住的选择；在这里选一次就以这里为准</div>` : ""}</div></div>`;
+      $("#defModel", dbox).onchange = async (e) => {
+        const value = e.target.value;
+        try {
+          await api("/api/settings", { method: "POST", body: { scope: "user", key: "model", value } });
+          if (remembered.model) await api("/api/remembered", { method: "POST", body: { model: null } });
+          defModel = value;
+          remembered.model = null;
+          for (const pill of $$(".def-pill", box)) pill.remove();
+          $(`tr[data-model="${CSS.escape(value)}"] .title-cell strong`, box)?.insertAdjacentHTML("beforeend", ' <span class="pill ok def-pill">默认</span>');
+          toast(`默认模型已改为 ${value}`);
+        } catch (err) { fail(err); }
+        paintDefaults();
+      };
+      $("#defEffort", dbox).onchange = async (e) => {
+        const value = e.target.value;
+        try {
+          await api("/api/settings", { method: "POST", body: { scope: "user", key: "effort", value } });
+          if (remembered.effort) await api("/api/remembered", { method: "POST", body: { effort: null } });
+          defEffort = value;
+          remembered.effort = null;
+          toast(`默认思考强度已改为 ${value}`);
+        } catch (err) { fail(err); }
+        paintDefaults();
+      };
+    };
+    paintDefaults();
     let saving = Promise.resolve();
     const savePicked = () => {
       const models = [...picked];
       $("#pickedNote", box).textContent = pickedNote();
       $("#clearPicked", box).hidden = !picked.size;
+      paintDefaults(); // (its choices are the ticked models)
       saving = saving.then(() => api("/api/models/picked", { method: "POST", body: { models } })).catch((e) => fail(e));
     };
     box.onchange = (e) => {
@@ -1539,40 +1588,13 @@
         try { drawProviders(el, await api(`/api/providers/${encodeURIComponent(rm.dataset.remove)}`, { method: "DELETE" })); toast("已断开"); } catch (err) { fail(err); }
         return;
       }
-      if (e.target.closest(".pick")) return; // (the checkbox's cell: ticking, not filling the default)
-      const tr = e.target.closest("tr[data-model]");
-      const input = $("#defModel", el);
-      if (!tr || !input) return;
-      input.value = tr.dataset.model;
-      input.scrollIntoView({ block: "center", behavior: "smooth" });
-      input.focus({ preventScroll: true });
-      toast(`已填入 ${tr.dataset.model}：点「保存为默认」生效`);
+      if (e.target.closest(".pick")) return; // (the checkbox itself)
+      // a click on the row ticks (or unticks) the model
+      const cb = e.target.closest("tr[data-model]")?.querySelector("input[data-pick]");
+      if (!cb) return;
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
     };
-  }
-
-  async function loadDefaults(el, p) {
-    const box = $("#defaults", el);
-    let m;
-    try { m = await api("/api/models"); } catch (e) { box.innerHTML = `<div class="muted">读取失败：${esc(e.message)}</div>`; return; }
-    const current = m.remembered?.model || m.current;
-    const efforts = ["auto", "low", "medium", "high", "xhigh", "max"];
-    const currentEffort = p.remembered?.effort || p.effort;
-    box.innerHTML = `<div class="actions" style="align-items:flex-end">
-      <label class="field" style="flex:2;min-width:260px;margin:0">模型<input list="modelList" id="defModel" value="${esc(current)}" placeholder="provider/model，或 opus、sonnet"><datalist id="modelList">${m.models.map((x) => `<option value="${esc(x.ref)}">${esc(x.provider)}${x.window ? ` · ${fmtTokens(x.window)} 上下文` : ""}</option>`).join("")}</datalist></label>
-      <label class="field" style="min-width:140px;margin:0">推理强度<select id="defEffort">${efforts.map((x) => `<option${x === currentEffort ? " selected" : ""}>${x}</option>`).join("")}${efforts.includes(currentEffort) ? "" : `<option selected>${esc(currentEffort)}</option>`}</select></label>
-      <button class="button" id="saveDefaults">保存为默认</button></div>
-      <p class="muted" style="font-size:12.5px;margin:10px 0 0">${m.remembered?.model || m.remembered?.effort ? `现在生效的是会话里 /model、/effort 记住的选择（${esc([m.remembered.model, m.remembered.effort].filter(Boolean).join(" · "))}）。保存后会写入设置的 model / effort，并清掉记住的选择。` : "保存到 ~/.claude-pro/settings.json 的 model / effort。"}已经开着的会话要 /model default 或重启才换。</p>`;
-    $("#saveDefaults", box).addEventListener("click", async () => {
-      const model = $("#defModel", box).value.trim();
-      const effort = $("#defEffort", box).value;
-      try {
-        if (model) await api("/api/settings", { method: "POST", body: { scope: "user", key: "model", value: model } });
-        await api("/api/settings", { method: "POST", body: { scope: "user", key: "effort", value: effort } });
-        await api("/api/remembered", { method: "POST", body: { model: null, effort: null } });
-        toast("已保存默认模型");
-        providers();
-      } catch (e) { fail(e); }
-    });
   }
 
   // Connect 7bit.fun, or change its key: the gateway checks the key (its account), and its model list comes with it.

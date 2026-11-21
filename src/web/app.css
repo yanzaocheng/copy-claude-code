@@ -251,6 +251,13 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .model-list label:hover { background: var(--surface-2); }
 .model-list small { color: var(--muted); margin-left: auto; white-space: nowrap; }
 
+/* 默认设置 */
+.def-row { display: grid; grid-template-columns: minmax(200px, 340px) minmax(0, 460px); gap: 8px 20px; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.def-row:last-child { border-bottom: 0; }
+.def-label small { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+.def-row select { width: 100%; }
+.def-note { margin-top: 6px; color: var(--warn); font-size: 12.5px; }
+
 /* 模型列表: a tab per provider */
 .head-actions { flex: none; flex-wrap: nowrap; }
 .mtabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
@@ -388,7 +395,7 @@ details.proj > div { padding: 0 0 6px 18px; }
   input, select, textarea, .composer textarea { font-size: 16px; } /* (no zoom on focus in iOS) */
   .composer textarea { max-height: min(240px, 30dvh); }
   .page:not(.chat) { padding: 64px 14px 40px; }
-  .setting { grid-template-columns: 1fr; }
+  .setting, .def-row { grid-template-columns: 1fr; }
   .kv { grid-template-columns: 1fr; gap: 2px 0; }
   .kv dd { margin-bottom: 8px; }
   .chat-log { padding: 16px 14px; }
