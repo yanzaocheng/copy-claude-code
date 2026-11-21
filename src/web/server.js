@@ -217,6 +217,16 @@ async function serve() {
       if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote, hosted: host?.size ?? 0 });
       // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
       if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }
+      // a session an older version started in a hidden window moves in (App.maybeMoveIntoConsole): the state it leaves
+      if (url.pathname === '/api/adopt' && req.method === 'POST') {
+        if (!bearer) return send(res, 403, { error: 'claude-pro only' });
+        const state = (await readBody(req))?.state;
+        if (!host || !state || typeof state.cwd !== 'string' || !fs.existsSync(state.cwd)) return send(res, 400, { error: 'no state' });
+        if ([...host.apps].some((a) => a.store?.id === state.sessionId)) return send(res, 409, { error: 'running here already' });
+        const app = await host.launch({ cwd: state.cwd, restart: state });
+        if (app.exiting) return send(res, 500, { error: 'it did not start' });
+        return send(res, 200, { ok: true, peerId: app.peers?.id || null });
+      }
       // 远程访问's own settings: on or off, the password, the devices logged in, the recent logins
       if (url.pathname === '/api/remote' && req.method === 'GET') return send(res, 200, remoteView());
       if (url.pathname === '/api/remote' && req.method === 'POST') {
@@ -391,6 +401,21 @@ export async function ensureWebServer() {
     }
   }
   return { url: `http://127.0.0.1:${state.port}/?t=${state.token}`, port: state.port, started };
+}
+
+// A session of an older version, in a hidden window, moves into the console's process: the console (started if need
+// be) takes it up from `state` (what a restart carries over). Resolves {ok, peerId} or {ok: false, error}.
+export async function adoptIntoConsole(state) {
+  const { port } = await ensureWebServer();
+  const token = readState()?.token;
+  const res = await fetch(`http://127.0.0.1:${port}/api/adopt`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ state }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const body = await res.json().catch(() => ({}));
+  return res.ok ? body : { ok: false, error: body.error || `HTTP ${res.status}` };
 }
 
 // The page in the user's browser.

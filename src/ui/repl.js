@@ -288,8 +288,10 @@ export class App {
       ],
       status: () => this.liveStatus(),
     });
-    // started by the web console in a hidden window (a 后台会话): only the console shows it, and ends it
-    this.hidden = Boolean(host) || /^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_BACKGROUND || '');
+    // run by the web console (a 后台会话): only the console shows it, and ends it. `legacyHidden`: one an older version
+    // of the console started in a hidden window, a process of its own: it moves into the console's (maybeMoveIntoConsole)
+    this.legacyHidden = !host && /^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_BACKGROUND || '');
+    this.hidden = Boolean(host) || this.legacyHidden;
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
@@ -417,6 +419,11 @@ export class App {
       Promise.resolve(this.commands.get('connect').run('')).catch((e) => this.logError(e)).finally(() => this.screen.schedule());
     }
     this.startSourceWatch();
+    if (this.legacyHidden && !this.selfCheck) {
+      this.moveTimer = setInterval(() => this.maybeMoveIntoConsole(), 60_000);
+      this.moveTimer.unref?.();
+      setTimeout(() => this.maybeMoveIntoConsole(), 5000).unref?.();
+    }
     if (!this.driven) {
       // Updates are deliberately manual: /update checks npm and installs the selected release.
       // Do not query the registry or install/restart a running session in the background.
@@ -506,6 +513,7 @@ export class App {
     clearTimeout(this.reloadTimer);
     this.sourceWatch?.close();
     clearTimeout(this.updateRetry);
+    clearInterval(this.moveTimer);
     // only this session's: in the web console's process the other sessions go on
     shutdownBackgroundShells(this.host ? this.owner : undefined);
     shutdownInterpreters(this.host ? this.owner : undefined);
@@ -1197,6 +1205,29 @@ export class App {
       remote: this.remote?.handoff() || null,
       restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between
     };
+  }
+
+  // A session of an older version that the console started in a hidden window, a process (and a supervisor) of its
+  // own: once it is idle the console takes it up in its own process (see web/host.js), with the same id and the state
+  // a restart carries over, and this process ends (exit code 0: the supervisor does not start it again).
+  async maybeMoveIntoConsole() {
+    if (!this.legacyHidden || this.moving || this.exiting || !this.runtime || this.working() || this.restartRequest || this.reloading) return;
+    this.moving = true;
+    try {
+      const { adoptIntoConsole } = await import('../web/server.js');
+      if (this.exiting || this.working()) return;
+      const state = this.restartState({ reason: 'moved into the web console' }, { counts: false });
+      const r = await adoptIntoConsole(state);
+      if (!r?.ok) { this.moveRefused = r?.error || 'refused'; return; }
+      // the console's session has this one's id now, and its peer file: closed here without removing it
+      try { this.peers?.server?.close(); } catch { /* gone */ }
+      this.peers = null;
+      this.exit(0, { restart: true }); // (the gateway's remote page, if any, goes on with the console's session)
+    } catch (e) {
+      this.moveRefused = e.message; // tried again in a minute
+    } finally {
+      this.moving = false;
+    }
   }
 
   // /cd: the session goes on in `dir` (an existing directory). It restarts there, so that everything that belongs to
