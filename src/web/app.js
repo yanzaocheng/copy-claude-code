@@ -306,10 +306,10 @@
   }
 
   // A tool's output: whole, but folded to its first lines when it is long (展开 shows the rest, 收起 folds it again).
-  const FOLD_LINES = 12;
+  const FOLD_LINES = 5;
   function folded(html) {
     const n = html.split("\n").length;
-    if (n <= FOLD_LINES + 3) return `<pre>${html}</pre>`;
+    if (n <= FOLD_LINES + 2) return `<pre>${html}</pre>`;
     return `<div class="fold"><pre>${html}</pre><button type="button" class="fold-btn" data-fold>展开全部 · ${n} 行</button></div>`;
   }
   document.addEventListener("click", (e) => {

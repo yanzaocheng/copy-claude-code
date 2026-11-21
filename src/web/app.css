@@ -273,7 +273,7 @@ details.proj > div { padding: 0 0 6px 18px; }
 @keyframes blink { 50% { opacity: .2; } }
 .it-tool pre, .it-output pre { margin: 4px 0 0 16px; white-space: pre-wrap; word-break: break-all; color: var(--text-2); }
 .fold { position: relative; }
-.fold:not(.open) pre { max-height: calc(12 * 1.55em); overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.fold:not(.open) pre { max-height: calc(5 * 1.55em); overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
 .fold-btn { margin: 4px 0 0 16px; padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: 99px; background: var(--surface); color: var(--muted); font: 12px/1.4 system-ui, sans-serif; cursor: pointer; }
 .fold-btn:hover { color: var(--text); border-color: var(--accent); }
 .a-add { background: var(--diff-add-bg); color: var(--diff-add-fg); }
