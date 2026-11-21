@@ -119,6 +119,7 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 .chip { display: inline-flex; align-items: center; gap: 5px; max-width: 280px; padding: 5px 10px; border: 0; border-radius: 99px; background: none; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
 .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip:hover { background: var(--hover); color: var(--text); }
+.chip[hidden] { display: none; }
 .round-btn { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer; flex: none; }
 .round-btn:hover { background: var(--accent-hover); }
 .round-btn:disabled { opacity: .4; cursor: default; }

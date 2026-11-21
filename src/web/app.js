@@ -937,7 +937,7 @@
     const near = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
     const c = composer($("#lcomp", el), {
       placeholder: "发给这个会话：和在终端里输入一样，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
-      right: '<button type="button" class="chip" id="lmodel" title="切换模型和推理强度"><span></span></button>',
+      right: `<button type="button" class="chip" id="lmodel" title="切换模型"><span></span>${ICON.caret}</button><button type="button" class="chip" id="leffort" title="切换推理强度"><span></span>${ICON.caret}</button>`,
       dropZone: el,
       draftKey: `live:${peerId}`,
       onSend: async (text, images) => {
@@ -948,15 +948,17 @@
       },
     });
     c.onStop(() => post("interrupt").catch(fail));
-    $("#lmodel", el).addEventListener("click", async (e) => {
+    // the model and the reasoning effort, each its own menu
+    const choose = (key, title, list) => async (e) => {
       const anchor = e.currentTarget;
       let o;
       try { o = await post("options"); } catch (err) { return fail(err); }
-      popMenu(anchor, [
-        { key: "model", title: "模型", items: (o.models || []).map((m) => ({ label: m.label || m.value, description: m.description || "", value: m.value, current: m.current })) },
-        { key: "effort", title: "推理强度", items: (o.efforts || []).map((m) => ({ label: m.label || m.value, description: m.description || "", value: m.value, current: m.current })) },
-      ], (key, value) => post("send", { text: `/${key} ${value}` }).catch(fail));
-    });
+      const items = (o[list] || []).map((m) => ({ label: m.label || m.value, description: m.description || "", value: m.value, current: m.current }));
+      if (!items.length) return toast(key === "effort" ? "这个模型不能调推理强度" : "没有可选的模型");
+      popMenu(anchor, [{ key, title, items }], (k, value) => post("send", { text: `/${k} ${value}` }).catch(fail));
+    };
+    $("#lmodel", el).addEventListener("click", choose("model", "模型", "models"));
+    $("#leffort", el).addEventListener("click", choose("effort", "推理强度", "efforts"));
     $("#lmenu", el).addEventListener("click", (e) => {
       popMenu(e.currentTarget, [{ key: "a", title: "", items: [
         { label: "查看完整历史记录", value: "history" },
@@ -1036,7 +1038,9 @@
       statusAt = Date.now();
       $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
       $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? " · 后台运行" : " · 终端窗口"}`;
-      $("#lmodel span", el).textContent = `${status.model || "模型"}${status.effort ? ` · ${status.effort}` : ""}`;
+      $("#lmodel span", el).textContent = status.model || "模型";
+      $("#leffort span", el).textContent = status.effort || "推理强度";
+      $("#leffort", el).hidden = !status.effort;
       const stats = [];
       if (status.context?.window) stats.push(`上下文 ${fmtTokens(status.context.used || 0)} / ${fmtTokens(status.context.window)}（${Math.round(((status.context.used || 0) / status.context.window) * 100)}%）`);
       if (Number.isFinite(status.cost)) stats.push(`花费 ${fmtUsd(status.cost)}`);
