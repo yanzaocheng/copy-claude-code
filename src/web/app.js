@@ -1836,7 +1836,22 @@
   setDrawer(false);
   syncVisualHeight();
   $("#logoutBtn").addEventListener("click", async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.reload(); });
+  // The console took up new code (an update, an edit): this page is the old one, and the API may differ from it.
+  let pageCode = null, toldReload = false;
+  function noteServerCode(p) {
+    if (!p?.code) return;
+    pageCode ??= p.code;
+    if (p.code === pageCode || toldReload) return;
+    toldReload = true;
+    const el = document.createElement("div");
+    el.className = "reload-note"; // (not .toast: toast() reuses and removes that one)
+    el.innerHTML = `控制台已更新到 v${esc(p.version)}：<button type="button" class="button small" data-reload>刷新页面</button>`;
+    el.querySelector("[data-reload]").addEventListener("click", () => location.reload());
+    document.body.appendChild(el);
+  }
+  let pingTick = 0;
   api("/api/ping").then((p) => {
+    noteServerCode(p);
     $("#brandVersion").textContent = `v${p.version}`;
     hasNativeFolderPicker = p.nativeFolderPicker === true;
     $("#remoteLinks").classList.toggle("hidden", !p.remote); // opened through 远程访问: switch computer, log out
@@ -1845,6 +1860,10 @@
     scheduleUpdateCheck();
   }).catch(() => {});
   // the sidebar follows the sessions (and keeps the server from stopping while the page is open)
-  setInterval(() => { if (document.visibilityState === "visible") loadWorkspace(); else api("/api/ping").catch(() => {}); }, 5000);
+  setInterval(() => {
+    const visible = document.visibilityState === "visible";
+    if (visible) loadWorkspace();
+    if (!visible || ++pingTick % 6 === 0) api("/api/ping").then(noteServerCode).catch(() => {}); // (every 30 s while looked at)
+  }, 5000);
   api("/api/overview").then((o) => { const who = o.gateway?.account?.name || o.gateway?.account?.email || o.host; $("#sideUser").textContent = who; $("#sideAvatar").textContent = String(who || "?").slice(0, 1).toUpperCase(); }).catch(() => {});
 })();

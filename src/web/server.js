@@ -81,6 +81,9 @@ async function serve() {
   const before = readState()?.token;
   const token = typeof before === 'string' && /^[\w-]{32}$/.test(before) ? before : crypto.randomBytes(24).toString('base64url');
   const code = codeStamp(); // the code this server runs (a later start compares it with the files as they are then)
+  // The page as it was when this server started: a page read from disk at every load could be newer than the API
+  // this process serves (an update or an edit waits for the sessions to be idle) and call routes it does not have.
+  const pages = Object.fromEntries(Object.values(STATIC).map(([file]) => [file, fs.readFileSync(path.join(HERE, file))]));
   const { routes, useHost } = await import('./api.js');
   const data = await import('./data.js');
   const ra = await import('./remote-access.js');
@@ -202,7 +205,7 @@ async function serve() {
       if (req.method === 'GET' && STATIC[url.pathname]) {
         const [file, type] = STATIC[url.pathname];
         res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
-        return res.end(fs.readFileSync(path.join(HERE, file)));
+        return res.end(pages[file]);
       }
       if (!url.pathname.startsWith('/api/')) return send(res, 404, { error: 'not found' });
       const bearer = equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);

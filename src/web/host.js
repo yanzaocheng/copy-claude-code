@@ -216,10 +216,8 @@ export class SessionHost {
   // works is its work, loaded when the sessions are idle; one made while all are idle is loaded once the source has
   // been left alone for a few minutes (a few seconds when there is no session to restart).
   watch() {
-    this.watcher = watchSource(INSTALL_DIR, (file) => {
-      if (/^web[\\/]app\.js$/i.test(file)) return; // read from disk by every page load: nothing to restart for
-      this.noteChange();
-    });
+    // (the page too: the server serves the page it started with, so that page and API always match)
+    this.watcher = watchSource(INSTALL_DIR, () => this.noteChange());
   }
 
   noteChange({ now = false } = {}) {
