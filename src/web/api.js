@@ -358,24 +358,38 @@ function windowsTerminal() {
   return wtPath;
 }
 
+// claude-pro in a new terminal window or tab, in `cwd`, with `args` (ids and flags only: nothing a shell would
+// take apart). Windows Terminal when there is one, else a console window; elsewhere only the command to run.
+function launchTerminal(cwd, args, title) {
+  const bin = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
+  const command = `cd "${cwd}" && claude-pro${args.length ? ` ${args.join(' ')}` : ''}`;
+  if (!isWin) return { opened: false, command };
+  const wt = windowsTerminal();
+  const child = wt
+    ? spawn(wt, ['-w', '0', 'new-tab', '-d', cwd, '--title', String(title || 'claude-pro').replace(/;/g, ',').slice(0, 40), process.execPath, bin, ...args], { detached: true, stdio: 'ignore', windowsHide: false })
+    : spawn('cmd.exe', ['/c', 'start', '""', '/D', `"${cwd}"`, `"${process.execPath}"`, `"${bin}"`, ...args], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true });
+  child.on('error', () => {});
+  child.unref();
+  return { opened: true, how: wt ? 'Windows Terminal' : 'cmd', command };
+}
+
 function openInTerminal(dir, id) {
   const session = listAllSessions().find((s) => s.dir === dir && s.id === id);
   if (!session) throw httpError(404, '会话不存在');
   const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
-  const bin = path.join(INSTALL_DIR, 'bin', 'claude-pro.js');
-  const command = `cd "${cwd}" && claude-pro --resume ${id}`;
-  if (!isWin) return { opened: false, command };
-  const wt = windowsTerminal();
-  if (wt) {
-    const child = spawn(wt, ['-w', '0', 'new-tab', '-d', cwd, '--title', session.title.slice(0, 40), process.execPath, bin, '--resume', id], { detached: true, stdio: 'ignore', windowsHide: false });
-    child.on('error', () => {});
-    child.unref();
-    return { opened: true, how: 'Windows Terminal', command };
-  }
-  const child = spawn('cmd.exe', ['/c', 'start', '""', '/D', `"${cwd}"`, `"${process.execPath}"`, `"${bin}"`, '--resume', id], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true });
-  child.on('error', () => {});
-  child.unref();
-  return { opened: true, how: 'cmd', command };
+  return launchTerminal(cwd, ['--resume', id], session.title);
+}
+
+// A new session in `cwd` (its first message, if any, is sent by the page once the session is up: no quoting through
+// a terminal's command line).
+function newSession(body) {
+  let cwd = String(body?.cwd || '').trim().replace(/^~(?=$|[\\/])/, home);
+  if (!cwd) throw httpError(400, '请填写目录');
+  cwd = path.resolve(cwd);
+  let st;
+  try { st = fs.statSync(cwd); } catch { throw httpError(400, `目录不存在：${cwd}`); }
+  if (!st.isDirectory()) throw httpError(400, `不是目录：${cwd}`);
+  return { ...launchTerminal(cwd, [], path.basename(cwd) || cwd), cwd };
 }
 
 // ---------------------------------------------------------------- routes
@@ -419,6 +433,7 @@ export const routes = [
   ['DELETE', /^\/api\/trash$/, () => ({ removed: purgeTrash({ all: true }) })],
 
   ['GET', /^\/api\/live$/, async () => ({ sessions: await runningSessions() })],
+  ['POST', /^\/api\/live\/new$/, (req, m, body) => newSession(body)],
   ['POST', /^\/api\/live\/([0-9a-f]{12})\/(send|interrupt|dialog|options|suggest|list|output)$/, async (req, [peerId, type], body) => {
     const peer = findPeerById(peerId);
     const r = await peerRequest(peer, 'POST', '/command', { type, body: body || {} }, { timeout: type === 'options' ? 20_000 : 10_000 });

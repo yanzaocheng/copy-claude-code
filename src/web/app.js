@@ -251,6 +251,44 @@
     return "";
   }
 
+  // ---------------------------------------------------------------- images for a message (as pasting one in the terminal)
+
+  const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  const MAX_IMAGES = 6;
+  const encode = (canvas, type, quality) => new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+  // {media_type, data (base64), size, url}: scaled down to 2000 px on the longer edge (the model sees no more), at most 5 MB
+  async function prepareImage(file) {
+    if (!IMAGE_TYPES.includes(file.type)) throw new Error("只支持 PNG、JPEG、GIF、WebP 图片");
+    let blob = file;
+    if (file.type !== "image/gif") {
+      const bitmap = await createImageBitmap(file).catch(() => null);
+      if (bitmap && (Math.max(bitmap.width, bitmap.height) > 2000 || file.size > 2.5 * 1024 * 1024)) {
+        const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        blob = (await encode(canvas, file.type === "image/png" ? "image/png" : "image/jpeg", 0.9)) || file;
+        if (blob.size > 2.5 * 1024 * 1024) {
+          ctx.globalCompositeOperation = "destination-over";
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          blob = (await encode(canvas, "image/jpeg", 0.85)) || blob;
+        }
+      }
+      bitmap?.close?.();
+    }
+    if (blob.size > 5 * 1024 * 1024) throw new Error("图片太大：缩小后仍超过 5 MB");
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+      reader.onerror = () => reject(new Error("读取图片失败"));
+      reader.readAsDataURL(blob);
+    });
+    return { media_type: IMAGE_TYPES.includes(blob.type) ? blob.type : file.type, data, size: blob.size, url: URL.createObjectURL(blob) };
+  }
+
   // ---------------------------------------------------------------- modal and file editor
 
   function modal({ title, sub = "", body = "", foot = "", big = false }) {
@@ -300,16 +338,18 @@
   let cleanup = null; // what the current view leaves behind (timers, streams)
   function route() {
     const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
-    const page = parts[0] || "overview";
-    $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === page || (page === "session" && a.dataset.nav === "sessions")));
-    // another session of 运行中: the list stays, only the right side changes
-    if (page === "live" && liveSplit && main.contains(liveSplit.root)) { liveSplit.select(parts[1] || null); return; }
+    const page = parts[0] || "new";
+    $$("#nav a, .side-new").forEach((a) => a.classList.toggle("active", a.dataset.nav === page));
+    markActive();
+    $("#tip")?.classList.add("hidden");
+    $(".pop")?.remove();
     if (cleanup) { try { cleanup(); } catch { /* ignore */ } cleanup = null; }
     main.scrollTop = 0;
-    const views = { overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => live(parts[1] || null), providers, settings, memory, extensions, usage };
-    (views[page] || overview)();
+    const views = { new: newView, overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => (parts[1] ? liveView(parts[1]) : newView()), providers, settings, memory, extensions, usage };
+    (views[page] || newView)();
   }
-  const page = (html, wide = false) => { main.innerHTML = `<div class="page${wide ? " wide" : ""}">${html}</div>`; return $(".page", main); };
+  // mode: true = full width, "chat" = the conversation layout (full height, its own scrolling)
+  const page = (html, mode = false) => { main.innerHTML = `<div class="page${mode === "chat" ? " chat" : mode ? " wide" : ""}">${html}</div>`; return $(".page", main); };
 
   function showLoggedOut(message) {
     main.innerHTML = `<div class="page"><div class="panel panel-pad" style="max-width:560px;margin:60px auto"><h1>需要从 claude-pro 打开</h1><p class="sub">${esc(message)}</p><p>在任意 claude-pro 会话里输入 <code>/web</code>，或在终端运行 <code>claude-pro web</code>，会自动打开并登录这个页面。</p></div></div>`;
@@ -325,7 +365,7 @@
     const gw = o.gateway;
     el.innerHTML = `<h1>概览</h1><p class="sub">这台电脑上的 claude-pro · ${esc(o.host)}</p>
       <div class="cards">
-        <a class="panel stat" href="#/live"><div class="label">运行中的会话</div><div class="value">${o.running}</div><div class="hint">${o.busy ? `${o.busy} 个正在工作` : "都空闲"}</div></a>
+        <a class="panel stat" href="#/new"><div class="label">运行中的会话</div><div class="value">${o.running}</div><div class="hint">${o.busy ? `${o.busy} 个正在工作` : "都空闲"}</div></a>
         <a class="panel stat" href="#/sessions"><div class="label">会话记录</div><div class="value">${o.sessions}</div><div class="hint">${o.projects} 个项目 · 占用 ${fmtBytes(o.storage)}</div></a>
         <a class="panel stat" href="#/providers"><div class="label">默认模型</div><div class="value" style="font-size:16px;word-break:break-all">${esc(o.remembered?.model || o.model)}</div><div class="hint">推理强度 ${esc(o.remembered?.effort || o.effort)}${o.remembered?.model ? " · 来自 /model 记住的选择" : ""}</div></a>
         <a class="panel stat" href="#/providers"><div class="label">7bit.fun 余额</div><div class="value">${gw ? (gw.balance != null ? fmtUsd(gw.balance) : "—") : "未连接"}</div><div class="hint">${gw ? esc(gw.account?.email || gw.account?.name || gw.key) : "在「模型与供应商」里连接"}${gw?.accountError ? ` · ${esc(gw.accountError)}` : ""}</div></a>
@@ -411,121 +451,363 @@
   }
 
   async function sessionView(dir, id) {
-    const el = page('<div class="empty">正在加载会话…</div>');
+    const el = page('<div class="chat-page"><div class="chat-scroll"><div class="empty">正在加载会话…</div></div></div>', "chat");
     let d;
     try { d = await api(`/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`); } catch (e) { el.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
+    if (d.running) { location.replace(`#/live/${d.running}`); return; }
     const base = `/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`;
-    el.innerHTML = `<div class="convo-head"><div><a href="#/sessions" class="muted" style="font-size:13px">← 会话列表</a><h1 style="margin-top:6px">${esc(d.title)}</h1>
-        <div class="path">${esc(shortPath(d.cwd || dir))}</div><div class="muted" style="font-size:12.5px;margin-top:4px">${d.count} 条消息 · ${fmtBytes(d.size)} · ${d.cost ? `${fmtUsd(d.cost)} · ` : ""}最后使用 ${esc(fmtTime(d.mtime))} · <span class="mono">${esc(d.id)}</span></div></div>
-      <div class="actions">${d.running ? `<a class="button" href="#/live/${esc(d.running)}">实时查看</a>` : '<button class="button" id="resume">在终端中继续</button>'}
-        <button class="button secondary" id="rename">改名</button><a class="button secondary" href="${base}/export">导出 Markdown</a>${d.running ? "" : '<button class="button danger" id="del">删除</button>'}</div></div>
-      <div class="actions" style="margin-bottom:10px"><label class="muted" style="font-size:13px"><input type="checkbox" id="showTools" checked> 显示工具调用</label><label class="muted" style="font-size:13px"><input type="checkbox" id="showThinking"> 展开思考过程</label></div>
-      <div class="log" id="log"></div>`;
+    el.innerHTML = `<div class="chat-page">
+      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><span class="pill">未运行</span><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
+      <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
+      <div class="chat-foot"><div class="resume-bar"><span class="muted">这个会话现在没有在运行。在终端里继续它，就能在这里实时查看和发消息。</span><button class="button" id="resume">在终端中继续</button></div></div></div>`;
     const log = $("#log", el);
     const image = (n) => `${base}/image/${n}`;
     // drawn in pieces: a long conversation has thousands of items
     let i = 0;
     const step = () => {
-      const chunk = d.items.slice(i, i + 200).map((it) => itemHtml(it, { image })).join("");
-      log.insertAdjacentHTML("beforeend", chunk);
+      log.insertAdjacentHTML("beforeend", d.items.slice(i, i + 200).map((it) => itemHtml(it, { image })).join(""));
       i += 200;
       if (i < d.items.length) requestAnimationFrame(step);
-      else if (!d.items.length) log.innerHTML = '<div class="empty">没有内容</div>';
+      else if (!d.items.length) log.innerHTML = '<div class="chat-empty">没有内容</div>';
     };
     step();
-    $("#showTools", el).addEventListener("change", (e) => { $$(".it-tool", log).forEach((n) => n.classList.toggle("hidden", !e.target.checked)); });
-    $("#showThinking", el).addEventListener("change", (e) => { $$(".it-thinking details", log).forEach((n) => { n.open = e.target.checked; }); });
-    $("#resume", el)?.addEventListener("click", async () => {
+    $("#resume", el).addEventListener("click", async () => {
       try {
         const r = await api(`${base}/open`, { method: "POST" });
-        if (r.opened) toast(`已在 ${r.how} 新窗口中继续这个会话`);
-        else { await navigator.clipboard.writeText(r.command).catch(() => {}); toast(`请在终端运行（已复制）：${r.command}`); }
+        if (!r.opened) { await navigator.clipboard.writeText(r.command).catch(() => {}); toast(`请在终端运行（已复制）：${r.command}`); return; }
+        toast(`已在 ${r.how} 新标签中继续，等它上线…`);
+        for (let k = 0; k < 20; k++) {
+          await new Promise((res) => setTimeout(res, 1000));
+          const live = (await api("/api/live").catch(() => ({ sessions: [] }))).sessions.find((x) => x.status?.sessionId === id);
+          if (live) { await loadWorkspace(); location.hash = `#/live/${live.peerId}`; return; }
+        }
       } catch (e) { fail(e); }
     });
-    $("#rename", el).addEventListener("click", async () => {
-      if (d.running) { location.hash = `#/live/${d.running}`; toast("运行中的会话请在实时查看里发送 /rename 新名字"); return; }
-      const name = prompt("会话的新名字（留空则去掉名字）", d.name || "");
-      if (name === null) return;
-      try { await api(`${base}/rename`, { method: "POST", body: { name } }); toast("已改名"); sessionView(dir, id); } catch (e) { fail(e); }
-    });
-    $("#del", el)?.addEventListener("click", async () => {
-      if (!confirm(`删除「${d.title}」？会先移到回收站，保留 7 天。`)) return;
-      try { await api(base, { method: "DELETE" }); toast("已移到回收站"); location.hash = "#/sessions"; } catch (e) { fail(e); }
+    let toolsShown = true;
+    $("#hmenu", el).addEventListener("click", (e) => {
+      popMenu(e.currentTarget, [{ key: "a", title: "", items: [
+        { label: "改名", value: "rename" },
+        { label: "导出 Markdown", value: "export" },
+        { label: toolsShown ? "隐藏工具调用" : "显示工具调用", value: "tools" },
+        { label: "删除（进回收站）", value: "delete" },
+      ] }], async (key, value) => {
+        try {
+          if (value === "rename") {
+            const name = prompt("会话的新名字（留空则去掉名字）", d.name || "");
+            if (name === null) return;
+            await api(`${base}/rename`, { method: "POST", body: { name } });
+            toast("已改名");
+            loadWorkspace();
+            sessionView(dir, id);
+          }
+          if (value === "export") location.href = `${base}/export`;
+          if (value === "tools") { toolsShown = !toolsShown; $$(".it-tool", log).forEach((n) => n.classList.toggle("hidden", !toolsShown)); }
+          if (value === "delete" && confirm(`删除「${d.title}」？会先移到回收站，保留 7 天。`)) {
+            await api(base, { method: "DELETE" });
+            toast("已移到回收站");
+            await loadWorkspace();
+            location.hash = "#/new";
+          }
+        } catch (err) { fail(err); }
+      });
     });
   }
 
-  // ---------------------------------------------------------------- 运行中
+  // ---------------------------------------------------------------- the sidebar: 工作区 (projects and their conversations)
 
-  function liveState(s) {
-    const st = s.status || {};
+  const ICON = {
+    plus: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
+    folder: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+    folderOpen: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1"/><path d="M3 19l2.5-7.5A2 2 0 0 1 7.4 10H21l-2.7 8a2 2 0 0 1-1.9 1H5a2 2 0 0 1-2-2"/></svg>',
+    search: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+    refresh: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
+    newChat: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+    send: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+    stop: '<svg viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg>',
+    add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+    caret: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+    more: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
+  };
+
+  // how long ago, as short as the sidebar wants it: 刚刚, 5分, 3小时, 16天, 2个月, 1年
+  function shortAgo(ms) {
+    if (!ms) return "";
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return "刚刚";
+    if (s < 3600) return `${Math.floor(s / 60)}分`;
+    if (s < 86400) return `${Math.floor(s / 3600)}小时`;
+    if (s < 86400 * 30) return `${Math.floor(s / 86400)}天`;
+    if (s < 86400 * 365) return `${Math.floor(s / (86400 * 30))}个月`;
+    return `${Math.floor(s / (86400 * 365))}年`;
+  }
+
+  function liveState(st = {}) {
     if (st.dialog) return ["ask", "等待回答"];
     if (st.turn) return ["busy", st.verb ? `${st.verb}…` : "工作中"];
-    return ["", "空闲"];
+    return ["idle", "空闲"];
   }
 
-  async function refreshLiveBadge(list) {
+  const ws = {
+    sessions: [], live: [], q: "", loaded: false,
+    closed: new Set(JSON.parse(localStorage.getItem("cpWsClosed") || "[]")),
+    expanded: new Set(),
+    tips: new Map(),
+  };
+  const projectKey = (cwd) => shortPath(cwd || "").toLowerCase().replace(/\/+$/, "");
+  const baseName = (cwd) => shortPath(cwd || "").replace(/\/+$/, "").split("/").pop() || cwd || "?";
+
+  async function loadWorkspace() {
     try {
-      const sessions = list || (await api("/api/live")).sessions;
-      const asking = sessions.filter((s) => s.status?.dialog).length;
-      const badge = $("#liveBadge");
-      badge.textContent = asking ? `${asking}` : String(sessions.length);
-      badge.classList.toggle("hidden", !sessions.length);
-      badge.title = asking ? `${asking} 个会话在等回答` : `${sessions.length} 个会话在运行`;
-    } catch { /* next time */ }
-  }
-
-  // 运行中: the sessions on the left, the one chosen on the right (live), as a chat app lays out its conversations.
-  let liveSplit = null;
-  function live(peerId) {
-    const el = page(`<div class="split" id="lsplit"><aside class="split-list"><div class="split-head"><h2>运行中</h2><span class="muted" id="lcount"></span></div><div id="lrows"><div class="empty">正在加载…</div></div></aside><section class="split-main" id="lmain"></section></div>`, true);
-    const root = $("#lsplit", el);
-    let current = null;
-    let viewCleanup = null;
-    let sessions = [];
-    const rows = $("#lrows", el);
-    const draw = async () => {
-      let data;
-      try { data = await api("/api/live"); } catch (e) { rows.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
-      sessions = data.sessions;
-      refreshLiveBadge(sessions);
-      $("#lcount", el).textContent = sessions.length ? `${sessions.length} 个` : "";
-      rows.innerHTML = sessions.length ? sessions.map((s) => {
-        const [cls, label] = liveState(s);
-        const st = s.status || {};
-        return `<a class="lrow${s.peerId === current ? " active" : ""}" href="#/live/${esc(s.peerId)}" title="${esc(st.title || s.name)}"><div class="lrow-top"><span class="dot-state ${cls}"></span><strong>${esc(st.title || s.name)}</strong>${cls ? `<span class="pill ${cls === "ask" ? "off" : "warn"}">${esc(label)}</span>` : ""}</div>
-          <div class="lrow-sub mono">@${esc(s.name)} · ${esc(shortPath(st.cwd || s.cwd))}</div>
-          <div class="lrow-sub">${esc(st.model || "")}${st.cost != null ? ` · ${fmtUsd(st.cost)}` : ""}${st.context?.window ? ` · ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""}${st.rc ? " · ⇄" : ""}</div></a>`;
-      }).join("") : '<div class="empty">现在没有运行中的会话。在终端里启动 claude-pro 后会出现在这里。</div>';
-      if (current && !sessions.some((s) => s.peerId === current) && !$("#lmain .live-wrap", el)) select(null);
-    };
-    function select(id) {
-      if (id === current && (id || $("#lmain", el).childElementCount)) return;
-      if (viewCleanup) { try { viewCleanup(); } catch { /* ignore */ } viewCleanup = null; }
-      current = id;
-      root.classList.toggle("has-sel", Boolean(id));
-      $$(".lrow", rows).forEach((r) => r.classList.toggle("active", r.getAttribute("href") === `#/live/${id}`));
-      const box = $("#lmain", el);
-      if (id) viewCleanup = liveView(id, box);
-      else box.innerHTML = `<div class="split-empty"><div class="brand-logo" style="width:44px;height:44px;font-size:22px">c</div><h2>选择左边的会话</h2><p class="muted">实时查看它在做什么，给它发消息、回答它的问题，或停止当前任务</p></div>`;
+      const [s, l] = await Promise.all([api("/api/sessions"), api("/api/live")]);
+      ws.sessions = s.sessions;
+      ws.live = l.sessions;
+      ws.loaded = true;
+      drawWorkspace();
+    } catch (e) {
+      if (!ws.loaded) $("#ws").innerHTML = `<div class="ws-empty">加载失败：${esc(e.message)}</div>`;
     }
-    liveSplit = { root, select };
-    select(peerId);
-    draw();
-    const timer = setInterval(draw, 3000);
-    cleanup = () => { clearInterval(timer); if (viewCleanup) viewCleanup(); liveSplit = null; };
   }
 
-  // A running session, live, in `box`. Returns what stops it.
-  function liveView(peerId, box) {
-    box.innerHTML = `<div class="live-wrap">
-      <div class="convo-head" style="margin:0"><div><a href="#/live" class="muted back-mobile" style="font-size:13px">← 运行中</a><h2 id="ltitle" style="margin-top:4px;font-size:18px">连接中…</h2><div class="path" id="lsub"></div></div><div class="actions"><span id="lconn" class="pill">连接中</span></div></div>
-      <div class="log" id="log"></div>
-      <div class="live-foot"><div class="status-line" id="lstatus"></div><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div>
-        <form class="send-form" id="lform"><textarea id="linput" rows="1" placeholder="发给这个会话（和在终端输入框里回车一样：/命令、!命令、@会话 都可以）。Enter 发送，Shift+Enter 换行"></textarea><button type="button" class="button danger hidden" id="lstop">停止</button><button class="button" type="submit">发送</button></form></div>
-    </div>`;
-    const el = box;
+  function drawWorkspace() {
+    const box = $("#ws");
+    const liveById = new Map(ws.live.map((l) => [l.peerId, l]));
+    const known = new Set(ws.sessions.map((s) => s.id));
+    const items = ws.sessions.map((s) => {
+      const peer = s.running ? liveById.get(s.running) : null;
+      return { href: peer ? `#/live/${peer.peerId}` : `#/session/${s.dir}/${s.id}`, title: peer?.status?.title || s.title, cwd: s.cwd || s.dir, mtime: s.mtime, peer, alt: peer ? `#/session/${s.dir}/${s.id}` : null };
+    });
+    // running sessions with nothing written yet (just started)
+    for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: Date.now(), peer: l });
+    const q = ws.q.toLowerCase();
+    const groups = new Map();
+    for (const it of items) {
+      if (q && !`${it.title} ${it.cwd}`.toLowerCase().includes(q)) continue;
+      const key = projectKey(it.cwd);
+      if (!groups.has(key)) groups.set(key, { key, cwd: it.cwd, items: [], last: 0 });
+      const g = groups.get(key);
+      g.items.push(it);
+      g.last = Math.max(g.last, it.peer ? Date.now() : it.mtime);
+    }
+    const list = [...groups.values()].sort((a, b) => b.last - a.last);
+    const here = location.hash;
+    ws.tips.clear();
+    let n = 0;
+    box.innerHTML = list.length ? list.map((g) => {
+      g.items.sort((a, b) => Boolean(b.peer) - Boolean(a.peer) || b.mtime - a.mtime);
+      const closed = ws.closed.has(g.key) && !q;
+      const limit = ws.expanded.has(g.key) || q ? Infinity : 6;
+      const rows = closed ? "" : g.items.slice(0, limit).map((it) => {
+        const id = `t${n++}`;
+        ws.tips.set(id, it);
+        const [cls] = it.peer ? liveState(it.peer.status) : [""];
+        const active = here === it.href || (it.alt && here === it.alt);
+        return `<a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}" data-tip="${id}">${it.peer ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span><span class="ws-ago">${it.peer ? "" : esc(shortAgo(it.mtime))}</span></a>`;
+      }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
+      const running = g.items.filter((it) => it.peer).length;
+      return `<div class="ws-group"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button>${rows}</div>`;
+    }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话"}</div>`;
+  }
+
+  function markActive() {
+    const here = location.hash;
+    $$("#ws .ws-item").forEach((a) => {
+      const it = ws.tips.get(a.dataset.tip);
+      a.classList.toggle("active", Boolean(it && (here === it.href || (it.alt && here === it.alt))));
+    });
+  }
+
+  function wireSidebar() {
+    const box = $("#ws");
+    box.addEventListener("click", (e) => {
+      const f = e.target.closest("[data-folder]"), x = e.target.closest("[data-expand]");
+      if (f) {
+        const key = f.dataset.folder;
+        if (ws.closed.has(key)) ws.closed.delete(key); else ws.closed.add(key);
+        localStorage.setItem("cpWsClosed", JSON.stringify([...ws.closed]));
+        drawWorkspace();
+      }
+      if (x) { ws.expanded.add(x.dataset.expand); drawWorkspace(); }
+    });
+    const tip = $("#tip");
+    box.addEventListener("mouseover", (e) => {
+      const a = e.target.closest("[data-tip]");
+      const it = a && ws.tips.get(a.dataset.tip);
+      if (!it) { tip.classList.add("hidden"); return; }
+      const [cls, label] = it.peer ? liveState(it.peer.status) : ["off", "未运行"];
+      const st = it.peer?.status || {};
+      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div><div class="tip-state"><span class="ws-dot ${cls}"></span>${esc(label)}</div>`;
+      const r = a.getBoundingClientRect();
+      tip.classList.remove("hidden");
+      tip.style.left = `${r.right + 8}px`;
+      tip.style.top = `${Math.min(window.innerHeight - tip.offsetHeight - 8, r.top)}px`;
+    });
+    box.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+    box.addEventListener("scroll", () => tip.classList.add("hidden"));
+    $("#wsSearchBtn").addEventListener("click", () => {
+      const input = $("#wsSearch");
+      input.classList.toggle("hidden");
+      if (!input.classList.contains("hidden")) input.focus(); else { input.value = ""; ws.q = ""; drawWorkspace(); }
+    });
+    $("#wsSearch").addEventListener("input", (e) => { ws.q = e.target.value.trim(); drawWorkspace(); });
+    $("#wsRefresh").addEventListener("click", () => loadWorkspace());
+  }
+
+  // ---------------------------------------------------------------- the message box (new conversation and live)
+
+  // A rounded box with the text, images (pasted, dropped or added with +), what goes left and right of the send button.
+  // onSend(text, images) resolves when sent (the box is emptied) or throws (it is kept).
+  function composer(box, { placeholder, onSend, left = "", right = "", dropZone = box }) {
+    box.innerHTML = `<form class="composer"><div class="thumbs hidden"></div><textarea rows="1" placeholder="${esc(placeholder)}"></textarea>
+      <div class="composer-bar"><button type="button" class="icon-btn" data-add title="添加图片（也可以粘贴或拖进来）" aria-label="添加图片">${ICON.add}</button><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <span class="composer-left">${left}</span><span class="grow"></span><span class="composer-right">${right}</span>
+        <button type="button" class="round-btn stop hidden" data-stop title="停止当前任务">${ICON.stop}</button><button type="submit" class="round-btn" data-send title="发送（Enter）" disabled>${ICON.send}</button></div></form>`;
+    const form = $("form", box), input = $("textarea", box), thumbs = $(".thumbs", box), file = $("input[type=file]", box), send = $("[data-send]", box);
+    let images = [];
+    let sending = false;
+    const ready = () => { send.disabled = sending || (!input.value.trim() && !images.length); };
+    const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(240, input.scrollHeight)}px`; ready(); };
+    const paint = () => {
+      thumbs.classList.toggle("hidden", !images.length);
+      thumbs.innerHTML = images.map((img, i) => `<div class="thumb"><img src="${img.url}" alt="图片 ${i + 1}"><button type="button" data-drop="${i}" title="移除" aria-label="移除">×</button></div>`).join("");
+      ready();
+    };
+    async function add(files) {
+      const list = [...files].filter((f) => f && f.type.startsWith("image/"));
+      for (const f of list) {
+        if (images.length >= MAX_IMAGES) { toast(`一条消息最多 ${MAX_IMAGES} 张图片`, "error"); break; }
+        try { images.push(await prepareImage(f)); } catch (err) { fail(err); }
+      }
+      paint();
+      input.focus();
+    }
+    thumbs.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-drop]");
+      if (!b) return;
+      const [gone] = images.splice(Number(b.dataset.drop), 1);
+      if (gone) URL.revokeObjectURL(gone.url);
+      paint();
+    });
+    $("[data-add]", box).addEventListener("click", () => file.click());
+    file.addEventListener("change", async () => { await add(file.files); file.value = ""; });
+    input.addEventListener("input", autosize);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); } });
+    input.addEventListener("paste", (e) => {
+      const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file").map((it) => it.getAsFile());
+      if (files.some((f) => f?.type.startsWith("image/"))) { e.preventDefault(); add(files); }
+    });
+    dropZone.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); box.classList.add("dropping"); } });
+    dropZone.addEventListener("dragleave", (e) => { if (!dropZone.contains(e.relatedTarget)) box.classList.remove("dropping"); });
+    dropZone.addEventListener("drop", (e) => { box.classList.remove("dropping"); if (e.dataTransfer?.files?.length) { e.preventDefault(); add(e.dataTransfer.files); } });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = input.value;
+      if (sending || (!text.trim() && !images.length)) return;
+      sending = true;
+      ready();
+      try {
+        await onSend(text, images.map(({ media_type, data }) => ({ media_type, data })));
+        input.value = "";
+        for (const img of images) URL.revokeObjectURL(img.url);
+        images = [];
+        paint();
+        autosize();
+      } catch (err) { fail(err); } finally { sending = false; ready(); }
+    });
+    return {
+      input,
+      left: $(".composer-left", box),
+      right: $(".composer-right", box),
+      setBusy(busy) { $("[data-stop]", box).classList.toggle("hidden", !busy); },
+      onStop(fn) { $("[data-stop]", box).addEventListener("click", fn); },
+      dispose() { for (const img of images) URL.revokeObjectURL(img.url); },
+    };
+  }
+
+  // A small menu under `anchor`: items [{label, description, current, value}], onPick(value).
+  function popMenu(anchor, sections, onPick) {
+    $(".pop")?.remove();
+    const pop = document.createElement("div");
+    pop.className = "pop";
+    pop.innerHTML = sections.map((s) => `<div class="pop-head">${esc(s.title)}</div>${s.items.map((it, i) => `<button type="button" data-s="${esc(s.key)}" data-i="${i}" class="${it.current ? "current" : ""}"><span>${esc(it.label)}</span>${it.description ? `<small>${esc(it.description)}</small>` : ""}</button>`).join("")}`).join("");
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = `${Math.max(8, Math.min(window.innerWidth - pop.offsetWidth - 8, r.right - pop.offsetWidth))}px`;
+    pop.style.top = `${Math.max(8, r.top - pop.offsetHeight - 6)}px`;
+    const close = (e) => { if (!e || !pop.contains(e.target)) { pop.remove(); document.removeEventListener("mousedown", close); } };
+    setTimeout(() => document.addEventListener("mousedown", close), 0);
+    pop.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      const s = sections.find((x) => x.key === b.dataset.s);
+      onPick(s.key, s.items[Number(b.dataset.i)].value);
+      close();
+    });
+  }
+
+  // ---------------------------------------------------------------- 新会话
+
+  async function newView() {
+    const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">在一个目录里开一个新的 claude-pro 会话：它会在新的终端标签里启动，你可以在这里实时看着它工作。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
+    let projects = [];
+    try { projects = (await api("/api/projects")).projects; } catch { /* typed by hand */ }
+    let dir = localStorage.getItem("cpNewDir") || projects[0]?.cwd || "";
+    const c = composer($("#ncomp", el), {
+      placeholder: "描述你要它做的事，/命令 也可以。Enter 发送，Shift+Enter 换行",
+      left: `<button type="button" class="chip" id="ndir" title="会话在哪个目录里工作">${ICON.folder}<span></span>${ICON.caret}</button>`,
+      onSend: async (text, images) => startSession(dir, text, images),
+    });
+    const chip = $("#ndir", el);
+    const paintDir = () => { $("span", chip).textContent = dir ? baseName(dir) : "选择目录"; chip.title = dir ? `会话在 ${dir} 里工作` : "选择目录"; };
+    paintDir();
+    chip.addEventListener("click", () => {
+      popMenu(chip, [
+        { key: "dir", title: "最近的项目", items: projects.slice(0, 12).map((p) => ({ label: baseName(p.cwd), description: shortPath(p.cwd), value: p.cwd, current: p.cwd === dir })) },
+        { key: "other", title: "", items: [{ label: "其他目录…", value: "" }] },
+      ], (key, value) => {
+        if (key === "other") value = prompt("目录的完整路径", dir) || "";
+        if (value) { dir = value.trim(); localStorage.setItem("cpNewDir", dir); paintDir(); }
+      });
+    });
+    c.input.focus();
+  }
+
+  // claude-pro in a new terminal tab in `dir`; once it is up it is opened here and the message goes to it.
+  async function startSession(dir, text, images) {
+    if (!dir) throw new Error("先选一个目录");
+    const before = new Set(ws.live.map((r) => r.peerId));
+    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir } });
+    if (!r.opened) throw new Error(`这个系统不能自动打开终端，请运行：${r.command}`);
+    localStorage.setItem("cpNewDir", r.cwd);
+    toast(`已在 ${r.how} 里启动，等待会话上线…`);
+    const until = Date.now() + 30_000;
+    let found = null;
+    while (!found && Date.now() < until) {
+      await new Promise((res) => setTimeout(res, 1000));
+      try { found = (await api("/api/live")).sessions.find((x) => !before.has(x.peerId) && projectKey(x.status?.cwd || x.cwd) === projectKey(r.cwd)); } catch { /* again */ }
+    }
+    if (!found) throw new Error(`已在 ${r.how} 里打开，但 30 秒内没看到会话上线：请看一下那个终端窗口`);
+    // the session may still be drawing its first screen: tried again for a few seconds
+    for (let i = 0; i < 10; i++) {
+      try { await api(`/api/live/${found.peerId}/send`, { method: "POST", body: { text, images } }); break; } catch (ex) {
+        if (i === 9) toast(`会话已创建，但消息没发出去：${ex.message}`, "error");
+        await new Promise((res) => setTimeout(res, 800));
+      }
+    }
+    await loadWorkspace();
+    location.hash = `#/live/${found.peerId}`;
+  }
+
+  // ---------------------------------------------------------------- a running session, live
+
+  function liveView(peerId) {
+    const el = page(`<div class="chat-page">
+      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill">连接中</span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
+      <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
+      <div class="chat-foot"><div class="chat-extra"><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
+        <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
+    </div>`, "chat");
     const log = $("#log", el);
-    const input = $("#linput", el);
+    const scroller = $("#lscroll", el);
     const elements = new Map();
     const full = new Map();
     let state = hydrate([]);
@@ -533,7 +815,40 @@
     let statusAt = Date.now();
     let dialogShown = null;
     const post = (type, body = {}) => api(`/api/live/${peerId}/${type}`, { method: "POST", body });
-    const near = () => log.scrollHeight - log.scrollTop - log.clientHeight < 140;
+    const near = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
+    const c = composer($("#lcomp", el), {
+      placeholder: "发给这个会话：和在终端里输入一样，/命令、!命令、@会话 都可以。Enter 发送，Shift+Enter 换行",
+      right: '<button type="button" class="chip" id="lmodel" title="切换模型和推理强度"><span></span></button>',
+      dropZone: el,
+      onSend: async (text, images) => {
+        if (/^\s*\/(exit|quit|restart|reload|update)(\s|$)/i.test(text)) throw new Error("结束、重启会话和更新 claude-pro 只能在终端里操作");
+        const r = await post("send", { text, images });
+        if (r.queued) toast("会话正忙：已排队，当前任务结束后处理");
+        setTimeout(() => { scroller.scrollTop = scroller.scrollHeight; }, 50);
+      },
+    });
+    c.onStop(() => post("interrupt").catch(fail));
+    $("#lmodel", el).addEventListener("click", async (e) => {
+      const anchor = e.currentTarget;
+      let o;
+      try { o = await post("options"); } catch (err) { return fail(err); }
+      popMenu(anchor, [
+        { key: "model", title: "模型", items: (o.models || []).map((m) => ({ label: m.label || m.value, description: m.description || "", value: m.value, current: m.current })) },
+        { key: "effort", title: "推理强度", items: (o.efforts || []).map((m) => ({ label: m.label || m.value, description: m.description || "", value: m.value, current: m.current })) },
+      ], (key, value) => post("send", { text: `/${key} ${value}` }).catch(fail));
+    });
+    $("#lmenu", el).addEventListener("click", (e) => {
+      popMenu(e.currentTarget, [{ key: "a", title: "", items: [
+        { label: "查看完整历史记录", value: "history" },
+        { label: "改名（/rename）", value: "rename" },
+        { label: "压缩上下文（/compact）", value: "compact" },
+      ] }], (key, value) => {
+        const known = ws.sessions.find((s) => s.id === status.sessionId);
+        if (value === "history") { if (known) location.hash = `#/session/${known.dir}/${known.id}`; else toast("这个会话还没有保存的记录"); }
+        if (value === "rename") { const name = prompt("新的名字", status.title || ""); if (name) post("send", { text: `/rename ${name}` }).catch(fail); }
+        if (value === "compact") post("send", { text: "/compact" }).catch(fail);
+      });
+    });
 
     function render(item) {
       let node = elements.get(item);
@@ -553,31 +868,36 @@
       log.innerHTML = "";
       elements.clear();
       for (const it of state.items) render(it);
-      log.scrollTop = log.scrollHeight;
+      if (!state.items.length) log.innerHTML = '<div class="chat-empty">还没有消息：在下面输入，或在它的终端里输入</div>';
+      scroller.scrollTop = scroller.scrollHeight;
     }
     function renderStatus() {
       const s = status;
-      let html;
+      const busy = Boolean(s.turn ?? s.busy);
+      let html = "";
       if (s.rateWait) html = `<span class="work">⏸ ${esc(s.rateWait.text)}</span>`;
-      else if (s.turn ?? s.busy) {
+      else if (busy) {
         const frames = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
         const parts = [fmtDuration((s.elapsed || 0) + Date.now() - statusAt)];
         if (s.tokens) parts.push(`↓ ${fmtTokens(s.tokens)} tokens`);
         if (s.aborting) parts.push("正在停止…");
-        html = `<span class="work">${frames[Math.floor(Date.now() / 120) % frames.length]} ${esc(s.verb || "Working")}…</span> (${parts.join(" · ")})`;
-      } else html = "✳ 空闲";
-      const extra = [];
-      if (s.model) extra.push(esc(s.model) + (s.effort ? ` · ${esc(s.effort)}` : ""));
-      if (Number.isFinite(s.cost)) extra.push(fmtUsd(s.cost));
-      if (s.context?.window) extra.push(`上下文 ${fmtTokens(s.context.used || 0)} / ${fmtTokens(s.context.window)}`);
-      $("#lstatus", el).innerHTML = `${html}${extra.length ? ` · ${extra.join(" · ")}` : ""}`;
-      $("#lstop", el).classList.toggle("hidden", !(s.turn ?? s.busy));
+        html = `<span class="work">${frames[Math.floor(Date.now() / 120) % frames.length]} ${esc(s.verb || "Working")}…</span> <span class="muted">(${parts.join(" · ")})</span>`;
+      }
+      $("#lstatus", el).innerHTML = html;
+      c.setBusy(busy);
     }
     function setStatus(next) {
       status = next || {};
       statusAt = Date.now();
       $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
       $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}`;
+      $("#lmodel span", el).textContent = `${status.model || "模型"}${status.effort ? ` · ${status.effort}` : ""}`;
+      const stats = [];
+      if (status.context?.window) stats.push(`上下文 ${fmtTokens(status.context.used || 0)} / ${fmtTokens(status.context.window)}（${Math.round(((status.context.used || 0) / status.context.window) * 100)}%）`);
+      if (Number.isFinite(status.cost)) stats.push(`花费 ${fmtUsd(status.cost)}`);
+      if (status.tasks) stats.push(`${status.tasks} 个后台 agent`);
+      if (status.rc) stats.push("⇄ 远程控制已开");
+      $("#lstats", el).textContent = stats.join("  ·  ");
       const todos = Array.isArray(status.todos) ? status.todos : [];
       $("#ltodos", el).innerHTML = todos.length ? `<details open><summary class="muted">待办 ${todos.filter((t) => t.status === "completed").length}/${todos.length}</summary>${todos.map((t) => `<div class="${t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : ""}">${t.status === "completed" ? "☒" : t.status === "in_progress" ? "◼" : "☐"} ${esc(t.content)}</div>`).join("")}</details>` : "";
       $("#lqueue", el).innerHTML = (status.queue || []).map((q) => `<div>⎿ 排队中：${esc(String(q).replace(/\s+/g, " ").slice(0, 200))}</div>`).join("");
@@ -631,8 +951,9 @@
       if (msg.t === "status") { setStatus(msg.status); return; }
       if (msg.t === "batch") {
         const stick = near();
+        log.querySelector(".chat-empty")?.remove();
         for (const ev of msg.events || []) { const it = applyEvent(state, ev); if (it) render(it); }
-        if (stick) log.scrollTop = log.scrollHeight;
+        if (stick) scroller.scrollTop = scroller.scrollHeight;
       }
     }
     const conn = $("#lconn", el);
@@ -641,26 +962,8 @@
     es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch { /* skip */ } };
     es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "已断开" : "重新连接中…"; conn.className = "pill warn"; };
     const tick = setInterval(renderStatus, 250);
-    const stop = () => { es.close(); clearInterval(tick); };
-
-    const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(220, input.scrollHeight + 2)}px`; };
-    input.addEventListener("input", autosize);
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#lform", el).requestSubmit(); } });
-    $("#lform", el).addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = input.value;
-      if (!text.trim()) return;
-      if (/^\s*\/(exit|quit|restart|reload|update)(\s|$)/i.test(text)) { toast("结束、重启会话和更新 claude-pro 只能在终端里操作", "error"); return; }
-      try {
-        const r = await post("send", { text });
-        input.value = "";
-        autosize();
-        if (r.queued) toast("会话正忙：已排队，当前任务结束后处理");
-      } catch (err) { fail(err); }
-    });
-    $("#lstop", el).addEventListener("click", () => post("interrupt").catch(fail));
-    input.focus();
-    return stop;
+    cleanup = () => { es.close(); clearInterval(tick); c.dispose(); };
+    c.input.focus();
   }
 
   // ---------------------------------------------------------------- 模型与供应商
@@ -1012,7 +1315,9 @@
     localStorage.setItem("cpTheme", next);
   });
   window.addEventListener("hashchange", route);
-  api("/api/ping").then((p) => { $("#brandVersion").textContent = `v${p.version}`; route(); }).catch(() => {});
-  setInterval(() => { api("/api/ping").catch(() => {}); refreshLiveBadge(); }, 60_000); // keeps the server from stopping while the page is open
-  refreshLiveBadge();
+  wireSidebar();
+  api("/api/ping").then((p) => { $("#brandVersion").textContent = `v${p.version}`; route(); loadWorkspace(); }).catch(() => {});
+  // the sidebar follows the sessions (and keeps the server from stopping while the page is open)
+  setInterval(() => { if (document.visibilityState === "visible") loadWorkspace(); else api("/api/ping").catch(() => {}); }, 5000);
+  api("/api/overview").then((o) => { const who = o.gateway?.account?.name || o.gateway?.account?.email || o.host; $("#sideUser").textContent = who; $("#sideAvatar").textContent = String(who || "?").slice(0, 1).toUpperCase(); }).catch(() => {});
 })();
