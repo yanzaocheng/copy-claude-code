@@ -799,14 +799,9 @@ export class App {
   }
 
   // A message of the user in the transcript (typed here, on the remote page, or sent by another session).
-  echoUser(text, images = 0) {
+  echoUser(text) {
     this.logLocal(renderUserMessage(text, this.width));
-    // the web console shows the images themselves: they become the next ones of the conversation (see liveImage)
     this.liveFeed.emit({ t: 'user', text: String(text) });
-    if (images && this.liveFeed.active) {
-      const before = this.conversationImages().length;
-      for (let i = 0; i < images; i++) this.liveFeed.emit({ t: 'image', n: before + i });
-    }
   }
 
   // The images of the user's messages, in order (what transcriptItems numbers {k: 'image', n}).
@@ -1880,7 +1875,7 @@ export class App {
     this.turnStarting = true;
     this.turnStart = Date.now();
     this.verb = VERBS[Math.floor(Math.random() * VERBS.length)];
-    if (echo) this.echoUser(display ?? prompt, images.length);
+    if (echo) this.echoUser(display ?? prompt);
     this.refreshTopic(topic ?? display ?? prompt);
     let content;
     try {
@@ -2448,14 +2443,23 @@ export class App {
   takeQueued() {
     if (!this.queue.length) return [];
     const items = this.queue.splice(0);
-    for (const q of items) this.echoUser(q.display ?? q.text, q.images?.length);
+    for (const q of items) this.echoUser(q.display ?? q.text);
     this.turnPeers.push(...items.map((q) => q.peer).filter(Boolean));
     this.refreshTopic(items.map((q) => q.display ?? q.text).join('\n\n'));
     // Content blocks for the agent: each queued message's text followed by its images.
     return items.flatMap((q) => [{ type: 'text', text: q.text }, ...q.images.map(imageBlock)]);
   }
 
-  messageAdded(msg, agent) { if (this.isMain(agent)) this.store.message(msg); }
+  messageAdded(msg, agent) {
+    if (!this.isMain(agent)) return;
+    this.store.message(msg);
+    if (!this.liveFeed.active || msg.role !== 'user' || !Array.isArray(msg.content)) return;
+    const count = msg.content.filter((b) => b.type === 'image').length;
+    if (!count) return;
+    // Publish after pushMessage adds the fitted images: the page can immediately fetch them via liveImage.
+    const end = this.conversationImages().length;
+    for (let n = end - count; n < end; n++) this.liveFeed.emit({ t: 'image', n });
+  }
   systemPrompt(text, agent) { if (this.isMain(agent)) this.store.setSystemPrompt(text); }
   messagesReplaced(msgs, agent) { if (this.isMain(agent)) this.store.reset(msgs); }
   usage(_u, agent) {
