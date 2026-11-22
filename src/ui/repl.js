@@ -16,11 +16,11 @@ import {
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
-import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, pickedModels } from '../config.js';
+import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
 import { gatewayLogin, loadGatewayModels, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { connectedProviders } from '../providers.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
-import { buildCommands, modelChoices, effortChoices } from '../commands.js';
+import { buildCommands, webModelChoices, effortChoices } from '../commands.js';
 import { canRestart, writeRestartState, runSelfCheck, watchSource, restartNote, reloadTiming, RESTART_EXIT_CODE, MAX_RESTARTS, RESTART_WINDOW_MS } from '../restart.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { listDirectory, recentDirectories } from '../utils/dirs.js';
@@ -1067,21 +1067,15 @@ export class App {
     return {};
   }
 
-  // For the page's model and effort menus: what /model and /effort offer (in plain text; the page sends /model
-  // <value> or /effort <value>), what is chosen (`current`), and the model and effort in use, as the status says.
+  // The page's model and effort menus, from the kept lists. The page sends /model or /effort with the choice.
   async remoteOptions() {
     const cfg = this.config;
-    // (the lists kept from before: the page's menus open at once; 刷新模型列表 on the console renews them)
-    // (and only the models ticked in its 模型列表, when any are)
-    const [models, efforts] = await Promise.all([modelChoices(cfg, { cached: true, picked: new Set(pickedModels()) }), effortChoices(cfg, { cached: true })]);
-    const chosen = cfg.modelOverride || 'default';
-    const same = (m) => m.id === cfg.model.id && m.provider === cfg.model.provider;
-    const current = models.find((o) => o.value === chosen) || models.find((o) => o.value !== 'default' && same(cfg.resolveModel(o.value)));
+    const [models, efforts] = await Promise.all([webModelChoices(cfg), effortChoices(cfg, { cached: true })]);
     const effortChosen = cfg.effortOverride || 'default';
     const { effort } = modelInfo(cfg);
     return {
       model: cfg.model.id,
-      models: models.map((o) => ({ ...o, ...(o === current ? { current: true } : {}) })),
+      models,
       effort: effort || defaultEffort(cfg.model.id, cfg),
       efforts: efforts.options.map((o) => ({ ...o, ...(o.value === effortChosen ? { current: true } : {}) })),
     };

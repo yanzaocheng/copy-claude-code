@@ -17,6 +17,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR, VERSION } from '../config.js';
+import { machineName } from '../peers.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 7878;
@@ -217,7 +218,7 @@ async function serve() {
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, remote, nativeFolderPicker: !remote && process.platform === 'win32', hosted: host?.size ?? 0 });
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), remote, nativeFolderPicker: !remote && process.platform === 'win32', hosted: host?.size ?? 0 });
       if (remote && url.pathname === '/api/projects/pick') return send(res, 403, { error: '远程访问请使用目录列表' });
       // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
       if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }

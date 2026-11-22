@@ -163,6 +163,7 @@ h3 { font-size: 14px; margin: 0 0 6px; }
 .pop button:hover { background: var(--hover); }
 .pop button.current { color: var(--accent-text); font-weight: 600; }
 .pop button.danger { color: var(--danger); }
+.pop .pop-default { margin-left: 4px; padding: 0 5px; font-size: 11px; vertical-align: middle; }
 .pop small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* parts */

@@ -992,7 +992,7 @@
     if (wasOpen) return;
     const pop = document.createElement("div");
     pop.className = "pop";
-    pop.innerHTML = sections.map((s) => `<div class="pop-head">${esc(s.title)}</div>${s.items.map((it, i) => `<button type="button" data-s="${esc(s.key)}" data-i="${i}" class="${it.current ? "current" : ""}${it.danger ? " danger" : ""}"><span>${esc(it.label)}</span>${it.description ? `<small>${esc(it.description)}</small>` : ""}</button>`).join("")}`).join("");
+    pop.innerHTML = sections.map((s) => `<div class="pop-head">${esc(s.title)}</div>${s.items.map((it, i) => `<button type="button" data-s="${esc(s.key)}" data-i="${i}" class="${it.current ? "current" : ""}${it.danger ? " danger" : ""}"><span>${esc(it.label)}${it.isDefault ? ' <span class="pill accent pop-default">默认</span>' : ""}</span>${it.description ? `<small>${esc(it.description)}</small>` : ""}</button>`).join("")}`).join("");
     document.body.appendChild(pop);
     const r = anchor.getBoundingClientRect();
     pop.style.left = `${Math.max(8, Math.min(window.innerWidth - pop.offsetWidth - 8, r.right - pop.offsetWidth))}px`;
@@ -1025,6 +1025,9 @@
       onPick(s.key, s.items[Number(b.dataset.i)].value);
     });
   }
+
+  // Clicking the tagged model follows the project default rather than creating a model override.
+  const modelMenuItems = (models = []) => models.filter((m) => m.value !== "default").map((m) => ({ ...m, value: m.isDefault ? "default" : m.value }));
 
   // ---------------------------------------------------------------- 新会话
 
@@ -1103,8 +1106,8 @@
           const info = await options(kind);
           if (!el.isConnected || dir !== currentDir) return;
           const isModel = kind === "models";
-          const current = isModel ? info.modelChoice : info.effortChoice;
-          const items = info[kind].map((item) => ({ ...item, label: item.value === "default" ? "项目默认" : item.label, current: item.value === current }));
+          const items = isModel ? modelMenuItems(info.models) : (info.efforts || []).map((item) => ({ ...item, label: item.value === "default" ? "项目默认" : item.label, current: item.value === info.effortChoice }));
+          if (!items.length) return toast(isModel ? "没有可选的模型" : "这个模型不能调推理强度");
           popMenu(anchor, [{ key: kind, title: isModel ? "模型" : "思考强度", items }], (_, value) => {
             if (isModel) { if (model !== value) effort = undefined; model = value; }
             else effort = value;
@@ -1196,7 +1199,8 @@
       const anchor = e.currentTarget;
       let o;
       try { o = await post("options"); } catch (err) { return fail(err); }
-      const items = (o[list] || []).map((m) => ({ label: m.label || m.value, description: m.description || "", value: m.value, current: m.current }));
+      if (!el.isConnected) return;
+      const items = key === "model" ? modelMenuItems(o.models) : (o[list] || []);
       if (!items.length) return toast(key === "effort" ? "这个模型不能调推理强度" : "没有可选的模型");
       popMenu(anchor, [{ key, title, items }], (k, value) => post("send", { text: `/${k} ${value}` }).catch(fail));
     };
@@ -2019,6 +2023,10 @@
   api("/api/ping").then((p) => {
     noteServerCode(p);
     $("#brandVersion").textContent = `v${p.version}`;
+    const machine = p.machine || "本机";
+    $("#sideUser").textContent = machine;
+    $("#sideAvatar").textContent = [...machine][0].toUpperCase();
+    $("#sideMe").title = `${machine} · 设置与更多`;
     hasNativeFolderPicker = p.nativeFolderPicker === true;
     $("#remoteLinks").classList.toggle("hidden", !p.remote); // opened through 远程访问: switch computer, log out
     route();
@@ -2031,5 +2039,4 @@
     if (visible) loadWorkspace();
     if (!visible || ++pingTick % 6 === 0) api("/api/ping").then(noteServerCode).catch(() => {}); // (every 30 s while looked at)
   }, 5000);
-  api("/api/overview").then((o) => { const who = o.gateway?.account?.name || o.gateway?.account?.email || o.host; $("#sideUser").textContent = who; $("#sideAvatar").textContent = String(who || "?").slice(0, 1).toUpperCase(); }).catch(() => {});
 })();

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { c, glyphs, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog, TextInputDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
-import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
+import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, pickedModels, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnections, saveConnection, removeConnection, normalizeBaseUrl, validBaseUrl, cleanProviderId, reservedProviderId, listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels } from './providers.js';
 import { SessionStore } from './session.js';
@@ -50,7 +50,7 @@ async function providerModelChoices({ cached = false } = {}) {
   return groups.flat();
 }
 
-// What /model offers (and the remote page, see App.remoteOptions): [{value, label, description}] in plain text, the
+// What /model offers: [{value, label, description}] in plain text, the
 // default first. `value` is what /model <value> takes. Every connected provider's models, provider/model, 7bit.fun's
 // among them (asked for anew each time, 4 seconds at most, so that a model just added is there without a restart;
 // without an answer the list given last, else gpt-6.1-sol for its GPT models); the Claude aliases where a provider of
@@ -92,6 +92,25 @@ export async function modelChoices(cfg, { cached = false, picked = null } = {}) 
     kept.splice(1, 0, current);
   }
   return kept;
+}
+
+// The web menu marks the default on its model's row instead of offering a separate Default entry.
+export async function webModelChoices(cfg) {
+  const models = (await modelChoices(cfg, { cached: true, picked: new Set(pickedModels()) })).filter((o) => o.value !== 'default');
+  const find = (spec) => {
+    const exact = models.find((o) => o.value === spec);
+    if (exact) return exact;
+    const { provider, id } = cfg.resolveModel(spec);
+    return models.find((o) => o.value === `${provider}/${id}`) || models.find((o) => {
+      // Full refs have already been matched; only aliases or the retained override can resolve to a different ref.
+      if (o.value.includes('/') && o.value !== cfg.modelOverride) return false;
+      const m = cfg.resolveModel(o.value);
+      return m.provider === provider && m.id === id;
+    });
+  };
+  const preferred = find(cfg.configuredModelSpec);
+  const current = find(cfg.modelSpec);
+  return models.map((o) => ({ ...o, isDefault: o === preferred, current: o === current }));
 }
 
 // Ask the gateway and every connected provider for their models now, and keep what they say (the gateway's list on
