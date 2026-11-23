@@ -1971,13 +1971,13 @@
 
   async function extensions() {
     const project = sessionStorage.getItem("extProject") || "";
-    const el = page(`<h1>扩展</h1><p class="sub">内置工具、技能、子 agent、自定义命令、MCP 服务器和 hooks。新会话会加载改动</p>
+    const el = page(`<h1>扩展</h1><p class="sub">内置工具、技能、子 agent、MCP 和 hooks。新会话会加载改动</p>
       <div class="toolbar"><span class="muted" style="font-size:13px">项目：</span>${await projectsSelect("proj", project)}</div><div id="body"><div class="empty">正在加载…</div></div>`);
     $("#proj", el).addEventListener("change", (e) => { sessionStorage.setItem("extProject", e.target.value); extensions(); });
     let x;
     try { x = await api(`/api/extensions${project ? `?project=${encodeURIComponent(project)}` : ""}`); } catch (e) { $("#body", el).innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
     const scopePill = (s) => `<span class="pill${s === "built-in" ? "" : s === "user" ? " accent" : " ok"}">${{ "built-in": "内置", user: "用户", project: "项目" }[s] || esc(s)}</span>`;
-    const list = (items, kind) => items.length ? items.map((i) => `<div class="file-row"><span class="name">${esc(kind === "command" ? `/${i.name}` : i.name)}</span>${scopePill(i.scope)}<span class="desc" title="${esc(i.description)}">${esc(i.description)}</span>${i.path ? `<button class="button secondary small" data-edit="${esc(i.path)}">编辑</button>` : ""}</div>`).join("") : '<div class="file-row"><span class="desc">还没有</span></div>';
+    const list = (items, kind) => items.length ? items.map((i) => `<div class="file-row"><span class="name">${esc(i.name)}</span>${scopePill(i.scope)}<span class="desc" title="${esc(i.description)}">${esc(i.description)}</span>${i.path ? `<button class="button secondary small" data-edit="${esc(i.path)}">编辑</button>` : ""}</div>`).join("") : '<div class="file-row"><span class="desc">还没有</span></div>';
     // 新建: a new conversation with the request written for the model (it knows the formats and asks what is missing)
     const aiBtn = (kind) => `<button class="button secondary small" data-ai="${kind}" title="打开新会话，写好要求交给模型去做">${ICON.agent}让 AI 新建</button>`;
     // 内置工具: what every request gives the model, in a line each (the whole description on hover)
@@ -1992,9 +1992,10 @@
         <div class="file-row"><span class="desc">另外：配置了 MCP 服务器时，它们的工具会以 mcp__服务器名__工具名 加进这个清单；子 agent 用的是它定义里 tools 列出的那些。</span></div></div>
       <div class="section-head"><div><h2>技能</h2><p>skills/&lt;名字&gt;/SKILL.md：模型按描述决定何时用 Skill 工具加载</p></div>${aiBtn("skill")}</div><div class="panel">${list(x.skills, "skill")}</div>
       <div class="section-head"><div><h2>子 agent</h2><p>agents/*.md：Task 工具可以把任务交给它们</p></div>${aiBtn("agent")}</div><div class="panel">${list(x.agents, "agent")}</div>
-      <div class="section-head"><div><h2>自定义命令</h2><p>commands/*.md：不是工具。在会话里输入 /名字 时，把文件内容（$ARGUMENTS 换成后面的参数）当作你的消息发给模型，模型自己不会调用</p></div>${aiBtn("command")}</div><div class="panel">${list(x.commands, "command")}</div>
-      <div class="section-head"><div><h2>MCP 服务器</h2><p>外接的工具服务（没有内置的）：配置后它们的工具加进上面的清单。环境变量和请求头的值不会显示</p></div>${aiBtn("mcp")}</div>
-      <div class="panel">${x.mcp.length ? x.mcp.map((s, i) => `<div class="file-row"><span class="name">${esc(s.name)}</span><span class="pill">${esc(s.scope)}</span><span class="desc mono">${esc(s.spec?.url || [s.spec?.command, ...(s.spec?.args || [])].filter(Boolean).join(" "))}</span>${s.scope === "user" || s.scope === ".mcp.json" ? `<button class="button secondary small" data-mcp="${i}">编辑</button>` : `<button class="button secondary small" data-edit="${esc(s.file)}">编辑文件</button>`}</div>`).join("") : '<div class="file-row"><span class="desc">没有配置 MCP 服务器</span></div>'}</div>
+      <div class="section-head"><div><h2>MCP</h2><p>别的工具要装 MCP 才有的常用能力，这里已经内置，不用安装；也可以接入外部 MCP 服务器，它们的工具会加进上面的清单</p></div>${aiBtn("mcp")}</div>
+      <div class="panel">${BUILTIN_MCP.filter((b) => tools.some((t) => t.name === b.tool)).map((b) => `<div class="file-row"><span class="name" style="font-family:inherit;font-weight:600">${esc(b.name)}</span><span class="pill">内置</span><span class="desc" title="${esc(b.tools)}">${esc(b.desc)}${b.like ? `<span class="faint"> · 相当于 ${esc(b.like)}</span>` : ""}</span></div>`).join("")}
+        <div class="file-row mcp-sub"><span class="desc"><strong>外部 MCP 服务器</strong> · 环境变量和请求头的值不会显示</span></div>
+        ${x.mcp.length ? x.mcp.map((s, i) => `<div class="file-row"><span class="name">${esc(s.name)}</span><span class="pill">${esc(s.scope)}</span><span class="desc mono">${esc(s.spec?.url || [s.spec?.command, ...(s.spec?.args || [])].filter(Boolean).join(" "))}</span>${s.scope === "user" || s.scope === ".mcp.json" ? `<button class="button secondary small" data-mcp="${i}">编辑</button>` : `<button class="button secondary small" data-edit="${esc(s.file)}">编辑文件</button>`}</div>`).join("") : '<div class="file-row"><span class="desc">还没有添加外部 MCP 服务器</span></div>'}</div>
       <div class="section-head"><div><h2>Hooks</h2><p>在工具调用前后、提交消息时等运行的命令，写在设置文件的 hooks 里</p></div></div>
       <div class="panel">${x.hooks.length ? x.hooks.map((h) => `<div class="file-row"><span class="name">${esc(h.event)}</span><span class="pill">${esc(h.scope)}</span><span class="desc mono">${esc(JSON.stringify(h.entries))}</span><button class="button secondary small" data-edit="${esc(h.file)}">编辑文件</button></div>`).join("") : `<div class="file-row"><span class="desc">没有 hooks。要添加，编辑设置文件的 "hooks" 字段</span><button class="button secondary small" data-edit="${esc(x.settingsFiles.user)}">编辑用户设置文件</button></div>`}</div>`;
     $("#body", el).addEventListener("click", async (e) => {
@@ -2034,6 +2035,18 @@
     Restart: "改了 claude-pro 自身代码后重启加载（只有源码版有）",
   };
 
+  // What other agents get from MCP servers and claude-pro has built in (扩展's MCP section): shown while its tool is
+  // there (Browser can be turned off).
+  const BUILTIN_MCP = [
+    { tool: "Browser", tools: "Browser", name: "浏览器", desc: "打开网页、点击、输入、截图，可以用你已登录的浏览器", like: "Playwright / Chrome DevTools MCP" },
+    { tool: "WebSearch", tools: "WebSearch", name: "联网搜索", desc: "搜索并汇总结果，附来源", like: "Brave / Tavily 等搜索 MCP" },
+    { tool: "WebFetch", tools: "WebFetch", name: "抓取网页", desc: "读取网页正文，按要求提取内容", like: "Fetch MCP" },
+    { tool: "Read", tools: "Read · Write · Edit · MultiEdit · Glob · Grep", name: "文件系统", desc: "读写、修改、搜索本机文件", like: "Filesystem MCP" },
+    { tool: "REPL", tools: "REPL", name: "代码执行", desc: "常驻的 Python / Node.js 进程，处理数据、跑脚本", like: "代码执行类 MCP" },
+    { tool: "Processes", tools: "Processes", name: "进程管理", desc: "查看进程和占用的端口，结束进程", like: "系统 / 进程类 MCP" },
+    { tool: "MessagePeer", tools: "ListPeers · MessagePeer", name: "多会话协作", desc: "和本机、你的其他电脑、联系人的 claude-pro 会话互发任务", like: "" },
+  ];
+
   // 让 AI 新建: the new conversation's box with the request (where the file goes, its format), the project's directory
   // chosen when the page shows one; what the thing should do is left for the user to write at the end.
   function askModelToCreate(kind, { project, settingsFile }) {
@@ -2044,7 +2057,6 @@
     const text = {
       skill: `帮我新建一个技能，放在${where}：${dir}${sep}skills${sep}<名字>${sep}SKILL.md。frontmatter 写 name 和 description（description 说清楚什么时候该用它），正文写步骤和说明。信息不够就先问我。\n\n这个技能用来：`,
       agent: `帮我新建一个子 agent，放在${where}：${dir}${sep}agents${sep}<名字>.md。frontmatter 写 name、description（什么时候把任务交给它）和 tools，正文是它的系统提示词。信息不够就先问我。\n\n这个子 agent 负责：`,
-      command: `帮我新建一个自定义命令，放在${where}：${dir}${sep}commands${sep}<名字>.md（在会话里输入 /<名字> 使用）。frontmatter 写 description 和 argument-hint，正文是发给模型的内容，用 $ARGUMENTS 代表命令后面的参数。信息不够就先问我。\n\n这个命令要做的事：`,
       mcp: `帮我添加一个 MCP 服务器，写进${project ? `项目的 ${project}${sep}.mcp.json` : ` ${settingsFile || "用户设置文件"} 的 "mcpServers"`}（写法和 Claude Code 的 mcpServers 一样：stdio 用 command/args/env，远程用 type: "http" 和 url/headers）。需要安装或填密钥就告诉我，先别把密钥写进会提交的文件。\n\n要接入的服务：`,
     }[kind];
     if (!text) return;

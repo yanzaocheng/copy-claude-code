@@ -16,7 +16,7 @@ import {
 } from '../providers.js';
 import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayList } from '../gateway.js';
 import { checkForUpdate, installUpdate } from '../updater.js';
-import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
+import { loadAgents, loadSkills } from '../agents.js';
 import { webModelChoices, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
 import { setArchived, archivedSessions, projectDir } from '../session.js';
 import {
@@ -519,16 +519,9 @@ function extensionsView(project) {
     selfRestart: SOURCE_CHECKOUT, // (a source checkout's sessions have Restart too)
     skills: [...loadSkills(cwd).values()].map((s) => ({ name: s.name, description: s.description, scope: s.scope, path: s.file })),
     agents: [...loadAgents(cwd).values()].map((a) => ({ name: a.name, description: a.description, tools: a.tools, scope: scopeOf(a.source), path: a.source === 'built-in' ? null : a.source })),
-    commands: [...loadCustomCommands(cwd).values()].map((c) => ({ name: c.name, description: c.description, scope: c.scope, path: commandPath(cwd, c) })),
     mcp, hooks, settingsFiles: files,
     mcpLoaded: Object.keys(config.settings.mcpServers || {}),
   };
-}
-
-function commandPath(cwd, cmd) {
-  const rel = `${cmd.name.split(':').join(path.sep)}.md`;
-  const roots = cmd.scope === 'user' ? [path.join(CONFIG_DIR, 'commands')] : [path.join(cwd, '.claude-pro', 'commands'), path.join(cwd, '.claude', 'commands')];
-  return roots.map((r) => path.join(r, rel)).find((f) => fs.existsSync(f)) || null;
 }
 
 // An MCP server's settings without the values of its environment and headers (tokens live there).
