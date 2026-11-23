@@ -243,7 +243,7 @@
 
   // One transcript item as HTML. opts: {image(n): url, full: Map id -> text, canExpand}
   function itemHtml(item, opts = {}) {
-    if (item.k === "user") return `<div class="it it-user"><div class="bubble">${esc(item.text)}</div></div>`;
+    if (item.k === "user") return `<div class="it it-user"><div class="bubble">${userText(item.text)}</div></div>`;
     if (item.k === "image") return `<div class="it it-image">${opts.image ? `<img src="${opts.image(item.n)}" alt="图片" loading="lazy" data-zoom>` : "[图片]"}</div>`;
     if (item.k === "text") return `<div class="it it-text"><span class="mark">⏺</span><div class="md">${md(item.text)}</div></div>`;
     if (item.k === "thinking") return `<div class="it it-thinking"><details${item.open ? " open" : ""}><summary>✻ ${item.open ? "思考中…" : "思考过程"}</summary><div class="pre">${esc(item.text)}</div></details></div>`;
@@ -964,6 +964,7 @@
   // What was typed and not sent, per box (`draftKey`): kept when the page shows another conversation and back. The text
   // also in localStorage (it survives a reload), the images only in memory (their object URLs live as long as the page).
   const draftImages = new Map();
+  const draftQuotes = new Map(); // draftKey → the passages quoted in that box (引用), while the page is open
   const draftText = (key) => (key ? localStorage.getItem(`cpDraft:${key}`) || "" : "");
   function saveDraft(key, text, images) {
     if (!key) return;
@@ -974,15 +975,31 @@
   // A rounded box with the text, images (pasted, dropped or added with +), what goes left and right of the send button.
   // onSend(text, images) resolves when sent (the box is emptied) or throws (it is kept).
   function composer(box, { placeholder, onSend, left = "", right = "", dropZone = box, draftKey = "" }) {
-    box.innerHTML = `<form class="composer"><div class="thumbs hidden"></div><textarea rows="1" placeholder="${esc(placeholder)}"></textarea>
+    box.innerHTML = `<form class="composer"><div class="quotes hidden"></div><div class="thumbs hidden"></div><textarea rows="1" placeholder="${esc(placeholder)}"></textarea>
       <div class="composer-bar"><button type="button" class="icon-btn" data-add title="添加图片（也可以粘贴或拖进来）" aria-label="添加图片">${ICON.add}</button><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         <span class="composer-left">${left}</span><span class="grow"></span><span class="composer-right">${right}</span>
         <button type="button" class="round-btn stop hidden" data-stop title="停止当前任务">${ICON.stop}</button><button type="submit" class="round-btn" data-send title="发送（Enter）" disabled>${ICON.send}</button></div></form>`;
     const form = $("form", box), input = $("textarea", box), thumbs = $(".thumbs", box), file = $("input[type=file]", box), send = $("[data-send]", box);
+    const quoteBox = $(".quotes", box);
     let images = [...(draftImages.get(draftKey) || [])];
+    // 引用: passages of the conversation chosen with 引用文本, sent before the message as Markdown quotes; kept
+    // with the draft
+    let quotes = draftKey ? [...(draftQuotes.get(draftKey) || [])] : [];
     let sending = false;
-    const keep = () => saveDraft(draftKey, input.value, images);
-    const ready = () => { send.disabled = sending || (!input.value.trim() && !images.length); };
+    const keep = () => { saveDraft(draftKey, input.value, images); if (draftKey) { if (quotes.length) draftQuotes.set(draftKey, [...quotes]); else draftQuotes.delete(draftKey); } };
+    const ready = () => { send.disabled = sending || (!input.value.trim() && !images.length && !quotes.length); };
+    const paintQuotes = () => {
+      quoteBox.classList.toggle("hidden", !quotes.length);
+      quoteBox.innerHTML = quotes.map((q, i) => `<div class="quote-chip" title="${esc(q)}"><span class="quote-mark" aria-hidden="true">“</span><span class="quote-text">${esc(q.replace(/\s+/g, " "))}</span><button type="button" data-unquote="${i}" title="去掉这条引用" aria-label="去掉这条引用">×</button></div>`).join("");
+      keep();
+      ready();
+    };
+    quoteBox.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-unquote]");
+      if (!b || sending) return;
+      quotes.splice(Number(b.dataset.unquote), 1);
+      paintQuotes();
+    });
     const autosize = () => { input.style.height = "auto"; input.style.height = `${Math.min(240, input.scrollHeight)}px`; ready(); };
     const paint = () => {
       thumbs.classList.toggle("hidden", !images.length);
@@ -1020,8 +1037,11 @@
     dropZone.addEventListener("drop", (e) => { box.classList.remove("dropping"); if (e.dataTransfer?.files?.length) { e.preventDefault(); add(e.dataTransfer.files); } });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const text = input.value;
-      if (sending || (!text.trim() && !images.length)) return;
+      const typed = input.value;
+      if (sending || (!typed.trim() && !images.length && !quotes.length)) return;
+      // the quotes first, each a Markdown block quote, then what was typed
+      const quoted = quotes.map((q) => q.split(/\r?\n/).map((l) => `> ${l}`.trimEnd()).join("\n")).join("\n\n");
+      const text = quoted ? `${quoted}${typed.trim() ? `\n\n${typed}` : ""}` : typed;
       sending = true;
       input.readOnly = true;
       ready();
@@ -1030,16 +1050,27 @@
         input.value = "";
         for (const img of images) URL.revokeObjectURL(img.url);
         images = [];
+        quotes = [];
+        paintQuotes();
         paint(); // (the draft goes with it)
         autosize();
       } catch (err) { fail(err); } finally { sending = false; input.readOnly = false; ready(); }
     });
     input.value = draftText(draftKey);
     if (images.length) paint();
+    if (quotes.length) paintQuotes();
     requestAnimationFrame(autosize); // (measured once the box is on the page)
     return {
       input,
       submit: () => form.requestSubmit(),
+      // a passage of the conversation quoted in the message being written (引用文本)
+      quote(text) {
+        const t = String(text || "").replace(/\u00a0/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
+        if (!t || sending) return;
+        if (!quotes.includes(t)) quotes.push(t);
+        paintQuotes();
+        input.focus();
+      },
       left: $(".composer-left", box),
       right: $(".composer-right", box),
       setBusy(busy) { $("[data-stop]", box).classList.toggle("hidden", !busy); },
@@ -1047,6 +1078,66 @@
       // (images of a draft stay: they come back with it)
       dispose() { for (const img of images) if (!draftImages.get(draftKey)?.includes(img)) URL.revokeObjectURL(img.url); },
     };
+  }
+
+  // 引用文本: text selected in the conversation (`log`) offers a small button above it that hands it to `onQuote`.
+  // Returns what undoes it (the view's cleanup).
+  function quoteSelection(log, onQuote) {
+    let btn = null, text = "";
+    const hide = () => { btn?.remove(); btn = null; text = ""; };
+    const place = () => {
+      const sel = getSelection();
+      const range = sel && !sel.isCollapsed && sel.rangeCount ? sel.getRangeAt(0) : null;
+      // (inside the conversation only: not the box being written, not a menu)
+      const t = range && log.contains(range.commonAncestorContainer) ? sel.toString().trim() : "";
+      if (!t) return hide();
+      text = t;
+      const r = range.getBoundingClientRect();
+      if (!btn) {
+        btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "quote-pop";
+        btn.textContent = "引用文本";
+        // (pointerdown kept from taking the selection away; the text is the one the button was shown for)
+        btn.addEventListener("pointerdown", (e) => e.preventDefault());
+        btn.addEventListener("click", () => {
+          const q = text;
+          getSelection()?.removeAllRanges();
+          hide();
+          if (q) onQuote(q);
+        });
+        document.body.appendChild(btn);
+      }
+      const h = btn.offsetHeight || 34, w = btn.offsetWidth || 90;
+      const top = r.top - h - 8 < 8 ? r.bottom + 8 : r.top - h - 8;
+      btn.style.top = `${Math.round(top)}px`;
+      btn.style.left = `${Math.round(Math.min(Math.max(8, r.left + r.width / 2 - w / 2), innerWidth - w - 8))}px`;
+    };
+    let timer = 0;
+    const later = () => { clearTimeout(timer); timer = setTimeout(place, 120); };
+    const scroller = log.closest(".chat-scroll");
+    document.addEventListener("selectionchange", later);
+    scroller?.addEventListener("scroll", later, { passive: true });
+    addEventListener("resize", later);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("selectionchange", later);
+      scroller?.removeEventListener("scroll", later);
+      removeEventListener("resize", later);
+      hide();
+    };
+  }
+
+  // A user's message: its leading "> " lines (引用) shown as quotes above what was typed.
+  function userText(text) {
+    const lines = String(text || "").split("\n");
+    const quoted = [];
+    let i = 0;
+    while (i < lines.length && (/^>/.test(lines[i]) || (lines[i] === "" && quoted.length && /^>/.test(lines[i + 1] || "")))) quoted.push(lines[i++]);
+    if (!quoted.length) return esc(text);
+    while (i < lines.length && lines[i] === "") i++;
+    const blocks = quoted.join("\n").split(/\n\n+/).map((b) => b.split("\n").map((l) => l.replace(/^> ?/, "")).join("\n"));
+    return blocks.map((b) => `<div class="user-quote">${esc(b)}</div>`).join("") + esc(lines.slice(i).join("\n"));
   }
 
   // A small menu next to `anchor`: onPick(section, value).
@@ -1488,7 +1579,8 @@
     es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch { /* skip */ } };
     es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "连接已断开，请刷新页面" : "正在重新连接…"; conn.hidden = false; };
     const tick = setInterval(renderStatus, 250);
-    cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); };
+    const unquote = quoteSelection(log, (text) => c.quote(text));
+    cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); };
     if (!mobileLayout.matches) c.input.focus();
   }
 
