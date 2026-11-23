@@ -18,7 +18,7 @@ import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fet
 import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills, loadCustomCommands } from '../agents.js';
 import { webModelChoices, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
-import { setArchived, archivedSessions } from '../session.js';
+import { setArchived, archivedSessions, projectDir } from '../session.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
   purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError,
@@ -38,14 +38,50 @@ const home = os.homedir();
 // extension pages list, and where their files may be edited.
 function knownProjects() {
   const byCwd = new Map();
+  const keyOf = (cwd) => (isWin ? path.resolve(cwd).toLowerCase() : path.resolve(cwd));
   for (const s of listAllSessions()) {
     if (!s.cwd) continue;
-    const key = isWin ? s.cwd.toLowerCase() : s.cwd;
+    const key = keyOf(s.cwd);
     const p = byCwd.get(key);
     if (!p) byCwd.set(key, { cwd: s.cwd, dir: s.dir, sessions: 1, lastUsed: s.mtime });
     else { p.sessions++; p.lastUsed = Math.max(p.lastUsed, s.mtime); }
   }
+  // the folders added to the 工作区, also before a conversation ran there
+  for (const w of addedWorkspaces()) {
+    if (!byCwd.has(keyOf(w.cwd)) && fs.existsSync(w.cwd)) byCwd.set(keyOf(w.cwd), { cwd: w.cwd, dir: path.basename(projectDir(w.cwd)), sessions: 0, lastUsed: w.added || 0 });
+  }
   return [...byCwd.values()].sort((a, b) => b.lastUsed - a.lastUsed);
+}
+
+// 工作区: folders the user added to the sidebar (添加工作区), listed with the projects that have conversations, also
+// before the first one runs there. CONFIG_DIR/workspaces.json, {dirs: [{cwd, added}]}, newest first.
+const workspacesFile = () => path.join(CONFIG_DIR, 'workspaces.json');
+function addedWorkspaces() {
+  let list = null;
+  try { list = JSON.parse(fs.readFileSync(workspacesFile(), 'utf8'))?.dirs; } catch { /* none yet */ }
+  return Array.isArray(list) ? list.filter((w) => typeof w?.cwd === 'string' && path.isAbsolute(w.cwd)) : [];
+}
+function saveWorkspaces(dirs) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const tmp = `${workspacesFile()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ dirs }, null, 2));
+  fs.renameSync(tmp, workspacesFile());
+  return dirs;
+}
+function addWorkspace(body) {
+  const raw = typeof body?.cwd === 'string' ? body.cwd.trim() : '';
+  if (!raw || !path.isAbsolute(raw) || (isWin && !windowsDrivePath(raw))) throw httpError(400, '无效的目录');
+  const cwd = path.resolve(raw);
+  let st = null;
+  try { st = fs.statSync(cwd); } catch { throw httpError(404, '目录不存在'); }
+  if (!st.isDirectory()) throw httpError(400, '这不是一个目录');
+  const rest = addedWorkspaces().filter((w) => !same(w.cwd, cwd));
+  return { cwd, workspaces: saveWorkspaces([{ cwd, added: Date.now() }, ...rest]) };
+}
+function removeWorkspace(body) {
+  const cwd = typeof body?.cwd === 'string' ? body.cwd : '';
+  if (!cwd) throw httpError(400, '无效的目录');
+  return { workspaces: saveWorkspaces(addedWorkspaces().filter((w) => !same(w.cwd, cwd))) };
 }
 
 const same = (a, b) => (isWin ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
@@ -655,8 +691,11 @@ export const routes = [
       sessions: listAllSessions().map(({ file, ...s }) => ({ ...s, running: peersById.get(s.id) ?? null })),
       live,
       projectOpen: { explorer: isWin, vscode: vscodeAvailable() },
+      workspaces: addedWorkspaces().filter((w) => fs.existsSync(w.cwd)),
     };
   }],
+  ['POST', /^\/api\/workspaces$/, (req, m, body) => addWorkspace(body)],
+  ['POST', /^\/api\/workspaces\/remove$/, (req, m, body) => removeWorkspace(body)],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     const detail = sessionDetail(dir, id);
     const live = await running();

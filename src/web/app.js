@@ -697,7 +697,7 @@
   }
 
   const ws = {
-    sessions: [], live: [], projectOpen: {}, q: "", loaded: false,
+    sessions: [], live: [], projectOpen: {}, workspaces: [], q: "", loaded: false,
     closed: new Set(JSON.parse(localStorage.getItem("cpWsClosed") || "[]")),
     expanded: new Set(),
     tips: new Map(),
@@ -716,6 +716,7 @@
         const s = await api("/api/sessions");
         ws.sessions = s.sessions;
         ws.projectOpen = s.projectOpen || {};
+        ws.workspaces = Array.isArray(s.workspaces) ? s.workspaces : [];
         ws.live = s.live || (await api("/api/live")).sessions;
         ws.loaded = true;
         if (!sidebarMenuOpen()) drawWorkspace();
@@ -752,6 +753,13 @@
       g.last = Math.max(g.last, it.mtime || 0);
       if (working(it)) g.live = true;
     }
+    // the folders added to the 工作区 (添加工作区): listed before a conversation runs there
+    for (const w of ws.workspaces) {
+      const key = projectKey(w.cwd);
+      if (groups.has(key)) { groups.get(key).added = true; continue; }
+      if (q && !w.cwd.toLowerCase().includes(q)) continue;
+      groups.set(key, { key, cwd: w.cwd, items: [], last: w.added || 0, live: false, added: true });
+    }
     const list = [...groups.values()].sort((a, b) => b.live - a.live || b.last - a.last || a.key.localeCompare(b.key));
     const here = location.hash;
     ws.tips.clear();
@@ -766,10 +774,34 @@
         const [cls] = it.peer ? liveState(it.peer.status) : [""];
         const active = here === it.href || (it.alt && here === it.alt);
         return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
-      }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "");
+      }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "")
+        + (!closed && !g.items.length ? '<div class="ws-hint">还没有会话，点右边的 + 新建</div>' : "");
       const running = g.items.filter(working).length;
       return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" data-cwd="${esc(g.cwd)}" title="更多" aria-label="项目菜单" aria-expanded="false">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
-    }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话"}</div>`;
+    }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话：点上方的文件夹图标添加工作区"}</div>`;
+  }
+
+  // 添加工作区: a folder chosen on the computer claude-pro runs on (the system's folder dialog here, the directory
+  // browser from elsewhere), listed in the sidebar and opened there
+  async function addWorkspaceDir() {
+    const add = async (cwd) => {
+      if (!cwd) return;
+      try {
+        const r = await api("/api/workspaces", { method: "POST", body: { cwd } });
+        if (ws.closed.delete(projectKey(r.cwd))) localStorage.setItem("cpWsClosed", JSON.stringify([...ws.closed]));
+        // the folder of the next new conversation (the new-conversation page, when shown, starts again with it)
+        localStorage.setItem("cpNewDir", r.cwd);
+        await loadWorkspace({ afterPending: true });
+        if (location.hash === "#/new" || location.hash === "") route();
+        toast(`已添加工作区 ${baseName(r.cwd)}`);
+      } catch (e) { fail(e); }
+    };
+    if (!hasNativeFolderPicker) return browseProjectDirectories(null, add);
+    const b = $("#wsAddDir");
+    b.disabled = true;
+    try { await add((await api("/api/projects/pick", { method: "POST", body: {} })).cwd); }
+    catch (e) { if (e.status === 409) fail(e); else browseProjectDirectories(null, add); }
+    finally { b.disabled = false; }
   }
 
   function markActive() {
@@ -870,9 +902,15 @@
         if (ws.projectOpen.explorer) items.push({ label: "在资源管理器中打开", value: "explorer" });
         if (ws.projectOpen.vscode) items.push({ label: "在 VS Code 中打开", value: "vscode" });
         items.push({ label: ids.length ? `归档全部会话（${ids.length} 个）` : "没有可以归档的会话", description: ids.length ? "从工作区收起，内容保留，可以在「全部会话 → 已归档」里找回" : "运行中的会话不能归档", value: "all" });
+        const pinned = ws.workspaces.find((w) => projectKey(w.cwd) === key);
+        if (pinned) items.push({ label: "从工作区移除", description: "只是不再固定显示，目录和会话都不动", value: "unpin" });
         popMenu(pm, [{ key: "p", title: "", items }], async (_, value) => {
           try {
-            if (value === "all") {
+            if (value === "unpin") {
+              await api("/api/workspaces/remove", { method: "POST", body: { cwd: pinned.cwd } });
+              await loadWorkspace({ afterPending: true });
+              toast(`已从工作区移除 ${baseName(pinned.cwd)}`);
+            } else if (value === "all") {
               if (ids.length && confirm(`归档这个项目的 ${ids.length} 个会话？`)) await archive(ids);
             } else {
               await api("/api/projects/open", { method: "POST", body: { cwd: pm.dataset.cwd, target: value } });
@@ -923,6 +961,7 @@
     });
     $("#wsSearch").addEventListener("input", (e) => { ws.q = e.target.value.trim(); drawWorkspace(); });
     $("#wsRefresh").addEventListener("click", () => loadWorkspace());
+    $("#wsAddDir").addEventListener("click", () => addWorkspaceDir().catch(fail));
   }
 
   // ---------------------------------------------------------------- the message box (new conversation and live)
