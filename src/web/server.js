@@ -16,8 +16,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_DIR, VERSION } from '../config.js';
+import { CONFIG_DIR, VERSION, readGatewayLogin } from '../config.js';
 import { machineName } from '../peers.js';
+import { autostartStatus, setAutostart } from './autostart.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 7878;
@@ -54,7 +55,7 @@ const PUBLIC_ASSETS = new Set(['/favicon.svg', '/manifest.webmanifest', '/icon-1
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', 'app.js', 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;
@@ -167,11 +168,10 @@ async function serve() {
   }
 
   // The tunnel follows web-remote.json (changed here, or by /web remote in a session) and the gateway login.
+  // (as everywhere: an address saved before 2026-11-19 read as the gateway's present one)
   function gatewayLoginNow() {
-    try {
-      const g = JSON.parse(fs.readFileSync(path.join(CONFIG_DIR, 'gateway.json'), 'utf8'));
-      return g?.apiKey ? { url: String(g.url || process.env.CLAUDE_PRO_GATEWAY_URL || 'https://7bit.fun'), apiKey: g.apiKey } : null;
-    } catch { return null; }
+    const g = readGatewayLogin();
+    return g?.apiKey ? { url: g.url || process.env.CLAUDE_PRO_GATEWAY_URL || 'https://7bit.fun', apiKey: g.apiKey } : null;
   }
   const gatewayHandle = (handle = null) => ra.addressPrefix(gatewayLoginNow(), handle);
 
@@ -258,6 +258,12 @@ async function serve() {
       }
       // 远程访问's own settings: on or off, the password, the devices logged in, the recent logins
       if (url.pathname === '/api/remote' && req.method === 'GET') return send(res, 200, remoteView());
+      // 开机自动启动 (on the 远程访问 page): the console started at log-in
+      if (url.pathname === '/api/autostart' && req.method === 'GET') return send(res, 200, autostartStatus());
+      if (url.pathname === '/api/autostart' && req.method === 'POST') {
+        const body = (await readBody(req)) || {};
+        try { return send(res, 200, await setAutostart(body.enabled === true)); } catch (e) { return send(res, 400, { error: e.message }); }
+      }
       if (url.pathname === '/api/remote/handle' && req.method === 'GET') {
         try { return send(res, 200, await gatewayHandle()); } catch (e) { return send(res, e.status || 502, { error: e.message }); }
       }

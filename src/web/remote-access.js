@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { CONFIG_DIR, VERSION } from '../config.js';
+import { CONFIG_DIR, VERSION, normalizeGatewayUrl } from '../config.js';
 
 export const remoteFile = () => path.join(CONFIG_DIR, 'web-remote.json');
 export const MIN_PASSWORD = 10;
@@ -67,7 +67,7 @@ export function setEnabled(on) { return writeRemote((d) => { d.enabled = Boolean
 // characters of its alphabet), not one the user chose. Throws with the gateway's words and a status for the page.
 export async function addressPrefix(login, handle = null, { fetchImpl = globalThis.fetch } = {}) {
   if (!login?.apiKey) throw Object.assign(new Error('远程访问需要先连接 7bit.fun'), { status: 409 });
-  const base = String(login.url || 'https://7bit.fun').replace(/\/+$/, '');
+  const base = normalizeGatewayUrl(login.url);
   let r;
   try {
     r = await fetchImpl(`${base}/v1/remote/contacts${handle ? '/handle' : ''}`, {
@@ -159,7 +159,7 @@ export function loginPassed(ip) { failures.delete(ip); }
 // a remote request), and the answer goes back as it comes.
 export class TunnelClient {
   constructor({ gatewayUrl, apiKey, localPort, secret, onState = () => {} }) {
-    this.wsUrl = `${String(gatewayUrl).replace(/\/+$/, '').replace(/^http/, 'ws')}/v1/tunnel`;
+    this.wsUrl = `${normalizeGatewayUrl(gatewayUrl).replace(/^http/, 'ws')}/v1/tunnel`;
     this.apiKey = apiKey;
     this.localPort = localPort;
     this.secret = secret;

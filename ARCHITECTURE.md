@@ -8,7 +8,7 @@
 
 | 后端 | 用途 | 凭据来源 | 请求目标 |
 |---|---|---|---|
-| `gateway` | codex-gateway 账户和模型 | `/connect` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://7bit.fun`（旧地址 gw.predix.icu 按 7bit.fun 读取） |
+| `gateway` | codex-gateway 账户和模型 | `/connect` 保存的网关 key（`gateway.json`，唯一来源） | `CLAUDE_PRO_GATEWAY_URL`，默认 `https://7bit.fun` |
 | `/connect` 的供应商 | 其他供应商的模型（[`src/providers.js`](src/providers.js)） | `/connect` 保存的 key（`providers.json`，只有用户自己能读） | 内置地址或用户填的地址；Anthropic 协议直接发，OpenAI 协议经 [`src/openai-chat.js`](src/openai-chat.js) 转成 Chat Completions |
 
 ## 2. 总体架构

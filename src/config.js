@@ -24,8 +24,9 @@ export const SOURCE_CHECKOUT = fs.existsSync(path.join(INSTALL_DIR, '.git'));
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
 export const APP_NAME = 'claude-pro';
 export const GATEWAY_DEFAULT_URL = 'https://7bit.fun';
-// The gateway's earlier address (until 2026-11-19): a login or a setting saved with it means the same gateway, which
-// answers there too, so it is read as the new one and no computer has to log in again.
+// The gateway's earlier address (until 2026-11-19), no longer used: a login or a setting saved with it means the same
+// gateway, so it is read as the new one (and gateway.json rewritten with it, readGatewayLogin) and no computer has to
+// log in again.
 const OLD_GATEWAY_URLS = new Set(['https://gw.predix.icu', 'http://gw.predix.icu']);
 export function normalizeGatewayUrl(url) {
   const base = String(url || GATEWAY_DEFAULT_URL).trim().replace(/\/+$/, '');
@@ -40,7 +41,17 @@ let gatewayMemo = null; // {at, data}
 export function readGatewayLogin(url) {
   if (!gatewayMemo || Date.now() - gatewayMemo.at >= 1000) {
     let data = null;
-    try { data = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json'), 'utf8')); } catch { /* none */ }
+    const file = path.join(process.env.CLAUDE_PRO_CONFIG_DIR || CONFIG_DIR, 'gateway.json');
+    try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* none */ }
+    // saved with the old address: the file says the new one from now on (what reads it raw sees it too)
+    if (data?.url && normalizeGatewayUrl(data.url) !== String(data.url).trim().replace(/\/+$/, '')) {
+      data = { ...data, url: normalizeGatewayUrl(data.url) };
+      try {
+        const tmp = `${file}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+        fs.renameSync(tmp, file);
+      } catch { /* read as the new one all the same */ }
+    }
     gatewayMemo = { at: Date.now(), data };
   }
   const data = gatewayMemo.data;
