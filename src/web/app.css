@@ -53,19 +53,21 @@ h3 { font-size: 14px; margin: 0 0 6px; font-weight: 650; }
 .hidden { display: none !important; }
 
 /* layout: the sidebar (工作区) and the main pane */
-.app { display: grid; grid-template-columns: 276px minmax(0, 1fr); height: 100vh; height: 100dvh; }
+.app { display: grid; grid-template-columns: 284px minmax(0, 1fr); height: 100vh; height: 100dvh; }
 .drawer-close { display: none !important; }
 .composer-left, .composer-right { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .side { position: relative; display: flex; flex-direction: column; min-height: 0; background: var(--side-bg); border-right: 1px solid var(--line); padding: 14px 12px 10px; }
-.brand { display: flex; align-items: center; gap: 9px; padding: 3px 6px 16px; }
+.brand { display: flex; align-items: center; gap: 7px; padding: 3px 2px 16px 6px; }
 .brand-logo { display: block; width: 28px; height: 28px; border-radius: 7px; flex: none; box-shadow: 0 1px 3px rgba(140, 55, 25, .3); }
 .brand strong { font-size: 15.5px; font-weight: 700; letter-spacing: -.2px; white-space: nowrap; }
-.brand-tag { font-size: 9.5px; font-weight: 700; letter-spacing: .7px; padding: 2px 6px; border-radius: 5px; background: var(--accent-soft); color: var(--accent-text); }
+.brand-tag { font-size: 9.5px; font-weight: 700; letter-spacing: .5px; padding: 2px 5px; border-radius: 5px; background: var(--accent-soft); color: var(--accent-text); }
 .brand-release { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; white-space: nowrap; }
 .brand-ver { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .brand-update { width: 22px; height: 22px; padding: 0; border: 1px solid var(--accent-line); border-radius: 7px; background: var(--accent-soft); color: var(--accent-text); font: inherit; font-weight: 700; cursor: pointer; }
 .brand-update:hover:not(:disabled) { background: var(--accent); color: #fff; }
 .brand-update:disabled { opacity: .65; cursor: wait; }
+/* (an update to offer: the decorative tag makes room for its arrow) */
+.brand:has(.brand-update:not(.hidden)) .brand-tag { display: none; }
 .side-new { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface); color: var(--text); font-weight: 600; font-size: 14px; box-shadow: var(--shadow-sm); margin-bottom: 8px; transition: border-color .15s, box-shadow .15s; }
 .side-new svg { color: var(--accent); }
 .side-new:hover { text-decoration: none; border-color: var(--accent-line); box-shadow: var(--shadow); }
@@ -534,6 +536,19 @@ details.proj > div { padding: 0 0 6px 18px; }
 
 
 .mobile-menu, .side-backdrop { display: none; }
+/* 收起侧栏 (desktop; on a phone the sidebar is a drawer): out, and a small rail of buttons left at the top left */
+.side-toggle { width: 28px; height: 28px; margin: -2px 0 0 -2px; }
+.side-rail { display: none; }
+@media (min-width: 861px) {
+  .app.side-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .app.side-collapsed .side { display: none; }
+  .app.side-collapsed .side-rail { display: flex; gap: 2px; position: fixed; z-index: 40; top: 9px; left: 10px; padding: 3px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-sm); }
+  .side-rail .icon-btn { width: 32px; height: 32px; color: var(--text-2); }
+  .side-rail .icon-btn:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+  .app.side-collapsed .chat-head { padding-left: 108px; }
+  .app.side-collapsed .page:not(.chat) { padding-top: 64px; }
+}
+@media (max-width: 860px) { .side-toggle { display: none; } }
 .remote-links { display: flex; gap: 8px; padding: 8px 6px 0; }
 .remote-links a, .remote-links button { flex: 1; text-align: center; padding: 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-2); font: inherit; font-size: 13px; cursor: pointer; }
 .remote-links a:hover, .remote-links button:hover { text-decoration: none; border-color: var(--accent-line); }

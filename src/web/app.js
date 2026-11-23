@@ -2392,6 +2392,26 @@
     document.documentElement.style.setProperty("--visible-height", `${Math.round(viewport.height)}px`);
   }
   window.visualViewport?.addEventListener("resize", syncVisualHeight);
+  // 收起侧栏 (desktop): its button, the rail's, Ctrl+B (⌘B); kept for the next visits
+  const sideCollapsed = () => $(".app").classList.contains("side-collapsed");
+  function setSideHidden(hidden, { focus = false } = {}) {
+    closeMenu?.();
+    showUserMenu(false);
+    $("#tip")?.classList.add("hidden");
+    $(".app").classList.toggle("side-collapsed", hidden);
+    $("#sideHide").setAttribute("aria-expanded", String(!hidden));
+    $("#sideShow").setAttribute("aria-expanded", String(!hidden));
+    try { if (hidden) localStorage.setItem("cpSideHidden", "1"); else localStorage.removeItem("cpSideHidden"); } catch { /* private mode */ }
+    if (focus) (hidden ? $("#sideShow") : $("#sideHide")).focus({ preventScroll: true });
+  }
+  setSideHidden(localStorage.getItem("cpSideHidden") === "1");
+  $("#sideHide").addEventListener("click", () => setSideHidden(true, { focus: true }));
+  $("#sideShow").addEventListener("click", () => setSideHidden(false, { focus: true }));
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "b" || mobileLayout.matches) return;
+    e.preventDefault();
+    setSideHidden(!sideCollapsed());
+  });
   setDrawer(false);
   syncVisualHeight();
   $("#logoutBtn").addEventListener("click", async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); location.reload(); });
