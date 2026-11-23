@@ -5,6 +5,7 @@
 
 import { spawn } from 'node:child_process';
 import { OutputDecoder } from '../utils/encoding.js';
+import { findPs, parsePsRows, msysTree } from '../utils/shell.js';
 
 const isWin = process.platform === 'win32';
 export const processLimits = { rows: 40, maxRows: 200, commandChars: 220, queryMs: 30_000 };
@@ -130,6 +131,62 @@ function descendants(list, root) {
   return out;
 }
 
+// What a Git Bash in the tree started: Windows does not link a program started from bash to it (its parent id is a
+// launcher that is gone by then), MSYS does (`ps -W`). Those, with their own Windows children, not already in the
+// tree. (`npm start` from bash: npm, the cmd.exe it runs, and the app; a tree kill without them left the app
+// running.)
+const SHELL_EXE = /^(bash|sh|dash|zsh)\.exe$/i;
+async function msysExtras(list, victims, signal) {
+  if (!isWin || !victims.some((v) => SHELL_EXE.test(v.name))) return [];
+  const ps = findPs();
+  const r = ps ? await capture(ps, ['-W'], { timeoutMs: 8000, signal }) : { code: 1 };
+  const rows = r.code === 0 ? parsePsRows(r.out) : [];
+  const byWin = new Map(rows.map((row) => [row.winpid, row]));
+  const byPid = new Map(list.map((p) => [p.pid, p]));
+  const have = new Set(victims.map((v) => v.pid));
+  const extra = [];
+  const queue = [...victims];
+  const take = (p, depth) => {
+    if (have.has(p.pid)) return;
+    have.add(p.pid);
+    const row = { ...p, depth };
+    extra.push(row);
+    queue.push(row);
+  };
+  while (queue.length) {
+    const v = queue.shift();
+    const depth = (v.depth || 0) + 1;
+    // what MSYS says is under it
+    const row = byWin.get(v.pid);
+    if (!row) continue;
+    for (const winpid of msysTree(rows, row.pid)) {
+      const p = byPid.get(winpid);
+      if (!p || have.has(p.pid)) continue;
+      take(p, depth);
+      for (const d of descendants(list, p.pid)) take(d, depth + d.depth);
+    }
+  }
+  return extra;
+}
+
+// What may be left of a Git Bash killed, and nothing links to it: when bash runs a script (`npm start`: npm is one) it
+// starts a new bash for it whose Windows parent is gone and whose MSYS parent is 1, the old one a stub waiting for it.
+// Not killed on a guess (another session's command may have started that second): said, with what runs under them.
+function maybeLeft(list, victims) {
+  if (!isWin) return [];
+  const bashes = victims.filter((v) => SHELL_EXE.test(v.name) && v.started);
+  if (!bashes.length) return [];
+  const byPid = new Map(list.map((p) => [p.pid, p]));
+  const have = new Set(victims.map((v) => v.pid));
+  const out = [];
+  for (const p of list) {
+    if (have.has(p.pid) || !SHELL_EXE.test(p.name) || byPid.has(p.ppid) || !p.started) continue;
+    if (!bashes.some((b) => p.started >= b.started && p.started - b.started < 3000)) continue;
+    out.push(p, ...descendants(list, p.pid).filter((d) => !have.has(d.pid)));
+  }
+  return out;
+}
+
 // ---- Showing them
 
 const pad = (s, n) => (String(s).length >= n ? String(s) : String(s) + ' '.repeat(n - String(s).length));
@@ -227,6 +284,7 @@ export const ProcessesTool = {
         const p = byPid.get(pid);
         if (!p) { lines.push(`${pid}: no such process`); failed = true; continue; }
         const victims = [p, ...(tree ? descendants(list, pid) : [])];
+        if (tree) victims.push(...await msysExtras(list, victims, signal));
         const label = `${pid} ${p.name}`;
         const own = victims.find((v) => mine.has(v.pid));
         const critical = victims.find((v) => CRITICAL.has(v.name.toLowerCase()) || v.pid <= 4);
@@ -234,11 +292,17 @@ export const ProcessesTool = {
         if (own) { lines.push(`${label}: refused, ${own.pid === pid ? 'it is' : `its tree holds ${own.pid} ${own.name}, which is`} claude-pro or what it runs under`); failed = true; continue; }
         if (critical) { lines.push(`${label}: refused, ${critical.pid === pid ? 'it is' : `its tree holds ${critical.pid} ${critical.name},`} a system process`); failed = true; continue; }
         if (guarded && !input.force) { lines.push(`${label}: refused without force: true (${guarded.name} is the desktop shell)`); failed = true; continue; }
-        const err = await killPid(pid, tree);
+        let err = await killPid(pid, tree);
+        // (what Windows does not see as its children: taskkill /T would not reach it)
+        for (const v of victims.slice(1)) if (exists(v.pid)) err = (await killPid(v.pid, true)) || err;
         await new Promise((r) => setTimeout(r, 200));
         const left = victims.filter((v) => exists(v.pid));
         if (!left.length) lines.push(`${label}: killed${victims.length > 1 ? ` with ${victims.length - 1} child process${victims.length === 2 ? '' : 'es'}` : ''}`);
         else { failed = true; lines.push(`${label}: ${left.length} of ${victims.length} still running (${left.slice(0, 5).map((v) => `${v.pid} ${v.name}`).join(', ')})${err ? `: ${err}` : ''}`); }
+        if (tree) {
+          const maybe = maybeLeft(list, victims).filter((v) => exists(v.pid));
+          if (maybe.length) lines.push(`  possibly left running: a Git Bash that ran a script (npm start…) has a successor nothing links to (its parent gone, started within seconds of it). Check and kill them if they are its:\n${maybe.slice(0, 8).map((v) => `  ${v.pid} ${v.name} — ${cut(String(v.command || '').replace(/\s+/g, ' '), 140)}`).join('\n')}`);
+        }
       }
       return { isError: failed, content: lines.join('\n'), display: { summary: lines.length === 1 ? lines[0] : `${lines.filter((l) => /killed/.test(l)).length} of ${lines.length} killed` } };
     }
@@ -251,6 +315,7 @@ export const ProcessesTool = {
       const root = byPid.get(Number(input.pid));
       if (!root) return { isError: true, content: `no process ${input.pid}` };
       rows = input.tree ? [root, ...descendants(list, root.pid)] : [root];
+      if (input.tree) rows.push(...await msysExtras(list, rows, signal));
       filters.push(`pid ${input.pid}${input.tree ? ' and its descendants' : ''}`);
     }
     if (input.name) { const q = String(input.name).toLowerCase(); rows = rows.filter((p) => p.name.toLowerCase().includes(q)); filters.push(`name ~ ${input.name}`); }

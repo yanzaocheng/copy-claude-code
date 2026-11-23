@@ -103,7 +103,8 @@ export function msysTree(rows, rootPid) {
 }
 
 let psCache;
-function findPs() {
+// Git Bash's ps.exe (`ps -W` lists MSYS's processes with their Windows ids), or null without Git Bash.
+export function findPs() {
   if (psCache !== undefined) return psCache;
   psCache = null;
   const shell = findShell(null);
