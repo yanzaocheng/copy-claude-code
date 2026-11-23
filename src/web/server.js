@@ -243,7 +243,7 @@ async function serve() {
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), repo: REPO, remote, hosted: host?.size ?? 0 });
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), repo: REPO, remote, hosted: host?.size ?? 0, pending: host?.pendingUpdate() || null });
       // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
       if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }
       // a session an older version started in a hidden window moves in (App.maybeMoveIntoConsole): the state it leaves

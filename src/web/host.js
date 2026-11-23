@@ -232,6 +232,39 @@ export class SessionHost {
   // A newer console (another version) was started: this one gives way once its sessions are idle.
   requestHandover() { this.noteChange({ now: true }); }
 
+  // New code waiting for the sessions to be idle (the page's notice): the version on disk and what each session that
+  // is not idle is busy with. A background shell or agent never ends by itself (a dev server, an app): the page offers
+  // to end them (clearBlockers). Null when nothing waits.
+  pendingUpdate() {
+    const due = this.requests.size || (this.source && this.source.key !== this.failed);
+    if (!due) return null;
+    const blockers = [...this.apps].filter((a) => !this.ready(a)).map((a) => ({
+      name: a.peerLabel(),
+      title: a.sessionLabel?.() || a.peerLabel(),
+      turn: Boolean(a.isTurnRunning?.()),
+      dialog: Boolean(a.dialogs?.length),
+      queued: a.queue?.length || 0,
+      background: (a.backgroundWork?.() || []).map(({ kind, id, label }) => ({ kind, id, label })),
+    }));
+    return { version: installedVersion() || VERSION, blockers };
+  }
+
+  // 结束后台程序并更新: the background shells and agents of the sessions the new code waits for (a turn running goes on: it
+  // ends by itself). Returns how many were ended.
+  async clearBlockers() {
+    const { shutdownBackgroundShells } = await import('../tools/bash.js');
+    let ended = 0;
+    for (const app of [...this.apps].filter((a) => !this.ready(a))) {
+      const work = app.backgroundWork?.() || [];
+      if (!work.length) continue;
+      for (const t of app.runtime?.tasks?.running() || []) app.runtime.tasks.kill(t.id);
+      if (app.owner) shutdownBackgroundShells(app.owner); // (without an owner it would be every session's)
+      ended += work.length;
+    }
+    this.check();
+    return { ended };
+  }
+
   // A session asks for a restart (the Restart tool, /restart, an update): done when all sessions are idle.
   restartFor(app, request) {
     this.requests.set(app, request || {});

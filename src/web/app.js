@@ -2316,6 +2316,35 @@
     el.querySelector("[data-reload]").addEventListener("click", () => location.reload());
     document.body.appendChild(el);
   }
+  // New code waits for the sessions to be idle, and a background program (a dev server, an app) never ends by itself:
+  // said at the top with what holds it up, and a button that ends those programs. A turn running is not shown: it
+  // ends by itself and the switch follows.
+  let pendingDismissed = "";
+  function notePending(p) {
+    const old = $("#pendingNote");
+    const pending = p?.pending;
+    const held = (pending?.blockers || []).filter((b) => b.background.length);
+    const key = held.map((b) => b.name + ":" + b.background.map((x) => x.id).join(",")).join("|");
+    if (!pending || !held.length || key === pendingDismissed) { old?.remove(); return; }
+    const what = held.map((b) => `<strong>${esc(b.title)}</strong>（${b.background.map((x) => `${x.kind === "agent" ? "后台 agent" : "后台程序"}「${esc(x.label)}」`).join("、")}）`).join("；");
+    const others = (pending.blockers || []).filter((b) => !b.background.length && (b.turn || b.dialog || b.queued)).length;
+    const html = `<span class="pending-text">新版本 v${esc(pending.version)} 已就绪，等这些会话空闲后自动切换：${what}${others ? `；另有 ${others} 个会话正在工作，完成后会自动继续` : ""}</span><button type="button" class="button small" data-clear>结束后台程序并更新</button><button type="button" class="icon-btn" data-dismiss title="先不管" aria-label="关闭">✕</button>`;
+    const el = old || Object.assign(document.createElement("div"), { id: "pendingNote", className: "reload-note pending-note" });
+    if (el.dataset.key === key) return;
+    el.dataset.key = key;
+    el.innerHTML = html;
+    el.querySelector("[data-dismiss]").addEventListener("click", () => { pendingDismissed = key; el.remove(); });
+    el.querySelector("[data-clear]").addEventListener("click", async (e) => {
+      if (!confirm(`结束这些后台程序？${held.map((b) => b.background.map((x) => `\n· ${b.title}：${x.label}`).join("")).join("")}\n\n它们会被停止；需要的话，切换后让对应的会话重新启动。`)) return;
+      e.currentTarget.disabled = true;
+      try {
+        const r = await api("/api/update/clear", { method: "POST", body: {} });
+        el.remove();
+        toast(`已结束 ${r.ended} 个后台程序，控制台空闲后切换到新版本`);
+      } catch (err) { fail(err); e.currentTarget.disabled = false; }
+    });
+    if (!old) document.body.appendChild(el);
+  }
   // 安装为桌面应用: the browser's own install prompt (Chrome, Edge), offered in the settings menu while it can be
   // shown; not inside the installed app itself
   let installPrompt = null;
@@ -2337,6 +2366,7 @@
   let pingTick = 0;
   api("/api/ping").then((p) => {
     noteServerCode(p);
+    notePending(p);
     $("#brandVersion").textContent = `v${p.version}`;
     if (p.machine) $("#sideMe").title = `设置与更多 · ${p.machine}`;
     $("#remoteLinks").classList.toggle("hidden", !p.remote); // opened through 远程访问: switch computer, log out
@@ -2371,6 +2401,6 @@
   setInterval(() => {
     const visible = document.visibilityState === "visible";
     if (visible) loadWorkspace();
-    if (!visible || ++pingTick % 6 === 0) api("/api/ping").then(noteServerCode).catch(() => {}); // (every 30 s while looked at)
+    if (!visible || ++pingTick % 6 === 0) api("/api/ping").then((p) => { noteServerCode(p); notePending(p); }).catch(() => {}); // (every 30 s while looked at)
   }, 5000);
 })();

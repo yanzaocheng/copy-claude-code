@@ -683,6 +683,11 @@ const running = async () => {
 export const routes = [
   ['GET', /^\/api\/overview$/, () => overview()],
   ['GET', /^\/api\/update$/, (req, m, body, url) => webUpdateStatus({ fresh: url.searchParams.get('check') === '1' })],
+  // 结束后台程序并更新: new code waits for sessions whose background shells or agents never end by themselves
+  ['POST', /^\/api\/update\/clear$/, async () => {
+    if (!host) throw httpError(409, '控制台还在启动');
+    return host.clearBlockers();
+  }],
   ['POST', /^\/api\/update$/, (req, m, body) => startWebUpdate(body?.version)],
 
   ['GET', /^\/api\/sessions$/, async () => {

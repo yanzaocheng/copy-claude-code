@@ -270,6 +270,10 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 /* toast and modal */
 .toast { position: fixed; right: 20px; bottom: 20px; z-index: 50; padding: 11px 16px; border-radius: 11px; background: var(--text); color: var(--surface); font-size: 13px; box-shadow: var(--shadow-lg); max-width: 480px; animation: pop-in .15s ease; }
 .toast.error { background: var(--danger); color: #fff; }
+.pending-note { width: min(760px, calc(100vw - 24px)); align-items: center; }
+.pending-note .pending-text { flex: 1; line-height: 1.5; }
+.pending-note .button { flex: none; }
+.pending-note .icon-btn { flex: none; color: inherit; opacity: .7; }
 .reload-note { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 55; display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 16px; border-radius: 12px; background: var(--text); color: var(--surface); font-size: 13px; box-shadow: var(--shadow-lg); max-width: calc(100vw - 24px); }
 .modal-back { position: fixed; inset: 0; z-index: 40; background: rgba(24, 20, 16, .42); backdrop-filter: blur(2px); display: grid; place-items: center; padding: 20px; }
 .modal { width: min(760px, 100%); max-height: calc(100vh - 40px); display: flex; flex-direction: column; background: var(--surface); border-radius: 16px; border: 1px solid var(--line); box-shadow: var(--shadow-lg); animation: pop-in .15s ease; }
