@@ -1971,7 +1971,7 @@
 
   async function extensions() {
     const project = sessionStorage.getItem("extProject") || "";
-    const el = page(`<h1>扩展</h1><p class="sub">技能、子 agent、自定义命令、MCP 服务器和 hooks。新会话会加载改动</p>
+    const el = page(`<h1>扩展</h1><p class="sub">内置工具、技能、子 agent、自定义命令、MCP 服务器和 hooks。新会话会加载改动</p>
       <div class="toolbar"><span class="muted" style="font-size:13px">项目：</span>${await projectsSelect("proj", project)}</div><div id="body"><div class="empty">正在加载…</div></div>`);
     $("#proj", el).addEventListener("change", (e) => { sessionStorage.setItem("extProject", e.target.value); extensions(); });
     let x;
@@ -1980,11 +1980,20 @@
     const list = (items, kind) => items.length ? items.map((i) => `<div class="file-row"><span class="name">${esc(kind === "command" ? `/${i.name}` : i.name)}</span>${scopePill(i.scope)}<span class="desc" title="${esc(i.description)}">${esc(i.description)}</span>${i.path ? `<button class="button secondary small" data-edit="${esc(i.path)}">编辑</button>` : ""}</div>`).join("") : '<div class="file-row"><span class="desc">还没有</span></div>';
     // 新建: a new conversation with the request written for the model (it knows the formats and asks what is missing)
     const aiBtn = (kind) => `<button class="button secondary small" data-ai="${kind}" title="打开新会话，写好要求交给模型去做">${ICON.agent}让 AI 新建</button>`;
+    // 内置工具: what every request gives the model, in a line each (the whole description on hover)
+    const tools = x.tools || [];
+    const toolRows = tools.map((t) => {
+      const first = (t.description.split(/\n/).find((l) => l.trim()) || "").replace(/^[-\s]+/, "").split(/(?<=\.)\s/)[0];
+      return `<div class="file-row"><span class="name">${esc(t.name)}</span><span class="desc" title="${esc(t.description.slice(0, 1200))}">${esc(TOOL_ZH[t.name] || first)}</span></div>`;
+    }).join("");
     $("#body", el).innerHTML = `
-      <div class="section-head"><div><h2>技能</h2><p>skills/&lt;名字&gt;/SKILL.md：模型按描述决定何时加载</p></div>${aiBtn("skill")}</div><div class="panel">${list(x.skills, "skill")}</div>
+      <div class="section-head"><div><h2>内置工具<span class="card-count" style="margin-left:8px;vertical-align:2px">${tools.length + (x.selfRestart ? 1 : 0)}</span></h2><p>每次请求都会发给模型、由模型决定何时调用的工具，写在程序里（不是 MCP）。鼠标停在说明上可以看到发给模型的原文</p></div></div>
+      <div class="panel">${toolRows || '<div class="file-row"><span class="desc">读不到工具清单</span></div>'}${x.selfRestart ? `<div class="file-row"><span class="name">Restart</span><span class="desc">${esc(TOOL_ZH.Restart)}</span></div>` : ""}
+        <div class="file-row"><span class="desc">另外：配置了 MCP 服务器时，它们的工具会以 mcp__服务器名__工具名 加进这个清单；子 agent 用的是它定义里 tools 列出的那些。</span></div></div>
+      <div class="section-head"><div><h2>技能</h2><p>skills/&lt;名字&gt;/SKILL.md：模型按描述决定何时用 Skill 工具加载</p></div>${aiBtn("skill")}</div><div class="panel">${list(x.skills, "skill")}</div>
       <div class="section-head"><div><h2>子 agent</h2><p>agents/*.md：Task 工具可以把任务交给它们</p></div>${aiBtn("agent")}</div><div class="panel">${list(x.agents, "agent")}</div>
-      <div class="section-head"><div><h2>自定义命令</h2><p>commands/*.md：在会话里输入 /名字</p></div>${aiBtn("command")}</div><div class="panel">${list(x.commands, "command")}</div>
-      <div class="section-head"><div><h2>MCP 服务器</h2><p>环境变量和请求头的值不会显示（保持 ••• 就是不改）</p></div>${aiBtn("mcp")}</div>
+      <div class="section-head"><div><h2>自定义命令</h2><p>commands/*.md：不是工具。在会话里输入 /名字 时，把文件内容（$ARGUMENTS 换成后面的参数）当作你的消息发给模型，模型自己不会调用</p></div>${aiBtn("command")}</div><div class="panel">${list(x.commands, "command")}</div>
+      <div class="section-head"><div><h2>MCP 服务器</h2><p>外接的工具服务（没有内置的）：配置后它们的工具加进上面的清单。环境变量和请求头的值不会显示</p></div>${aiBtn("mcp")}</div>
       <div class="panel">${x.mcp.length ? x.mcp.map((s, i) => `<div class="file-row"><span class="name">${esc(s.name)}</span><span class="pill">${esc(s.scope)}</span><span class="desc mono">${esc(s.spec?.url || [s.spec?.command, ...(s.spec?.args || [])].filter(Boolean).join(" "))}</span>${s.scope === "user" || s.scope === ".mcp.json" ? `<button class="button secondary small" data-mcp="${i}">编辑</button>` : `<button class="button secondary small" data-edit="${esc(s.file)}">编辑文件</button>`}</div>`).join("") : '<div class="file-row"><span class="desc">没有配置 MCP 服务器</span></div>'}</div>
       <div class="section-head"><div><h2>Hooks</h2><p>在工具调用前后、提交消息时等运行的命令，写在设置文件的 hooks 里</p></div></div>
       <div class="panel">${x.hooks.length ? x.hooks.map((h) => `<div class="file-row"><span class="name">${esc(h.event)}</span><span class="pill">${esc(h.scope)}</span><span class="desc mono">${esc(JSON.stringify(h.entries))}</span><button class="button secondary small" data-edit="${esc(h.file)}">编辑文件</button></div>`).join("") : `<div class="file-row"><span class="desc">没有 hooks。要添加，编辑设置文件的 "hooks" 字段</span><button class="button secondary small" data-edit="${esc(x.settingsFiles.user)}">编辑用户设置文件</button></div>`}</div>`;
@@ -1995,6 +2004,35 @@
       if (mc) mcpDialog(x, x.mcp[Number(mc.dataset.mcp)], project);
     });
   }
+
+  // The built-in tools in a few Chinese words (扩展's 内置工具; what the model reads is their English description)
+  const TOOL_ZH = {
+    Task: "把复杂的多步任务交给子 agent，可以在后台运行",
+    Skill: "加载一个技能（下面「技能」里写好的做事说明）",
+    TaskOutput: "查看后台 agent 的状态和结果",
+    TaskStop: "停止一个后台 agent",
+    Bash: "运行终端命令（git、npm、构建、测试等），可以放到后台",
+    BashOutput: "读取后台命令的输出",
+    KillShell: "结束一个后台命令",
+    REPL: "在常驻的 Python / Node.js 进程里运行代码，变量和数据保留到下次",
+    Processes: "列出本机进程（端口、命令行），或结束进程",
+    Glob: "按文件名模式找文件",
+    Grep: "按内容搜索文件（ripgrep）",
+    Read: "读取文件，也能看图片和 notebook",
+    Edit: "在文件里精确替换一段文字",
+    MultiEdit: "一次在同一个文件里做多处替换",
+    Write: "写入文件（新建或整个覆盖）",
+    NotebookEdit: "编辑 Jupyter notebook 的单元格",
+    WebFetch: "抓取网页，按要求提取内容",
+    WebSearch: "联网搜索",
+    Browser: "操作真实的浏览器：打开网页、点击、输入、截图",
+    TodoWrite: "维护当前任务的待办清单（就是对话下方的「待办」）",
+    AskUserQuestion: "向你提问、让你在几个选项里选",
+    Effort: "遇到难题时调高自己本次的思考强度",
+    ListPeers: "列出其他 claude-pro 会话（本机、你的其他电脑、联系人）",
+    MessagePeer: "给其他会话发任务或问题，答复自动发回",
+    Restart: "改了 claude-pro 自身代码后重启加载（只有源码版有）",
+  };
 
   // 让 AI 新建: the new conversation's box with the request (where the file goes, its format), the project's directory
   // chosen when the page shows one; what the thing should do is left for the user to write at the end.

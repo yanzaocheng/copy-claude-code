@@ -21,7 +21,7 @@ import { webModelChoices, effortChoices as sessionEfforts, refreshModelLists } f
 import { setArchived, archivedSessions, projectDir } from '../session.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
-  purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError,
+  purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools,
 } from './data.js';
 
 const mask = (key) => {
@@ -515,6 +515,8 @@ function extensionsView(project) {
   const scopeOf = (source) => (typeof source === 'string' && inside(path.resolve(source), CONFIG_DIR) ? 'user' : source === 'built-in' ? 'built-in' : 'project');
   return {
     project: cwd === home ? null : cwd,
+    tools: builtinTools(cwd === home ? null : cwd),
+    selfRestart: SOURCE_CHECKOUT, // (a source checkout's sessions have Restart too)
     skills: [...loadSkills(cwd).values()].map((s) => ({ name: s.name, description: s.description, scope: s.scope, path: s.file })),
     agents: [...loadAgents(cwd).values()].map((a) => ({ name: a.name, description: a.description, tools: a.tools, scope: scopeOf(a.source), path: a.source === 'built-in' ? null : a.source })),
     commands: [...loadCustomCommands(cwd).values()].map((c) => ({ name: c.name, description: c.description, scope: c.scope, path: commandPath(cwd, c) })),

@@ -151,6 +151,9 @@ function toolsFor(cwd) {
   return tools;
 }
 
+// The built-in tools a session of the project sends the model (扩展's 内置工具): {name, description}.
+export const builtinTools = (cwd) => toolsFor(cwd).map((t) => ({ name: t.name, description: String(t.description || '') }));
+
 // A conversation as the console shows it: its items (as the live view has them, images as {k: 'image', n}), with
 // what the list knows of it.
 export function sessionDetail(dir, id) {
