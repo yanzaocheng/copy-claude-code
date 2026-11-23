@@ -1530,13 +1530,36 @@
           ${h?.error ? `<div style="color:var(--danger);font-size:13px;margin-top:4px">读不到域名前缀：${esc(h.error)}</div>` : ""}</div>
         <div class="actions">${v.enabled ? `<button class="button secondary" id="rRename">修改前缀</button><button class="button danger" id="rOff">关闭远程访问</button>` : ""}</div></div>
         ${v.enabled ? "" : `<div class="remote-setup">${prefixField("rHandle")}<div class="actions"><button class="button" id="rOn" ${v.hasPassword ? "" : "disabled"}>开启远程访问</button>${v.hasPassword ? "" : '<span class="muted" style="font-size:12.5px">先在下面设一个密码</span>'}<span class="modal-error" id="rErr"></span></div></div>`}
-        <p class="muted" style="font-size:12.5px;margin:12px 0 0">开启后这台电脑的控制台服务常驻后台；电脑休眠或关机时打不开，claude-pro 的任何会话启动时会重新接上。</p></div>
+        <p class="muted" style="font-size:12.5px;margin:12px 0 0">开启后这台电脑的控制台服务常驻后台；电脑休眠或关机时打不开。开机后想马上能连，就打开下面的「开机自动启动」；不开的话，claude-pro 的任何会话启动时也会重新接上。</p></div>
+      <div class="panel panel-pad" id="rAuto"><span class="muted">正在读取开机启动设置…</span></div>
       <div class="section-head"><div><h2>密码</h2><p>${v.hasPassword ? "已设置。改密码会让所有已登录的设备退出。" : `还没有设置：开启前先设一个（至少 ${v.minPassword} 位）。`}</p></div></div>
       <form class="panel panel-pad actions" id="rPwForm"><input type="password" id="rPw1" placeholder="新密码" autocomplete="new-password" style="flex:1;min-width:180px"><input type="password" id="rPw2" placeholder="再输一次" autocomplete="new-password" style="flex:1;min-width:180px"><button class="button" type="submit">${v.hasPassword ? "修改密码" : "设置密码"}</button></form>
       <div class="section-head"><div><h2>已登录的设备</h2><p>${v.sessions.length} 台</p></div>${v.sessions.length ? '<button class="button danger small" id="rLogoutAll">全部退出</button>' : ""}</div>
       <div class="panel">${v.sessions.length ? `<table class="list"><tbody>${v.sessions.map((s) => `<tr><td>${esc(device(s.ua))}</td><td class="mono">${esc(s.ip || "")}</td><td>最近 ${esc(ago(s.lastSeen))}</td><td class="num muted">${s.remember ? "记住 30 天" : "1 天"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">没有</div>'}</div>
       <div class="section-head"><h2>最近的登录</h2></div>
       <div class="panel">${v.logins.length ? `<table class="list"><tbody>${v.logins.map((l) => `<tr><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill off">密码错误</span>'}</td><td>${esc(device(l.ua))}</td><td class="mono">${esc(l.ip || "")}</td><td class="num">${esc(fmtTime(l.at))}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">还没有人登录过</div>'}</div>`;
+    // 开机自动启动: the console started at log-in (a shortcut in Startup, a LaunchAgent, an XDG autostart entry)
+    const drawAuto = (a) => {
+      const box = $("#rAuto", el);
+      if (!box) return;
+      const head = '<div class="auto-head"><div><div style="font-weight:650">开机自动启动</div><div class="muted" style="font-size:12.5px;margin-top:2px">电脑开机、登录后在后台启动控制台，手机马上就能连。没开远程访问时，没人用 30 分钟后它会自己退出。</div></div>';
+      if (!a.supported) {
+        box.innerHTML = `${head}</div><p class="muted" style="font-size:13px;margin:12px 0 6px">这台电脑没有图形桌面，没有「登录时启动」的地方。要开机启动，把下面这行加进 <code>crontab -e</code>：</p><pre class="auto-cmd">${esc(a.hint)}</pre>`;
+        return;
+      }
+      const how = { windows: "「启动」文件夹里的快捷方式", macos: "LaunchAgent", linux: "桌面的自启动项" }[a.kind] || "";
+      box.innerHTML = `${head}<label class="switch"><input type="checkbox" id="rAutoOn" role="switch"${a.enabled ? " checked" : ""}><span class="switch-track" aria-hidden="true"></span><span class="sr-only">开机自动启动</span></label></div>${a.enabled ? `<div class="muted" style="font-size:12px;margin-top:10px">${esc(how)}：<span class="mono">${esc(a.file)}</span></div>` : ""}`;
+      $("#rAutoOn", box).addEventListener("change", async (e) => {
+        const on = e.target.checked;
+        e.target.disabled = true;
+        try {
+          drawAuto(await api("/api/autostart", { method: "POST", body: { enabled: on } }));
+          toast(on ? "已设置开机自动启动" : "已取消开机自动启动");
+        } catch (err) { e.target.checked = !on; e.target.disabled = false; fail(err); }
+      });
+    };
+    api("/api/autostart").then(drawAuto).catch((e) => { const box = $("#rAuto", el); if (box) box.innerHTML = `<span class="muted">读不到开机启动设置：${esc(e.message)}</span>`; });
+
     const post = async (body, done) => {
       const next = await api("/api/remote", { method: "POST", body });
       if (body.handle && h) Object.assign(h, { handle: body.handle, auto: false, error: null });
