@@ -289,7 +289,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/web`（`/web remote …`）`/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`，以及 `.claude/commands/*.md`、`.claude-pro/commands/*.md`、`~/.claude-pro/commands/*.md` 中的自定义命令（支持 `$ARGUMENTS`、`$1`、`` !`cmd` ``）。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/web`（`/web remote …`）`/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`。技能也可以直接用 `/技能名 参数` 运行。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 

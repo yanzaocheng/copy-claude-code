@@ -211,7 +211,7 @@ const inside = (file, dir) => {
 function editable(file) {
   const f = path.resolve(file);
   const ext = path.extname(f).toLowerCase();
-  const extDirs = (root) => ['skills', 'agents', 'commands'].some((d) => inside(f, path.join(root, d))) && ext === '.md';
+  const extDirs = (root) => ['skills', 'agents'].some((d) => inside(f, path.join(root, d))) && ext === '.md';
   if (same(f, path.join(CONFIG_DIR, 'CLAUDE.md')) || same(f, path.join(CONFIG_DIR, 'settings.json'))) return true;
   if (extDirs(CONFIG_DIR)) return true;
   if (inside(f, projectsRoot()) && ext === '.md' && path.basename(path.dirname(f)) === 'memory' && same(path.dirname(path.dirname(path.dirname(f))), projectsRoot())) return true;

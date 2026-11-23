@@ -11,7 +11,7 @@ import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnec
 import { SessionStore } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
-import { loadCustomCommands, renderSkill, expandCommandBody, expandShellEmbeds } from './agents.js';
+import { renderSkill } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
 import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS } from './api.js';
@@ -1379,24 +1379,6 @@ export function buildCommands(app) {
     description: `Exit ${APP_NAME}`,
     run() { app.exit(0); },
   });
-
-  // Custom commands from markdown files.
-  for (const custom of loadCustomCommands(app.cwd).values()) {
-    if (commands.has(custom.name)) continue;
-    add({
-      name: custom.name,
-      argHint: custom.argumentHint,
-      description: `${custom.description} ${c.dim(`(${custom.scope})`)}`,
-      async run(args) {
-        const bash = app.runtime.tools.find((t) => t.name === 'Bash');
-        const body = await expandShellEmbeds(expandCommandBody(custom.body, args), async (command) => {
-          const r = await bash.call({ command }, app.agent.makeCtx());
-          return typeof r.content === 'string' ? r.content : '';
-        });
-        return app.startTurn(body, { echo: false });
-      },
-    });
-  }
 
   // Skills can be run directly as /<skill-name> [arguments].
   for (const skill of app.runtime.skills.values()) {
