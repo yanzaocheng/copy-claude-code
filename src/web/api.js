@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFile, execFileSync } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import {
   CONFIG_DIR, INSTALL_DIR, SOURCE_CHECKOUT, VERSION, BASIC_SETTINGS, KNOWN_KEYS, loadConfig, settingsFiles,
   writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile, applyRememberedChoices, pickedModels, savePickedModels,
@@ -149,54 +149,34 @@ async function openProject(body) {
   return { opened: true };
 }
 
-// On the local Windows console only: the host's native directory picker, not a browser upload prompt.
-let folderDialog;
-function pickProjectDirectory() {
-  if (!isWin) throw httpError(409, '这台电脑没有可用的系统目录选择器');
-  if (folderDialog) throw httpError(409, '目录选择窗口已经打开');
-  const script = `
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-$owner = New-Object System.Windows.Forms.Form
-$owner.TopMost = $true
-$owner.ShowInTaskbar = $false
-$owner.Opacity = 0
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '选择 claude-pro 项目目录'
-try {
-  $owner.Show()
-  if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.SelectedPath) }
-} finally { $dialog.Dispose(); $owner.Dispose() }
-`;
-  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const args = ['-NoProfile', '-NoLogo', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
-  folderDialog = new Promise((resolve, reject) => {
-    execFile(powershell, args, { windowsHide: true, timeout: 180_000, maxBuffer: 64 * 1024 }, (err, stdout) => {
-      if (err) reject(httpError(503, '系统目录选择器不可用，请从目录列表选择'));
-      else resolve({ cwd: stdout || null });
-    });
-  }).finally(() => { folderDialog = null; });
-  return folderDialog;
-}
-
+// The folder browser of 添加工作区 and 其他目录… (in the page, the same from a phone): without `cwd` the places to start
+// from (home and its usual folders, the drives, the recent projects, and where to open: next to the latest project),
+// else the folder's subfolders.
 async function projectDirectories(cwd) {
   if (!cwd) {
-    const paths = [home, process.cwd(), ...knownProjects().map((p) => p.cwd)];
-    const roots = new Map();
-    for (const dir of paths) {
-      if (!path.isAbsolute(dir) || (isWin && !windowsDrivePath(dir))) continue;
-      const root = path.parse(dir).root;
-      roots.set(isWin ? root.toLowerCase() : root, root);
-    }
-    return { cwd: null, dirs: [...new Set([...paths.slice(0, 2), ...roots.values()])].filter((dir) => !isWin || windowsDrivePath(dir)).map((dir) => ({ path: dir, name: dir })) };
+    const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+    const firstDir = (...c) => c.find(isDir);
+    const od = (n) => path.join(home, 'OneDrive', n);
+    const places = [
+      { name: '主目录', path: home, kind: 'home' },
+      { name: '桌面', path: firstDir(path.join(home, 'Desktop'), od('Desktop'), od('桌面')), kind: 'desktop' },
+      { name: '文档', path: firstDir(path.join(home, 'Documents'), od('Documents'), od('文档')), kind: 'documents' },
+      { name: '下载', path: firstDir(path.join(home, 'Downloads')), kind: 'downloads' },
+    ].filter((p) => p.path);
+    // (A: and B: left out: an empty floppy drive answers slowly)
+    const drives = isWin ? [...'CDEFGHIJKLMNOPQRSTUVWXYZ'].map((l) => `${l}:\\`).filter(isDir).map((p) => ({ name: p.slice(0, 2), path: p, kind: 'drive' })) : [{ name: '/', path: '/', kind: 'drive' }];
+    const recent = knownProjects().filter((p) => isDir(p.cwd)).slice(0, 8).map((p) => ({ name: path.basename(p.cwd) || p.cwd, path: p.cwd, kind: 'project' }));
+    return { cwd: null, places, drives, recent, start: recent[0] ? path.dirname(recent[0].path) : home };
   }
   if (!path.isAbsolute(cwd) || (isWin && !windowsDrivePath(cwd))) throw httpError(400, '不是本机目录');
   try {
     const dir = await fs.promises.realpath(cwd);
     if (isWin && !windowsDrivePath(dir)) throw httpError(400, '不是本机目录');
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-    const dirs = entries.filter((e) => e.isDirectory()).map((e) => ({ name: e.name, path: path.join(dir, e.name) })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    // hidden: .git, node_modules and the like, and what Windows keeps at a drive's root (shown dim, after the rest)
+    const hidden = (n) => n.startsWith('.') || n.startsWith('$') || n === 'node_modules' || n === 'System Volume Information';
+    const dirs = entries.filter((e) => e.isDirectory()).map((e) => ({ name: e.name, path: path.join(dir, e.name), hidden: hidden(e.name) }))
+      .sort((a, b) => a.hidden - b.hidden || a.name.localeCompare(b.name, undefined, { numeric: true }));
     return { cwd: dir, parent: path.dirname(dir) === dir ? null : path.dirname(dir), dirs };
   } catch (e) { throw httpError(e.status || 404, '无法读取这个目录，请选择其他目录'); }
 }
@@ -820,7 +800,6 @@ export const routes = [
   ['GET', /^\/api\/memory$/, () => memoryView()],
   ['GET', /^\/api\/projects$/, () => ({ projects: knownProjects() })],
   ['POST', /^\/api\/projects\/open$/, (req, m, body) => openProject(body)],
-  ['POST', /^\/api\/projects\/pick$/, () => pickProjectDirectory()],
   ['GET', /^\/api\/projects\/directories$/, (req, m, body, url) => projectDirectories(url.searchParams.get('cwd'))],
   ['GET', /^\/api\/file$/, (req, m, b, url) => readFileInfo(checkedPath(url.searchParams.get('path')))],
   ['PUT', /^\/api\/file$/, (req, m, body) => {
