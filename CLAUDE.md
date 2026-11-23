@@ -8,7 +8,7 @@
 
 ## 改完就提交(用户的要求,2026-10-12)
 
-每完成一项改动、检查通过后,马上 `git commit`,只提交到本地,不必等用户说"提交"。原因是别的程序(例如官方 Claude Code 的 `/rewind` 恢复代码)可能改动文件,每次都提交了,`git status` / `git diff` 就能一眼看出是谁改的。`git status` 里有不是自己改的改动,不要一起提交,先查清来源并告诉用户。`git push` 和 `npm publish` 仍然要等用户说"发布"。
+每完成一项改动、检查通过后,马上 `git commit`,只提交到本地,不必等用户说"提交"。原因是别的程序(例如官方 Claude Code 的 `/rewind` 恢复代码)可能改动文件,每次都提交了,`git status` / `git diff` 就能一眼看出是谁改的。`git status` 里有不是自己改的改动,不要一起提交,先查清来源并告诉用户。`git push` 和 `npm publish` 仍然要等用户说"发布"。用户说"发布"时运行 `npm run release -- patch`（有新功能用 `minor`）：检查、升版本、自检和打包检查、提交推送、npm 发布、7bit.fun 安装脚本有变化时同步并部署网关、等 npm 生效，一条命令做完（`scripts/release.mjs`，`--dry-run` 只做检查）。
 
 ## 省时间的事实
 

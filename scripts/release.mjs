@@ -71,8 +71,8 @@ const behind = Number(git(['rev-list', '--count', 'HEAD..origin/main'], { captur
 if (behind) fail(`本地落后 origin/main ${behind} 个提交，先合并`);
 const taken = run('npm', ['view', `${pkg.name}@${version}`, 'version', '--prefer-online'], { capture: true, allowFail: true });
 if (taken.ok && taken.out) fail(`npm 上已经有 ${pkg.name}@${version}`);
-const notes = git(['log', '--format=  %h %s', 'origin/main..HEAD'], { capture: true }).out;
-console.log(notes ? `这次发布的提交：\n${notes}` : '（origin/main 之后没有新提交：只发版本号）');
+const notes = git(['log', '--format=%h %s', 'origin/main..HEAD'], { capture: true }).out;
+console.log(notes ? `这次发布的提交：\n${notes.split('\n').map((l) => `  ${l}`).join('\n')}` : '（origin/main 之后没有新提交：只发版本号）');
 
 // ---------------------------------------------------------------- 2. the version
 step(`版本号改为 ${version}`);
