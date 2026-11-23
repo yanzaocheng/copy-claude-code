@@ -475,29 +475,6 @@ function redactSpec(spec) {
   return out;
 }
 
-const TEMPLATES = {
-  skill: (name) => `---\nname: ${name}\ndescription: 什么时候用这个技能（模型据此决定是否加载）\n---\n\n# ${name}\n\n步骤和说明写在这里。\n`,
-  agent: (name) => `---\nname: ${name}\ndescription: 什么时候把任务交给这个子 agent\ntools: Read, Grep, Glob, Bash\n---\n\n你是一个……（子 agent 的系统提示词）\n`,
-  command: (name) => `---\ndescription: 这个命令做什么\nargument-hint: [参数]\n---\n\n要发给模型的内容，$ARGUMENTS 会换成命令后面的参数。\n`,
-};
-
-function newExtension({ kind, scope, name, project }) {
-  if (!TEMPLATES[kind]) throw httpError(400, 'kind must be skill, agent or command');
-  const clean = String(name || '').trim();
-  if (!/^[\w.-]{1,60}$/.test(clean)) throw httpError(400, '名字只能用字母、数字、_ . -');
-  let root;
-  if (scope === 'user') root = CONFIG_DIR;
-  else {
-    if (!project || !fs.existsSync(project)) throw httpError(400, '项目级的需要先选一个项目');
-    root = path.join(project, '.claude-pro');
-  }
-  const file = kind === 'skill' ? path.join(root, 'skills', clean, 'SKILL.md') : path.join(root, kind === 'agent' ? 'agents' : 'commands', `${clean}.md`);
-  if (fs.existsSync(file)) throw httpError(409, '已经有同名的了');
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, TEMPLATES[kind](clean));
-  return { path: file };
-}
-
 // ---------------------------------------------------------------- opening a conversation in a terminal
 
 let wtPath;
@@ -800,7 +777,6 @@ export const routes = [
   }],
 
   ['GET', /^\/api\/extensions$/, (req, m, b, url) => extensionsView(url.searchParams.get('project'))],
-  ['POST', /^\/api\/extensions$/, (req, m, body) => newExtension(body || {})],
   ['POST', /^\/api\/mcp$/, (req, m, body) => {
     // add, replace or remove one MCP server in a settings file (user, or a project's .mcp.json)
     const name = String(body?.name || '').trim();

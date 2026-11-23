@@ -250,7 +250,16 @@
     if (item.k === "summary") return `<div class="it it-summary"><details><summary>✻ 对话已压缩（摘要）</summary><div class="md">${md(item.text)}</div></details></div>`;
     if (item.k === "output") {
       const lines = trimBlank(item.lines);
-      return lines.length ? `<div class="it it-output"><pre>${ansiLines(lines)}</pre></div>` : "";
+      if (!lines.length) return "";
+      // the "✻ Done at …" line under an answer (see App.doneText): a line of its own, the rest as the terminal had it
+      let html = "", run = [];
+      const flush = () => { const r = trimBlank(run); if (r.length) html += `<pre>${ansiLines(r)}</pre>`; run = []; };
+      for (const line of lines) {
+        const text = plain(line).trim();
+        if (/^✻ Done at \d{1,2}:\d{2}\b/.test(text)) { flush(); html += turnMeta(text); } else run.push(line);
+      }
+      flush();
+      return html ? `<div class="it it-output">${html}</div>` : "";
     }
     if (item.k === "tool") {
       const running = item.status === "running";
@@ -265,6 +274,21 @@
       return `<div class="it it-tool ${running ? "running" : item.status === "error" ? "error" : "done"}"${cut ? ` data-cut="${esc(item.id)}"` : ""}><div class="head"><span class="dot"></span><span>${ansi(item.head || "")}</span></div>${body ? (running ? `<pre>${body}</pre>` : folded(body)) : ""}</div>`;
     }
     return "";
+  }
+
+  // "✻ Done at 17:37 · worked 5m 40s · $0.05 (total $0.10) · ctx 119.1k/1M · opus-5-5 max" as the page shows it
+  function turnMeta(text) {
+    const [head, ...rest] = text.split(" · ");
+    const at = head.replace(/^✻ Done at /, "");
+    const parts = rest.map((p) => { // (HTML: every piece of the line escaped)
+      let m;
+      if ((m = /^worked (.+)$/.exec(p))) return `用时 ${esc(m[1])}`;
+      if ((m = /^(\$[\d.,]+) \(total (\$[\d.,]+)\)$/.exec(p))) return `${esc(m[1])}<span class="tm-dim">（累计 ${esc(m[2])}）</span>`;
+      if ((m = /^ctx (.+)$/.exec(p))) return `上下文 ${esc(m[1])}`;
+      return esc(p);
+    });
+    const check = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
+    return `<div class="turn-meta" title="${esc(text)}"><span class="tm-done"><span class="tm-check">${check}</span>${esc(at)} 完成</span>${parts.map((p) => `<span>${p}</span>`).join("")}</div>`;
   }
 
   // ---------------------------------------------------------------- images for a message (as pasting one in the terminal)
@@ -644,6 +668,12 @@
     stop: '<svg viewBox="0 0 24 24" width="14" height="14"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg>',
     add: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     caret: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+    chevron: '<svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
+    terminal: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7 5 5-5 5M12 17h7"/></svg>',
+    agent: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="2.5"/></svg>',
+    todoOpen: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>',
+    todoNow: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>',
+    todoDone: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="m8 12.3 2.8 2.8L16.2 9.6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     more: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
   };
 
@@ -1279,10 +1309,21 @@
     function renderBackground(list) {
       const box = $("#lbg", el);
       const open = $("details", box)?.open ?? true;
-      box.innerHTML = list.length ? `<details${open ? " open" : ""}><summary class="muted">后台运行 ${list.length}</summary>${list.map((b) => {
-        const tip = b.command && b.command !== b.label ? ` title="${esc(b.command)}"` : "";
-        return `<div class="bg-row"${tip}><span class="bg-kind">${b.kind === "agent" ? "Agent" : "Shell"}</span><span class="bg-label">${esc(b.label)}</span><span class="muted bg-meta">${esc(b.id)}${Number(b.since) > 0 ? ` · <span data-since="${Number(b.since)}"></span>` : ""}</span></div>`;
-      }).join("")}</details>` : "";
+      box.innerHTML = list.length ? `<details class="side-card"${open ? " open" : ""}><summary><span class="pulse"></span>后台运行<span class="card-count">${list.length}</span>${ICON.chevron}</summary><div class="card-list">${list.map((b) => {
+        const agent = b.kind === "agent";
+        const tip = b.command && b.command !== b.label ? b.command : b.label;
+        const since = Number(b.since) > 0 ? Number(b.since) : 0;
+        return `<div class="bg-row${agent ? " agent" : ""}" title="${esc(tip)}"><span class="bg-icon" title="${agent ? "后台 agent" : "后台命令"}">${agent ? ICON.agent : ICON.terminal}</span><span class="bg-label">${esc(b.label)}</span><span class="bg-id">${esc(b.id)}</span>${since ? `<span class="bg-time" data-since="${since}">${fmtDuration(Math.max(0, Date.now() - since))}</span>` : ""}</div>`;
+      }).join("")}</div></details>` : "";
+    }
+    function renderTodos(todos) {
+      const box = $("#ltodos", el);
+      const open = $("details", box)?.open ?? true;
+      const done = todos.filter((t) => t.status === "completed").length;
+      box.innerHTML = todos.length ? `<details class="side-card"${open ? " open" : ""}><summary>待办<span class="card-count">${done}/${todos.length}</span><span class="todo-bar"><i style="width:${Math.round((done / todos.length) * 100)}%"></i></span>${ICON.chevron}</summary><div class="card-list">${todos.map((t) => {
+        const state = t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : "";
+        return `<div class="todo-row ${state}"><span class="todo-icon">${state === "done" ? ICON.todoDone : state === "now" ? ICON.todoNow : ICON.todoOpen}</span><span>${esc(t.content)}</span></div>`;
+      }).join("")}</div></details>` : "";
     }
     function setStatus(next) {
       status = next || {};
@@ -1298,9 +1339,8 @@
       if (status.tasks && !Array.isArray(status.background)) stats.push(`${status.tasks} 个后台 agent`); // (a session of an older version)
       $("#lstats", el).textContent = stats.join("  ·  ");
       renderBackground(Array.isArray(status.background) ? status.background : []);
-      const todos = Array.isArray(status.todos) ? status.todos : [];
-      $("#ltodos", el).innerHTML = todos.length ? `<details open><summary class="muted">待办 ${todos.filter((t) => t.status === "completed").length}/${todos.length}</summary>${todos.map((t) => `<div class="${t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : ""}">${t.status === "completed" ? "☒" : t.status === "in_progress" ? "◼" : "☐"} ${esc(t.content)}</div>`).join("")}</details>` : "";
-      $("#lqueue", el).innerHTML = (status.queue || []).map((q) => `<div>⎿ 排队中：${esc(String(q).replace(/\s+/g, " ").slice(0, 200))}</div>`).join("");
+      renderTodos(Array.isArray(status.todos) ? status.todos : []);
+      $("#lqueue", el).innerHTML = (status.queue || []).map((q) => `<div class="queue-row"><span class="queue-tag">排队中</span><span>${esc(String(q).replace(/\s+/g, " ").slice(0, 200))}</span></div>`).join("");
       renderDialog(status.dialog);
       renderStatus();
     }
@@ -1820,28 +1860,42 @@
     try { x = await api(`/api/extensions${project ? `?project=${encodeURIComponent(project)}` : ""}`); } catch (e) { $("#body", el).innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
     const scopePill = (s) => `<span class="pill${s === "built-in" ? "" : s === "user" ? " accent" : " ok"}">${{ "built-in": "内置", user: "用户", project: "项目" }[s] || esc(s)}</span>`;
     const list = (items, kind) => items.length ? items.map((i) => `<div class="file-row"><span class="name">${esc(kind === "command" ? `/${i.name}` : i.name)}</span>${scopePill(i.scope)}<span class="desc" title="${esc(i.description)}">${esc(i.description)}</span>${i.path ? `<button class="button secondary small" data-edit="${esc(i.path)}">编辑</button>` : ""}</div>`).join("") : '<div class="file-row"><span class="desc">还没有</span></div>';
-    const newBtn = (kind, label) => `<button class="button secondary small" data-new="${kind}">新建${label}</button>`;
+    // 新建: a new conversation with the request written for the model (it knows the formats and asks what is missing)
+    const aiBtn = (kind) => `<button class="button secondary small" data-ai="${kind}" title="打开新会话，写好要求交给模型去做">${ICON.agent}让 AI 新建</button>`;
     $("#body", el).innerHTML = `
-      <div class="section-head"><div><h2>技能</h2><p>skills/&lt;名字&gt;/SKILL.md：模型按描述决定何时加载</p></div>${newBtn("skill", "技能")}</div><div class="panel">${list(x.skills, "skill")}</div>
-      <div class="section-head"><div><h2>子 agent</h2><p>agents/*.md：Task 工具可以把任务交给它们</p></div>${newBtn("agent", "子 agent")}</div><div class="panel">${list(x.agents, "agent")}</div>
-      <div class="section-head"><div><h2>自定义命令</h2><p>commands/*.md：在会话里输入 /名字</p></div>${newBtn("command", "命令")}</div><div class="panel">${list(x.commands, "command")}</div>
-      <div class="section-head"><div><h2>MCP 服务器</h2><p>环境变量和请求头的值不会显示（保持 ••• 就是不改）</p></div><button class="button secondary small" id="addMcp">添加 MCP 服务器</button></div>
+      <div class="section-head"><div><h2>技能</h2><p>skills/&lt;名字&gt;/SKILL.md：模型按描述决定何时加载</p></div>${aiBtn("skill")}</div><div class="panel">${list(x.skills, "skill")}</div>
+      <div class="section-head"><div><h2>子 agent</h2><p>agents/*.md：Task 工具可以把任务交给它们</p></div>${aiBtn("agent")}</div><div class="panel">${list(x.agents, "agent")}</div>
+      <div class="section-head"><div><h2>自定义命令</h2><p>commands/*.md：在会话里输入 /名字</p></div>${aiBtn("command")}</div><div class="panel">${list(x.commands, "command")}</div>
+      <div class="section-head"><div><h2>MCP 服务器</h2><p>环境变量和请求头的值不会显示（保持 ••• 就是不改）</p></div>${aiBtn("mcp")}</div>
       <div class="panel">${x.mcp.length ? x.mcp.map((s, i) => `<div class="file-row"><span class="name">${esc(s.name)}</span><span class="pill">${esc(s.scope)}</span><span class="desc mono">${esc(s.spec?.url || [s.spec?.command, ...(s.spec?.args || [])].filter(Boolean).join(" "))}</span>${s.scope === "user" || s.scope === ".mcp.json" ? `<button class="button secondary small" data-mcp="${i}">编辑</button>` : `<button class="button secondary small" data-edit="${esc(s.file)}">编辑文件</button>`}</div>`).join("") : '<div class="file-row"><span class="desc">没有配置 MCP 服务器</span></div>'}</div>
       <div class="section-head"><div><h2>Hooks</h2><p>在工具调用前后、提交消息时等运行的命令，写在设置文件的 hooks 里</p></div></div>
       <div class="panel">${x.hooks.length ? x.hooks.map((h) => `<div class="file-row"><span class="name">${esc(h.event)}</span><span class="pill">${esc(h.scope)}</span><span class="desc mono">${esc(JSON.stringify(h.entries))}</span><button class="button secondary small" data-edit="${esc(h.file)}">编辑文件</button></div>`).join("") : `<div class="file-row"><span class="desc">没有 hooks。要添加，编辑设置文件的 "hooks" 字段</span><button class="button secondary small" data-edit="${esc(x.settingsFiles.user)}">编辑用户设置文件</button></div>`}</div>`;
     $("#body", el).addEventListener("click", async (e) => {
-      const ed = e.target.closest("[data-edit]"), nw = e.target.closest("[data-new]"), mc = e.target.closest("[data-mcp]");
+      const ed = e.target.closest("[data-edit]"), ai = e.target.closest("[data-ai]"), mc = e.target.closest("[data-mcp]");
       if (ed) openEditor(ed.dataset.edit, { title: "编辑", deletable: !/\.json$/i.test(ed.dataset.edit), onSaved: extensions });
-      if (nw) {
-        const kind = nw.dataset.new;
-        const name = prompt(`新${{ skill: "技能", agent: "子 agent", command: "命令" }[kind]}的名字（字母、数字、_ . -）`);
-        if (!name) return;
-        const scope = project && confirm(`放在项目 ${project} 里吗？\n确定：项目级（.claude-pro/）  取消：用户级（所有项目）`) ? "project" : "user";
-        try { const r = await api("/api/extensions", { method: "POST", body: { kind, scope, name, project } }); openEditor(r.path, { title: "编辑", onSaved: extensions }); } catch (err) { fail(err); }
-      }
+      if (ai) askModelToCreate(ai.dataset.ai, { project, settingsFile: x.settingsFiles?.user || "" });
       if (mc) mcpDialog(x, x.mcp[Number(mc.dataset.mcp)], project);
     });
-    $("#addMcp", el).addEventListener("click", () => mcpDialog(x, null, project));
+  }
+
+  // 让 AI 新建: the new conversation's box with the request (where the file goes, its format), the project's directory
+  // chosen when the page shows one; what the thing should do is left for the user to write at the end.
+  function askModelToCreate(kind, { project, settingsFile }) {
+    const sep = settingsFile.includes("\\") ? "\\" : "/";
+    const userDir = settingsFile ? settingsFile.slice(0, settingsFile.lastIndexOf(sep)) : "~/.claude-pro";
+    const dir = project ? `${project}${sep}.claude-pro` : userDir;
+    const where = project ? `项目 ${project}` : "用户级（所有项目都能用）";
+    const text = {
+      skill: `帮我新建一个技能，放在${where}：${dir}${sep}skills${sep}<名字>${sep}SKILL.md。frontmatter 写 name 和 description（description 说清楚什么时候该用它），正文写步骤和说明。信息不够就先问我。\n\n这个技能用来：`,
+      agent: `帮我新建一个子 agent，放在${where}：${dir}${sep}agents${sep}<名字>.md。frontmatter 写 name、description（什么时候把任务交给它）和 tools，正文是它的系统提示词。信息不够就先问我。\n\n这个子 agent 负责：`,
+      command: `帮我新建一个自定义命令，放在${where}：${dir}${sep}commands${sep}<名字>.md（在会话里输入 /<名字> 使用）。frontmatter 写 description 和 argument-hint，正文是发给模型的内容，用 $ARGUMENTS 代表命令后面的参数。信息不够就先问我。\n\n这个命令要做的事：`,
+      mcp: `帮我添加一个 MCP 服务器，写进${project ? `项目的 ${project}${sep}.mcp.json` : ` ${settingsFile || "用户设置文件"} 的 "mcpServers"`}（写法和 Claude Code 的 mcpServers 一样：stdio 用 command/args/env，远程用 type: "http" 和 url/headers）。需要安装或填密钥就告诉我，先别把密钥写进会提交的文件。\n\n要接入的服务：`,
+    }[kind];
+    if (!text) return;
+    if (draftText("new").trim() && !confirm("新会话输入框里还有没发送的内容，用这段要求替换它吗？")) return;
+    saveDraft("new", text, []);
+    if (project) localStorage.setItem("cpNewDir", project);
+    location.hash = "#/new";
   }
 
   function mcpDialog(x, server, project) {
@@ -2034,10 +2088,7 @@
   api("/api/ping").then((p) => {
     noteServerCode(p);
     $("#brandVersion").textContent = `v${p.version}`;
-    const machine = p.machine || "本机";
-    $("#sideUser").textContent = machine;
-    $("#sideAvatar").textContent = [...machine][0].toUpperCase();
-    $("#sideMe").title = `${machine} · 设置与更多`;
+    if (p.machine) $("#sideMe").title = `设置与更多 · ${p.machine}`;
     hasNativeFolderPicker = p.nativeFolderPicker === true;
     $("#remoteLinks").classList.toggle("hidden", !p.remote); // opened through 远程访问: switch computer, log out
     route();
