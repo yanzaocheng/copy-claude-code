@@ -12,6 +12,7 @@
 #   CLAUDE_PRO_MIRROR=npmmirror|official   where to download from (default: decided by a quick probe)
 #   CLAUDE_PRO_USE_RUNTIME=1               the portable Node even when a usable one is installed
 #   CLAUDE_PRO_NO_MODIFY_PATH=1            do not add ~/.claude-pro/bin to the shell's startup files
+#   CLAUDE_PRO_NO_SHORTCUT=1               no 「claude-pro 控制台」 in the app menu (Linux desktops)
 #   CLAUDE_PRO_CONFIG_DIR=<dir>            instead of ~/.claude-pro (claude-pro reads it too)
 #
 # The source of this file is install.sh in https://github.com/yanzaocheng/copy-claude-code (7bit.fun serves a copy).
@@ -166,6 +167,26 @@ fi
 VERSION=$("$CMD" --version 2>/dev/null || true)
 [ -n "$VERSION" ] || die "claude-pro 装好了但运行不起来：$CMD --version 没有输出"
 
+# 「claude-pro 控制台」 in the app menu of a Linux desktop (not on a server: no display): `claude-pro web --app` starts the
+# web console when it is not running and opens it in a window of its own. On macOS the browser installs it (安装).
+SHORTCUT=""
+if [ "$OS" = linux ] && [ "${CLAUDE_PRO_NO_SHORTCUT:-0}" != 1 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  if [ "$USE_SYSTEM" = 1 ]; then PKG_DIR="$PREFIX/lib/node_modules/$PKG"; else PKG_DIR="$NODE_DIR/lib/node_modules/$PKG"; fi
+  APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  mkdir -p "$APPS"
+  cat > "$APPS/claude-pro.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=claude-pro 控制台
+Comment=claude-pro 的网页控制台
+Exec="$CMD" web --app
+Icon=$PKG_DIR/src/web/icon-512.png
+Terminal=false
+Categories=Development;
+EOF
+  SHORTCUT="$APPS/claude-pro.desktop"
+fi
+
 if ! command -v git >/dev/null 2>&1; then note "提示：没有找到 git，建议装上（Linux：apt install git，macOS：xcode-select --install）"; fi
 if ! command -v rg >/dev/null 2>&1; then note "${DIM}提示：装上 ripgrep 后搜索代码会快很多（apt install ripgrep / brew install ripgrep）${RESET}"; fi
 
@@ -176,4 +197,10 @@ case ":$PATH:" in
      note "   （不想重开也可以直接运行 $CMD）" ;;
 esac
 note "2. 第一次启动会打开 /connect：选择 7bit.fun，粘贴在 https://7bit.fun/user 创建的 API Key"
-note "3. 想用网页控制台：在 claude-pro 里输入 /web，或运行 claude-pro web"
+if [ -n "$SHORTCUT" ]; then
+  note "3. 网页控制台：应用菜单里的「claude-pro 控制台」，或在 claude-pro 里输入 /web"
+elif [ "$OS" = darwin ]; then
+  note "3. 网页控制台：运行 claude-pro web；在 Chrome / Edge 里点地址栏的「安装」，就能放进程序坞、像应用一样打开"
+else
+  note "3. 想用网页控制台：在 claude-pro 里输入 /web，或运行 claude-pro web"
+fi

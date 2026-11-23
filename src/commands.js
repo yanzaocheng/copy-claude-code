@@ -979,7 +979,7 @@ export function buildCommands(app) {
       out(c.dim('Starting the web console…'));
       try {
         const { url, port } = await web.ensureWebServer();
-        const opened = web.openBrowser(url);
+        const opened = await web.openBrowser(url);
         out(`${c.green('✔')} Web console: ${c.blue(`http://127.0.0.1:${port}`)}${opened ? c.dim(' (opened in your browser)') : ''}`);
         if (!opened) out(c.dim(`Open this link to log in: ${url}`));
       } catch (e) {

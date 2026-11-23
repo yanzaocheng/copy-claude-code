@@ -42,12 +42,19 @@ const STATIC = {
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['logo.svg', 'image/svg+xml'], // (also before 远程访问's login: its page shows it too)
+  // installing the console as an app (the browser's 「安装」): fetched without the cookie, so before any log-in
+  '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json; charset=utf-8'],
+  '/icon-192.png': ['icon-192.png', 'image/png'],
+  '/icon-512.png': ['icon-512.png', 'image/png'],
+  '/icon-maskable.png': ['icon-maskable.png', 'image/png'],
 };
+// what is served before the log-in of 远程访问 too
+const PUBLIC_ASSETS = new Set(['/favicon.svg', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/icon-maskable.png']);
 
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css', 'logo.svg'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;
@@ -194,9 +201,10 @@ async function serve() {
     const remoteOrigin = remote ? String(req.headers['x-cpweb-origin'] || '').toLowerCase() : '';
     const ip = remote ? String(req.headers['x-cpweb-ip'] || '') : '127.0.0.1';
     try {
-      if (req.method === 'GET' && url.pathname === '/favicon.svg') {
-        res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'max-age=86400' });
-        return res.end(pages['logo.svg']);
+      if (req.method === 'GET' && PUBLIC_ASSETS.has(url.pathname)) {
+        const [file, type] = STATIC[url.pathname];
+        res.writeHead(200, { 'content-type': type, 'cache-control': 'max-age=86400' });
+        return res.end(pages[file]);
       }
       if (remote) {
         if (url.pathname === '/__login' && req.method === 'POST') return remoteLogin(req, res, ip, remoteOrigin);
@@ -227,6 +235,8 @@ async function serve() {
       const bearer = equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
       const authed = remote || bearer || equal(cookieOf(req, COOKIE), token);
       if (!authed) return send(res, 401, { error: '需要从 claude-pro 打开：在会话里输入 /web，或运行 claude-pro web' });
+      // the cookie lives on while the page is used (an installed app opens at / and has no ?t= to renew it)
+      if (!remote && !bearer && url.pathname === '/api/ping') res.setHeader('set-cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}`);
       // (a request with the secret in its header is claude-pro's, not a page's: no cross-site question)
       if (!remote && !bearer && req.method !== 'GET' && req.method !== 'HEAD') {
         // a change only from the console's own page
@@ -457,7 +467,21 @@ export async function adoptIntoConsole(state) {
 }
 
 // The page in the user's browser.
-export function openBrowser(url) {
+// `app`: in a window of its own, without the browser's tabs and address bar (Chrome's or Edge's --app), when there is
+// one; else as any page.
+export async function openBrowser(url, { app = false } = {}) {
+  if (app) {
+    try {
+      const { browserExecutables } = await import('../browser/session.js');
+      const exe = browserExecutables().find((p) => p && fs.existsSync(p));
+      if (exe) {
+        const child = spawn(exe, [`--app=${url}`], { detached: true, stdio: 'ignore', windowsHide: false });
+        child.on('error', () => {});
+        child.unref();
+        return true;
+      }
+    } catch { /* the default browser then */ }
+  }
   const [cmd, args] = process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
     : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   try {
@@ -468,12 +492,12 @@ export function openBrowser(url) {
   } catch { return false; }
 }
 
-// `claude-pro web [--no-open]`
+// `claude-pro web [--no-open | --app]` (--app: in a window of its own; the desktop shortcut of the install scripts)
 export async function webCommand(argv = []) {
   try {
     const { url, port, started } = await ensureWebServer();
     const open = !argv.includes('--no-open');
-    if (open) openBrowser(url);
+    if (open) await openBrowser(url, { app: argv.includes('--app') });
     process.stdout.write(`claude-pro web console ${started ? 'started' : 'is running'} at http://127.0.0.1:${port}\n${open ? 'Opened it in your browser. ' : ''}Log-in link (keep it to yourself): ${url}\n`);
     return 0;
   } catch (e) {

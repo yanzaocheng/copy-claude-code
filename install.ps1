@@ -13,6 +13,7 @@
 #   CLAUDE_PRO_USE_RUNTIME=1               the portable Node even when a usable one is installed
 #   CLAUDE_PRO_NO_MODIFY_PATH=1            do not add %USERPROFILE%\.claude-pro\bin to the user's PATH
 #   CLAUDE_PRO_SKIP_GIT=1                  do not install Git for Windows
+#   CLAUDE_PRO_NO_SHORTCUT=1               no 「claude-pro 控制台」 shortcut on the desktop and in the Start menu
 #   CLAUDE_PRO_CONFIG_DIR=<dir>            instead of %USERPROFILE%\.claude-pro (claude-pro reads it too)
 #
 # The source of this file is install.ps1 in https://github.com/yanzaocheng/copy-claude-code (7bit.fun serves a copy).
@@ -155,6 +156,26 @@
     $version = "$(& $cmd --version 2>$null)".Trim()
     if (-not $version) { throw "claude-pro 装好了但运行不起来：$cmd --version 没有输出" }
 
+    # ---------------------------------------------------------------- 「claude-pro 控制台」 on the desktop and in the Start menu
+    # `claude-pro web --app`: starts the web console when it is not running and opens it in a window of its own; the
+    # command's window minimized (only a blink in the taskbar)
+    if ($env:CLAUDE_PRO_NO_SHORTCUT -ne '1') {
+      $pkgDir = Join-Path $(if ($useSystem) { $prefix } else { $nodeDir }) "node_modules\$($Pkg.Replace('/', '\'))"
+      $icon = Join-Path $pkgDir 'src\web\icon.ico'
+      $wsh = New-Object -ComObject WScript.Shell
+      foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')) | Where-Object { $_ }) {
+        $lnk = $wsh.CreateShortcut((Join-Path $dir 'claude-pro 控制台.lnk'))
+        $lnk.TargetPath = $cmd
+        $lnk.Arguments = 'web --app'
+        $lnk.WorkingDirectory = $HOME
+        $lnk.WindowStyle = 7
+        $lnk.Description = 'claude-pro 的网页控制台'
+        if (Test-Path -LiteralPath $icon) { $lnk.IconLocation = "$icon,0" }
+        $lnk.Save()
+      }
+      Note '已在桌面和开始菜单建好「claude-pro 控制台」，双击就能打开网页控制台'
+    }
+
     # ---------------------------------------------------------------- Git for Windows (the Bash tool runs in Git Bash)
     $bash = @("$env:ProgramFiles\Git\bin\bash.exe", "${env:ProgramFiles(x86)}\Git\bin\bash.exe", "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe") | Where-Object { Test-Path -LiteralPath $_ }
     $git = Get-Command git.exe -ErrorAction SilentlyContinue
@@ -174,7 +195,8 @@
     if ((Get-Command claude-pro -ErrorAction SilentlyContinue)) { Note '1. 进入你的项目目录，运行：claude-pro' }
     else { Note '1. 重新打开终端（Windows Terminal 要整个关掉再开），进入项目目录运行：claude-pro'; Note "   （不想重开也可以直接运行 $cmd）" }
     Note '2. 第一次启动会打开 /connect：选择 7bit.fun，粘贴在 https://7bit.fun/user 创建的 API Key'
-    Note '3. 想用网页控制台：在 claude-pro 里输入 /web，或运行 claude-pro web'
+    if ($env:CLAUDE_PRO_NO_SHORTCUT -ne '1') { Note '3. 网页控制台：双击桌面上的「claude-pro 控制台」，或在 claude-pro 里输入 /web' }
+    else { Note '3. 想用网页控制台：在 claude-pro 里输入 /web，或运行 claude-pro web' }
   } catch {
     Write-Host "错误：$($_.Exception.Message)" -ForegroundColor Red
   }

@@ -2293,6 +2293,24 @@
     el.querySelector("[data-reload]").addEventListener("click", () => location.reload());
     document.body.appendChild(el);
   }
+  // 安装为桌面应用: the browser's own install prompt (Chrome, Edge), offered in the settings menu while it can be
+  // shown; not inside the installed app itself
+  let installPrompt = null;
+  const installItem = $("#installApp");
+  addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    installPrompt = e;
+    installItem.classList.remove("hidden");
+  });
+  addEventListener("appinstalled", () => { installPrompt = null; installItem.classList.add("hidden"); toast("已安装：桌面和开始菜单里有 claude-pro 了"); });
+  installItem.addEventListener("click", async (e) => {
+    e.preventDefault();
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice.catch(() => ({}));
+    if (outcome === "accepted") { installPrompt = null; installItem.classList.add("hidden"); }
+  });
+
   let pingTick = 0;
   api("/api/ping").then((p) => {
     noteServerCode(p);

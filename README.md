@@ -31,7 +31,7 @@ irm https://7bit.fun/claude-pro/install.ps1 | iex
 curl -fsSL https://7bit.fun/claude-pro/install.sh | sh
 ```
 
-脚本（[install.ps1](install.ps1)、[install.sh](install.sh)）先看机器上有没有 Node.js 22 以上、npm 全局目录能不能写：有就直接用它 `npm i -g`；没有就下载一份便携的 Node.js 24 到 `~/.claude-pro/runtime`（按官方 SHA256 校验），只把 `claude-pro` 这一个命令加进 PATH，不覆盖你自己的 node。连不上 nodejs.org 时（国内）自动改用 npmmirror。Windows 上没装 Git for Windows 时会用 winget 装上（Bash 工具要用 Git Bash）。再运行一次就是更新或修复；可以用环境变量 `CLAUDE_PRO_MIRROR=npmmirror|official`、`CLAUDE_PRO_USE_RUNTIME=1`、`CLAUDE_PRO_NO_MODIFY_PATH=1` 调整，说明在脚本开头。
+脚本（[install.ps1](install.ps1)、[install.sh](install.sh)）先看机器上有没有 Node.js 22 以上、npm 全局目录能不能写：有就直接用它 `npm i -g`；没有就下载一份便携的 Node.js 24 到 `~/.claude-pro/runtime`（按官方 SHA256 校验），只把 `claude-pro` 这一个命令加进 PATH，不覆盖你自己的 node。连不上 nodejs.org 时（国内）自动改用 npmmirror。Windows 上没装 Git for Windows 时会用 winget 装上（Bash 工具要用 Git Bash）。Windows 上还会在桌面和开始菜单建一个「claude-pro 控制台」，Linux 桌面上建在应用菜单里：双击运行 `claude-pro web --app`，控制台没启动就先启动，在一个独立窗口里打开。再运行一次就是更新或修复；可以用环境变量 `CLAUDE_PRO_MIRROR=npmmirror|official`、`CLAUDE_PRO_USE_RUNTIME=1`、`CLAUDE_PRO_NO_MODIFY_PATH=1`、`CLAUDE_PRO_NO_SHORTCUT=1` 调整，说明在脚本开头。
 
 已经有 Node.js 22+ 的，也可以直接用 npm：
 
@@ -202,6 +202,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 在会话里输入 `/web`，或在终端运行 `claude-pro web`（`--no-open` 只启动不打开浏览器），会在浏览器里打开 `http://127.0.0.1:7878`（端口被占用时换一个随机端口）。它和终端用的是同一份配置和数据，改动对新会话生效。
 
+- **装成桌面应用**：控制台是可安装的网页应用。Chrome / Edge 地址栏会出现「安装」，「设置」菜单里也有「安装为桌面应用」；装好后有自己的窗口和图标，出现在桌面、开始菜单（macOS 是程序坞）。手机上用远程访问打开后，可以「添加到主屏幕」。只要页面在用，登录 cookie 就会自动续期。
 - **布局**：左边是「工作区」，按项目目录分组列出会话，可以搜索和折叠。正在工作或等待回答的会话带状态点；鼠标停留显示目录和状态。右边是选中的会话。
 - **新会话（后台会话）**：选择目录、模型和思考强度，再发送第一条消息（可以带图片）。模型和思考强度只应用于新会话，不修改全局设置。选「其他目录」时打开页面里的目录选择器（左边是主目录、桌面、各磁盘和最近的项目，右边逐级点进去，可以筛选），浏览的是运行 claude-pro 的电脑上的目录，远程访问时也一样。没在运行的会话，在它的输入框里发消息就会在后台接着运行。这些会话只在控制台里看和操作，不开任何窗口，也不用“结束”：想做别的就直接点开另一个对话。标题由模型按对话内容自动起，话题变了标题跟着变；对话页顶部的 ⋯ 菜单可以导出 Markdown、归档或删除。压缩上下文是自动的，也可以发 `/compact`；想在终端里接着用，在终端运行 `claude-pro --resume <id>`。工作区里只有正在工作或在等你回答的会话带圆点。这样终端窗口都可以关掉，只用控制台（本机或远程访问）。
   - **都在控制台的进程里运行**（和 DeepSeek Harness 一样）：后台会话不再各开一个 claude-pro 进程和监督进程，每个会话省下 100 MB 以上（实测 8 个会话加控制台共约 75 MB），启动只要约 0.1 秒。每个会话的后台命令、REPL 解释器、浏览器标签互相分开，`/bashes` 只列自己的。
