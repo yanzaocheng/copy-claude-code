@@ -61,6 +61,30 @@ export function computerId() {
 
 export function setEnabled(on) { return writeRemote((d) => { d.enabled = Boolean(on); }); }
 
+// The address's prefix: the account's 通讯号 at the gateway (<通讯号>.7bit.fun; its contacts find it by it too), asked
+// for (handle null) or set with the gateway key (/v1/remote/contacts), the gateway checking the form, its reserved
+// names and that no other account has it. {handle, auto, domain}; `auto`: still the one the gateway made up (cp and 6
+// characters of its alphabet), not one the user chose. Throws with the gateway's words and a status for the page.
+export async function addressPrefix(login, handle = null, { fetchImpl = globalThis.fetch } = {}) {
+  if (!login?.apiKey) throw Object.assign(new Error('远程访问需要先连接 7bit.fun'), { status: 409 });
+  const base = String(login.url || 'https://7bit.fun').replace(/\/+$/, '');
+  let r;
+  try {
+    r = await fetchImpl(`${base}/v1/remote/contacts${handle ? '/handle' : ''}`, {
+      method: handle ? 'POST' : 'GET',
+      headers: { authorization: `Bearer ${login.apiKey}`, ...(handle ? { 'content-type': 'application/json' } : {}) },
+      ...(handle ? { body: JSON.stringify({ handle }) } : {}),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (e) { throw Object.assign(new Error(`连不上网关：${e.message}`), { status: 502 }); }
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw Object.assign(new Error(j?.error?.message || (typeof j?.error === 'string' ? j.error : '') || `网关返回 ${r.status}`), { status: r.status === 409 || r.status === 400 ? r.status : 502 });
+  const now = String(j?.handle || '');
+  let domain = '7bit.fun';
+  try { domain = new URL(base).hostname; } catch { /* the default */ }
+  return { handle: now, auto: /^cp[a-hjkmnp-z2-9]{6}$/.test(now), domain };
+}
+
 // ---------------------------------------------------------------- logged-in devices
 
 const hashToken = (secret) => crypto.createHash('sha256').update(secret).digest('base64url');

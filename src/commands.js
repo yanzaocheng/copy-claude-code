@@ -1044,18 +1044,31 @@ export function buildCommands(app) {
       return;
     }
     if (action === 'on') {
-      if (!gatewayLogin(cfg.gatewayUrl)) { out(c.red(`远程访问通过 7bit.fun 网关：先 /connect 7bit.fun 连上网关。`)); return; }
+      const login = gatewayLogin(cfg.gatewayUrl);
+      if (!login) { out(c.red(`远程访问通过 7bit.fun 网关：先 /connect 7bit.fun 连上网关。`)); return; }
       if (!ra.hasPassword()) {
         const pw = await askPassword(ra);
         if (!pw) { out(c.dim('远程访问没有开启。')); return; }
         ra.setPassword(pw);
+      }
+      // the address's prefix: chosen by the user the first time, not the one the gateway made up
+      let prefix;
+      try { prefix = await ra.addressPrefix(login); } catch (e) { out(c.red(`读不到域名前缀：${e.message}`)); return; }
+      while (prefix.auto) {
+        const wanted = await app.showDialog(new TextInputDialog({
+          title: '远程访问域名',
+          body: [`选一个域名前缀：https://<前缀>.${prefix.domain}`, '3–20 个小写字母、数字或 -，字母开头、不以 - 结尾；要唯一（它也是你在网关的通讯号）。'],
+          question: '前缀:',
+        }));
+        if (wanted === null || !String(wanted).trim()) { out(c.dim('远程访问没有开启。')); return; }
+        try { prefix = await ra.addressPrefix(login, String(wanted).trim().toLowerCase()); } catch (e) { out(c.yellow(e.message)); }
       }
       ra.setEnabled(true);
       out(c.dim('正在连接网关…'));
     } else if (action) { out(c.red('/web remote [on|off|password|logout]')); return; }
     const d = ra.readRemote();
     if (!d.enabled) {
-      out([`远程访问：${c.dim('关闭')}`, c.dim('/web remote on 开启：在手机上打开 https://<你的通讯号>.7bit.fun，输入密码就能用这台电脑的 claude-pro 控制台。')]);
+      out([`远程访问：${c.dim('关闭')}`, c.dim('/web remote on 开启：第一次选一个域名前缀，在手机上打开 https://<前缀>.7bit.fun，输入密码就能用这台电脑的 claude-pro 控制台。')]);
       return;
     }
     let view;

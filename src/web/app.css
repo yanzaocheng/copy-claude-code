@@ -296,6 +296,12 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .model-list label:hover { background: var(--surface-2); }
 .model-list small { color: var(--muted); margin-left: auto; white-space: nowrap; }
 
+/* 远程访问: the address's prefix */
+.remote-setup { display: grid; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.prefix-row { display: flex; align-items: center; gap: 6px; max-width: 520px; }
+.prefix-row input { flex: 1; min-width: 0; }
+.remote-setup .modal-error { color: var(--danger); font-size: 13px; }
+
 /* 默认设置 */
 .def-row { display: grid; grid-template-columns: minmax(200px, 340px) minmax(0, 460px); gap: 8px 24px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .def-row:last-child { border-bottom: 0; }

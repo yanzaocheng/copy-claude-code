@@ -166,6 +166,8 @@ async function serve() {
       return g?.apiKey ? { url: String(g.url || process.env.CLAUDE_PRO_GATEWAY_URL || 'https://7bit.fun'), apiKey: g.apiKey } : null;
     } catch { return null; }
   }
+  const gatewayHandle = (handle = null) => ra.addressPrefix(gatewayLoginNow(), handle);
+
   function syncTunnel() {
     const want = ra.readRemote().enabled && ra.hasPassword();
     const login = want ? gatewayLoginNow() : null;
@@ -247,8 +249,18 @@ async function serve() {
       }
       // 远程访问's own settings: on or off, the password, the devices logged in, the recent logins
       if (url.pathname === '/api/remote' && req.method === 'GET') return send(res, 200, remoteView());
+      if (url.pathname === '/api/remote/handle' && req.method === 'GET') {
+        try { return send(res, 200, await gatewayHandle()); } catch (e) { return send(res, e.status || 502, { error: e.message }); }
+      }
       if (url.pathname === '/api/remote' && req.method === 'POST') {
         const body = (await readBody(req)) || {};
+        // the prefix chosen (the first time, or changed): set at the gateway before anything else
+        if (typeof body.handle === 'string' && body.handle.trim()) {
+          try { await gatewayHandle(body.handle.trim().toLowerCase()); } catch (e) { return send(res, e.status || 502, { error: e.message }); }
+          // (an open tunnel took its host when it connected: again, for the new one)
+          tunnel?.close();
+          tunnel = null;
+        }
         if (typeof body.password === 'string' && body.password) {
           try { ra.setPassword(body.password); } catch (e) { return send(res, 400, { error: e.message }); }
         }

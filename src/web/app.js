@@ -1454,16 +1454,31 @@
   // ---------------------------------------------------------------- 远程访问
 
   async function remotePage() {
-    const el = page('<h1>远程访问</h1><p class="sub">在手机或别的电脑上，通过 https://&lt;你的通讯号&gt;.7bit.fun 打开这台电脑的控制台，要输入密码</p><div id="body"><div class="empty">正在加载…</div></div>');
+    const el = page('<h1>远程访问</h1><p class="sub">在手机或别的电脑上，通过你自己的域名（https://&lt;前缀&gt;.7bit.fun）打开这台电脑的控制台，要输入密码</p><div id="body"><div class="empty">正在加载…</div></div>');
     let v;
     try { v = await api("/api/remote"); } catch (e) { $("#body", el).innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
-    drawRemote(el, v);
-    const timer = setInterval(async () => { try { const next = await api("/api/remote"); if (JSON.stringify(next.tunnel) !== JSON.stringify(v.tunnel)) { v = next; drawRemote(el, v); } } catch { /* next time */ } }, 3000);
+    // the address's prefix (the account's 通讯号 at the gateway), asked once
+    const h = v.gateway ? await api("/api/remote/handle").catch((e) => ({ error: e.message })) : null;
+    if (!el.isConnected) return;
+    drawRemote(el, v, h);
+    const timer = setInterval(async () => { try { const next = await api("/api/remote"); if (JSON.stringify(next.tunnel) !== JSON.stringify(v.tunnel)) { v = next; drawRemote(el, v, h); } } catch { /* next time */ } }, 3000);
     cleanup = () => clearInterval(timer);
   }
 
-  function drawRemote(el, v) {
+  const HANDLE_RULE = /^[a-z][a-z0-9-]{1,18}[a-z0-9]$/;
+  const HANDLE_HINT = "3–20 个小写字母、数字或 -，字母开头、不以 - 结尾";
+
+  function drawRemote(el, v, h) {
+    // without 7bit.fun there is no address: only the way to connect it
+    if (!v.gateway) {
+      $("#body", el).innerHTML = `<div class="panel panel-pad"><div style="font-weight:650;margin-bottom:6px">远程访问需要 7bit.fun 网关</div><p class="muted" style="margin:0 0 14px;font-size:13px">访问地址 https://&lt;前缀&gt;.7bit.fun 由网关提供：连接 7bit.fun 后，就能在这里选一个自己的域名前缀并开启。</p><button class="button" id="rConnectGw">去连接 7bit.fun</button></div>`;
+      $("#rConnectGw", el).addEventListener("click", () => { sessionStorage.setItem("cpOpenAdd", "1"); location.hash = "#/providers"; });
+      return;
+    }
     const t = v.tunnel || {};
+    const domain = h?.domain || "7bit.fun";
+    const prefixField = (id) => `<label class="field" style="margin:0">域名前缀<small>${HANDLE_HINT}；要唯一，它也是你在网关的通讯号（联系人用它找到你）</small>
+        <span class="prefix-row"><span class="mono muted">https://</span><input id="${id}" class="mono" maxlength="20" autocomplete="off" spellcheck="false" placeholder="例如 yanzc" value="${h && !h.auto ? esc(h.handle) : ""}"><span class="mono muted">.${esc(domain)}</span></span></label>`;
     const state = !v.enabled ? ["off", "已关闭"] : t.status === "online" ? ["ok", "已开启"] : t.status === "error" ? ["off", "没有接上"] : ["warn", "正在连接"];
     const device = (ua) => { const s = String(ua || ""); return /iPhone|iPad/.test(s) ? "iPhone / iPad" : /Android/.test(s) ? "Android" : /Windows/.test(s) ? "Windows" : /Mac OS/.test(s) ? "Mac" : s.slice(0, 40) || "未知设备"; };
     $("#body", el).innerHTML = `
@@ -1471,25 +1486,67 @@
         <div><div class="muted" style="font-size:12.5px">状态</div><div style="font-size:18px;font-weight:650;margin-top:2px"><span class="pill ${state[0]}">${state[1]}</span>
           ${t.status === "online" && t.host ? ` <a href="https://${esc(t.host)}" target="_blank" rel="noopener" class="mono" style="font-size:15px">https://${esc(t.host)}</a>` : ""}</div>
           ${t.error ? `<div style="color:var(--danger);font-size:13px;margin-top:4px">${esc(t.error)}</div>` : ""}
-          ${!v.gateway ? '<div class="muted" style="font-size:13px;margin-top:4px">远程访问通过 7bit.fun 网关：先在「模型与供应商」里连接 7bit.fun。</div>' : ""}</div>
-        <div class="actions">${v.enabled ? '<button class="button danger" id="rOff">关闭远程访问</button>' : `<button class="button" id="rOn" ${v.hasPassword && v.gateway ? "" : "disabled"}>开启远程访问</button>`}</div></div>
-        <p class="muted" style="font-size:12.5px;margin:12px 0 0">地址用的是你在网关的通讯号（在网关网页「通讯录」里改）。开启后这台电脑的控制台服务常驻后台；电脑休眠或关机时打不开，claude-pro 的任何会话启动时会重新接上。</p></div>
+          ${h?.error ? `<div style="color:var(--danger);font-size:13px;margin-top:4px">读不到域名前缀：${esc(h.error)}</div>` : ""}</div>
+        <div class="actions">${v.enabled ? `<button class="button secondary" id="rRename">修改前缀</button><button class="button danger" id="rOff">关闭远程访问</button>` : ""}</div></div>
+        ${v.enabled ? "" : `<div class="remote-setup">${prefixField("rHandle")}<div class="actions"><button class="button" id="rOn" ${v.hasPassword ? "" : "disabled"}>开启远程访问</button>${v.hasPassword ? "" : '<span class="muted" style="font-size:12.5px">先在下面设一个密码</span>'}<span class="modal-error" id="rErr"></span></div></div>`}
+        <p class="muted" style="font-size:12.5px;margin:12px 0 0">开启后这台电脑的控制台服务常驻后台；电脑休眠或关机时打不开，claude-pro 的任何会话启动时会重新接上。</p></div>
       <div class="section-head"><div><h2>密码</h2><p>${v.hasPassword ? "已设置。改密码会让所有已登录的设备退出。" : `还没有设置：开启前先设一个（至少 ${v.minPassword} 位）。`}</p></div></div>
       <form class="panel panel-pad actions" id="rPwForm"><input type="password" id="rPw1" placeholder="新密码" autocomplete="new-password" style="flex:1;min-width:180px"><input type="password" id="rPw2" placeholder="再输一次" autocomplete="new-password" style="flex:1;min-width:180px"><button class="button" type="submit">${v.hasPassword ? "修改密码" : "设置密码"}</button></form>
       <div class="section-head"><div><h2>已登录的设备</h2><p>${v.sessions.length} 台</p></div>${v.sessions.length ? '<button class="button danger small" id="rLogoutAll">全部退出</button>' : ""}</div>
       <div class="panel">${v.sessions.length ? `<table class="list"><tbody>${v.sessions.map((s) => `<tr><td>${esc(device(s.ua))}</td><td class="mono">${esc(s.ip || "")}</td><td>最近 ${esc(ago(s.lastSeen))}</td><td class="num muted">${s.remember ? "记住 30 天" : "1 天"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">没有</div>'}</div>
       <div class="section-head"><h2>最近的登录</h2></div>
       <div class="panel">${v.logins.length ? `<table class="list"><tbody>${v.logins.map((l) => `<tr><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill off">密码错误</span>'}</td><td>${esc(device(l.ua))}</td><td class="mono">${esc(l.ip || "")}</td><td class="num">${esc(fmtTime(l.at))}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">还没有人登录过</div>'}</div>`;
-    const post = async (body, done) => { try { drawRemote(el, await api("/api/remote", { method: "POST", body })); if (done) toast(done); } catch (e) { fail(e); } };
-    $("#rOn", el)?.addEventListener("click", () => post({ enabled: true }, "远程访问已开启，正在连接网关…"));
-    $("#rOff", el)?.addEventListener("click", () => { if (confirm("关闭远程访问？外网就打不开这台电脑的控制台了。")) post({ enabled: false }, "远程访问已关闭"); });
-    $("#rLogoutAll", el)?.addEventListener("click", () => { if (confirm("让所有已登录的设备退出？")) post({ logoutAll: true }, "都已退出"); });
+    const post = async (body, done) => {
+      const next = await api("/api/remote", { method: "POST", body });
+      if (body.handle && h) Object.assign(h, { handle: body.handle, auto: false, error: null });
+      drawRemote(el, next, h);
+      if (done) toast(done);
+    };
+    // the prefix typed, checked here as the gateway will: none needed when the user chose one before
+    const typedHandle = (input, err) => {
+      const value = input.value.trim().toLowerCase();
+      if (!value && h && !h.auto) return h.handle;
+      if (!value) { err("先填一个域名前缀"); input.focus(); return null; }
+      if (!HANDLE_RULE.test(value)) { err(`域名前缀要是 ${HANDLE_HINT}`); input.focus(); return null; }
+      return value;
+    };
+    $("#rOn", el)?.addEventListener("click", async (e) => {
+      const b = e.currentTarget, errBox = $("#rErr", el), err = (m) => { errBox.textContent = m; };
+      err("");
+      const handle = typedHandle($("#rHandle", el), err);
+      if (!handle) return;
+      b.disabled = true;
+      try { await post({ ...(handle !== h?.handle ? { handle } : {}), enabled: true }, `远程访问已开启：https://${handle}.${domain}，正在连接网关…`); }
+      catch (ex) { err(ex.message); b.disabled = false; }
+    });
+    $("#rHandle", el)?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("#rOn", el)?.click(); });
+    $("#rRename", el)?.addEventListener("click", () => {
+      const m = modal({
+        title: "修改域名前缀", sub: `现在是 https://${h?.handle || "…"}.${domain}；改后旧地址就打不开了`,
+        body: prefixField("rNewHandle"),
+        foot: '<span class="modal-error"></span><button class="button secondary" data-close>取消</button><button class="button" id="rSaveHandle">保存</button>',
+      });
+      const input = $("#rNewHandle", m.el);
+      input.focus(); input.select();
+      const save = async () => {
+        const err = (msg) => { $(".modal-error", m.el).textContent = msg; };
+        err("");
+        const handle = typedHandle(input, err);
+        if (!handle) return;
+        if (handle === h?.handle) return m.close();
+        try { await post({ handle }, `已改为 https://${handle}.${domain}，正在重新连接…`); m.close(); } catch (ex) { err(ex.message); }
+      };
+      $("#rSaveHandle", m.el).addEventListener("click", save);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    });
+    $("#rOff", el)?.addEventListener("click", () => { if (confirm("关闭远程访问？外网就打不开这台电脑的控制台了。")) post({ enabled: false }, "远程访问已关闭").catch(fail); });
+    $("#rLogoutAll", el)?.addEventListener("click", () => { if (confirm("让所有已登录的设备退出？")) post({ logoutAll: true }, "都已退出").catch(fail); });
     $("#rPwForm", el).addEventListener("submit", (e) => {
       e.preventDefault();
       const a = $("#rPw1", el).value, b = $("#rPw2", el).value;
       if (a.length < v.minPassword) return toast(`密码至少 ${v.minPassword} 位`, "error");
       if (a !== b) return toast("两次输入不一样", "error");
-      post({ password: a }, "密码已保存，所有已登录的设备都已退出");
+      post({ password: a }, "密码已保存，所有已登录的设备都已退出").catch(fail);
     });
   }
 
