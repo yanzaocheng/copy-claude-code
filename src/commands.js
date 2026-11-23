@@ -635,6 +635,9 @@ export function buildCommands(app) {
     const kept = models.length ? models : choice !== KEEP ? [{ id: choice }] : [];
     saveConnection(info.id, {
       ...(info.custom ? { custom: true, name: info.name, protocol: info.protocol, baseUrl: info.baseUrl } : {}),
+      // (another account of a provider stays one, with the name the user gave it)
+      ...(existing?.preset ? { preset: existing.preset, ...(existing.baseUrl ? { protocol: existing.protocol, baseUrl: existing.baseUrl } : {}) } : {}),
+      ...(existing?.name && !info.custom ? { name: existing.name } : {}),
       apiKey: key.apiKey,
       authHeader: info.protocol === 'openai' ? 'bearer' : authHeader || 'x-api-key',
       ...(Object.keys(quirks).length ? { quirks } : {}),
@@ -693,6 +696,8 @@ export function buildCommands(app) {
             { label: `${mark(gatewayIn)}7bit.fun`, value: GATEWAY_PROVIDER, description: 'the gateway: Claude and GPT models, balance, the web page, your other computers' },
             ...PRESETS.map((p) => ({ label: `${mark(Boolean(connections[p.id]))}${p.name}`, value: p.id, description: `${protocolName(p.protocol)} protocol · ${hostOf(p.baseUrl)}` })),
             ...Object.entries(connections).filter(([, conn]) => conn?.custom).map(([id, conn]) => ({ label: `${mark(true)}${conn.name || id}`, value: id, description: `your own · ${protocolName(conn.protocol)} protocol · ${hostOf(conn.baseUrl)}` })),
+            // (the other accounts added in the web console: their key replaced here)
+            ...Object.entries(connections).filter(([id, conn]) => conn?.preset && providerInfo(id, connections)).map(([id, conn]) => ({ label: `${mark(true)}${conn.name || id}`, value: id, description: `${id}/<model> · another account` })),
             { label: '  Your own (Anthropic-compatible)', value: '__custom_anthropic__', description: 'any endpoint with POST /v1/messages' },
             { label: '  Your own (OpenAI-compatible)', value: '__custom_openai__', description: 'any endpoint with POST /chat/completions: relays, LM Studio, vLLM…' },
           ],

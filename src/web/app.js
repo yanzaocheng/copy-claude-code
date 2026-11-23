@@ -1133,7 +1133,7 @@
   }
 
   async function newView() {
-    const el = page(`<div class="chat-page"><div class="welcome"><div class="welcome-logo">c</div><h1>你好，今天要做什么？</h1><p class="muted">选一个项目目录，告诉它要做什么：你在这里看着它工作、随时给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
+    const el = page(`<div class="chat-page"><div class="welcome"><img class="welcome-logo" src="/favicon.svg" alt="" width="56" height="56"><h1>你好，今天要做什么？</h1><p class="muted">选一个项目目录，告诉它要做什么：你在这里看着它工作、随时给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
     let projects = [];
     try { projects = (await api("/api/projects")).projects; } catch { /* the folder chooser still works */ }
     if (!el.isConnected) return;
@@ -1510,15 +1510,31 @@
       <div class="section-head"><div><h2>模型列表</h2><p>勾选的模型出现在会话的模型菜单里，也是「默认模型」的选项（都不勾就列出全部）。列表只在点「刷新模型列表」时更新</p></div><div class="actions head-actions"><input type="search" id="modelFilter" placeholder="搜索模型…" style="width:180px"><button class="button secondary small" id="refreshModels" title="重新向 7bit.fun 和各供应商拉取模型列表">刷新模型列表</button><button class="button small" id="addProvider" title="连接 7bit.fun、DeepSeek、Kimi、OpenRouter 等供应商，或你自己的兼容接口">添加供应商</button></div></div>
       <div id="modelLists"><div class="panel panel-pad muted">正在读取…</div></div></div>`;
     loadModelLists(el, p);
-    // 添加供应商: a built-in one not connected yet, or one of the user's own
+    // 添加供应商: any built-in provider or 7bit.fun (one connected already: another account of it), or one of the
+    // user's own
     $("#addProvider", el).addEventListener("click", (e) => {
-      const free = p.presets.filter((x) => !x.connected);
-      const gateway = p.gateway.connected ? [] : [{ label: "7bit.fun", description: `${p.gateway.url} · Claude、GPT 等模型；远程访问、跨电脑互发任务也通过它`, value: "7bit" }];
+      const others = (base) => p.custom.filter((c) => c.preset === base && c.connected).length;
+      const again = "已连接 · 再添加一个账号";
       popMenu(e.currentTarget, [
-        { key: "preset", title: "选择供应商", items: [...gateway, ...free.map((x) => ({ label: x.name, description: x.baseUrl, value: x.id }))] },
+        { key: "preset", title: "选择供应商", items: [
+          { label: "7bit.fun", description: p.gateway.connected ? again : `${p.gateway.url} · Claude、GPT 等模型`, value: "7bit" },
+          ...p.presets.map((x) => ({ label: x.providerName || x.name, description: x.connected ? again : x.baseUrl, value: x.id })),
+        ] },
         { key: "custom", title: "", items: [{ label: "自定义供应商…", description: "任何兼容 Anthropic 或 OpenAI 的接口", value: "" }] },
-      ], (key, value) => (value === "7bit" ? gatewayDialog(el, p) : connectDialog(el, key === "custom" ? null : free.find((x) => x.id === value))), { dropdown: true });
+      ], (key, value) => {
+        if (key === "custom") return connectDialog(el, null);
+        if (value === "7bit") {
+          if (!p.gateway.connected) return gatewayDialog(el, p);
+          return connectDialog(el, null, { instanceOf: "7bit", template: { name: "7bit.fun", baseUrl: p.gateway.url }, count: 1 + others("7bit") });
+        }
+        const x = p.presets.find((y) => y.id === value);
+        if (!x) return;
+        if (!x.connected) return connectDialog(el, x);
+        connectDialog(el, null, { instanceOf: x.id, template: { name: x.providerName || x.name, baseUrl: x.baseUrl, keyless: x.keyless }, count: 1 + others(x.id) });
+      }, { dropdown: true });
     });
+    // (from the first-run notice: the menu opens by itself)
+    if (sessionStorage.getItem("cpOpenAdd")) { sessionStorage.removeItem("cpOpenAdd"); setTimeout(() => { if (el.isConnected) $("#addProvider", el)?.click(); }, 60); }
     $("#refreshModels", el).addEventListener("click", async (e) => {
       const b = e.currentTarget;
       b.disabled = true;
@@ -1695,49 +1711,57 @@
   function gatewayDialog(el, p) {
     const again = p.gateway.connected;
     const m = modal({
-      title: again ? "更换 7bit.fun 的 Key" : "连接 7bit.fun", sub: p.gateway.url,
-      body: `<label class="field">API Key<small>在网关网页「API 密钥」里创建；远程访问、跨电脑互发任务也用这个 Key</small><input type="password" id="gKey" autocomplete="off" placeholder="粘贴 7bit.fun 的 API Key"></label>
+      title: again ? `${p.gateway.name || "7bit.fun"}：名称与 Key` : "连接 7bit.fun", sub: p.gateway.url,
+      body: `<label class="field">名称<small>显示在 tab 里</small><input id="gName" maxlength="40" value="${esc(p.gateway.name || "7bit.fun")}"></label>
+        <label class="field">API Key<small>${again ? "留空则继续用已保存的 Key；" : ""}在网关网页「API 密钥」里创建</small><input type="password" id="gKey" autocomplete="off" placeholder="${again ? "留空：用已保存的" : "粘贴 7bit.fun 的 API Key"}"></label>
         <a class="button secondary small" href="${esc(p.gateway.keyPage)}" target="_blank" rel="noopener">获取 Key</a>`,
-      foot: `<span class="modal-error"></span><button class="button secondary" data-close>取消</button><button class="button" id="gConnect">${again ? "更换" : "连接"}</button>`,
+      foot: `<span class="modal-error"></span><button class="button secondary" data-close>取消</button><button class="button" id="gConnect">${again ? "保存" : "连接"}</button>`,
     });
     const input = $("#gKey", m.el);
-    input.focus();
+    (again ? $("#gName", m.el) : input).focus();
     const go = async () => {
       const apiKey = input.value.trim();
+      const name = $("#gName", m.el).value.trim();
       const err = $(".modal-error", m.el);
-      if (!apiKey) { err.textContent = "请先粘贴 Key"; return; }
+      if (!apiKey && !again) { err.textContent = "请先粘贴 Key"; return; }
       const b = $("#gConnect", m.el);
       b.disabled = true;
       b.textContent = "正在验证…";
       err.textContent = "";
       try {
-        const view = await api("/api/gateway", { method: "POST", body: { apiKey } });
+        const view = await api("/api/gateway", { method: "POST", body: { ...(apiKey ? { apiKey } : {}), name } });
         m.close();
-        toast(again ? "已更换 7bit.fun 的 Key" : "已连接 7bit.fun");
+        toast(again ? "已保存" : `已连接 ${name || "7bit.fun"}`);
         modelTab = "7bit";
         drawProviders(el, view);
-      } catch (ex) { err.textContent = ex.message; b.disabled = false; b.textContent = again ? "更换" : "连接"; }
+      } catch (ex) { err.textContent = ex.message; b.disabled = false; b.textContent = again ? "保存" : "连接"; }
     };
     $("#gConnect", m.el).addEventListener("click", go);
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    for (const i of [input, $("#gName", m.el)]) i.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
   }
 
-  // Connect a provider (a built-in one, or with x = null one of the user's own): key → models → test → saved.
-  function connectDialog(el, x) {
-    const custom = !x;
+  // Connect a provider: a built-in one (x; connected already: its key, model or name changed), another account of one
+  // or of 7bit.fun (instanceOf, with its template and how many are connected), or with neither one of the user's own.
+  // 名称 → key → models → test → saved.
+  function connectDialog(el, x, { instanceOf = null, template = null, count = 0 } = {}) {
+    const custom = !x && !instanceOf;
+    const base = x || template;
+    const defaultName = x ? x.name : instanceOf ? `${template.name} ${count + 1}` : "";
     const m = modal({
-      title: custom ? "添加自定义供应商" : `连接 ${x.name}`, sub: custom ? "任何兼容 Anthropic Messages 或 OpenAI Chat Completions 的接口" : `${x.baseUrl}`,
-      body: `${custom ? `<label class="field">名字<small>模型名会是 名字/模型，比如 myrelay/gpt-5</small><input id="cName" placeholder="myrelay"></label>
-        <label class="field">协议<select id="cProto"><option value="openai">OpenAI 兼容（/chat/completions）</option><option value="anthropic">Anthropic 兼容（/v1/messages）</option></select></label>
+      title: custom ? "添加自定义供应商" : x ? (x.connected ? `${x.name}：名称、Key 与模型` : `连接 ${x.name}`) : `再添加一个 ${template.name} 账号`,
+      sub: custom ? "任何兼容 Anthropic Messages 或 OpenAI Chat Completions 的接口" : `${base.baseUrl}`,
+      body: `<label class="field">名称<small>${custom ? "显示在 tab 和模型菜单里；英文名同时是模型前缀，比如 myrelay/gpt-5" : "显示在 tab 和模型菜单里"}</small><input id="cName" maxlength="40" value="${esc(defaultName)}" placeholder="${custom ? "myrelay" : esc(base.name)}"></label>
+        ${custom ? `<label class="field">协议<select id="cProto"><option value="openai">OpenAI 兼容（/chat/completions）</option><option value="anthropic">Anthropic 兼容（/v1/messages）</option></select></label>
         <label class="field">地址<input id="cUrl" placeholder="https://api.example.com/v1"></label>` : ""}
-        <label class="field">API Key${x?.connected ? "<small>留空则继续用已保存的 Key</small>" : x?.keyless ? "<small>这个供应商不需要 Key</small>" : ""}<input type="password" id="cKey" autocomplete="off" placeholder="${x?.connected ? "留空：用已保存的" : "粘贴 Key"}"></label>
+        <label class="field">API Key${x?.connected ? "<small>留空则继续用已保存的 Key</small>" : base?.keyless ? "<small>这个供应商不需要 Key</small>" : ""}<input type="password" id="cKey" autocomplete="off" placeholder="${x?.connected ? "留空：用已保存的" : "粘贴 Key"}"></label>
         <div class="actions"><button class="button secondary" id="cCheck">检查 Key 并列出模型</button></div>
         <div id="cModels" style="margin-top:14px"></div>`,
       foot: '<span class="modal-error"></span><button class="button secondary" data-close>取消</button><button class="button" id="cConnect" disabled>测试并连接</button>',
     });
     let checked = null;
     const err = (t) => { $(".modal-error", m.el).textContent = t || ""; };
-    const target = () => (custom ? { custom: { name: $("#cName", m.el).value, protocol: $("#cProto", m.el).value, baseUrl: $("#cUrl", m.el).value } } : { id: x.id });
+    const target = () => (custom ? { custom: { name: $("#cName", m.el).value, protocol: $("#cProto", m.el).value, baseUrl: $("#cUrl", m.el).value } } : instanceOf ? { instanceOf } : { id: x.id });
+    (x?.connected ? $("#cName", m.el) : custom ? $("#cName", m.el) : $("#cKey", m.el)).focus();
     $("#cCheck", m.el).addEventListener("click", async (e) => {
       err("");
       e.target.disabled = true;
@@ -1762,12 +1786,10 @@
       e.target.disabled = true;
       e.target.textContent = `正在测试 ${model}…`;
       try {
-        const before = new Set($$("[data-tab]", el).map((t) => t.dataset.tab));
-        const p = await api("/api/providers/connect", { method: "POST", body: { ...target(), apiKey: $("#cKey", m.el).value, model, models: list.length ? list : [{ id: model }], authHeader: checked?.authHeader, useNow: $("#cUse", m.el)?.checked } });
+        const p = await api("/api/providers/connect", { method: "POST", body: { ...target(), name: $("#cName", m.el).value, apiKey: $("#cKey", m.el).value, model, models: list.length ? list : [{ id: model }], authHeader: checked?.authHeader, useNow: $("#cUse", m.el)?.checked } });
         m.close();
         toast(`已连接，模型 ${model} 测试通过`);
-        // its tab is the one shown (a custom one: the provider that was not connected before)
-        modelTab = x?.id || [...p.custom].find((c) => c.connected && !before.has(c.id))?.id || modelTab;
+        modelTab = p.connected || modelTab; // (its tab is the one shown)
         drawProviders(el, p);
       } catch (ex) { err(ex.message); e.target.disabled = false; e.target.textContent = "测试并连接"; }
     });
@@ -2130,10 +2152,33 @@
     if (p.machine) $("#sideMe").title = `设置与更多 · ${p.machine}`;
     hasNativeFolderPicker = p.nativeFolderPicker === true;
     $("#remoteLinks").classList.toggle("hidden", !p.remote); // opened through 远程访问: switch computer, log out
+    if (p.repo) { $("#repoLink").href = p.repo; $("#repoLink").classList.remove("hidden"); $("#repoSep").classList.remove("hidden"); }
     route();
     loadWorkspace();
     scheduleUpdateCheck();
+    noticeNoProvider();
   }).catch(() => {});
+  // A first start (nothing connected, not even 7bit.fun): said at once, with the way to the page that adds one. Once a
+  // browser session, and not on that page.
+  function noticeNoProvider() {
+    if (sessionStorage.getItem("cpNoProviderShown")) return;
+    api("/api/providers").then((v) => {
+      if (v.gateway?.connected || [...(v.presets || []), ...(v.custom || [])].some((x) => x.connected)) return;
+      if (location.hash.startsWith("#/providers") || sessionStorage.getItem("cpNoProviderShown")) return;
+      sessionStorage.setItem("cpNoProviderShown", "1");
+      const m = modal({
+        title: "先添加一个模型供应商",
+        body: `<p style="margin:0 0 10px">claude-pro 需要连上至少一个模型供应商才能工作：7bit.fun、DeepSeek、Kimi、OpenAI、OpenRouter……也可以是任何兼容 Anthropic 或 OpenAI 接口的服务。</p><p class="muted" style="margin:0;font-size:13px">添加之后，在「模型与供应商」里还能勾选会话里要用的模型、设置默认模型。</p>`,
+        foot: '<button class="button secondary" data-close>稍后</button><button class="button" id="goAddProvider">添加供应商</button>',
+      });
+      $("#goAddProvider", m.el).addEventListener("click", () => {
+        m.close();
+        sessionStorage.setItem("cpOpenAdd", "1");
+        if (location.hash === "#/providers") route(); else location.hash = "#/providers";
+      });
+      $("#goAddProvider", m.el).focus();
+    }).catch(() => {});
+  }
   // the sidebar follows the sessions (and keeps the server from stopping while the page is open)
   setInterval(() => {
     const visible = document.visibilityState === "visible";

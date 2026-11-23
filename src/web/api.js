@@ -11,7 +11,7 @@ import {
 } from '../config.js';
 import {
   PRESETS, GATEWAY_PROVIDER, readConnections, saveConnection, removeConnection, providerInfo, connectedProviders,
-  listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels, cleanProviderId, reservedProviderId,
+  listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels, cleanProviderId, nextInstanceId,
   normalizeBaseUrl, validBaseUrl,
 } from '../providers.js';
 import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayList } from '../gateway.js';
@@ -330,7 +330,9 @@ function providersView() {
   const shown = (info) => {
     const c = info.connection;
     return {
-      id: info.id, name: info.name, protocol: info.protocol, baseUrl: info.baseUrl, keyPage: info.keyPage || null, keyless: Boolean(info.keyless), custom: Boolean(info.custom),
+      id: info.id, name: info.name, protocol: info.protocol, baseUrl: info.baseUrl, keyPage: info.keyPage || null, keyless: Boolean(info.keyless), custom: Boolean(info.custom), preset: info.preset || null,
+      // (the provider's own name, whatever the user called this connection: what 添加供应商 lists)
+      providerName: PRESETS.find((p) => p.id === (info.preset || info.id))?.name || (info.preset === GATEWAY_PROVIDER ? '7bit.fun' : info.name),
       connected: Boolean(c && (c.apiKey || info.keyless || info.custom)),
       key: c ? mask(c.apiKey) : '', model: c?.model || null, savedAt: c?.savedAt || null,
       models: (c?.models || []).map((m) => ({ id: m.id, name: m.name || null, window: m.window || null, price: m.price || null })),
@@ -338,7 +340,7 @@ function providersView() {
   };
   const custom = Object.keys(connections).filter((id) => !PRESETS.some((p) => p.id === id)).map((id) => providerInfo(id, connections)).filter(Boolean);
   return {
-    gateway: { id: GATEWAY_PROVIDER, url: config.gatewayUrl, connected: Boolean(login), key: login ? mask(login.apiKey) : '', account: login?.account || null, keyPage: `${config.gatewayUrl.replace(/\/+$/, '')}/user#keys` },
+    gateway: { id: GATEWAY_PROVIDER, name: gatewayName(connections), url: config.gatewayUrl, connected: Boolean(login), key: login ? mask(login.apiKey) : '', account: login?.account || null, keyPage: `${config.gatewayUrl.replace(/\/+$/, '')}/user#keys` },
     presets: PRESETS.map((p) => shown(providerInfo(p.id, connections))),
     custom: custom.map(shown),
     model: config.setting('model'),
@@ -347,18 +349,34 @@ function providersView() {
   };
 }
 
-// The provider a request names: a built-in one or one of the user's ({custom: {name, protocol, baseUrl}}).
+// What the gateway's own login is called in the console (名称, kept in providers.json under its id), else 7bit.fun.
+const gatewayName = (connections = readConnections()) => (typeof connections[GATEWAY_PROVIDER]?.name === 'string' && connections[GATEWAY_PROVIDER].name.trim()) || '7bit.fun';
+const displayName = (value) => String(value ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 40);
+
+// The provider a request names: a built-in one (or one already connected, by its id), another account of a built-in
+// one or of 7bit.fun ({instanceOf}), or one of the user's own ({custom: {name, protocol, baseUrl}}). A new connection's
+// id is chosen when it is saved (see connectProvider): `id` here is what it will likely be.
 function requestedProvider(body) {
+  const connections = readConnections({ fresh: true });
   if (body?.custom) {
-    const id = cleanProviderId(body.custom.name);
-    if (!id) throw httpError(400, '名字只能用字母、数字和 -');
-    if (reservedProviderId(id)) throw httpError(400, `"${id}" 是内置的供应商，请在列表里选它，或换个名字`);
+    const name = displayName(body.custom.name);
+    if (!name) throw httpError(400, '请填写名称');
     const protocol = body.custom.protocol === 'openai' ? 'openai' : 'anthropic';
     const baseUrl = normalizeBaseUrl(body.custom.baseUrl, protocol);
     if (!validBaseUrl(baseUrl)) throw httpError(400, '地址要以 http:// 或 https:// 开头');
-    return { id, name: body.custom.name.trim(), protocol, baseUrl, custom: true, connection: readConnections({ fresh: true })[id] || null };
+    // (an English name is the models' prefix, myrelay/gpt-5; another one, or one taken, gets a free id)
+    return { id: nextInstanceId(cleanProviderId(name) || 'custom', connections), name, protocol, baseUrl, custom: true, connection: null, isNew: true };
   }
-  const info = providerInfo(String(body?.id || ''), readConnections({ fresh: true }));
+  if (body?.instanceOf) {
+    const base = String(body.instanceOf);
+    const gatewayUrl = loadConfig({ cwd: home }).gatewayUrl.replace(/\/+$/, '');
+    const template = base === GATEWAY_PROVIDER
+      ? { name: '7bit.fun', protocol: 'anthropic', baseUrl: gatewayUrl, keyPage: `${gatewayUrl}/user#keys` }
+      : PRESETS.find((p) => p.id === base);
+    if (!template) throw httpError(404, '没有这个供应商');
+    return { ...template, id: nextInstanceId(base, connections), preset: base, connection: null, isNew: true };
+  }
+  const info = providerInfo(String(body?.id || ''), connections);
   if (!info) throw httpError(404, '没有这个供应商');
   return info;
 }
@@ -394,16 +412,24 @@ async function connectProvider(body) {
     throw httpError(400, `${model} 没有通过测试：${e.message}`);
   }
   const models = Array.isArray(body.models) && body.models.length ? body.models.filter((m) => m && typeof m.id === 'string').slice(0, 2000) : [{ id: model }];
-  saveConnection(info.id, {
-    ...(info.custom ? { custom: true, name: info.name, protocol: info.protocol, baseUrl: info.baseUrl } : {}),
+  // a new one's id taken now (the file as it is after the test, not before it)
+  const fresh = readConnections({ fresh: true });
+  const id = info.isNew ? nextInstanceId(info.custom ? (cleanProviderId(info.name) || 'custom') : info.preset, fresh) : info.id;
+  const name = displayName(body.name) || info.name;
+  const builtIn = PRESETS.find((p) => p.id === id);
+  saveConnection(id, {
+    ...(info.custom ? { custom: true, protocol: info.protocol, baseUrl: info.baseUrl } : {}),
+    ...(info.preset ? { preset: info.preset, ...(info.preset === GATEWAY_PROVIDER ? { protocol: 'anthropic', baseUrl: info.baseUrl } : {}) } : {}),
+    // (a built-in provider under its own name keeps none: it follows the provider's)
+    ...(info.custom || !builtIn || name !== builtIn.name ? { name } : {}),
     apiKey,
     authHeader: info.protocol === 'openai' ? 'bearer' : authHeader || 'x-api-key',
     ...(Object.keys(quirks || {}).length ? { quirks } : {}),
     model,
     models,
   });
-  if (body.useNow) rememberChoice({ model: `${info.id}/${model}` });
-  return providersView();
+  if (body.useNow) rememberChoice({ model: `${id}/${model}` });
+  return { ...providersView(), connected: id };
 }
 
 // The model lists kept for the console's 模型列表 (what the pickers offer), nothing asked: the gateway's (as fetched
@@ -416,7 +442,7 @@ function keptModelLists() {
   if (login) {
     const kept = keptGatewayList(login);
     groups.push({
-      id: GATEWAY_PROVIDER, name: '7bit.fun', at: kept?.at || null,
+      id: GATEWAY_PROVIDER, name: gatewayName(), at: kept?.at || null,
       models: (kept?.list || []).map((m) => ({
         ref: `${GATEWAY_PROVIDER}/${m.id}`, id: m.id, name: m.display_name || null, vendor: m.vendor || m.owned_by || null,
         window: m.max_input_tokens || null, maxOutput: m.max_tokens || null, efforts: m.supported_reasoning_levels || [],
@@ -772,7 +798,14 @@ export const routes = [
   }],
   ['POST', /^\/api\/gateway$/, async (req, m, body) => {
     const config = loadConfig({ cwd: home });
-    try { await loginWithKey({ url: config.gatewayUrl, apiKey: body?.apiKey, signal: AbortSignal.timeout(15_000) }); } catch (e) { throw httpError(e.status === 401 || e.status === 403 ? 400 : 502, e.message); }
+    if (body?.apiKey) {
+      try { await loginWithKey({ url: config.gatewayUrl, apiKey: body.apiKey, signal: AbortSignal.timeout(15_000) }); } catch (e) { throw httpError(e.status === 401 || e.status === 403 ? 400 : 502, e.message); }
+    } else if (!gatewayLogin(config.gatewayUrl)) throw httpError(400, '请先粘贴 Key');
+    // its name in the console (名称): 7bit.fun unless the user gave another
+    if (body && 'name' in body) {
+      const name = displayName(body.name);
+      if (name && name !== '7bit.fun') saveConnection(GATEWAY_PROVIDER, { name }); else removeConnection(GATEWAY_PROVIDER);
+    }
     // its model list at once (as /connect keeps a provider's): its tab in 模型列表 is not empty
     const login = gatewayLogin(config.gatewayUrl);
     if (login) await fetchGatewayModels(login, { fresh: true, timeoutMs: 10_000 }).catch(() => {});

@@ -60,9 +60,21 @@ export function validBaseUrl(url) {
 export const cleanProviderId = (name) => String(name || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30);
 export const reservedProviderId = (id) => id === GATEWAY_PROVIDER || PRESET_IDS.has(id);
 
+// The id of a new connection named after `base` that no other connection, built-in provider or the gateway has: the
+// second DeepSeek is deepseek-2, the next deepseek-3.
+export function nextInstanceId(base, connections = readConnections()) {
+  const stem = cleanProviderId(base) || 'provider';
+  const free = (id) => !connections[id] && !reservedProviderId(id);
+  if (free(stem)) return stem;
+  for (let n = 2; ; n++) if (free(`${stem}-${n}`)) return `${stem}-${n}`;
+}
+
 // {id: connection}. A connection: {apiKey, authHeader, model?, models: [{id, name?, window?, maxOutput?, price?}],
-// savedAt} (model: the one chosen at /connect), and for the user's own providers also {custom: true, name, protocol,
-// baseUrl}. Read again at most once a second (the model is resolved at every frame of the footer), and at once after
+// savedAt, name?} (model: the one chosen at /connect; name: what the user called it, else the provider's own), and for
+// the user's own providers also {custom: true, name, protocol, baseUrl}. A second account of a built-in provider (or of
+// 7bit.fun) is a connection of its own under another id (deepseek-2, 7bit-2: see nextInstanceId) with {preset: the
+// provider's id}, and for 7bit.fun's also {protocol, baseUrl}; its models are deepseek-2/<model>. The entry "7bit"
+// holds at most the name given to the gateway's own login (gateway.json has its key). Read again at most once a second (the model is resolved at every frame of the footer), and at once after
 // this process changed the file; another window's change is seen within the second. Not to be changed by callers.
 const MEMO_MS = 1000;
 let memo = null; // {at, data}
@@ -105,7 +117,13 @@ export function removeConnection(id) {
 export function providerInfo(id, connections = readConnections()) {
   const connection = connections[id] || null;
   const preset = PRESETS.find((p) => p.id === id);
-  if (preset) return { ...preset, connection };
+  if (preset) return { ...preset, name: connection?.name || preset.name, connection };
+  // another account of a built-in provider, or of 7bit.fun (its address kept in the connection)
+  if (connection?.preset) {
+    const base = connection.preset === GATEWAY_PROVIDER ? { name: '7bit.fun', protocol: 'anthropic' } : PRESETS.find((p) => p.id === connection.preset);
+    const baseUrl = connection.baseUrl || base?.baseUrl;
+    if (base && baseUrl) return { ...base, id, name: connection.name || base.name, baseUrl, preset: connection.preset, connection };
+  }
   if (connection?.custom && connection.baseUrl) {
     return { id, name: connection.name || id, protocol: connection.protocol === 'openai' ? 'openai' : 'anthropic', baseUrl: connection.baseUrl, custom: true, connection };
   }
@@ -115,8 +133,8 @@ export function providerInfo(id, connections = readConnections()) {
 // The providers that are connected now, in the order /connect lists them (the gateway is not among them: see
 // gatewayLogin).
 export function connectedProviders(connections = readConnections()) {
-  const rank = (id) => { const i = PRESETS.findIndex((p) => p.id === id); return i < 0 ? PRESETS.length : i; };
-  return Object.keys(connections).sort((a, b) => rank(a) - rank(b))
+  const rank = (id) => { const i = PRESETS.findIndex((p) => p.id === (connections[id]?.preset || id)); return i < 0 ? PRESETS.length : i; };
+  return Object.keys(connections).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, 'en', { numeric: true }))
     .map((id) => providerInfo(id, connections)).filter((p) => p?.connection && (p.connection.apiKey || p.keyless || p.custom));
 }
 
@@ -130,7 +148,8 @@ export function splitModelRef(spec, connections = null) {
   if (slash > 0) {
     const prefix = name.slice(0, slash).toLowerCase();
     const rest = name.slice(slash + 1);
-    if (rest && (prefix === GATEWAY_PROVIDER || PRESET_IDS.has(prefix) || (connections ?? readConnections())[prefix]?.custom)) return { provider: prefix, model: rest };
+    const conn = rest && !(prefix === GATEWAY_PROVIDER || PRESET_IDS.has(prefix)) ? (connections ?? readConnections())[prefix] : null;
+    if (rest && (prefix === GATEWAY_PROVIDER || PRESET_IDS.has(prefix) || conn?.custom || conn?.preset)) return { provider: prefix, model: rest };
   }
   return { provider: GATEWAY_PROVIDER, model: name };
 }

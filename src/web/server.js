@@ -21,6 +21,14 @@ import { machineName } from '../peers.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 7878;
+// The project's page (package.json's repository, as a browser opens it): the console's menu links to it.
+const REPO = (() => {
+  try {
+    const r = JSON.parse(fs.readFileSync(path.join(HERE, '..', '..', 'package.json'), 'utf8')).repository;
+    const url = String(typeof r === 'string' ? r : r?.url || '').replace(/^git\+/, '').replace(/\.git$/, '');
+    return /^https:\/\//.test(url) ? url : null;
+  } catch { return null; }
+})();
 const IDLE_MS = 30 * 60_000;
 const BODY_LIMIT = 20 * 1024 * 1024;
 const COOKIE = 'cpweb';
@@ -33,12 +41,13 @@ const STATIC = {
   '/': ['page.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
+  '/favicon.svg': ['logo.svg', 'image/svg+xml'], // (also before 远程访问's login: its page shows it too)
 };
 
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'page.html', 'login.html', 'app.js', 'app.css', 'logo.svg'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;
@@ -183,6 +192,10 @@ async function serve() {
     const remoteOrigin = remote ? String(req.headers['x-cpweb-origin'] || '').toLowerCase() : '';
     const ip = remote ? String(req.headers['x-cpweb-ip'] || '') : '127.0.0.1';
     try {
+      if (req.method === 'GET' && url.pathname === '/favicon.svg') {
+        res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'max-age=86400' });
+        return res.end(pages['logo.svg']);
+      }
       if (remote) {
         if (url.pathname === '/__login' && req.method === 'POST') return remoteLogin(req, res, ip, remoteOrigin);
         const session = ra.validSession(cookieOf(req, remoteCookieName(remoteOrigin)));
@@ -218,7 +231,7 @@ async function serve() {
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), remote, nativeFolderPicker: !remote && process.platform === 'win32', hosted: host?.size ?? 0 });
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), repo: REPO, remote, nativeFolderPicker: !remote && process.platform === 'win32', hosted: host?.size ?? 0 });
       if (remote && url.pathname === '/api/projects/pick') return send(res, 403, { error: '远程访问请使用目录列表' });
       // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
       if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }
