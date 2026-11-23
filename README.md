@@ -19,14 +19,28 @@
 
 ## 安装与运行
 
-需要 Node.js 22+。Windows 上 Bash 工具使用 Git Bash，会自动查找，也可以用 `CLAUDE_CODE_GIT_BASH_PATH` 指定。
+一键安装（不需要先装 Node.js）：
 
-从 npm 安装（推荐）：
+```powershell
+# Windows（PowerShell）
+irm https://7bit.fun/claude-pro/install.ps1 | iex
+```
+
+```bash
+# macOS / Linux
+curl -fsSL https://7bit.fun/claude-pro/install.sh | sh
+```
+
+脚本（[install.ps1](install.ps1)、[install.sh](install.sh)）先看机器上有没有 Node.js 22 以上、npm 全局目录能不能写：有就直接用它 `npm i -g`；没有就下载一份便携的 Node.js 24 到 `~/.claude-pro/runtime`（按官方 SHA256 校验），只把 `claude-pro` 这一个命令加进 PATH，不覆盖你自己的 node。连不上 nodejs.org 时（国内）自动改用 npmmirror。Windows 上没装 Git for Windows 时会用 winget 装上（Bash 工具要用 Git Bash）。再运行一次就是更新或修复；可以用环境变量 `CLAUDE_PRO_MIRROR=npmmirror|official`、`CLAUDE_PRO_USE_RUNTIME=1`、`CLAUDE_PRO_NO_MODIFY_PATH=1` 调整，说明在脚本开头。
+
+已经有 Node.js 22+ 的，也可以直接用 npm：
 
 ```bash
 npm install -g @yanzc/claude-pro
 claude-pro                 # 在任意项目目录里运行
 ```
+
+Windows 上 Bash 工具使用 Git Bash，会自动查找，也可以用 `CLAUDE_CODE_GIT_BASH_PATH` 指定。
 
 更新是手动触发的：npm 全局安装的版本运行 `/update` 后才检查 npm，并在会话空闲时安装新版；安装由单个会话加锁，完成后通过重启加载新版本并保留对话。源码仓库副本不会被 `/update` 改写。
 

@@ -83,9 +83,19 @@ function latestVersion({ timeoutMs = 10_000 } = {}) {
   });
 }
 
+// The npm of the node running this, when it sits next to it (a Node install, nvm, the portable Node the install
+// script puts in ~/.claude-pro/runtime, whose directory is not on PATH): else the one on PATH. The npm on PATH can
+// belong to another Node, whose global directory is not this one's (install() then refuses).
+function npmCommand() {
+  const win = process.platform === 'win32';
+  const own = path.join(path.dirname(process.execPath), win ? 'npm.cmd' : 'npm');
+  if (fs.existsSync(own)) return win ? `"${own}"` : own; // (quoted for cmd.exe: C:\Program Files\nodejs)
+  return win ? 'npm.cmd' : 'npm';
+}
+
 function runNpm(args, { timeoutMs = 300_000 } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, { shell: process.platform === 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(npmCommand(), args, { shell: process.platform === 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     const take = (d) => { out = (out + d).slice(-200_000); };
     child.stdout.on('data', take);
