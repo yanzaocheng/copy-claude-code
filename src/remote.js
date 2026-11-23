@@ -8,6 +8,7 @@
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { toolHeader, renderToolResult, bashModeLines } from './ui/render.js';
+import { c } from './ui/ansi.js';
 import { shownQuotes } from './ui/editor.js';
 
 export const REMOTE_WIDTH = 100; // columns that tool headers and results are laid out for on the page
@@ -102,13 +103,19 @@ function shownUserText(text) {
 
 // Transcript items for a conversation (agent.messages), as the page shows them when it connects.
 // `limit`: the newest items kept (the web console's history view takes them all); `images`: an image is {k: 'image', n}
-// (the n-th image of the conversation) instead of the text [image].
-export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE_WIDTH, limit = SEED_ITEMS, images = false } = {}) {
+// (the n-th image of the conversation) instead of the text [image]; `turns`: the lines shown where turns ended
+// ([{after, text}], see SessionStore.turnEnd), each put back after its message as the terminal printed it.
+export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE_WIDTH, limit = SEED_ITEMS, images = false, turns = [] } = {}) {
   let imageCount = 0;
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const items = [];
   const calls = new Map();
-  for (const m of messages || []) {
+  const ends = new Map();
+  for (const t of turns || []) if (t?.text && Number.isInteger(t.after)) ends.set(t.after, [...(ends.get(t.after) || []), t.text]);
+  const list = messages || [];
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    for (const text of ends.get(i) || []) items.push({ k: 'output', lines: [c.dim(text), ''] }); // (after the first i messages)
     const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : (m.content || []);
     for (const b of blocks) {
       if (m.role === 'user') {
@@ -142,6 +149,7 @@ export function transcriptItems(messages, { tools = [], ctx, cwd, width = REMOTE
       }
     }
   }
+  for (const text of ends.get(list.length) || []) items.push({ k: 'output', lines: [c.dim(text), ''] });
   return Number.isFinite(limit) ? items.slice(-limit) : items;
 }
 

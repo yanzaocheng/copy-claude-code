@@ -1168,7 +1168,7 @@
     const el = page(`<div class="chat-page">
       <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill warn" hidden></span><button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
-      <div class="chat-foot"><div class="chat-extra"><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
+      <div class="chat-foot"><div class="chat-extra"><div class="bgwork" id="lbg"></div><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
         <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
     </div>`, "chat");
     const log = $("#log", el);
@@ -1272,7 +1272,17 @@
         html = `<span class="work">${frames[Math.floor(Date.now() / 120) % frames.length]} ${esc(s.verb || "Working")}…</span> <span class="muted">(${parts.join(" · ")})</span>`;
       }
       $("#lstatus", el).innerHTML = html;
+      for (const t of $$("#lbg [data-since]", el)) t.textContent = fmtDuration(Math.max(0, Date.now() - Number(t.dataset.since)));
       c.setBusy(busy);
+    }
+    // what runs in the background for the session (its background agents, its run_in_background commands)
+    function renderBackground(list) {
+      const box = $("#lbg", el);
+      const open = $("details", box)?.open ?? true;
+      box.innerHTML = list.length ? `<details${open ? " open" : ""}><summary class="muted">后台运行 ${list.length}</summary>${list.map((b) => {
+        const tip = b.command && b.command !== b.label ? ` title="${esc(b.command)}"` : "";
+        return `<div class="bg-row"${tip}><span class="bg-kind">${b.kind === "agent" ? "Agent" : "Shell"}</span><span class="bg-label">${esc(b.label)}</span><span class="muted bg-meta">${esc(b.id)}${Number(b.since) > 0 ? ` · <span data-since="${Number(b.since)}"></span>` : ""}</span></div>`;
+      }).join("")}</details>` : "";
     }
     function setStatus(next) {
       status = next || {};
@@ -1285,8 +1295,9 @@
       const stats = [];
       if (status.context?.window) stats.push(`上下文 ${fmtTokens(status.context.used || 0)} / ${fmtTokens(status.context.window)}（${Math.round(((status.context.used || 0) / status.context.window) * 100)}%）`);
       if (Number.isFinite(status.cost)) stats.push(`花费 ${fmtUsd(status.cost)}`);
-      if (status.tasks) stats.push(`${status.tasks} 个后台 agent`);
+      if (status.tasks && !Array.isArray(status.background)) stats.push(`${status.tasks} 个后台 agent`); // (a session of an older version)
       $("#lstats", el).textContent = stats.join("  ·  ");
+      renderBackground(Array.isArray(status.background) ? status.background : []);
       const todos = Array.isArray(status.todos) ? status.todos : [];
       $("#ltodos", el).innerHTML = todos.length ? `<details open><summary class="muted">待办 ${todos.filter((t) => t.status === "completed").length}/${todos.length}</summary>${todos.map((t) => `<div class="${t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : ""}">${t.status === "completed" ? "☒" : t.status === "in_progress" ? "◼" : "☐"} ${esc(t.content)}</div>`).join("")}</details>` : "";
       $("#lqueue", el).innerHTML = (status.queue || []).map((q) => `<div>⎿ 排队中：${esc(String(q).replace(/\s+/g, " ").slice(0, 200))}</div>`).join("");

@@ -311,6 +311,11 @@ export class SessionStore {
   // The name the user gave the conversation with /rename (null: none again); it wins over the topic.
   setName(name) { this.append({ type: 'meta', name, at: Date.now() }); }
   reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
+  // Where a turn ended (after how many messages) and the line shown then ("✻ Done at 14:05 · worked 1m 3s · …"):
+  // the web console's view is rebuilt from the conversation (a reload, a restart) and puts it back under the answer.
+  turnEnd(after, text) { this.append({ type: 'turn', after, text, at: Date.now() }); }
+  // All of them again after the messages were replaced: a reset drops those before it (see App.messagesReplaced).
+  setTurns(marks) { this.append({ type: 'turns', marks: marks.map(({ after, text }) => ({ after, text })), at: Date.now() }); }
   // What the conversation's requests have cost so far (USD, see pricing.js), written after each one; the newest wins.
   setCost(usd) { this.append({ type: 'meta', cost: usd, at: Date.now() }); }
   // Until when the conversation's prompt cache lasts (ms since epoch; 0: cold), for the footer's clock of a
@@ -341,6 +346,7 @@ export class SessionStore {
     let meta = {};
     let title = null;
     let lastAt = 0; // when the conversation last changed: the latest message or reset (0: unknown)
+    let turns = []; // [{after, text}]: see turnEnd
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
       let e;
@@ -348,6 +354,8 @@ export class SessionStore {
       if (e.type === 'message' || e.type === 'reset') lastAt = Math.max(lastAt, e.at || 0);
       if (e.type === 'reset') meta = { ...meta, cacheState: null }; // what was cached is not the new messages' prefix
       if (e.type === 'meta') meta = { ...meta, ...e };
+      else if (e.type === 'turn') turns.push({ after: e.after, text: e.text });
+      else if (e.type === 'turns') turns = Array.isArray(e.marks) ? e.marks.slice() : [];
       else if (e.type === 'message') {
         messages.push(e.message);
         times.push(e.at || 0);
@@ -357,10 +365,13 @@ export class SessionStore {
         // so their own times are unknown.
         messages.splice(0, messages.length, ...e.messages);
         times.splice(0, times.length, ...e.messages.map(() => 0));
+        turns = [];
       }
     }
+    turns = turns.filter((t) => Number.isInteger(t?.after) && t.after >= 1 && t.after <= messages.length && typeof t.text === 'string' && t.text)
+      .sort((a, b) => a.after - b.after);
     return {
-      messages, times, lastAt, meta, title,
+      messages, times, lastAt, meta, title, turns,
       topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,
       name: typeof meta.name === 'string' && meta.name.trim() ? meta.name : null,
       systemPrompt: typeof meta.systemPrompt === 'string' && meta.systemPrompt.trim() ? meta.systemPrompt : null,

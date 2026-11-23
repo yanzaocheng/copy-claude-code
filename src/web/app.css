@@ -361,6 +361,11 @@ details.proj > div { padding: 0 0 6px 18px; }
 .status-line { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
 .status-line .work { color: var(--accent-text); }
 .todos { font-size: 13px; }
+.bgwork { font-size: 13px; }
+.bgwork .bg-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0; }
+.bgwork .bg-kind { flex: none; min-width: 46px; padding: 0 6px; border-radius: 5px; background: var(--hover); color: var(--muted); font-size: 11px; text-align: center; }
+.bgwork .bg-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bgwork .bg-meta { flex: none; font-size: 12px; }
 .todos .now { font-weight: 600; } .todos .done { color: var(--faint); text-decoration: line-through; }
 .dialog-box { max-height: 45vh; overflow-y: auto; border: 1px solid var(--warn); border-radius: var(--radius); padding: 12px 14px; background: var(--warn-soft); display: grid; gap: 8px; }
 .dialog-box .opts { display: grid; gap: 6px; }

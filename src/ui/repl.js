@@ -283,7 +283,7 @@ export class App {
     // the local web console's live view of this session (claude-pro web, see live.js and web/server.js)
     this.liveFeed = new LiveFeed({
       seed: () => [
-        ...transcriptItems(this.agent?.messages || [], { tools: this.runtime?.tools || [], ctx: this.agent?.makeCtx(), cwd: this.cwd, images: true }),
+        ...transcriptItems(this.agent?.messages || [], { tools: this.runtime?.tools || [], ctx: this.agent?.makeCtx(), cwd: this.cwd, images: true, turns: this.turnMarks }),
         ...(this.seedOutput.length ? [{ k: 'output', lines: this.seedOutput.slice() }] : []),
       ],
       status: () => this.liveStatus(),
@@ -297,6 +297,10 @@ export class App {
     this.remoteStarting = null;
     this.remoteRefused = null; // a gateway key the gateway refused: not tried again by itself (a new /connect is)
     this.seedOutput = []; // lines the page is shown after the conversation when it starts from it (see resumeAfterRestart)
+    // Where the turns of the conversation ended, with their "✻ Done at …" lines: [{after, text, msg}] (`msg`: the
+    // message the line follows, to find it again when the messages are replaced), and the array they were made on.
+    this.turnMarks = [];
+    this.marksBase = null;
     this.selfCheck = selfCheck;
     this.sessionName = flags?.restart?.peerName || null; // this session's name when the sessions of this computer do not know it (CLAUDE_PRO_PEERS=0)
     this.customTitle = null; // the conversation's name given with /rename: the title, instead of the topic
@@ -962,6 +966,7 @@ export class App {
       cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'),
       name: this.peerLabel(),
       tasks: this.runtime.tasks.running().length,
+      background: this.backgroundWork(),
       restarting: Boolean(this.restartRequest || this.host?.restartWaits(this)),
       asking: this.dialogs.length > 0, // a question waits for an answer (the page reminds the user of it)
       conversationId: this.store.id,
@@ -1147,6 +1152,23 @@ export class App {
   // waiting to be sent, background agents and shells.
   working() {
     return Boolean(this.isTurnRunning() || this.dialogs.length || this.queue.length || this.restartBlockers().length);
+  }
+
+  // What runs in the background for this session, for the web console's live view: its background agents and the
+  // commands it started with run_in_background that still run. [{kind: 'agent'|'shell', id, label, command, since}]
+  backgroundWork() {
+    const out = [];
+    for (const t of this.runtime?.tasks?.running() || []) out.push({ kind: 'agent', id: t.id, label: t.description || t.subagentType || 'agent', since: t.started || null });
+    const owner = this.owner;
+    // (in the console's process the shells of all its sessions are in one list: without an owner, none is this one's)
+    if (owner || !this.host) {
+      for (const s of listBackgroundShells(owner)) {
+        if (s.status !== 'running') continue;
+        const command = String(s.command || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        out.push({ kind: 'shell', id: s.id, label: s.description || command, command, since: s.startedAt || null });
+      }
+    }
+    return out;
   }
 
   restartBlockers() {
@@ -1918,7 +1940,7 @@ export class App {
   }
 
   // The status line under each answer: "✻ Done at 14:05 · worked 1m 3s · $0.12 (total $3.40) · ctx 45k/1M · opus-5-5 max".
-  doneLine() {
+  doneText() {
     const at = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
     const parts = [`✻ Done at ${at}`, `worked ${formatDuration(Date.now() - this.turnStart)}`];
     const spent = this.cost - (this.turnCostStart || 0);
@@ -1931,7 +1953,17 @@ export class App {
       const level = effort || defaultEffort(cfg.model.id, cfg);
       parts.push(level ? `${model} ${level}` : model);
     } catch { /* no model information: the time and the cost are enough */ }
-    return c.dim(parts.join(' · '));
+    return parts.join(' · ');
+  }
+
+  // A turn ended with `text` under its answer: kept with the conversation, so that the web console shows it again
+  // when it rebuilds the view from the messages (a reload, a restart of the session or of the console).
+  markTurn(text) {
+    const msgs = this.agent?.messages || [];
+    if (!msgs.length) return;
+    if (this.marksBase !== msgs) { this.marksBase = msgs; this.turnMarks = this.turnMarks.filter((m) => msgs[m.after - 1] === m.msg); }
+    this.turnMarks.push({ after: msgs.length, text, msg: msgs[msgs.length - 1] });
+    this.store.turnEnd(msgs.length, text);
   }
 
   // A short message about something the user just did (a paste, a copy, a completion with nothing to offer): a
@@ -1974,7 +2006,11 @@ export class App {
       this.flushActive(true);
       // When the answer came and how long the turn took, under the answer (the user asked for the time, 2026-11-21),
       // with what there is no footer for: the cost, the context in use, the model.
-      if (result && !result.interrupted && !error) this.screen.log(this.doneLine(), '');
+      if (result && !result.interrupted && !error) {
+        const text = this.doneText();
+        this.screen.log(c.dim(text), '');
+        this.markTurn(text);
+      }
       this.answerPeers(result, error);
       this.busy = false;
       this.controller = null;
@@ -2109,6 +2145,8 @@ export class App {
     this.cost = loaded.cost;
     this.agent.cache.clockUntil = this.store.cacheUntil = loaded.cacheUntil;
     this.agent.messages = loaded.messages;
+    this.marksBase = loaded.messages;
+    this.turnMarks = (loaded.turns || []).map((t) => ({ ...t, msg: loaded.messages[t.after - 1] }));
     this.agent.restoreFileState(loaded.messages, loaded.times);
     this.agent.lastActivityAt = loaded.lastAt; // a long pause before this turn clears old tool results, as it would have
     this.agent.lastContextTokens = estimateTokens(loaded.messages);
@@ -2162,6 +2200,8 @@ export class App {
     this.store.onError = this.storeError;
     this.runtime.trace?.setSessionId(this.store.id);
     this.seedOutput = [];
+    this.turnMarks = [];
+    this.marksBase = this.agent?.messages || null;
     this.topic = null;
     this.customTitle = null;
     this.firstPrompt = null;
@@ -2461,7 +2501,25 @@ export class App {
     for (let n = end - count; n < end; n++) this.liveFeed.emit({ t: 'image', n });
   }
   systemPrompt(text, agent) { if (this.isMain(agent)) this.store.setSystemPrompt(text); }
-  messagesReplaced(msgs, agent) { if (this.isMain(agent)) this.store.reset(msgs); }
+  messagesReplaced(msgs, agent) {
+    if (!this.isMain(agent)) return;
+    this.store.reset(msgs);
+    // The turn lines go with their messages: where the same message is (a rewind keeps a prefix, a partial compaction
+    // the other part), or where they were when only messages' contents changed (cleared tool results, lighter images);
+    // those of what was summarized go. Written again: the reset drops them from the file.
+    const before = this.marksBase;
+    this.marksBase = msgs;
+    if (!this.turnMarks.length) return;
+    const sameLength = before === msgs || before?.length === msgs.length;
+    const kept = [];
+    for (const m of this.turnMarks) {
+      let at = msgs[m.after - 1] === m.msg ? m.after : msgs.indexOf(m.msg) + 1;
+      if (!at && sameLength && m.after <= msgs.length) at = m.after;
+      if (at > 0) kept.push({ after: at, text: m.text, msg: msgs[at - 1] });
+    }
+    this.turnMarks = kept.sort((a, b) => a.after - b.after);
+    if (kept.length) this.store.setTurns(kept);
+  }
   usage(_u, agent) {
     if (this.isMain(agent)) this.store.setCacheUntil(agent.cache.clockUntil, agent.cacheState()); // for a resumed or restarted conversation
     this.screen.schedule();

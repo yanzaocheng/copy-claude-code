@@ -158,7 +158,7 @@ export function sessionDetail(dir, id) {
   const loaded = SessionStore.load(file);
   const cwd = summarize(file).cwd;
   const ctx = { cwd: cwd || os.homedir(), projectRoot: cwd || os.homedir() };
-  const items = transcriptItems(loaded.messages, { tools: toolsFor(cwd), ctx, cwd: ctx.cwd, limit: Infinity, images: true });
+  const items = transcriptItems(loaded.messages, { tools: toolsFor(cwd), ctx, cwd: ctx.cwd, limit: Infinity, images: true, turns: loaded.turns });
   const st = fs.statSync(file);
   return {
     id, dir, cwd, title: loaded.name || loaded.topic || loaded.title || '(no prompt)', name: loaded.name, topic: loaded.topic,

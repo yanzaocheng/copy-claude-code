@@ -97,19 +97,28 @@ export async function modelChoices(cfg, { cached = false, picked = null } = {}) 
 // The web menu marks the default on its model's row instead of offering a separate Default entry.
 export async function webModelChoices(cfg) {
   const models = (await modelChoices(cfg, { cached: true, picked: new Set(pickedModels()) })).filter((o) => o.value !== 'default');
-  const find = (spec) => {
-    const exact = models.find((o) => o.value === spec);
+  const find = (list, spec) => {
+    const exact = list.find((o) => o.value === spec);
     if (exact) return exact;
     const { provider, id } = cfg.resolveModel(spec);
-    return models.find((o) => o.value === `${provider}/${id}`) || models.find((o) => {
+    return list.find((o) => o.value === `${provider}/${id}`) || list.find((o) => {
       // Full refs have already been matched; only aliases or the retained override can resolve to a different ref.
       if (o.value.includes('/') && o.value !== cfg.modelOverride) return false;
       const m = cfg.resolveModel(o.value);
       return m.provider === provider && m.id === id;
     });
   };
-  const preferred = find(cfg.configuredModelSpec);
-  const current = find(cfg.modelSpec);
+  let preferred = find(models, cfg.configuredModelSpec);
+  if (!preferred) {
+    // The default is not among the ticked models: listed anyway, first, by its full name as the ticked ones are, so
+    // that the menu can go back to it.
+    let ref = cfg.configuredModelSpec;
+    try { const m = cfg.resolveModel(ref); ref = `${m.provider}/${m.id}`; } catch { /* as written */ }
+    const entry = (await modelChoices(cfg, { cached: true, picked: new Set([ref]) })).find((o) => o.value === ref);
+    preferred = entry || { value: ref, label: ref, description: '' };
+    models.unshift(preferred);
+  }
+  const current = find(models, cfg.modelSpec);
   return models.map((o) => ({ ...o, isDefault: o === preferred, current: o === current }));
 }
 
