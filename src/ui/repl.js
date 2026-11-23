@@ -972,7 +972,6 @@ export class App {
       conversationId: this.store.id,
       cost: Number(this.cost.toFixed(6)),
       context: { used: this.contextUsed(), window: cfg.model.contextWindow },
-      background: this.backgroundWork(),
       kind: 'terminal',
     };
   }
@@ -992,13 +991,6 @@ export class App {
       this.contextGuess = { key, used };
     }
     return this.contextGuess.used;
-  }
-
-  // What runs in the background: the agent's background agents and shells.
-  backgroundWork() {
-    const agents = this.runtime.tasks.list().map((t) => ({ id: t.id, kind: 'agent', description: t.description, status: t.status, startedAt: t.started }));
-    const shells = listBackgroundShells(this.owner).map((s) => ({ id: s.id, kind: 'shell', description: s.description || s.command, status: s.status, startedAt: s.startedAt || null }));
-    return [...agents, ...shells];
   }
 
   // The dialog open in the terminal, for the page to answer (options by index: values need not be strings).
