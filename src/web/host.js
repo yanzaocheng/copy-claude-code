@@ -19,6 +19,7 @@ import { runSelfCheck, watchSource, reloadTiming, RESTART_EXIT_CODE, MAX_RESTART
 import { installedByNpm, installedVersion, isNewer } from '../updater.js';
 import { listPeers } from '../peers.js';
 import { REMOTE_WIDTH } from '../remote.js';
+import { sweepShells } from '../shells.js';
 
 export const rosterFile = () => path.join(CONFIG_DIR, 'web-running.json');
 export const handoffFile = () => path.join(CONFIG_DIR, 'web-handoff.json');
@@ -67,7 +68,7 @@ export class SessionHost {
     this.rosterTimer = setInterval(() => this.saveRoster(), 60_000); // (the model of each, which changes in between)
     this.rosterTimer.unref();
     this.idleSince = new Map(); // app -> since when nothing has gone on in it and no page has watched it
-    this.reapTimer = setInterval(() => this.reap(), 60_000);
+    this.reapTimer = setInterval(() => { this.reap(); sweepShells().catch((e) => this.log(e, 'sweep')); }, 60_000);
     this.reapTimer.unref();
   }
 
@@ -135,7 +136,8 @@ export class SessionHost {
     if (this.restarting) return;
     for (const app of this.apps) {
       if (app.exiting || !app.runtime) continue;
-      const busy = app.working() || this.requests.has(app) || app.liveFeed?.active;
+      // (a background shell keeps it: putting it away would end the shell; a restart does not, see shells.js)
+      const busy = app.working() || app.runningShells?.() > 0 || this.requests.has(app) || app.liveFeed?.active;
       if (busy || !this.idleSince.has(app)) { this.idleSince.set(app, now); continue; }
       if (now - this.idleSince.get(app) >= hostTiming.idleMs) {
         try {
@@ -233,8 +235,8 @@ export class SessionHost {
   requestHandover() { this.noteChange({ now: true }); }
 
   // New code waiting for the sessions to be idle (the page's notice): the version on disk and what each session that
-  // is not idle is busy with. A background shell or agent never ends by itself (a dev server, an app): the page offers
-  // to end them (clearBlockers). Null when nothing waits.
+  // is not idle is busy with. A background agent may run long: the page offers to end it (clearBlockers). Background
+  // shells are not in the way: they go on running and the next console takes them over. Null when nothing waits.
   pendingUpdate() {
     const due = this.requests.size || (this.source && this.source.key !== this.failed);
     if (!due) return null;
@@ -244,22 +246,17 @@ export class SessionHost {
       turn: Boolean(a.isTurnRunning?.()),
       dialog: Boolean(a.dialogs?.length),
       queued: a.queue?.length || 0,
-      background: (a.backgroundWork?.() || []).map(({ kind, id, label }) => ({ kind, id, label })),
+      background: (a.backgroundWork?.() || []).filter((w) => w.kind === 'agent').map(({ kind, id, label }) => ({ kind, id, label })),
     }));
     return { version: installedVersion() || VERSION, blockers };
   }
 
-  // 结束后台程序并更新: the background shells and agents of the sessions the new code waits for (a turn running goes on: it
-  // ends by itself). Returns how many were ended.
+  // 结束后台程序并更新: the background agents of the sessions the new code waits for (a turn running goes on: it ends by
+  // itself; background shells are not in the way). Returns how many were ended.
   async clearBlockers() {
-    const { shutdownBackgroundShells } = await import('../tools/bash.js');
     let ended = 0;
     for (const app of [...this.apps].filter((a) => !this.ready(a))) {
-      const work = app.backgroundWork?.() || [];
-      if (!work.length) continue;
-      for (const t of app.runtime?.tasks?.running() || []) app.runtime.tasks.kill(t.id);
-      if (app.owner) shutdownBackgroundShells(app.owner); // (without an owner it would be every session's)
-      ended += work.length;
+      for (const t of app.runtime?.tasks?.running() || []) { app.runtime.tasks.kill(t.id); ended++; }
     }
     this.check();
     return { ended };

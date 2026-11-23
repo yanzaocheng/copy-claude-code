@@ -101,9 +101,9 @@ h3 { font-size: 14px; margin: 0 0 6px; font-weight: 650; }
 .ws-folder-row:hover .ws-pmenu, .ws-pmenu:focus-visible, .ws-pmenu[aria-expanded=true] { opacity: 1; }
 .ws-pmenu[aria-expanded=true] { background: var(--active); color: var(--text); }
 .ws-folder-row:hover .ws-count, .ws-folder-row:has(.ws-pmenu[aria-expanded=true]) .ws-count { visibility: hidden; }
-@media (hover: none) { .ws-add, .ws-pmenu { opacity: .7; } .ws-folder-row .ws-count { margin-right: 52px; } }
+@media (hover: none) { .ws-add, .ws-pmenu { opacity: .7; } .ws-folder-row .ws-folder > :is(.ws-count, .ws-bg):last-child { margin-right: 52px; } }
 .ws-folder svg { color: var(--faint); flex: none; }
-.ws-folder span:not(.ws-count) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-folder span:not(.ws-count):not(.ws-bg) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-count { min-width: 18px; padding: 0 6px; border-radius: 99px; background: var(--ok-soft); color: var(--ok); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .ws-row { position: relative; }
 .ws-item { display: flex; align-items: center; gap: 7px; padding: 6px 10px 6px 34px; border-radius: 8px; color: var(--text-2); font-size: 13.5px; position: relative; transition: background .12s; }
@@ -111,6 +111,14 @@ h3 { font-size: 14px; margin: 0 0 6px; font-weight: 650; }
 .ws-row .ws-item.active { background: var(--surface); color: var(--text); font-weight: 500; box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); }
 .ws-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ago { color: var(--faint); font-size: 11.5px; flex: none; font-variant-numeric: tabular-nums; }
+/* background programs of a session (or of a project's sessions): a small terminal mark with their number */
+.ws-bg { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px 0 5px; border-radius: 99px; background: var(--surface-3); color: var(--text-2); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ws-bg svg { width: 11px; height: 11px; }
+.ws-folder-row:hover .ws-bg, .ws-folder-row:has(.ws-pmenu[aria-expanded=true]) .ws-bg { visibility: hidden; }
+.tip-bg { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, .14); display: grid; gap: 3px; font-size: 12px; }
+.tip-bg div { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tip-bg span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip-bg svg { flex: none; width: 12px; height: 12px; opacity: .8; }
 .ws-menu { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; opacity: 0; pointer-events: none; }
 .ws-menu:hover, .ws-menu[aria-expanded=true] { background: var(--active); color: var(--text); }
 .ws-row:is(:hover, :focus-within, :has(.ws-menu[aria-expanded=true])) .ws-menu { opacity: 1; pointer-events: auto; }

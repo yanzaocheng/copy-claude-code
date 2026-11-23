@@ -690,6 +690,9 @@
   }
 
   const working = (it) => Boolean(it.peer && (it.peer.status?.turn || it.peer.status?.dialog));
+  // what runs in the background for a session (its dev servers, its background agents): shown in the sidebar too
+  const backgroundOf = (it) => (Array.isArray(it.peer?.status?.background) ? it.peer.status.background : []);
+  const bgBadge = (list) => `<span class="ws-bg" title="${esc(`后台运行 ${list.length} 个：${list.map((b) => b.label).join("、")}`)}">${ICON.terminal}${list.length}</span>`;
   function liveState(st = {}) {
     if (st.dialog) return ["ask", "等待回答"];
     if (st.turn) return ["busy", st.verb ? `${st.verb}…` : "工作中"];
@@ -765,7 +768,7 @@
     ws.tips.clear();
     let n = 0;
     box.innerHTML = list.length ? list.map((g) => {
-      g.items.sort((a, b) => working(b) - working(a) || b.mtime - a.mtime);
+      g.items.sort((a, b) => working(b) - working(a) || (backgroundOf(b).length > 0) - (backgroundOf(a).length > 0) || b.mtime - a.mtime);
       const closed = ws.closed.has(g.key) && !q;
       const limit = ws.expanded.has(g.key) || q ? Infinity : 6;
       const rows = closed ? "" : g.items.slice(0, limit).map((it) => {
@@ -773,11 +776,12 @@
         ws.tips.set(id, it);
         const [cls] = it.peer ? liveState(it.peer.status) : [""];
         const active = here === it.href || (it.alt && here === it.alt);
-        return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
+        return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${backgroundOf(it).length ? bgBadge(backgroundOf(it)) : ""}${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
       }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "")
         + (!closed && !g.items.length ? '<div class="ws-hint">还没有会话，点右边的 + 新建</div>' : "");
       const running = g.items.filter(working).length;
-      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" data-cwd="${esc(g.cwd)}" title="更多" aria-label="项目菜单" aria-expanded="false">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
+      const bg = g.items.flatMap(backgroundOf);
+      return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${bg.length ? bgBadge(bg) : ""}${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" data-cwd="${esc(g.cwd)}" title="更多" aria-label="项目菜单" aria-expanded="false">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
     }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话：点上方的文件夹图标添加工作区"}</div>`;
   }
 
@@ -938,7 +942,7 @@
       if (!it || sidebarMenuOpen() || e.target.closest("[data-session-menu]")) { tip.classList.add("hidden"); return; }
       const [cls, label] = working(it) ? liveState(it.peer.status) : ["", ""];
       const st = it.peer?.status || {};
-      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div>${label || (it.peer && !st.hidden) ? `<div class="tip-state">${label ? `<span class="ws-dot ${cls}"></span>${esc(label)}` : ""}${it.peer && !st.hidden ? `${label ? " · " : ""}在终端窗口里运行` : ""}</div>` : ""}`;
+      tip.innerHTML = `<strong>${esc(it.title)}</strong><div class="tip-path">${esc(shortPath(it.cwd))}</div><div>${it.peer ? esc([st.model, st.cost != null ? fmtUsd(st.cost) : "", st.context?.window ? `上下文 ${fmtTokens(st.context.used)}/${fmtTokens(st.context.window)}` : ""].filter(Boolean).join(" · ")) : esc(ago(it.mtime))}</div>${label || (it.peer && !st.hidden) ? `<div class="tip-state">${label ? `<span class="ws-dot ${cls}"></span>${esc(label)}` : ""}${it.peer && !st.hidden ? `${label ? " · " : ""}在终端窗口里运行` : ""}</div>` : ""}${backgroundOf(it).length ? `<div class="tip-bg">${backgroundOf(it).map((b) => `<div>${b.kind === "agent" ? ICON.agent : ICON.terminal}<span>${esc(b.label)}</span></div>`).join("")}</div>` : ""}`;
       const r = a.getBoundingClientRect();
       tip.classList.remove("hidden");
       tip.style.left = `${r.right + 8}px`;
@@ -2428,9 +2432,9 @@
     el.querySelector("[data-reload]").addEventListener("click", () => location.reload());
     document.body.appendChild(el);
   }
-  // New code waits for the sessions to be idle, and a background program (a dev server, an app) never ends by itself:
-  // said at the top with what holds it up, and a button that ends those programs. A turn running is not shown: it
-  // ends by itself and the switch follows.
+  // New code waits for the sessions to be idle, and a background agent may run long: said at the top with what holds
+  // it up, and a button that ends those agents. A turn running is not shown: it ends by itself and the switch follows.
+  // (Background programs are not in the way: they keep running and the new console takes them over.)
   let pendingDismissed = "";
   function notePending(p) {
     const old = $("#pendingNote");
@@ -2438,21 +2442,21 @@
     const held = (pending?.blockers || []).filter((b) => b.background.length);
     const key = held.map((b) => b.name + ":" + b.background.map((x) => x.id).join(",")).join("|");
     if (!pending || !held.length || key === pendingDismissed) { old?.remove(); return; }
-    const what = held.map((b) => `<strong>${esc(b.title)}</strong>（${b.background.map((x) => `${x.kind === "agent" ? "后台 agent" : "后台程序"}「${esc(x.label)}」`).join("、")}）`).join("；");
+    const what = held.map((b) => `<strong>${esc(b.title)}</strong>（${b.background.map((x) => `后台 agent「${esc(x.label)}」`).join("、")}）`).join("；");
     const others = (pending.blockers || []).filter((b) => !b.background.length && (b.turn || b.dialog || b.queued)).length;
-    const html = `<span class="pending-text">新版本 v${esc(pending.version)} 已就绪，等这些会话空闲后自动切换：${what}${others ? `；另有 ${others} 个会话正在工作，完成后会自动继续` : ""}</span><button type="button" class="button small" data-clear>结束后台程序并更新</button><button type="button" class="icon-btn" data-dismiss title="先不管" aria-label="关闭">✕</button>`;
+    const html = `<span class="pending-text">新版本 v${esc(pending.version)} 已就绪，等这些会话空闲后自动切换：${what}${others ? `；另有 ${others} 个会话正在工作，完成后会自动继续` : ""}</span><button type="button" class="button small" data-clear>结束后台 agent 并更新</button><button type="button" class="icon-btn" data-dismiss title="先不管" aria-label="关闭">✕</button>`;
     const el = old || Object.assign(document.createElement("div"), { id: "pendingNote", className: "reload-note pending-note" });
     if (el.dataset.key === key) return;
     el.dataset.key = key;
     el.innerHTML = html;
     el.querySelector("[data-dismiss]").addEventListener("click", () => { pendingDismissed = key; el.remove(); });
     el.querySelector("[data-clear]").addEventListener("click", async (e) => {
-      if (!confirm(`结束这些后台程序？${held.map((b) => b.background.map((x) => `\n· ${b.title}：${x.label}`).join("")).join("")}\n\n它们会被停止；需要的话，切换后让对应的会话重新启动。`)) return;
+      if (!confirm(`结束这些后台 agent？${held.map((b) => b.background.map((x) => `\n· ${b.title}：${x.label}`).join("")).join("")}\n\n它们做到一半的工作会丢掉；后台程序（开发服务器等）不受影响，会继续运行。`)) return;
       e.currentTarget.disabled = true;
       try {
         const r = await api("/api/update/clear", { method: "POST", body: {} });
         el.remove();
-        toast(`已结束 ${r.ended} 个后台程序，控制台空闲后切换到新版本`);
+        toast(`已结束 ${r.ended} 个后台 agent，控制台空闲后切换到新版本`);
       } catch (err) { fail(err); e.currentTarget.disabled = false; }
     });
     if (!old) document.body.appendChild(el);

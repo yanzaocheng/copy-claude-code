@@ -26,7 +26,8 @@ import { resolvePath, displayPath } from '../utils/paths.js';
 import { listDirectory, recentDirectories } from '../utils/dirs.js';
 import { ripgrepPath } from '../utils/shell.js';
 import { describePause, formatClock, humanDuration, resumeText, shouldAnnounce } from '../ratelimit.js';
-import { shutdownBackgroundShells, listBackgroundShells } from '../tools/bash.js';
+import { shutdownBackgroundShells, listBackgroundShells, releaseBackgroundShells, adoptBackgroundShells } from '../tools/bash.js';
+import { sweepShells } from '../shells.js';
 import { shutdownInterpreters } from '../tools/code.js';
 import { browserSessionFor, closeBrowserSession } from '../browser/session.js';
 import { estimateTokens } from '../agent.js';
@@ -391,6 +392,8 @@ export class App {
     // so that the footer shows it before the first request.
     // not in the self-check a restart runs first: that would ask the gateway once more for every restart
     if (!this.driven && !this.selfCheck) loadGatewayModels(this.runtime.config).then(() => this.screen.schedule());
+    // background shells nobody took up (a session that crashed, or was never opened again): ended after a while
+    if (!this.selfCheck) setTimeout(() => sweepShells().catch(() => {}), 30_000).unref?.();
     // What the session showed before a restart: repainted after a resize.
     if (Array.isArray(this.flags.restart?.screenHistory)) this.screen.history = this.flags.restart.screenHistory.filter((l) => typeof l === 'string');
     // Keys typed while starting up stay buffered in stdin until we listen.
@@ -521,13 +524,17 @@ export class App {
     } catch { /* ignore */ }
   }
 
-  closeRuntime(runtime) {
+  // `restart`: the session goes on in a next process (a restart, the web console taking up new code, a /cd, the move
+  // into the console): its background shells keep running for it to take up (shells.js); else they end with it.
+  closeRuntime(runtime, { restart = false } = {}) {
     // In the console process, no owner means there is nothing to clean up, not every session.
     const owner = this.host ? runtime?.config?.owner : undefined;
     if (!this.host || owner) {
-      shutdownBackgroundShells(owner);
+      if (restart && this.store?.id) releaseBackgroundShells(owner, this.store.id);
+      else shutdownBackgroundShells(owner);
       shutdownInterpreters(owner);
     }
+    clearTimeout(this.adoptTimer);
     if (this.host && owner) closeBrowserSession(owner);
     runtime?.agent?.keepAlive?.stop();
     runtime?.tasks?.killAll();
@@ -548,7 +555,7 @@ export class App {
       this.sourceWatch?.close();
       clearTimeout(this.updateRetry);
       clearInterval(this.moveTimer);
-      this.closeRuntime(this.runtime);
+      this.closeRuntime(this.runtime, { restart });
       this.peers?.close();
       this.liveFeed?.close();
       clearInterval(this.remotePeersTimer);
@@ -1163,14 +1170,33 @@ export class App {
     return out;
   }
 
+  // What a restart would kill: the background agents (they run in this process). Background shells do not count: they
+  // keep running and the next process takes them over (shells.js).
   restartBlockers() {
     const found = [];
     for (const t of this.runtime?.tasks?.running() || []) found.push(`background agent ${t.id} "${t.description}"`);
-    const owner = this.owner;
-    if (owner || !this.host) {
-      for (const s of listBackgroundShells(owner)) if (s.status === 'running') found.push(`background shell ${s.id} (${String(s.command).slice(0, 40)})`);
-    }
     return found;
+  }
+
+  // The background shells of this session that still run (a dev server): what keeps it from being put away or ended
+  // without a word, though not from a restart.
+  runningShells() {
+    const owner = this.owner;
+    if (!owner && this.host) return 0; // (in the console's process the shells of all its sessions are in one list)
+    return listBackgroundShells(owner).filter((s) => s.status === 'running').length;
+  }
+
+  // The conversation `id` is this session's: the background shells a process before left for it (a restart) are its
+  // own now, with the same ids. One still held by the process handing it over is asked for again a little later.
+  adoptShells(id, attempt = 0) {
+    clearTimeout(this.adoptTimer);
+    if (this.exiting || !this.runtime || !id) return;
+    let r;
+    try { r = adoptBackgroundShells(this.owner, id); } catch (e) { this.logError?.(e); return; }
+    if (r.waiting && attempt < 8 && this.store?.id === id) {
+      this.adoptTimer = setTimeout(() => this.adoptShells(id, attempt + 1), Math.min(8000, 500 * 2 ** attempt));
+      this.adoptTimer.unref?.();
+    }
   }
 
   // Restart as soon as nothing is running: at once when idle, otherwise when the current turn ends (the
@@ -2120,6 +2146,7 @@ export class App {
   // `quiet`: do not print the transcript (a restart: it is still on screen).
   loadSession(file, id, { quiet = false } = {}) {
     const loaded = this.runtime.useSession(id, () => SessionStore.load(file));
+    this.adoptShells(id);
     this.previousSession = null; // the conversation before a /clear: resuming another one ends the offer
     this.seedOutput = [];
     this.store = new SessionStore(this.cwd, id);
@@ -2386,7 +2413,7 @@ export class App {
   liveStatus() {
     let status = {};
     try { status = this.remoteStatus(); } catch { /* the basics below */ }
-    return { ...status, busy: this.working(), turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, hidden: this.hidden };
+    return { ...status, busy: this.working() || this.runningShells() > 0, turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, hidden: this.hidden };
   }
 
   // A command of the local web console's live view: the same ones the gateway's page sends (see remote.js).
@@ -2412,7 +2439,7 @@ export class App {
   // The web console only ends sessions it owns. The host process survives and the current HTTP request can reply.
   pageEnd({ force = false } = {}) {
     if (!this.host) throw new Error('请在对应的终端结束这个会话');
-    if (!force && this.working()) throw new Error('会话正在工作：先停止当前任务，或选择强制结束');
+    if (!force && (this.working() || this.runningShells())) throw new Error('会话正在工作或有后台程序：先停止它们，或选择强制结束');
     this.exit(0);
     return { ending: true };
   }

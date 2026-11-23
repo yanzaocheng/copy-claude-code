@@ -14,14 +14,14 @@ How it works:
 - First the new code is started in a separate throwaway process (every module loads, the interface comes up, the tools and the system prompt are well formed). If that fails, nothing is restarted and the error is returned to you: fix it and call Restart again.
 - Then the restart happens as soon as your current turn ends, so finish the turn with a short message to the user. The conversation, your todo list, the model and effort settings, queued messages and whatever the user was typing carry over, and you get a message saying the new code is loaded.
 - Use \`then\` to say what to do right after the restart (typically: check that the change works). Without it you simply carry on.
-- Background agents and background shells are killed by a restart, so the tool refuses while any are running unless you pass force.
+- Background agents are killed by a restart, so the tool refuses while any are running unless you pass force. Background shells (Bash run_in_background) keep running: the new process takes them over, with the same ids and their unread output.
 - Restarting more than ${MAX_RESTARTS} times within five minutes is refused: that is a loop. Stop and tell the user.`,
   input_schema: {
     type: 'object',
     properties: {
       reason: { type: 'string', description: 'What changed, in a few words. Shown to the user.' },
       then: { type: 'string', description: 'What to do right after the restart, for example how to check the change.' },
-      force: { type: 'boolean', description: 'Restart even though background agents or shells are running (they are killed).' },
+      force: { type: 'boolean', description: 'Restart even though background agents are running (they are killed).' },
     },
     required: ['reason'],
   },
@@ -33,7 +33,7 @@ How it works:
     }
     const blockers = io.restartBlockers?.() || [];
     if (blockers.length && !input.force) {
-      return { isError: true, content: `A restart would kill what is still running: ${blockers.join('; ')}. Wait for it to finish (TaskOutput / BashOutput), stop it (TaskStop / KillShell), or call Restart again with force: true.` };
+      return { isError: true, content: `A restart would kill what is still running: ${blockers.join('; ')}. Wait for it to finish (TaskOutput), stop it (TaskStop), or call Restart again with force: true.` };
     }
     const check = await runSelfCheck({ signal: ctx.signal });
     if (!check.ok) {

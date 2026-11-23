@@ -280,9 +280,12 @@ export function hasRipgrep(config) { return ripgrepPath(config) !== null; }
 
 // `stdin`: text to feed the command on standard input (hooks get their event JSON this way).
 // Without it the command's stdin is closed, so nothing can hang waiting for input.
-export function spawnShell(shell, command, { cwd, env, stdin }) {
+// `out`: a file descriptor for its output (stdout and stderr) instead of pipes: a background shell (shells.js), which
+// must not die with this process. `exitFile`: where bash writes the command's exit code when it ends; `pidFile`: where
+// it writes its MSYS id on Windows (kept: else a temporary file, removed once the shell closes).
+export function spawnShell(shell, command, { cwd, env, stdin, out = null, exitFile = null, pidFile: keptPidFile = null }) {
   const withStdin = typeof stdin === 'string';
-  const stdio = [withStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'];
+  const stdio = [withStdin ? 'pipe' : 'ignore', out ?? 'pipe', out ?? 'pipe'];
   const feed = (child) => {
     if (withStdin) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
     return child;
@@ -295,23 +298,25 @@ export function spawnShell(shell, command, { cwd, env, stdin }) {
   // The command is evaluated via an env var so no quoting is needed. Each command starts in the session's
   // directory: a `cd` lasts for that command only (the user's choice, 2026-11-21). On Windows the script first
   // writes its own (MSYS) process id to a file, which is how killTree finds everything under it.
-  const pidFile = isWin ? path.join(os.tmpdir(), `claude-pro-pid-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`) : null;
+  const pidFile = isWin ? keptPidFile || path.join(os.tmpdir(), `claude-pro-pid-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`) : null;
   const script = [
     ...(pidFile ? ['if [ -n "$CLAUDE_PRO_PID_FILE" ]; then echo $$ > "$CLAUDE_PRO_PID_FILE"; fi'] : []),
+    // (a trap: the command's own `exit` ends the shell before any line after it)
+    ...(exitFile ? ['if [ -n "$CLAUDE_PRO_EXIT_FILE" ]; then trap \'echo $? > "$CLAUDE_PRO_EXIT_FILE"\' EXIT; fi'] : []),
     `eval "$CLAUDE_PRO_COMMAND"${withStdin ? '' : ' < /dev/null'}`,
     '__ccc_status=$?',
     'exit $__ccc_status',
   ].join('\n');
   const child = spawn(shell.path, ['-c', script], {
     cwd,
-    env: { ...env, CLAUDE_PRO_COMMAND: command, CLAUDE_PRO_PID_FILE: pidFile || '' },
+    env: { ...env, CLAUDE_PRO_COMMAND: command, CLAUDE_PRO_PID_FILE: pidFile || '', CLAUDE_PRO_EXIT_FILE: exitFile || '' },
     windowsHide: true,
     detached: !isWin,
     stdio,
   });
   if (pidFile) {
     child.claudeProPidFile = pidFile;
-    child.once('close', () => { try { fs.rmSync(pidFile, { force: true }); } catch { /* best effort */ } });
+    if (!keptPidFile) child.once('close', () => { try { fs.rmSync(pidFile, { force: true }); } catch { /* best effort */ } });
   }
   return feed(child);
 }
