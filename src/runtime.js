@@ -13,7 +13,7 @@ import { isAbort } from './api.js';
 import { McpManager } from './mcp.js';
 import { HookRunner } from './hooks.js';
 import { BackgroundTasks, taskNotification } from './tasks.js';
-import { autoMemoryDir, claimSession, sweepOldData, projectDir } from './session.js';
+import { autoMemoryDir, claimSession, sweepOldData, compactSessions, projectDir } from './session.js';
 import { loadAutoMemoryIndex, takeEnvSnapshot, takeEnvSnapshotAsync, localDate } from './context.js';
 import { canRestart } from './restart.js';
 import { RuntimeTrace } from './trace.js';
@@ -224,6 +224,10 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
         !app.exiting && (id === app.store?.id || (!app.runtime && (id === app.flags?.resumeId || id === app.flags?.restart?.sessionId))));
       sweepOldData({ days: config.setting('cleanupPeriodDays'), isOwned })
         .then((done) => { if (done.files) trace.append('cleanup', { conversations: done.conversations, files: done.files, bytes: done.bytes }); })
+        .catch(() => {})
+        // then the conversation files that grew with copies of the conversation (see compactSession)
+        .then(() => compactSessions({ isOwned }))
+        .then((done) => { if (done?.files) trace.append('compact', done); })
         .catch(() => {});
     }, 15_000).unref();
   }

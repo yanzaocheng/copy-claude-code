@@ -5,6 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import { CONFIG_DIR } from './config.js';
 import { PROMPT_CODE_VERSION } from './prompts.js';
 import { processAlive } from './utils/shell.js';
@@ -203,6 +205,7 @@ export async function sweepOldData({ days, keep = [], isOwned = () => false, roo
       fs.unlinkSync(file);
       done.files++;
       done.bytes += stats.size;
+      if (file.endsWith('.jsonl')) try { done.bytes += fs.statSync(historyFile(file)).size; fs.rmSync(historyFile(file), { force: true }); } catch { /* none */ }
       return true;
     } catch { return false; } finally { mark?.close(); }
   };
@@ -272,9 +275,133 @@ export function moveSession(file, id, cwd) {
   fs.writeFileSync(target, first + (nl >= 0 ? text.slice(nl) : '\n'));
   return {
     file: target,
-    commit() { try { fs.rmSync(file, { force: true }); } catch { /* two copies: /resume shows it in both places */ } },
+    commit() {
+      try { fs.rmSync(file, { force: true }); } catch { /* two copies: /resume shows it in both places */ }
+      try { fs.renameSync(historyFile(file), historyFile(target)); } catch { /* none, or left with the old directory */ }
+    },
     undo() { try { fs.rmSync(target, { force: true }); } catch { /* left behind */ } },
   };
+}
+
+// ---------------------------------------------------------------- compaction
+//
+// A conversation file grows by a whole copy of the conversation at every reset (a compaction, a rewind, cleared tool
+// results) and keeps every message before it, though loading reads only from the last reset on: on 2026-11-24, 614
+// MB of files, of which loading used 157 MB (a 77.5 MB file for a 1.0 MB conversation). When what precedes the last
+// reset is worth it, the file is rewritten as: the meta lines merged into its first line (with the first prompt, the
+// title of the list, whose message goes), then the last reset and what follows, byte for byte. What goes is appended
+// to <id>.history.jsonl.gz, one gzip member each time; it moves, goes to the trash and is swept with the conversation.
+export const historyFile = (file) => file.replace(/\.jsonl$/, '.history.jsonl.gz');
+const COMPACT_MIN = 256 * 1024; // what goes must be worth a rewrite
+const gzip = promisify(zlib.gzip);
+const startsWith = (buf, at, prefix) => buf.toString('utf8', at, at + prefix.length) === prefix;
+
+// {keep, gone} of a file's bytes, or null when there is not enough to compact
+function planCompaction(buf) {
+  const lines = []; // [start, end) of each line, without its newline
+  for (let s = 0; s < buf.length;) {
+    let e = buf.indexOf(10, s);
+    if (e < 0) e = buf.length;
+    if (e > s) lines.push([s, e]);
+    s = e + 1;
+  }
+  let last = -1;
+  for (let i = lines.length - 1; i >= 0; i--) if (startsWith(buf, lines[i][0], '{"type":"reset"')) { last = i; break; }
+  if (last <= 0 || lines[last][0] < COMPACT_MIN) return null;
+  let meta = {};
+  let firstPrompt = null;
+  for (let i = 0; i < last; i++) {
+    const [s, e] = lines[i];
+    if (startsWith(buf, s, '{"type":"meta"')) {
+      try { meta = { ...meta, ...JSON.parse(buf.toString('utf8', s, e)) }; } catch { /* a damaged line: it goes */ }
+    } else if (!firstPrompt && startsWith(buf, s, '{"type":"message"')) {
+      const line = buf.toString('utf8', s, e);
+      if (line.includes('"role":"user"')) try { firstPrompt = firstUserText(JSON.parse(line).message); } catch { /* skip */ }
+    } else if (!firstPrompt && startsWith(buf, s, '{"type":"reset"')) {
+      try { for (const m of JSON.parse(buf.toString('utf8', s, e)).messages) if (m.role === 'user' && (firstPrompt = firstUserText(m))) break; } catch { /* skip */ }
+    }
+  }
+  const { type, ...rest } = meta; // ('type' first: readers recognize a meta line by its start)
+  const merged = { type: 'meta', ...rest };
+  if (!merged.firstPrompt && firstPrompt) merged.firstPrompt = firstPrompt;
+  const cut = lines[last][0];
+  return { keep: Buffer.concat([Buffer.from(`${JSON.stringify(merged)}\n`), buf.subarray(cut)]), gone: buf.subarray(0, cut) };
+}
+
+// Compacts one conversation file. `owned`: by the process that writes it (what it appended meanwhile is kept);
+// else only when no process owns it and nothing changed meanwhile. The slow part (reading, gzip) is asynchronous;
+// the rewrite is synchronous, so that this process cannot append in between. Resolves {before, after} or false.
+export async function compactSession(file, { owned = false, isOwned = () => false } = {}) {
+  let st, buf;
+  try {
+    st = await fs.promises.stat(file);
+    if (st.size < COMPACT_MIN) return false;
+    buf = await fs.promises.readFile(file);
+  } catch { return false; }
+  const plan = planCompaction(buf);
+  if (!plan) return false;
+  const gz = await gzip(plan.gone);
+  const id = path.basename(file, '.jsonl');
+  let mark = null;
+  try {
+    if (!owned) {
+      mark = markSession(id, 'sweep');
+      if (hasSessionMark(mark.dir, 'owner') || isOwned(id) || foreignPeerIn(path.dirname(file))) return false;
+    }
+    const now = fs.statSync(file);
+    let tail = Buffer.alloc(0);
+    if (now.size !== buf.length || now.mtimeMs !== st.mtimeMs) {
+      if (!owned || now.size < buf.length) return false; // written by another hand meanwhile
+      tail = Buffer.alloc(now.size - buf.length);
+      const fd = fs.openSync(file, 'r');
+      try { fs.readSync(fd, tail, 0, tail.length, buf.length); } finally { fs.closeSync(fd); }
+    }
+    const hist = historyFile(file);
+    let histSize = 0;
+    try { histSize = fs.statSync(hist).size; } catch { /* the first time */ }
+    fs.appendFileSync(hist, gz);
+    const tmp = `${file}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, Buffer.concat([plan.keep, tail]));
+      fs.renameSync(tmp, file);
+    } catch {
+      // (the file is held open elsewhere, on Windows: as it was, and the history as it was, tried again next time)
+      try { fs.rmSync(tmp, { force: true }); } catch { /* none */ }
+      try { if (histSize) fs.truncateSync(hist, histSize); else fs.rmSync(hist, { force: true }); } catch { /* none */ }
+      return false;
+    }
+    return { before: now.size, after: plan.keep.length + tail.length };
+  } catch { return false; } finally { mark?.close(); }
+}
+
+// The files of every project that grew (see compactSession), when not written for 10 minutes and owned by no
+// process; and the histories whose conversation is gone. In the background, at most once an hour on the machine.
+export async function compactSessions({ isOwned = () => false, root = path.join(CONFIG_DIR, 'projects'), now = Date.now() } = {}) {
+  const done = { files: 0, before: 0, after: 0 };
+  const marker = path.join(root, '.last-compact');
+  try { if (now - fs.statSync(marker).mtimeMs < 3600_000) return done; } catch { /* never */ }
+  try { fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(marker, ''); } catch { return done; }
+  let projects = [];
+  try { projects = await fs.promises.readdir(root, { withFileTypes: true }); } catch { return done; }
+  for (const p of projects) {
+    if (!p.isDirectory()) continue;
+    const dir = path.join(root, p.name);
+    let names = [];
+    try { names = await fs.promises.readdir(dir); } catch { continue; }
+    for (const name of names) {
+      const file = path.join(dir, name);
+      if (name.endsWith('.history.jsonl.gz')) {
+        const conv = file.replace(/\.history\.jsonl\.gz$/, '.jsonl');
+        try { if (!fs.existsSync(conv) && now - fs.statSync(file).mtimeMs > 86_400_000) fs.rmSync(file, { force: true }); } catch { /* next time */ }
+        continue;
+      }
+      if (!name.endsWith('.jsonl')) continue;
+      try { if (now - fs.statSync(file).mtimeMs < 600_000) continue; } catch { continue; }
+      const r = await compactSession(file, { isOwned });
+      if (r) { done.files++; done.before += r.before; done.after += r.after; }
+    }
+  }
+  return done;
 }
 
 export class SessionStore {
@@ -310,7 +437,13 @@ export class SessionStore {
   setTopic(topic) { this.append({ type: 'meta', topic, at: Date.now() }); }
   // The name the user gave the conversation with /rename (null: none again); it wins over the topic.
   setName(name) { this.append({ type: 'meta', name, at: Date.now() }); }
-  reset(messages) { this.append({ type: 'reset', messages, at: Date.now() }); }
+  // (the file is then compacted in the background: what precedes this reset is no longer loaded, see compactSession)
+  reset(messages) {
+    this.append({ type: 'reset', messages, at: Date.now() });
+    clearTimeout(this.compactTimer);
+    this.compactTimer = setTimeout(() => { compactSession(this.file, { owned: true }).catch(() => {}); }, 3000);
+    this.compactTimer.unref?.();
+  }
   // Where a turn ended (after how many messages) and the line shown then ("✻ Done at 14:05 · worked 1m 3s · …"):
   // the web console's view is rebuilt from the conversation (a reload, a restart) and puts it back under the answer.
   turnEnd(after, text) { this.append({ type: 'turn', after, text, at: Date.now() }); }
@@ -370,6 +503,8 @@ export class SessionStore {
     }
     turns = turns.filter((t) => Number.isInteger(t?.after) && t.after >= 1 && t.after <= messages.length && typeof t.text === 'string' && t.text)
       .sort((a, b) => a.after - b.after);
+    // (the first prompt of a compacted file is in its meta: the message itself went to the history)
+    if (typeof meta.firstPrompt === 'string' && meta.firstPrompt) title = meta.firstPrompt;
     return {
       messages, times, lastAt, meta, title, turns,
       topic: typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null,

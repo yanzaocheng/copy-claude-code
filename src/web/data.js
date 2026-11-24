@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { CONFIG_DIR, loadConfig } from '../config.js';
-import { SessionStore, firstUserText, archivedSessions } from '../session.js';
+import { SessionStore, firstUserText, archivedSessions, historyFile } from '../session.js';
 import { transcriptItems } from '../remote.js';
 import { buildTools } from '../tools/index.js';
 import { loadAgents, loadSkills } from '../agents.js';
@@ -60,6 +60,7 @@ function summarize(file) {
   }
   const name = typeof meta.name === 'string' && meta.name.trim() ? meta.name : null;
   const topic = typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null;
+  if (typeof meta.firstPrompt === 'string' && meta.firstPrompt) firstPrompt = meta.firstPrompt; // (a compacted file: see compactSession)
   return {
     cwd: typeof meta.cwd === 'string' ? meta.cwd : null,
     created: meta.created || null,
@@ -239,6 +240,7 @@ export function trashSession(dir, id) {
   const base = path.join(trashRoot(), `${stamp}__${dir}__${id}`);
   fs.mkdirSync(base, { recursive: true });
   fs.renameSync(file, path.join(base, `${id}.jsonl`));
+  try { fs.renameSync(historyFile(file), path.join(base, `${id}.history.jsonl.gz`)); } catch { /* none */ }
   for (const suffix of ['.jsonl', '.jsonl.1']) {
     const trace = path.join(projectsRoot(), dir, 'traces', `${id}${suffix}`);
     try { fs.renameSync(trace, path.join(base, `trace${suffix}`)); } catch { /* none */ }
@@ -271,6 +273,7 @@ export function restoreSession(trashId) {
   if (fs.existsSync(target)) throw httpError(409, '同一个会话已经存在');
   fs.mkdirSync(dir, { recursive: true });
   fs.renameSync(path.join(base, `${info.id}.jsonl`), target);
+  try { fs.renameSync(path.join(base, `${info.id}.history.jsonl.gz`), historyFile(target)); } catch { /* none */ }
   for (const suffix of ['.jsonl', '.jsonl.1']) {
     const from = path.join(base, `trace${suffix}`);
     if (!fs.existsSync(from)) continue;
