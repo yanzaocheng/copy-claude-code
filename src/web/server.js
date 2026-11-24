@@ -195,9 +195,9 @@ async function serve() {
     // only requests for this server by its own name: a page elsewhere cannot reach it through a name that points here
     if (!hosts().has(String(req.headers.host || '').toLowerCase())) return send(res, 421, { error: 'wrong host' });
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
-    // 远程访问: through the tunnel, from https://<通讯号>.7bit.fun: its own password and cookie, and its own origin
+    // 远程访问: through the tunnel, from https://<prefix>.7bit.fun: its own password and cookie, and its own origin
     const remote = equal(req.headers['x-cpweb-tunnel'], tunnelSecret) && /^(?:127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || '');
-    // (the address the browser is at, https://<通讯号>.7bit.fun, as the gateway says: changes must come from it)
+    // (the address the browser is at, https://<prefix>.7bit.fun, as the gateway says: changes must come from it)
     const remoteOrigin = remote ? String(req.headers['x-cpweb-origin'] || '').toLowerCase() : '';
     const ip = remote ? String(req.headers['x-cpweb-ip'] || '') : '127.0.0.1';
     try {

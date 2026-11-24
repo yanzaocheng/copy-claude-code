@@ -363,6 +363,17 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .prefix-row { display: flex; align-items: center; gap: 6px; max-width: 520px; }
 .prefix-row input { flex: 1; min-width: 0; }
 .remote-setup .modal-error { color: var(--danger); font-size: 13px; }
+.dev-me { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+/* a computer asking to run a task here: on top of every page, as a remote desktop program asks */
+.auth-stack { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 60; display: flex; flex-direction: column; gap: 10px; width: min(560px, calc(100vw - 24px)); pointer-events: none; }
+.auth-card { pointer-events: auto; background: var(--surface); border: 1px solid var(--line-strong); border-top: 3px solid var(--warn); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 14px 16px; animation: pop-in .15s ease; }
+.auth-card h3 { margin: 0 0 6px; font-size: 15px; display: flex; align-items: center; gap: 8px; color: var(--text); }
+.auth-card h3 svg { color: var(--warn); flex: none; }
+.auth-from { font-size: 13px; color: var(--muted); }
+.auth-text { margin: 8px 0; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--main-bg); border: 1px solid var(--line); font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 8em; overflow: auto; }
+.auth-device { font-size: 12px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.auth-card .actions { margin-top: 12px; align-items: center; }
+.auth-view { margin-left: auto; font-size: 12.5px; }
 
 /* 默认设置 */
 .def-row { display: grid; grid-template-columns: minmax(200px, 340px) minmax(0, 460px); gap: 8px 24px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }

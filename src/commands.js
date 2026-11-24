@@ -18,6 +18,7 @@ import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS 
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath, normalizeDir, resolvePath } from './utils/paths.js';
 import { cleanName, machineName } from './peers.js';
+import { deviceIdentity, readDeviceTrust, untrustDevice, setInboundPolicy } from './devices.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { runSelfCheck } from './restart.js';
 
@@ -508,11 +509,11 @@ export function buildCommands(app) {
       app.screen.schedule();
     }
   };
-  // The gateway connected: this session goes online there at once, for tasks from your other computers and contacts.
+  // The gateway connected: this session goes online there at once, for tasks from your other computers.
   const goOnline = async () => {
     const remote = await app.syncRemote();
     if (!remote) return;
-    const page = 'sessions on your other computers and your contacts can send it tasks';
+    const page = 'sessions on your other computers can send it tasks, each computer allowed here first (/devices)';
     out(remote.registered
       ? `${c.green('⇄')} This session is online at the gateway: ${page}.`
       : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
@@ -985,13 +986,12 @@ export function buildCommands(app) {
     async run(args) {
       const [action, ...rest] = args.split(/\s+/).filter(Boolean);
       if (action === 'name' && rest.length) { out(`This session is now ${c.bold('@' + app.renameSession(rest.join('-')))}`); return; }
-      const { me, local, remote, contacts = [], online } = await app.listAllPeers();
+      const { me, local, remote, online } = await app.listAllPeers();
       out([
         `This session: ${c.bold('@' + me.name)} ${c.dim(displayPath(me.cwd, app.cwd))}${online ? c.dim(` · from other computers: @${me.label}`) : ''}`,
         ...local.map((p) => `${c.bold('@' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`),
         ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('@' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
-        ...(contacts.length ? [c.dim('Of your contacts (other people, /contacts):'), ...contacts.map((p) => `${c.bold('@' + p.label)}${p.busy ? c.dim(' · busy') : ''}`)] : []),
-        ...(local.length || remote.length || contacts.length ? [] : [c.dim('No other session is running.')]),
+        ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
           ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
           : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/connect 7bit.fun; /status says why it is not).'),
@@ -999,11 +999,11 @@ export function buildCommands(app) {
     },
   });
 
-  // The local web console, and its 远程访问 (https://<通讯号>.7bit.fun with a password, see web/remote-access.js).
+  // The local web console, and its 远程访问 (https://<prefix>.7bit.fun with a password, see web/remote-access.js).
   add({
     name: 'web',
     argHint: '[remote [on|off|password|logout]]',
-    description: 'Open the web console in your browser; /web remote on reaches it from your phone at <通讯号>.7bit.fun with a password',
+    description: 'Open the web console in your browser; /web remote on reaches it from your phone at <prefix>.7bit.fun with a password',
     async run(args) {
       const [what = '', action = ''] = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const web = await import('./web/server.js');
@@ -1090,7 +1090,7 @@ export function buildCommands(app) {
       while (prefix.auto) {
         const wanted = await app.showDialog(new TextInputDialog({
           title: '远程访问域名',
-          body: [`选一个域名前缀：https://<前缀>.${prefix.domain}`, '3–20 个小写字母、数字或 -，字母开头、不以 - 结尾；要唯一（它也是你在网关的通讯号）。'],
+          body: [`选一个域名前缀：https://<前缀>.${prefix.domain}`, '3–20 个小写字母、数字或 -，字母开头、不以 - 结尾；要唯一。'],
           question: '前缀:',
         }));
         if (wanted === null || !String(wanted).trim()) { out(c.dim('远程访问没有开启。')); return; }
@@ -1115,51 +1115,37 @@ export function buildCommands(app) {
     out(lines);
   }
 
-  // 通讯录 at the gateway: other people's accounts whose claude-pro sessions and this account's may send each other
-  // tasks, once both sides agreed. Each account has a public 通讯号 (handle) that the others add it by.
-  const CONTACT_LABELS = { incoming: c.yellow('asks to be your contact'), outgoing: c.dim('waiting for them to accept'), accepted: c.green('contact'), blocked: c.red('blocked') };
+  // The computers whose sessions may run tasks here without asking (see devices.js), and this computer's identity.
   add({
-    name: 'contacts',
-    argHint: '[add|accept|reject|remove|block|trust|handle] [通讯号] [auto|confirm]',
-    description: 'Your contacts at the gateway: other people whose claude-pro sessions and yours may send each other tasks once both agree',
-    async run(args) {
-      const [action = '', handle = '', extra = ''] = args.trim().split(/\s+/).filter(Boolean).map((s, i) => (i === 0 ? s.toLowerCase() : s));
-      const remote = await app.syncRemote();
-      if (!remote?.registered) { out(c.red(`Contacts live at the gateway, and this session is not online there: ${app.remoteState().text}`)); return; }
-      const actions = ['add', 'accept', 'reject', 'remove', 'block', 'trust', 'handle'];
-      if (action && !actions.includes(action)) { out(c.red(`Unknown action "${action}". /contacts ${actions.join('|')} 通讯号`)); return; }
-      if (action && !handle) { out(c.red(`/contacts ${action} needs a 通讯号${action === 'handle' ? ' (your new one)' : ''}.`)); return; }
-      const trust = extra.toLowerCase() || 'auto';
-      if (action === 'trust' && !['auto', 'confirm'].includes(trust)) { out(c.red('/contacts trust 通讯号 auto (their tasks run without asking) or confirm (each one is asked).')); return; }
-      let data;
+    name: 'devices',
+    argHint: '[remove <name|id>] [policy ask|account]',
+    description: 'The computers you trust to send this computer tasks without asking (as in remote desktop programs): list, remove, or let the whole account in',
+    run(args) {
+      const [action = '', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const what = rest.join(' ');
       try {
-        data = await remote.contacts(action, action === 'trust' ? { handle, trust } : action ? { handle } : undefined);
-      } catch (e) {
-        out(c.red(e.status === 404 && !action ? `The gateway ${remote.base} has no contacts yet (${e.message}).` : e.message));
-        return;
-      }
-      const done = {
-        add: `Asked ${handle}: once they accept, your sessions can send each other tasks.`,
-        accept: `${handle} is your contact now.`,
-        reject: `Declined ${handle}.`,
-        remove: `${handle} is no longer in your contacts.`,
-        block: `Blocked ${handle}: they cannot ask you nor send your sessions tasks.`,
-        trust: trust === 'auto' ? `Tasks from ${handle} run without asking now.` : `Each task from ${handle} is asked about now.`,
-        handle: `Your 通讯号 is ${data.handle} now.`,
-      }[action];
-      const added = action === 'add' && data.contacts?.find((x) => x.handle === handle.toLowerCase().replace(/^@/, ''))?.status === 'accepted';
-      if (done) out(c.green('✔ ') + (added ? `${handle} had asked you already: you are contacts now.` : done));
-      if (action === 'accept' || action === 'remove' || action === 'block' || added) app.refreshRemotePeers();
-      if (action && action !== 'handle') return;
-      const rows = Array.isArray(data.contacts) ? data.contacts : [];
+        if (action === 'remove') {
+          if (!what) { out(c.red('/devices remove NAME or ID')); return; }
+          const removed = untrustDevice(what);
+          out(removed.length ? `${c.green('✔')} No longer trusted: ${removed.map((d) => d.name).join(', ')}. Its tasks are asked about again.` : c.yellow(`No trusted computer "${what}".`));
+          return;
+        }
+        if (action === 'policy') {
+          setInboundPolicy(what.toLowerCase());
+          out(`${c.green('✔')} ${what.toLowerCase() === 'account' ? 'Every session of your gateway account now runs tasks here without asking.' : 'Tasks from a computer you have not trusted are asked about first.'}`);
+          return;
+        }
+        if (action) { out(c.red('/devices, /devices remove NAME|ID, /devices policy ask|account')); return; }
+      } catch (e) { out(c.red(e.message)); return; }
+      const { policy, devices } = readDeviceTrust();
+      let me = null;
+      try { me = deviceIdentity(); } catch (e) { out(c.yellow(e.message)); }
+      const rows = Object.entries(devices).sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
       out([
-        `Your 通讯号: ${c.bold(data.handle)} ${c.dim('(the name others add you by; /contacts handle NEW changes it)')}`,
-        ...rows.map((x) => {
-          const online = x.status === 'accepted' ? c.dim(` · ${x.online ? `${x.online} session${x.online === 1 ? '' : 's'} online` : 'no session online'} · tasks: ${x.trust === 'auto' ? 'run without asking' : 'asked about each time'}`) : '';
-          return `  ${c.bold(x.handle)} ${CONTACT_LABELS[x.status] || x.status}${online}`;
-        }),
-        ...(rows.length ? [] : [c.dim('  No contacts yet.')]),
-        c.dim('/contacts add 通讯号 asks someone; accept / reject / remove / block 通讯号; trust 通讯号 auto|confirm. A contact sees only the name, computer and state of your online sessions; their tasks are asked about here before they run, unless you set trust to auto. In /peers their sessions show as @通讯号:computer/name.'),
+        `This computer: ${c.bold(machineName(app.config.env))}${me ? c.dim(` · device ${me.id}`) : ''}`,
+        `Tasks from your other computers: ${policy === 'account' ? c.yellow('run without asking (policy account)') : 'asked about unless the computer is trusted'}`,
+        ...(rows.length ? [c.dim('Trusted computers:'), ...rows.map(([id, d]) => `  ${c.bold(d.name)} ${c.dim(`${id} · trusted ${new Date(d.trustedAt).toLocaleDateString()}${d.lastSeen ? ` · last task ${new Date(d.lastSeen).toLocaleString()}` : ''}`)}`)] : [c.dim('No trusted computer yet: choose "Always trust" when one asks to run a task.')]),
+        c.dim('/devices remove NAME|ID stops trusting one; /devices policy account lets every session of your account in, policy ask (default) asks. Sessions of this computer talk to each other without asking.'),
       ]);
     },
   });

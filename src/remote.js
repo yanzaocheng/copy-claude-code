@@ -2,14 +2,15 @@
 // snapshotItems: a conversation as a list of items — user messages, assistant text, thinking, tool calls, other
 // terminal output — that events update; the page, web/app.js, carries a copy of the reducer), and this session's
 // connection to the gateway's session relay (RemoteControl), which carries the tasks of the account's sessions on
-// other computers (`@公司 ...`, see peers.js) and of contacts. The session never listens on the network: it connects
-// out to the gateway with the API key from /connect.
+// other computers (`@公司 ...`, see peers.js; signed and authorized as devices.js says). The session never listens on
+// the network: it connects out to the gateway with the API key from /connect.
 
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { toolHeader, renderToolResult, bashModeLines } from './ui/render.js';
 import { c } from './ui/ansi.js';
 import { shownQuotes } from './ui/editor.js';
+import { deviceIdentity, signTask } from './devices.js';
 
 export const REMOTE_WIDTH = 100; // columns that tool headers and results are laid out for on the page
 const SEED_ITEMS = 500;
@@ -189,13 +190,14 @@ export const newRemoteId = () => crypto.randomBytes(9).toString('base64url');
 // which only the self-check and the tests set).
 export const onlineEnabled = (env = process.env) => !/^(0|false|no|off)$/i.test(env.CLAUDE_PRO_ONLINE || '');
 
-// This session at the gateway's session relay: registered while it runs, with a stream kept open on which the tasks
-// of the account's sessions on other computers (and of contacts) and the 通讯录's news arrive, and its status (busy,
+// This session at the gateway's session relay: registered while it runs (with this computer's device id), with a
+// stream kept open on which the tasks of the account's sessions on other computers arrive, and its status (busy,
 // name, title, directory, model: what the other sessions are shown of it). Nothing of the conversation goes there.
-// (Until 2026-11-21 the transcript went there too, for the gateway's 远程控制 page, which is gone.)
+// (Until 2026-11-21 the transcript went there too, for the gateway's 远程控制 page, which is gone; until 2026-11-24
+// the sessions of contacts, other people's accounts, could send tasks too.)
 export class RemoteControl {
   // gateway: {url, apiKey}. handlers: info() -> {name, title, cwd, model, version, machine, peerId}, status() -> object,
-  // peerMessage(message) (false defers delivery), contactEvent(event), changed() (online changed), refused(status).
+  // peerMessage(message) (false defers delivery), changed() (online changed), refused(status).
   constructor({ gateway, id, handlers, fetchImpl = globalThis.fetch }) {
     this.base = String(gateway.url).replace(/\/+$/, '');
     this.apiKey = gateway.apiKey;
@@ -250,7 +252,9 @@ export class RemoteControl {
 
   async register() {
     const info = this.handlers.info?.() || {};
-    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), ...info });
+    let device;
+    try { device = deviceIdentity().id; } catch { /* unidentified: its tasks can only be allowed once */ }
+    const data = await this.request('POST', '/v1/remote/sessions', { id: this.id, host: os.hostname(), ...info, ...(device ? { device } : {}) });
     if (data.id) this.id = data.id;
     this.registered = true;
     this.lastStatus = '';
@@ -349,10 +353,8 @@ export class RemoteControl {
 
   frame(frame) {
     if (this.closed) return;
-    // 通讯录: someone asked this account to be a contact, or accepted its request
-    if (frame.type === 'contact') { try { this.handlers.contactEvent?.(frame); } catch { /* the App's problem */ } return; }
     if (frame.type === 'peer' && frame.cid) this.peerMessage(frame);
-    // (anything else, such as an older gateway's page commands, is not this session's any more)
+    // (anything else, such as an older gateway's page commands or 通讯录 news, is not this session's any more)
   }
 
   // ------------------------------------------------------------ messages of other sessions
@@ -364,18 +366,18 @@ export class RemoteControl {
     if (this.seenPeer.has(cmd.cid)) { ack(); return; }
     try {
       const f = cmd.from || {};
+      // (a contact's message, another account's, that an older gateway still delivers: not taken)
+      if (typeof f.account === 'string' && f.account) throw new Error('通讯录 is gone');
       const machine = f.machine || f.host || 'computer';
-      // a contact's session (another person's account): its 通讯号 and how this account takes its tasks
-      const account = typeof f.account === 'string' && f.account ? f.account : null;
       const accepted = this.handlers.peerMessage?.({
         id: cmd.cid,
-        kind: cmd.kind === 'reply' ? 'reply' : 'task',
+        kind: cmd.kind === 'reply' || cmd.kind === 'notice' ? cmd.kind : 'task',
         text: String(cmd.text ?? ''),
         inReplyTo: cmd.inReplyTo || null,
-        from: {
-          id: f.id, name: `${account ? `${account}:` : ''}${machine}/${f.name || 'session'}`, cwd: account ? '' : (f.cwd || ''), machine, remote: true,
-          ...(account ? { account, trust: f.trust === 'auto' ? 'auto' : 'confirm' } : {}),
-        },
+        // the sender's signature, and the session it was for (see devices.js verifyTask)
+        auth: cmd.auth || null,
+        to: this.id,
+        from: { id: f.id, name: `${machine}/${f.name || 'session'}`, cwd: f.cwd || '', machine, remote: true, device: typeof f.device === 'string' ? f.device : null },
       });
       if (accepted === false) {
         // A session moving into the console cannot take new work. Leave it in the mailbox for the next stream.
@@ -388,24 +390,19 @@ export class RemoteControl {
     ack();
   }
 
-  // The sessions of this gateway account, on every computer, as the gateway lists them (this one included), and
-  // the online sessions of the account's contacts (each with `account`, the contact's 通讯号).
+  // The sessions of this gateway account, on every computer, as the gateway lists them (this one included).
   async sessions() {
     const data = await this.request('GET', '/v1/remote/sessions');
-    return { own: Array.isArray(data?.data) ? data.data : [], contacts: Array.isArray(data?.contacts) ? data.contacts : [] };
+    return Array.isArray(data?.data) ? data.data : [];
   }
 
-  // 通讯录 at the gateway: no action lists them ({handle, contacts: [{handle, status, trust, online}]}); handle,
-  // add, accept, reject, remove, block, trust act ({handle[, trust]}) and answer with the list as it is then.
-  async contacts(action = '', body = {}) {
-    if (!action) return await this.request('GET', '/v1/remote/contacts');
-    return await this.request('POST', `/v1/remote/contacts/${action}`, body, { retry: false });
-  }
-
-  // A message to another session of the account: resolves with {id} (the message's id, which a reply names).
+  // A message to another session of the account: resolves with {id} (the message's id, which a reply names). A task
+  // is signed with this computer's key; a notice tells the sender of a task that it waits for this user's answer.
   async sendPeer(targetId, { kind = 'task', text, inReplyTo = null }) {
     if (!this.registered) await this.register();
-    const body = { from: this.id, kind, text, ...(inReplyTo ? { inReplyTo } : {}) };
+    let auth = null;
+    if (kind === 'task') try { auth = signTask(targetId, text); } catch { /* sent unsigned: it can only be allowed once */ }
+    const body = { from: this.id, kind, text, ...(inReplyTo ? { inReplyTo } : {}), ...(auth ? { auth } : {}) };
     const data = await this.request('POST', `/v1/remote/sessions/${encodeURIComponent(targetId)}/messages`, body, { retry: false });
     return { id: data.id, delivered: data.delivered !== false };
   }

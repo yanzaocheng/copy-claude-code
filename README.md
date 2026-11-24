@@ -15,7 +15,7 @@
   ⎿  PASS
 ```
 
-> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 的 Key 保存在 `~/.claude-pro/gateway.json`，其他厂商的保存在 `~/.claude-pro/providers.json`。跨电脑互发任务和通讯录只在连接了 7bit.fun 时才有。
+> **认证**：`/connect` 里粘贴各家的 API Key。7bit.fun 的 Key 保存在 `~/.claude-pro/gateway.json`，其他厂商的保存在 `~/.claude-pro/providers.json`。跨电脑互发任务只在连接了 7bit.fun 时才有。
 
 ## 安装与运行
 
@@ -227,7 +227,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 ## 远程访问：在手机上用这台电脑的控制台
 
-远程访问需要先连接 7bit.fun。在控制台「远程访问」页或会话里的 `/web remote on` 开启：第一次会让你设一个至少 10 位的密码，并自己选一个域名前缀（3–20 个小写字母、数字或 `-`，只要没人用过），比如 `yanzc`，控制台就能在 **`https://yanzc.7bit.fun`** 打开：手机或别的电脑上打开这个地址，输入密码，就能看会话、发任务（可以带图片）、回答问题、改设置。手机上通过左上角菜单打开工作区，聊天和输入区适应小屏幕。前缀也是你在网关的通讯号，之后可以在「远程访问」页点「修改前缀」（旧地址随即失效）。
+远程访问需要先连接 7bit.fun。在控制台「远程访问」页或会话里的 `/web remote on` 开启：第一次会让你设一个至少 10 位的密码，并自己选一个域名前缀（3–20 个小写字母、数字或 `-`，只要没人用过），比如 `yanzc`，控制台就能在 **`https://yanzc.7bit.fun`** 打开：手机或别的电脑上打开这个地址，输入密码，就能看会话、发任务（可以带图片）、回答问题、改设置。手机上通过左上角菜单打开工作区，聊天和输入区适应小屏幕。之后可以在「远程访问」页点「修改前缀」（旧地址随即失效）。
 
 开启后控制台服务常驻后台。想让电脑一开机手机就能连上，在「远程访问」页打开「开机自动启动」：登录系统后自动在后台运行 `claude-pro web --no-open`（Windows 是「启动」文件夹里的快捷方式，macOS 是 LaunchAgent，Linux 桌面是自启动项；没有桌面的服务器页面上会给出一行 `crontab @reboot`）。
 
@@ -251,20 +251,14 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
   - 文件和会话同名时，行首 `@名字 任务` 按会话处理；要强制引用文件可写 `@./名字`。
 - **`@` 可以写在句子中间**：在空格后面打 `@` 再按 Tab 也会列出文件和会话；在发给当前 agent 的消息里提到 `@名字`，agent 会被告知那是哪个会话、怎么联系它。文件引用仍会展开为文件内容。输入法打出全角 `＆` 不再是会话语法。
 - **`/rename 新名字`**：给当前会话改名（比如 `/rename web-server`），别的会话从此用 `@web-server` 找它；这个名字也成为对话标题（终端标签页、`/resume` 列表、网页），不再自动按话题改；`/resume` 这个对话时名字一起回来。
-- **`/peers`**：列出本机、其他电脑和通讯录好友在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
+- **`/peers`**：列出本机和其他电脑在线的会话。模型也能用 ListPeers / MessagePeer 工具自己找别的会话分派任务。
 - 回答会在对方这一轮做完后自动发回；对方正忙时，任务排在它当前工作之后。网关替离线的会话暂存回答（24 小时；网关重启会丢失还没送达的消息）。
-- **安全**：在线的会话能被同一网关账户执行任何任务。能登录这个账户、或持有它任一 API key 的人，都能在这些电脑上以完全权限执行命令。不需要时 `/disconnect 7bit.fun`。
+- **跨电脑授权（像远程桌面）**：本机会话之间的任务直接执行；其他电脑发来的任务要先经这台电脑同意。每台电脑第一次用到时生成自己的设备身份（Ed25519 密钥，设备 ID 由公钥算出，保存在 `~/.claude-pro/device.json`），发出的任务都带签名，网关原样转交。收到没信任过的电脑的任务时，终端弹窗、网页控制台顶部（不论在看哪个页面）同时提醒，三个选项：
+  - **允许本次连接**：这条任务和发起它的那个会话之后的任务都执行，那个会话结束就失效；
+  - **始终信任这台电脑**：之后它的会话发来的任务直接执行（签名校验通过才有这个选项；旧版 claude-pro 不签名，只能单次允许）；
+  - **拒绝**：对方收到“已拒绝”。10 分钟没人回答按拒绝处理。
 
-## 通讯录：和别人的会话互发任务
-
-不同网关账户之间，双方同意后，各自的 claude-pro 会话也能互发任务。
-
-- **通讯号**：每个账户有一个公开的通讯号（默认随机，如 `cp7k3qxm`），别人用它加你，看不到你的邮箱。`/contacts handle 新名字`、控制台「远程访问」页或网关网页「通讯录」里修改（3-20 个小写字母、数字或 `-`，以字母开头；它也是远程访问的域名前缀）。
-- **加好友**：`/contacts add 对方通讯号` 发出请求；对方在线的会话会提示，对方用 `/contacts accept 你的通讯号` 同意（也可以 `reject`、`block`），或在网页通讯录里点同意。双方互相请求时直接成为好友。`/contacts remove` 删除，`/contacts block` 拉黑（对方不能再请求、不能发任务，也不会被告知）。`/contacts` 列出全部。
-- **发任务**：好友在线的会话在 `/peers` 和 ListPeers 里显示为 `@通讯号:电脑名/会话名`；`@通讯号 任务`（对方只开着一个会话时）或 `@通讯号:电脑名/会话名 任务` 发送，回答自动发回。
-- **确认**：好友发来的任务默认在终端弹窗问你「执行 / 拒绝 / 以后都执行」，拒绝时对方会收到“已拒绝”。`/contacts trust 通讯号 auto` 让这个好友的任务直接执行，`confirm` 改回每条确认。交给模型时会注明这是外人的请求、不是用户的指令，并要求它不泄露密钥和私人文件、不做破坏性操作。
-- **好友能看到什么**：只有你在线会话的名字、电脑名和是否在忙；看不到目录、标题和对话，发来的消息里也不带你的目录。
-- **要求**：双方都要在 claude-pro 里 `/connect` 连上 7bit.fun（模型用别家也可以，这个 key 只用于通讯）。
+  发起方会先收到“已送达，等待对方授权”。已信任的电脑在控制台「远程访问」页的「跨电脑互发任务」里查看、撤销，终端里用 `/devices`（`/devices remove 名字`）。不想每次确认可以把入站策略改成「同一账号的电脑直接执行」（`/devices policy account`，以前的行为）：那样能登录这个网关账户、或持有它任一 API key 的人，都能在你的电脑上以完全权限执行命令。
 
 ## 完全访问与安全网
 
@@ -306,7 +300,7 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 **`/cd <目录>`**：换工作目录，对话接着进行。目录可以是绝对路径、`~`、相对当前目录的路径；不存在或不是目录时报错（不会创建）。会话在新目录里重启一次（约一秒），新目录的项目设置、CLAUDE.md、记忆、git 状态、`@` 文件/会话补全、输入历史都换成新目录的；对话、模型、effort、待办不变。会话记录跟着搬到新目录下，在新目录里 `/resume` 能找到。用 `/rename` 或 `--name` 起过的名字保留，默认按目录取的名字换成新目录名。任务进行中不能切换。
 
-**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/contacts` `/web`（`/web remote …`）`/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`。技能也可以直接用 `/技能名 参数` 运行。
+**斜杠命令**：`/help` `/cd` `/rename` `/peers` `/devices` `/web`（`/web remote …`）`/clear` `/compact` `/config` `/model` `/effort` `/status` `/cost` `/trace` `/context` `/init` `/review` `/memory` `/verify` `/tasks` `/rewind` `/skills` `/resume` `/todos` `/agents` `/mcp` `/bashes` `/verbose` `/export` `/doctor` `/exit`。技能也可以直接用 `/技能名 参数` 运行。
 
 **记忆**：自动读取 `~/.claude-pro/CLAUDE.md`、项目各级目录的 `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`；某一级目录没有 `CLAUDE.md` 时读它的 `AGENTS.md` 代替（两者都有时通常是同一份说明，不重复发送）。
 
@@ -400,7 +394,7 @@ src/prompts.js        系统提示词、压缩提示词、自动记忆提示
 src/tools/*           各工具实现（含 Skill、NotebookEdit）
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
-src/remote.js         对话事件模型（applyEvent，控制台页面里有同一份）和网关的会话中继连接（跨电脑、通讯录互发任务）
+src/remote.js         对话事件模型（applyEvent，控制台页面里有同一份）和网关的会话中继连接（跨电脑互发任务）
 src/live.js           本机 Web 控制台的实时查看：会话的对话事件流（经会话自己的 127.0.0.1 peer 服务）
 src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面，远程访问的密码和隧道（remote-access.js）
 src/commands.js       斜杠命令

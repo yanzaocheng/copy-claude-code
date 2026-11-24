@@ -1,4 +1,4 @@
-// 远程访问 of the web console: https://<通讯号>.7bit.fun reaches this computer's console through the gateway (a
+// 远程访问 of the web console: https://<prefix>.7bit.fun reaches this computer's console through the gateway (a
 // WebSocket the console's server keeps open, see TunnelClient), and asks for a password first. The password is checked
 // here (the gateway never knows it): its scrypt hash, the logged-in devices and the recent logins are kept in
 // CONFIG_DIR/web-remote.json, readable by the user alone.
@@ -61,9 +61,9 @@ export function computerId() {
 
 export function setEnabled(on) { return writeRemote((d) => { d.enabled = Boolean(on); }); }
 
-// The address's prefix: the account's 通讯号 at the gateway (<通讯号>.7bit.fun; its contacts find it by it too), asked
-// for (handle null) or set with the gateway key (/v1/remote/contacts), the gateway checking the form, its reserved
-// names and that no other account has it. {handle, auto, domain}; `auto`: still the one the gateway made up (cp and 6
+// The address's prefix (<prefix>.7bit.fun), kept by the account at the gateway: asked for (handle null) or set with
+// the gateway key (/v1/remote/contacts: named after the 通讯录 that is gone, where the prefix was the 通讯号), the
+// gateway checking the form, its reserved names and that no other account has it. {handle, auto, domain}; `auto`: still the one the gateway made up (cp and 6
 // characters of its alphabet), not one the user chose. Throws with the gateway's words and a status for the page.
 export async function addressPrefix(login, handle = null, { fetchImpl = globalThis.fetch } = {}) {
   if (!login?.apiKey) throw Object.assign(new Error('远程访问需要先连接 7bit.fun'), { status: 409 });
@@ -191,7 +191,7 @@ export class TunnelClient {
       for (const req of this.local.values()) req.destroy();
       this.local.clear();
       if (this.closed) return;
-      // refused for good (a bad key, a 通讯号 that is not a host name): tried again only slowly
+      // refused for good (a bad key, a prefix that is not a host name): tried again only slowly
       if (event.code === 4003 || event.code === 4005) { this.wait = 5 * 60_000; this.set({ status: 'error', error: this.fatal || '网关拒绝了这台电脑' }); }
       else if (!ready) this.set({ status: 'connecting', error: this.state.error });
       else this.set({ status: 'connecting' });

@@ -666,6 +666,7 @@
   // ---------------------------------------------------------------- the sidebar: 工作区 (projects and their conversations)
 
   const ICON = {
+    shield: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 3 8.3 7 10 4-1.7 7-5.6 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>',
     plus: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
     folder: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
     folderOpen: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1"/><path d="M3 19l2.5-7.5A2 2 0 0 1 7.4 10H21l-2.7 8a2 2 0 0 1-1.9 1H5a2 2 0 0 1-2-2"/></svg>',
@@ -731,6 +732,7 @@
         ws.live = s.live || (await api("/api/live")).sessions;
         ws.loaded = true;
         if (!sidebarMenuOpen()) drawWorkspace();
+        drawAuthRequests();
       } catch (e) {
         if (!ws.loaded) $("#ws").innerHTML = `<div class="ws-empty">加载失败：${esc(e.message)}</div>`;
       }
@@ -1631,7 +1633,7 @@
     const el = page('<h1>远程访问</h1><p class="sub">在手机或别的电脑上，通过你自己的域名（https://&lt;前缀&gt;.7bit.fun）打开这台电脑的控制台，要输入密码</p><div id="body"><div class="empty">正在加载…</div></div>');
     let v;
     try { v = await api("/api/remote"); } catch (e) { $("#body", el).innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
-    // the address's prefix (the account's 通讯号 at the gateway), asked once
+    // the address's prefix (kept by the account at the gateway), asked once
     const h = v.gateway ? await api("/api/remote/handle").catch((e) => ({ error: e.message })) : null;
     if (!el.isConnected) return;
     drawRemote(el, v, h);
@@ -1651,7 +1653,7 @@
     }
     const t = v.tunnel || {};
     const domain = h?.domain || "7bit.fun";
-    const prefixField = (id) => `<label class="field" style="margin:0">域名前缀<small>${HANDLE_HINT}；要唯一，它也是你在网关的通讯号（联系人用它找到你）</small>
+    const prefixField = (id) => `<label class="field" style="margin:0">域名前缀<small>${HANDLE_HINT}；要唯一</small>
         <span class="prefix-row"><span class="mono muted">https://</span><input id="${id}" class="mono" maxlength="20" autocomplete="off" spellcheck="false" placeholder="例如 yanzc" value="${h && !h.auto ? esc(h.handle) : ""}"><span class="mono muted">.${esc(domain)}</span></span></label>`;
     const state = !v.enabled ? ["off", "已关闭"] : t.status === "online" ? ["ok", "已开启"] : t.status === "error" ? ["off", "没有接上"] : ["warn", "正在连接"];
     const device = (ua) => { const s = String(ua || ""); return /iPhone|iPad/.test(s) ? "iPhone / iPad" : /Android/.test(s) ? "Android" : /Windows/.test(s) ? "Windows" : /Mac OS/.test(s) ? "Mac" : s.slice(0, 40) || "未知设备"; };
@@ -1670,7 +1672,10 @@
       <div class="section-head"><div><h2>已登录的设备</h2><p>${v.sessions.length} 台</p></div>${v.sessions.length ? '<button class="button danger small" id="rLogoutAll">全部退出</button>' : ""}</div>
       <div class="panel">${v.sessions.length ? `<table class="list"><tbody>${v.sessions.map((s) => `<tr><td>${esc(device(s.ua))}</td><td class="mono">${esc(s.ip || "")}</td><td>最近 ${esc(ago(s.lastSeen))}</td><td class="num muted">${s.remember ? "记住 30 天" : "1 天"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">没有</div>'}</div>
       <div class="section-head"><h2>最近的登录</h2></div>
-      <div class="panel">${v.logins.length ? `<table class="list"><tbody>${v.logins.map((l) => `<tr><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill off">密码错误</span>'}</td><td>${esc(device(l.ua))}</td><td class="mono">${esc(l.ip || "")}</td><td class="num">${esc(fmtTime(l.at))}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">还没有人登录过</div>'}</div>`;
+      <div class="panel">${v.logins.length ? `<table class="list"><tbody>${v.logins.map((l) => `<tr><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill off">密码错误</span>'}</td><td>${esc(device(l.ua))}</td><td class="mono">${esc(l.ip || "")}</td><td class="num">${esc(fmtTime(l.at))}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">还没有人登录过</div>'}</div>
+      <div class="section-head"><div><h2>跨电脑互发任务</h2><p>你其他电脑上的会话发来任务时，像远程桌面一样先征得这里同意：允许本次连接、始终信任这台电脑或拒绝。同一台电脑上的会话之间直接执行</p></div></div>
+      <div class="panel panel-pad" id="rDevices"><span class="muted">正在读取…</span></div>`;
+    drawDevices(el);
     // 开机自动启动: the console started at log-in (a shortcut in Startup, a LaunchAgent, an XDG autostart entry)
     const drawAuto = (a) => {
       const box = $("#rAuto", el);
@@ -1745,6 +1750,69 @@
       if (a !== b) return toast("两次输入不一样", "error");
       post({ password: a }, "密码已保存，所有已登录的设备都已退出").catch(fail);
     });
+  }
+
+  // 跨电脑互发任务: this computer, how tasks from the others are taken, the computers trusted (see devices.js)
+  async function drawDevices(el, d = null) {
+    const box = $("#rDevices", el);
+    if (!box) return;
+    try { d ||= await api("/api/devices"); } catch (e) { box.innerHTML = `<span class="muted">读不到：${esc(e.message)}</span>`; return; }
+    if (!box.isConnected) return;
+    box.innerHTML = `<div class="dev-me"><div><div class="muted" style="font-size:12.5px">这台电脑</div><div style="font-weight:650;margin-top:2px">${esc(d.me.name)}</div>${d.me.id ? `<div class="mono faint" style="font-size:12px" title="设备 ID：第一次用到时生成，之后不变；发出的任务都用它签名">设备 ${esc(d.me.id)}</div>` : ""}</div>
+        <label class="field" style="margin:0;min-width:240px">来自其他电脑的任务<select id="devPolicy"><option value="ask"${d.policy === "ask" ? " selected" : ""}>每次询问（已信任的电脑除外）</option><option value="account"${d.policy === "account" ? " selected" : ""}>同一账号的电脑直接执行</option></select></label></div>
+      <div style="font-weight:650;margin:16px 0 6px">已信任的电脑</div>
+      ${d.devices.length ? `<table class="list"><tbody>${d.devices.map((x) => `<tr><td><strong>${esc(x.name)}</strong> <span class="mono faint" style="font-size:12px">${esc(x.id.slice(0, 8))}</span></td><td class="muted">信任于 ${esc(fmtTime(x.trustedAt))}</td><td class="muted">${x.lastSeen ? `最近任务 ${esc(ago(x.lastSeen))}` : ""}</td><td class="num"><button class="button danger small" data-untrust="${esc(x.id)}" data-name="${esc(x.name)}">撤销</button></td></tr>`).join("")}</tbody></table>`
+        : '<div class="muted" style="font-size:13px">还没有。其他电脑请求执行任务时选「始终信任这台电脑」，它就会出现在这里。</div>'}`;
+    $("#devPolicy", box).addEventListener("change", async (e) => {
+      const policy = e.target.value;
+      if (policy === "account" && !confirm("同一账号的任何电脑（包括用你的网关 Key 连上的）发来的任务都会直接执行，不再询问。确定？")) { e.target.value = d.policy; return; }
+      try { drawDevices(el, await api("/api/devices/policy", { method: "POST", body: { policy } })); toast(policy === "account" ? "同账号电脑的任务将直接执行" : "未信任电脑的任务会先询问"); } catch (err) { e.target.value = d.policy; fail(err); }
+    });
+    $$("[data-untrust]", box).forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm(`不再信任「${b.dataset.name}」？它之后发来的任务会先询问。`)) return;
+      try { drawDevices(el, await api("/api/devices/remove", { method: "POST", body: { id: b.dataset.untrust } })); toast("已撤销"); } catch (err) { fail(err); }
+    }));
+  }
+
+  // A computer asking to run a task in one of the sessions here (see App.askPeerTask): shown on top of every page,
+  // whatever session is open, as a remote desktop program asks before a connection; answered as the session's dialog.
+  const authAnswered = new Set();
+  function drawAuthRequests() {
+    let stack = $("#authStack");
+    const requests = [];
+    for (const l of ws.live) for (const r of l.status?.authRequests || []) if (!authAnswered.has(`${l.peerId}:${r.id}`)) requests.push({ ...r, live: l });
+    if (!requests.length) { stack?.remove(); return; }
+    if (!stack) { stack = document.createElement("div"); stack.id = "authStack"; stack.className = "auth-stack"; stack.setAttribute("role", "alert"); document.body.append(stack); }
+    const key = (r) => `${r.live.peerId}:${r.id}`;
+    const shown = new Set(requests.map(key));
+    for (const card of $$(".auth-card", stack)) if (!shown.has(card.dataset.key)) card.remove();
+    const LABELS = { once: "允许本次连接", always: "始终信任这台电脑", decline: "拒绝" };
+    for (const r of requests) {
+      if ($(`.auth-card[data-key="${CSS.escape(key(r))}"]`, stack)) continue;
+      const target = r.live.status?.title || r.live.name || "会话";
+      const device = r.verified ? `<span class="pill ok">设备已验证</span> <span class="mono faint">${esc(String(r.device).slice(0, 8))}</span>`
+        : r.signed ? '<span class="pill off">签名校验失败：可能不是它自称的那台电脑</span>' : '<span class="pill warn">无法识别设备（对方是旧版 claude-pro）</span>';
+      const card = document.createElement("div");
+      card.className = "auth-card";
+      card.dataset.key = key(r);
+      card.innerHTML = `<h3>${ICON.shield}另一台电脑请求执行任务</h3>
+        <div class="auth-from">电脑「<strong>${esc(r.machine)}</strong>」上的会话 @${esc(r.from)} 想让这里的「${esc(target)}」执行：</div>
+        <div class="auth-text">${esc(r.text)}</div>
+        <div class="auth-device">${device}</div>
+        <div class="actions">${r.options.map((o) => `<button class="button${o.value === "decline" ? " danger" : o.value === "always" ? " secondary" : ""} small" data-index="${o.index}">${LABELS[o.value] || esc(o.value)}</button>`).join("")}<a class="auth-view" href="#/live/${esc(r.live.peerId)}">查看会话</a></div>`;
+      $$("[data-index]", card).forEach((b) => b.addEventListener("click", async () => {
+        $$("button", card).forEach((x) => { x.disabled = true; });
+        try {
+          await api(`/api/live/${r.live.peerId}/dialog`, { method: "POST", body: { id: r.id, index: Number(b.dataset.index) } });
+          authAnswered.add(key(r));
+          card.remove();
+          if (!$(".auth-card", stack)) stack.remove();
+          toast(r.options[Number(b.dataset.index)]?.value === "decline" ? "已拒绝，对方会收到通知" : "已允许，任务开始执行");
+          loadWorkspace();
+        } catch (err) { $$("button", card).forEach((x) => { x.disabled = false; }); fail(err); }
+      }));
+      stack.append(card);
+    }
   }
 
   // ---------------------------------------------------------------- 模型与供应商
@@ -2060,7 +2128,7 @@
     subagentPromptCacheTtl: "子 agent、压缩和辅助请求的提示词缓存时长：5m 或 1h",
     cleanupPeriodDays: "会话最后一次使用后保留多少天（之后连同运行记录一起删除，和 Claude Code 一样；至少 1 天，想长期保留可以填 3650）",
     CLAUDE_PRO_GATEWAY_URL: "网关地址（默认 https://7bit.fun）",
-    CLAUDE_PRO_ONLINE: "设为 0：交互会话不连网关（也就不能跨电脑互发任务、不能和通讯录好友通讯）",
+    CLAUDE_PRO_ONLINE: "设为 0：交互会话不连网关（也就不能跨电脑互发任务）",
     CLAUDE_PRO_MACHINE_NAME: "这台电脑在其他电脑的会话里显示的名字（如 公司、家里；默认是主机名）",
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: "每次回复的 max_tokens（默认 48000；网关允许的更少时会自动降低）",
     MAX_THINKING_TOKENS: "思考预算：0 关闭思考，N 表示预算 N 个 token",

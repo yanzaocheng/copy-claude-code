@@ -20,6 +20,8 @@ import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills } from '../agents.js';
 import { webModelChoices, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
 import { setArchived, archivedSessions, projectDir } from '../session.js';
+import { deviceIdentity, readDeviceTrust, untrustDevice, setInboundPolicy } from '../devices.js';
+import { machineName } from '../peers.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
   purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools,
@@ -264,6 +266,17 @@ function readJsonFile(file) {
 
 // Every setting with its value in effect, where that comes from, and what each settings file holds. `project`: the
 // directory whose project settings count (default: none, the user's own).
+function devicesView() {
+  const { policy, devices } = readDeviceTrust();
+  let me = null;
+  try { me = deviceIdentity().id; } catch { /* a damaged device.json: shown without */ }
+  return {
+    me: { id: me, name: machineName(loadConfig({ cwd: home }).env) },
+    policy,
+    devices: Object.entries(devices).map(([id, d]) => ({ id, ...d })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)),
+  };
+}
+
 function settingsView(project) {
   const cwd = project && fs.existsSync(project) ? project : home;
   const config = loadConfig({ cwd });
@@ -760,6 +773,17 @@ export const routes = [
     if (r.status === 404) throw httpError(409, '这个会话的 claude-pro 版本较旧，不支持网页操作');
     if (!r.body?.ok) throw httpError(409, r.body?.error || '会话没有执行这个操作');
     return r.body;
+  }],
+
+  // 跨电脑互发任务: this computer, and the computers trusted to send it tasks without asking (see devices.js)
+  ['GET', /^\/api\/devices$/, () => devicesView()],
+  ['POST', /^\/api\/devices\/remove$/, (req, m, body) => {
+    if (!untrustDevice(String(body?.id || '')).length) throw httpError(404, '没有这台已信任的电脑');
+    return devicesView();
+  }],
+  ['POST', /^\/api\/devices\/policy$/, (req, m, body) => {
+    try { setInboundPolicy(String(body?.policy || '')); } catch (e) { throw httpError(400, e.message); }
+    return devicesView();
   }],
 
   ['GET', /^\/api\/settings$/, (req, m, b, url) => settingsView(url.searchParams.get('project'))],

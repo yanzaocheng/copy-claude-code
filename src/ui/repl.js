@@ -35,6 +35,7 @@ import { readClipboardImage, imageFromFile, writeClipboard, readClipboardText } 
 import { fitImagesIn, imageSize } from '../utils/images.js';
 import { checkForUpdate, installUpdate, installedVersion, installedByNpm, isNewer } from '../updater.js';
 import { PeerNode, peersEnabled, findPeer, resolvePeer, machineName, cleanName, peerMessagePrompt } from '../peers.js';
+import { verifyTask, readDeviceTrust, trustDevice, noteDeviceSeen } from '../devices.js';
 import { LiveFeed } from '../live.js';
 import { RemoteControl, transcriptItems, onlineEnabled, REMOTE_WIDTH } from '../remote.js';
 
@@ -78,6 +79,7 @@ const REMOTE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'
 const TERMINAL_ONLY = /^\s*\/(exit|quit|restart|reload|update)(?:\s|$)/i;
 const REMOTE_MAX_IMAGES = 6;
 const REMOTE_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const PEER_AUTH_TIMEOUT_MS = 10 * 60_000; // a task from another computer that nobody allowed in this time is declined
 export function remoteImages(images) {
   if (images == null) return [];
   if (!Array.isArray(images)) throw new Error('images must be a list.');
@@ -280,6 +282,10 @@ export class App {
     this.peers = null; // this session as seen by the other sessions on the machine (see peers.js)
     this.turnPeers = []; // tasks from other sessions that the running turn answers: [{msg}]
     this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
+    // sessions on other computers whose tasks the user allowed for as long as they run ('sessionId|device', see
+    // authorizePeerTask), and the questions open about them
+    this.peerAllowed = new Set(flags?.restart?.peerAllowed || []);
+    this.peerAuthPending = new Map();
     this.remote = null; // the browser page that watches and steers this session (see remote.js), when it is on
     // the local web console's live view of this session (claude-pro web, see live.js and web/server.js)
     this.liveFeed = new LiveFeed({
@@ -672,30 +678,20 @@ export class App {
   }
 
   // The account's sessions on other computers that are online now, from the gateway (what was known stays when
-  // it cannot be asked), and those of its contacts (other people, /contacts). Sessions of this computer are left
-  // out: they are reached directly.
+  // it cannot be asked). Sessions of this computer are left out: they are reached directly.
   refreshRemotePeers() {
     if (!this.remote?.registered) return Promise.resolve(this.remotePeers);
     this.remotePeersLoading ??= (async () => {
       try {
         const near = new Set([this.peers?.id, ...(this.peers?.peers() || []).map((p) => p.id)].filter(Boolean));
-        const { own, contacts } = await this.remote.sessions();
-        this.remotePeers = [
-          ...own
-            .filter((p) => p.online && !p.ended && p.id !== this.remote?.id && !near.has(p.peerId))
-            .map((p) => {
-              const machine = p.machine || p.host || 'computer';
-              const name = p.name || 'session';
-              return { id: p.id, name, machine, cwd: p.cwd || '', remote: true, label: `${machine}/${name}`, busy: Boolean(p.busy), title: p.title || '' };
-            }),
-          ...contacts
-            .filter((p) => p.online && p.account)
-            .map((p) => {
-              const machine = p.machine || 'computer';
-              const name = p.name || 'session';
-              return { id: p.id, name, machine, cwd: '', remote: true, contact: true, account: p.account, label: `${p.account}:${machine}/${name}`, busy: Boolean(p.busy), title: '' };
-            }),
-        ];
+        const own = await this.remote.sessions();
+        this.remotePeers = own
+          .filter((p) => p.online && !p.ended && p.id !== this.remote?.id && !near.has(p.peerId))
+          .map((p) => {
+            const machine = p.machine || p.host || 'computer';
+            const name = p.name || 'session';
+            return { id: p.id, name, machine, cwd: p.cwd || '', remote: true, label: `${machine}/${name}`, busy: Boolean(p.busy), title: p.title || '' };
+          });
         this.remotePeersAt = Date.now();
       } catch { /* the gateway cannot be asked now */ } finally {
         this.remotePeersLoading = null;
@@ -712,55 +708,75 @@ export class App {
     return {
       me: { name, cwd: this.agent?.cwd || this.cwd, label: `${machineName(this.config.env)}/${name}` },
       local: this.peers?.peers() || [],
-      remote: this.remotePeers.filter((p) => !p.contact),
-      contacts: this.remotePeers.filter((p) => p.contact),
+      remote: this.remotePeers,
       online: Boolean(this.remote?.online),
     };
   }
 
-  // 通讯录 events from the gateway: another account asked this one to be a contact, or accepted its request.
-  onContactEvent(ev) {
-    const handle = String(ev.handle || '').replace(/[^\w-]/g, '');
-    if (!handle || this.exiting) return;
-    if (ev.event === 'request') {
-      this.screen.log(`${c.blue('✉')} ${c.bold(handle)} asks to be your contact: their claude-pro sessions and yours could then send each other tasks.`,
-        c.dim(`  /contacts accept ${handle} · /contacts reject ${handle} · /contacts block ${handle} (or 通讯录 on the gateway's web page)`), '');
-    } else if (ev.event === 'accepted') {
-      this.screen.log(`${c.blue('✉')} ${c.bold(handle)} accepted you as a contact: their online sessions show in /peers as @${handle}:computer/name.`, '');
-      this.refreshRemotePeers();
+  // A task from a session on another computer runs when that computer is trusted here (its signature checks out, see
+  // devices.js), the session was allowed earlier for as long as it runs, or the user lets every session of the
+  // account in (/devices policy account); otherwise the user is asked first, as a remote desktop program asks before
+  // a connection. One question at a time for each sending session. Resolves with whether the task runs.
+  authorizePeerTask(msg) {
+    const f = msg.from;
+    const device = verifyTask({ auth: msg.auth, device: f.device, to: msg.to, text: msg.text });
+    const trust = readDeviceTrust();
+    if (trust.policy === 'account') return Promise.resolve(true);
+    if (device && Object.hasOwn(trust.devices, device)) { noteDeviceSeen(device, f.machine); return Promise.resolve(true); }
+    const key = `${f.id}|${device || 'unidentified'}`;
+    if (this.peerAllowed.has(key)) return Promise.resolve(true);
+    if (!this.peerAuthPending.has(key)) {
+      this.peerAuthPending.set(key, this.askPeerTask(msg, device, key).finally(() => this.peerAuthPending.delete(key)));
     }
+    return this.peerAuthPending.get(key);
   }
 
-  // A task from a contact's session (another person) runs only once the user allows it here, unless the user set
-  // that contact's tasks to run by themselves (trust "auto", /contacts trust). Resolves with whether it runs.
-  async allowContactTask(msg) {
-    if (msg.from.trust === 'auto') return true;
+  async askPeerTask(msg, device, key) {
+    const f = msg.from;
+    const me = `${machineName(this.config.env)}/${this.peerLabel()}`;
+    // the sender is told that it waits (an older claude-pro, which signs nothing, would take a notice for a task)
+    if (f.device) this.remote?.sendPeer(f.id, { kind: 'notice', text: `Delivered to ${me}: waiting for its user to allow the task.`, inReplyTo: msg.id }).catch(() => {});
     const preview = msg.text.length > 1200 ? `${msg.text.slice(0, 1200)}…` : msg.text;
-    const choice = await this.showDialog(new SelectDialog({
-      title: `Task from the contact ${msg.from.account}`,
-      body: [c.dim(`From their session @${msg.from.name}, another person's agent, not you:`), ...preview.split('\n').flatMap((line) => wordWrap(line, Math.max(20, this.width - 8))).slice(0, 20)],
-      question: 'Let this session work on it? Its final answer is sent back to them.',
+    const who = device ? `device ${device.slice(0, 8)}`
+      : f.device ? c.yellow('its signature does not check out: it may not be the computer it says')
+        : 'an older claude-pro, which cannot be identified';
+    const dialog = new SelectDialog({
+      title: `Task from another computer: ${f.machine}`,
+      body: [c.dim(`From the session @${f.name} (${who}):`), ...preview.split('\n').flatMap((line) => wordWrap(line, Math.max(20, this.width - 8))).slice(0, 20)],
+      question: 'Let this session work on it? Its final answer is sent back.',
       color: c.yellow,
       options: [
-        { label: 'Run it', value: 'run', description: 'This task only' },
+        { label: 'Allow this connection', value: 'once', description: `This task, and later ones from @${f.name} while that session runs` },
+        ...(device ? [{ label: `Always trust ${f.machine}`, value: 'always', description: 'The tasks of its sessions run without asking (/devices to revoke)' }] : []),
         { label: 'Decline', value: 'decline', description: 'They are told that you declined it' },
-        { label: `Always run tasks from ${msg.from.account}`, value: 'always', description: 'Their later tasks run without asking (/contacts trust to change it)' },
       ],
-    }));
+    });
+    // (for the web console, which shows it at the top whatever page is open)
+    dialog.peerAuth = { from: f.name, machine: f.machine, device: device || null, verified: Boolean(device), signed: Boolean(f.device), text: preview };
+    const timer = setTimeout(() => dialog.resolve('timeout'), PEER_AUTH_TIMEOUT_MS);
+    timer.unref?.();
+    let choice;
+    try { choice = await this.showDialog(dialog); } finally { clearTimeout(timer); }
     if (choice === 'always') {
-      this.remote?.contacts('trust', { handle: msg.from.account, trust: 'auto' }).catch((e) => this.notice(`Could not save that at the gateway: ${e.message}`, 'warn'));
+      try { trustDevice(device, f.machine); } catch (e) { this.notice(`Could not save the trusted computer: ${e.message}`, 'warn'); }
     }
-    return choice === 'run' || choice === 'always';
+    if (choice === 'once' || choice === 'always') { this.peerAllowed.add(key); return true; }
+    const timedOut = choice === 'timeout';
+    this.screen.log(c.dim(`  ✉ ${timedOut ? 'Nobody answered: declined' : 'Declined'} the task from @${f.name}`), '');
+    this.replyToPeer(msg, timedOut ? `Nobody at ${me} allowed this task within ${PEER_AUTH_TIMEOUT_MS / 60_000} minutes: it was not run.` : `The user of ${me} declined this task.`);
+    return false;
   }
 
   onPeerMessage(msg) {
     if (this.exiting) return;
-    if (msg.kind === 'task' && msg.from.account && !msg.confirmed && msg.from.trust !== 'auto') {
-      this.allowContactTask(msg).then((ok) => {
-        if (ok) { this.onPeerMessage({ ...msg, confirmed: true }); return; }
-        this.screen.log(c.dim(`  ✉ Declined the task from @${msg.from.name}`), '');
-        this.replyToPeer(msg, `The user of ${this.peerLabel()} declined this task.`);
-      }, (e) => this.logError(e));
+    if (msg.kind === 'notice') {
+      // about a task this session sent: it waits for the user over there (the text is ours, not the other side's)
+      this.screen.log(`${c.blue('✉')} ${c.bold(`@${msg.from.name}`)} ${c.dim('got the task: it waits for its user to allow it')}`, '');
+      if (!this.userSentToPeers.has(`${msg.from.id}:${msg.inReplyTo}`)) this.agent.addReminder(`The claude-pro session ${msg.from.name} on another computer got your message; its user has to allow the task there before it runs, and its answer comes once it is done (or a refusal).`);
+      return;
+    }
+    if (msg.kind === 'task' && msg.from.remote && !msg.authorized) {
+      this.authorizePeerTask(msg).then((ok) => { if (ok) this.onPeerMessage({ ...msg, authorized: true }); }, (e) => this.logError(e));
       return;
     }
     const from = c.bold(`@${msg.from.name}`);
@@ -768,8 +784,7 @@ export class App {
     if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
       // the answer to something the user sent: shown, and noted for the model, without a turn of its own
       this.screen.log(`${c.blue('✉')} ${from} ${c.dim('answered:')}`, ...renderMarkdown(msg.text, { width: width - 2 }).map((l) => '  ' + l), '');
-      const whose = msg.from.account ? `of the contact "${msg.from.account}" (another person)` : `(${msg.from.cwd})`;
-      this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} ${whose}, which answered:\n${msg.text}`);
+      this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} (${msg.from.cwd}), which answered:\n${msg.text}`);
       return;
     }
     const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${msg.text}`;
@@ -906,7 +921,6 @@ export class App {
           cwd: (this.agent?.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model,
         }),
         peerMessage: (msg) => this.moving || this.exiting ? false : this.onPeerMessage(msg),
-        contactEvent: (ev) => this.onContactEvent(ev),
         changed: () => {
           this.screen.schedule();
           if (remote.online && Date.now() - this.remotePeersAt > 10_000) this.refreshRemotePeers();
@@ -942,12 +956,12 @@ export class App {
     this.screen.schedule();
   }
 
-  // This session at the gateway (its session relay: tasks across computers and from contacts), for /status: {text}.
+  // This session at the gateway (its session relay: tasks across computers), for /status: {text}.
   remoteState() {
     const r = this.remote;
     if (r) {
       const who = r.account ? ` as ${r.account}` : '';
-      const text = r.online ? `${c.green('online')}${who}${c.dim(' · your other computers and your contacts can send it tasks')}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
+      const text = r.online ? `${c.green('online')}${who}${c.dim(' · your other computers can send it tasks (/devices)')}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
       return { text };
     }
     if (this.remoteStarting) return { text: 'connecting…' };
@@ -1029,8 +1043,9 @@ export class App {
   // The answer to the dialog the status showed the page (remoteDialog): {id, index}, {id, indices}, {id, text,
   // indices?} (its "other" option) or {id, cancel: true}.
   answerDialog({ id, index, indices, text, cancel } = {}) {
-    const d = this.dialogs[0];
-    if (!d || d.remoteId !== id) throw new Error('That question is no longer open.');
+    // (the open one, or a computer asking to run a task, which the console shows whatever else is open)
+    const d = this.dialogs.find((x, i) => x.remoteId === id && (i === 0 || x.peerAuth));
+    if (!d) throw new Error('That question is no longer open.');
     if (cancel) { d.resolve(d.cancelValue); return {}; }
     if (!Array.isArray(d.options)) throw new Error('This dialog cannot be answered from the page.');
     const valueAt = (i) => {
@@ -1309,6 +1324,7 @@ export class App {
       peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
+      peerAllowed: [...this.peerAllowed],
       restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between
       used: this.inUse(),
     };
@@ -1955,7 +1971,7 @@ export class App {
 
   // What `@name` in a message the user wrote stands for, told to the model: which session, and how to reach it.
   async peerMentions(prompt) {
-    // (a colon inside is a contact's session, yzc:computer/name; one at the end is punctuation)
+    // (a colon at the end is punctuation)
     const refs = [...new Set([...String(prompt).matchAll(/(?:^|\s)@([^\s@"&，。;；：!！?？、)）]+)/gu)].map((m) => m[1].replace(/:+$/, '')).filter(Boolean))];
     if (!refs.length) return [];
     const local = this.peers?.peers() || [];
@@ -1964,8 +1980,7 @@ export class App {
       let found = resolvePeer(local, this.remotePeers, ref, { ids: false });
       if (!found.peer && !found.ambiguous && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), ref, { ids: false });
       const p = found.peer;
-      if (p?.contact) notes.push(`@${ref} is the claude-pro session "${p.label}" of the contact "${p.account}", another person (not the user)`);
-      else if (p) notes.push(`@${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
+      if (p) notes.push(`@${ref} is the claude-pro session "${p.label || p.name}" ${p.remote ? `on the user's computer "${p.machine}"` : 'on this computer'}, working in ${p.cwd}`);
       else if (found.ambiguous) notes.push(found.error);
     }
     if (!notes.length) return [];
@@ -2457,7 +2472,11 @@ export class App {
   liveStatus() {
     let status = {};
     try { status = this.remoteStatus(); } catch { /* the basics below */ }
-    return { ...status, busy: this.working() || this.runningShells() > 0, turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, hidden: this.hidden };
+    // computers asking to run a task here (see askPeerTask): the console shows them at the top of every page
+    const authRequests = this.dialogs.filter((d) => d.peerAuth).map((d) => ({
+      id: (d.remoteId ??= ++this.remoteDialogs), ...d.peerAuth, options: d.options.map((o, index) => ({ index, value: o.value })),
+    }));
+    return { ...status, busy: this.working() || this.runningShells() > 0, turn: this.isTurnRunning(), sessionId: this.store?.id, pid: process.pid, hidden: this.hidden, authRequests };
   }
 
   // A command of the local web console's live view: the same ones the gateway's page sends (see remote.js).
