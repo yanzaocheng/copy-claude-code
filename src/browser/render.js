@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Cdp, abortError } from './cdp.js';
-import { browserExecutables } from './session.js';
+import { browserExecutables } from './executables.js';
 import { killTree, killTreeSync, processAlive } from '../utils/shell.js';
 
 export const renderLimits = {
