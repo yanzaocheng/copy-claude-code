@@ -351,6 +351,22 @@ async function serve() {
     }
   });
 
+  // A terminal attaching (see attach.js): claude-pro on this computer only, with the secret in its header, never
+  // through the tunnel.
+  const { acceptTerminal } = await import('./terminals.js');
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    const local = /^(?:127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || '');
+    const bearer = equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
+    if (url.pathname !== '/api/attach' || String(req.headers.upgrade).toLowerCase() !== 'claude-pro-attach' || !local || !bearer || req.headers['x-cpweb-tunnel'] || !host) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: claude-pro-attach\r\nConnection: Upgrade\r\n\r\n');
+    lastActivity = Date.now();
+    acceptTerminal(host, socket, head);
+  });
+
   // 7878, or the port the server before this one had (it may still be letting go of it for a moment: tried for 3 s),
   // else any port
   const wanted = Number(readState()?.port) || PORT;

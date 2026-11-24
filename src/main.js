@@ -241,6 +241,14 @@ export async function main(argv) {
     return await runPrint({ prompt, flags, cwd });
   }
   if (!fs.existsSync(cwd)) return 1;
+  // CLAUDE_PRO_ATTACH=1: the session runs in the web console's process, with this window attached to it (attach.js);
+  // where that cannot be done (no console, an older one) it runs here, as it always did
+  const { attachWanted } = await import('./attach.js');
+  if (process.env.CLAUDE_PRO_SELF_CHECK !== '1' && !process.env.CLAUDE_PRO_BACKGROUND && attachWanted(loadConfig({ cwd }).env)) {
+    const { attachSession } = await import('./attach.js');
+    const code = await attachSession({ flags, cwd, prompt }).catch(() => null);
+    if (code !== null) return code;
+  }
   const { runRepl } = await import('./ui/repl.js');
   return await runRepl({ flags, cwd, initialPrompt: prompt });
 }

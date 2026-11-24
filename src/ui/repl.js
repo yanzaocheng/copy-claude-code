@@ -198,15 +198,18 @@ export class App {
   // process either, but otherwise starts as a session does, so that code only a real start runs is checked too.
   // `host`: a 后台会话, one of the sessions the web console runs in its own process (see web/host.js): no terminal
   // (what it prints goes to the console's live view only), the process is the host's, and so are restarts.
-  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false, host = null }) {
+  // `attached` {row, profile}: run by the web console too, but with the terminal of a window attached to it (see
+  // attach.js): stdin and stdout come from there, `row` is where its cursor was, `profile` its measured widths.
+  constructor({ flags, cwd, stdin = process.stdin, stdout = process.stdout, noProcessExit = false, selfCheck = false, host = null, attached = null }) {
     this.flags = flags;
     this.cwd = cwd;
     this.stdin = stdin;
     this.stdout = stdout;
     this.host = host;
+    this.attached = host ? attached : null;
     this.noProcessExit = noProcessExit || selfCheck || Boolean(host);
     this.driven = noProcessExit;
-    this.screen = host ? new HeadlessScreen(stdout) : new Screen(stdout);
+    this.screen = host && !this.attached ? new HeadlessScreen(stdout) : new Screen(stdout);
     this.busy = false;
     // Attachment expansion is asynchronous. Claim the turn before the first await so two
     // rapid submits cannot start two Agent.run() calls against the same message array.
@@ -259,7 +262,7 @@ export class App {
     // run by the web console (a 后台会话): only the console shows it, and ends it. `legacyHidden`: one an older version
     // of the console started in a hidden window, a process of its own: it moves into the console's (maybeMoveIntoConsole)
     this.legacyHidden = !host && /^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_BACKGROUND || '');
-    this.hidden = Boolean(host) || this.legacyHidden;
+    this.hidden = (Boolean(host) && !this.attached) || this.legacyHidden;
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
@@ -315,7 +318,7 @@ export class App {
   get owner() { return this.runtime?.config?.owner; }
   // Whether the conversation is being worked on, not only looked at: a session the web console took up because its
   // conversation was opened is not, until it runs a turn (`used`, carried over by a restart).
-  inUse() { return !this.host || Boolean(this.used); }
+  inUse() { return !this.host || Boolean(this.attached) || Boolean(this.used); }
   get config() { return this.runtime.config; }
   get width() { return this.screen.width; }
   isTurnRunning() { return this.busy || this.turnStarting; }
@@ -328,7 +331,9 @@ export class App {
     stdin.setRawMode(true);
     // Where the cursor is, before anything is drawn: the input box is kept on the last rows of the window from
     // there (see screen.js).
-    if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
+    // (an attached terminal was asked by its window's process, which measured its widths too)
+    if (this.attached) this.screen.pinFrom(Number.isInteger(this.attached.row) ? this.attached.row : null);
+    else if (stdin.isTTY && this.stdout.isTTY) this.screen.pinFrom(await queryCursorRow(stdin, this.stdout));
     if (this.exiting) return this.exitCode;
     stdin.setEncoding('utf8');
     this.stdout.write(ESC.bracketedPasteOn);
@@ -340,7 +345,7 @@ export class App {
 
     // A project whose hooks, MCP servers or env are not trusted yet (see projectRisk): asked before any of it runs, in
     // plain lines, the interface not drawn yet. (The web console asks on its page before it starts a session.)
-    if (!this.host && !this.selfCheck && !this.flags.restart && stdin.isTTY) await this.askProjectTrust();
+    if ((!this.host || this.attached) && !this.selfCheck && !this.flags.restart && stdin.isTTY) await this.askProjectTrust();
     if (this.exiting) return this.exitCode;
     await this.startPeer();
     if (this.exiting) return this.exitCode;

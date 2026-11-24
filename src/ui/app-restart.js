@@ -163,6 +163,8 @@ export const restartMethods = {
       peerAllowed: [...this.peerAllowed],
       restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between
       used: this.inUse(),
+      // a terminal's (see attach.js): the web console taking up new code waits for its window to attach again
+      attached: Boolean(this.attached),
     };
   },
 

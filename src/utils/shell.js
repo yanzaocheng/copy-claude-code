@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { OutputDecoder } from './encoding.js';
+import { terminalContext } from '../ui/ansi.js';
 
 const isWin = process.platform === 'win32';
 let shellCache;
@@ -230,9 +231,10 @@ export function killTreeSync(child, { orphans = false } = {}) {
 // Run a quick command and return stdout (used for git info etc.). Never throws.
 // The environment of what the program starts (Bash, REPL, hooks, MCP servers): non-interactive and colour free, and
 // without what makes a process a restartable session of this program (a hook that ran `claude-pro -p` was given the
-// Restart tool and the prompt about its own source).
+// Restart tool and the prompt about its own source). In the web console's process, a session of an attached terminal
+// runs what it runs with its window's environment (see web/terminals.js), not the console's.
 export function childEnv() {
-  const env = { ...process.env };
+  const env = { ...(terminalContext()?.env || process.env) };
   Object.assign(env, { GIT_EDITOR: 'true', GIT_PAGER: 'cat', PAGER: 'cat', NO_COLOR: '1', CLAUDE_PRO: '1' });
   delete env.FORCE_COLOR;
   for (const key of ['CLAUDE_PRO_SUPERVISED', 'CLAUDE_PRO_RESTART_FILE', 'CLAUDE_PRO_RESTARTED']) delete env[key];

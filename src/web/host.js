@@ -20,11 +20,13 @@ import { installedByNpm, installedVersion, isNewer } from '../updater.js';
 import { listPeers } from '../peers.js';
 import { REMOTE_WIDTH } from '../remote.js';
 import { sweepShells } from '../shells.js';
+import { inTerminal } from '../ui/ansi.js';
+import { nextStreams, terminalReady, terminalEnded } from './terminals.js';
 
 export const rosterFile = () => path.join(CONFIG_DIR, 'web-running.json');
 export const handoffFile = () => path.join(CONFIG_DIR, 'web-handoff.json');
 const errorLog = () => path.join(CONFIG_DIR, 'web-errors.log');
-export const hostTiming = { idleMs: 30 * 60_000, emptyQuietMs: 2000, recheckMs: 5000, handoffMaxAgeMs: 10 * 60_000, startMs: 20_000 };
+export const hostTiming = { idleMs: 30 * 60_000, emptyQuietMs: 2000, recheckMs: 5000, handoffMaxAgeMs: 10 * 60_000, startMs: 20_000, reattachMs: 30_000 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
@@ -70,6 +72,9 @@ export class SessionHost {
     this.idleSince = new Map(); // app -> since when nothing has gone on in it and no page has watched it
     this.reapTimer = setInterval(() => { this.reap(); sweepShells().catch((e) => this.log(e, 'sweep')); }, 60_000);
     this.reapTimer.unref();
+    // sessions of attached terminals the console before this one handed over, by peer id: {state, timer}, until their
+    // window attaches again (or, after a while, taken up without one: they go on as 后台会话)
+    this.pendingAttach = new Map();
   }
 
   get size() { return this.apps.size; }
@@ -92,28 +97,33 @@ export class SessionHost {
 
   // A session: new in `cwd`, a saved one (`resumeFile`, `resumeId`), or one taken up again (`restart`: the state it
   // left). Resolves with its App once the console's page can reach it.
-  async launch({ cwd, restart = null, resumeFile = null, resumeId = null, initialChoices = null }) {
+  // `terminal`: the link of an attached window (see terminals.js), whose terminal the session gets.
+  async launch({ cwd, restart = null, resumeFile = null, resumeId = null, initialChoices = null, terminal = null }) {
     this.launching++;
     try {
-      return await this.startApp({ cwd, restart, resumeFile, resumeId, initialChoices });
+      return await this.startApp({ cwd, restart, resumeFile, resumeId, initialChoices, terminal });
     } finally {
       this.launching--;
       this.check();
     }
   }
 
-  async startApp({ cwd, restart, resumeFile, resumeId, initialChoices }) {
+  async startApp({ cwd, restart, resumeFile, resumeId, initialChoices, terminal }) {
     const { App } = await import('../ui/repl.js');
-    const flags = initialChoices ? { initialChoices } : {};
+    const flags = { ...(terminal?.flags || {}), ...(initialChoices ? { initialChoices } : {}) };
     if (restart) flags.restart = restart;
     else if (resumeFile) Object.assign(flags, { resumeFile, resumeId });
-    const { stdin, stdout } = noTerminal();
-    const app = new App({ flags, cwd, stdin, stdout, host: this });
+    const { stdin, stdout } = terminal ? nextStreams(terminal) : noTerminal();
+    const app = new App({ flags, cwd, stdin, stdout, host: this, attached: terminal ? { row: terminal.row, profile: terminal.profile, link: terminal } : null });
+    if (terminal) terminal.app = app;
     this.apps.add(app);
-    const ended = app.start('').catch((e) => {
+    // (an attached session runs, and so does all it starts, drawing for its window's terminal: see ansi.js)
+    const ended = inTerminal(terminal?.profile, () => app.start(restart ? '' : terminal?.prompt || '')).catch((e) => {
       this.log(e, `session in ${cwd}`);
       try { app.exit(1); } catch { /* half started */ }
+      return 1;
     });
+    if (terminal) ended.then((code) => terminalEnded(terminal, app, code, { goesOn: this.restarting || code === RESTART_EXIT_CODE }));
     ended.finally(() => {
       this.apps.delete(app);
       this.requests.delete(app);
@@ -124,8 +134,30 @@ export class SessionHost {
     // up: its runtime exists (its peer server, which the page talks to, comes before it)
     const until = Date.now() + hostTiming.startMs;
     while (!app.runtime && !app.exiting && Date.now() < until) await sleep(50);
+    if (terminal && !app.exiting) terminalReady(terminal, app);
     this.saveRoster();
     return app;
+  }
+
+  // A window attaches (see terminals.js): a new session for it, the one a supervised session of its own leaves when it
+  // restarts into this (`hello.restart`), or the one the console before this one handed over (`hello.reattach`).
+  async attachTerminal(link, hello) {
+    if (hello.reattach) {
+      const pending = this.pendingAttach.get(hello.reattach);
+      if (!pending) return null;
+      this.pendingAttach.delete(hello.reattach);
+      clearTimeout(pending.timer);
+      link.flags = {};
+      return this.launch({ cwd: pending.state.cwd, restart: pending.state, terminal: link });
+    }
+    const flags = hello.flags && typeof hello.flags === 'object' ? { ...hello.flags } : {};
+    delete flags.restart;
+    link.flags = flags;
+    link.prompt = typeof hello.prompt === 'string' ? hello.prompt : '';
+    const restart = hello.restart && typeof hello.restart === 'object' ? hello.restart : null;
+    const cwd = restart?.cwd && fs.existsSync(restart.cwd) ? restart.cwd : hello.cwd;
+    if (!fs.existsSync(cwd)) return null;
+    return this.launch({ cwd, restart, terminal: link });
   }
 
   // A session nobody works in or looks at for a while is put away: opening the conversation (or sending to it) takes
@@ -135,7 +167,7 @@ export class SessionHost {
   reap(now = Date.now()) {
     if (this.restarting) return;
     for (const app of this.apps) {
-      if (app.exiting || !app.runtime) continue;
+      if (app.exiting || !app.runtime || app.attached) continue; // (a terminal's session ends with its window)
       // (a background shell keeps it: putting it away would end the shell; a restart does not, see shells.js)
       const busy = app.working() || app.runningShells?.() > 0 || this.requests.has(app) || app.liveFeed?.active;
       if (busy || !this.idleSince.has(app)) { this.idleSince.set(app, now); continue; }
@@ -151,8 +183,9 @@ export class SessionHost {
 
   // /cd in one session: it alone starts again, in the new directory, with the state it left.
   relaunch(app, state) {
+    const terminal = app.attached?.link || null; // (in the same window)
     app.exit(RESTART_EXIT_CODE, { restart: true });
-    this.launch({ cwd: state.cwd, restart: state }).catch((e) => this.log(e, 'relaunch'));
+    this.launch({ cwd: state.cwd, restart: state, terminal }).catch((e) => this.log(e, 'relaunch'));
   }
 
   // The sessions the page reaches through peer servers (see peers.js), by id: waited for while the console takes
@@ -180,6 +213,7 @@ export class SessionHost {
       modelOverride: a.runtime?.config.modelOverride ?? null,
       effortOverride: a.runtime?.config.effortOverride ?? null,
       used: a.inUse(),
+      attached: Boolean(a.attached), // (after a crash its window attaches again to the console started next)
     }));
     try { writeJson(rosterFile(), { pid: process.pid, at: Date.now(), sessions }); } catch (e) { this.log(e, 'roster'); }
   }
@@ -201,8 +235,18 @@ export class SessionHost {
           states = roster.sessions.map((s) => ({ ...s, reason: 'the web console started again', restarts: [] }));
         }
       }
-      for (const state of states || []) {
-        if (!state || typeof state.cwd !== 'string' || !fs.existsSync(state.cwd)) continue;
+      // (those of attached terminals first, before any wait: their windows may attach again at once)
+      const usable = (states || []).filter((s) => s && typeof s.cwd === 'string' && fs.existsSync(s.cwd));
+      for (const state of usable.filter((s) => s.attached && s.peerId)) {
+        const timer = setTimeout(() => {
+          if (this.pendingAttach.get(state.peerId)?.state !== state) return;
+          this.pendingAttach.delete(state.peerId);
+          this.launch({ cwd: state.cwd, restart: { ...state, attached: false } }).catch((e) => this.log(e, 'recover'));
+        }, hostTiming.reattachMs);
+        timer.unref?.();
+        this.pendingAttach.set(state.peerId, { state, timer });
+      }
+      for (const state of usable.filter((s) => !(s.attached && s.peerId))) {
         await this.launch({ cwd: state.cwd, restart: state }).catch((e) => this.log(e, 'recover'));
       }
     } finally {

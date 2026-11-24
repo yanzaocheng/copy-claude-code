@@ -1,5 +1,7 @@
 // Terminal primitives: colors, ANSI-aware string width (CJK / emoji aware), wrapping, truncation.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 const out = process.stdout;
 const depth = process.env.NO_COLOR ? 1 : (out.isTTY && out.getColorDepth ? out.getColorDepth() : (process.env.FORCE_COLOR ? 24 : 1));
 
@@ -146,15 +148,19 @@ export function ambiguousGroups(max) {
 
 // The widths this terminal was measured to give characters (see queryCursorRow): [[character, cells], ...]. They
 // come before the tables above, which is what makes the program's layout and the terminal's agree where the
-// terminal draws a symbol such as ·, … or “ in two cells.
-const terminalWidths = new Map();
+// terminal draws a symbol such as ·, … or “ in two cells. They are the terminal's: in the web console's process,
+// where terminals of several windows attach (see attach.js), each has its own, and what is drawn for one runs in it
+// (inTerminal); everywhere else there is one, the process's.
 export function setTerminalWidths(widths) {
-  terminalWidths.clear();
+  const t = terminal();
+  t.widths = new Map();
   for (const [char, width] of widths) {
-    if (width === 1 || width === 2) terminalWidths.set(char.codePointAt(0), width);
+    if (width === 1 || width === 2) t.widths.set(char.codePointAt(0), width);
   }
-  Object.assign(glyphs, terminalWidths.get(0xb7) === 2 ? FONT_GLYPHS : GLYPHS);
+  t.glyphs = { ...(t.widths.get(0xb7) === 2 ? FONT_GLYPHS : GLYPHS) };
 }
+// What was measured, to be given to another process's terminal profile: [[character, cells], ...].
+export const terminalWidthList = () => [...terminal().widths].map(([cp, w]) => [String.fromCodePoint(cp), w]);
 
 // The interface's symbols that not every terminal can draw, by what they are for. The Windows console that sizes
 // characters by its Chinese font (the one that draws · in two cells) has no glyph for some of them and draws an
@@ -165,12 +171,32 @@ export function setTerminalWidths(widths) {
 // wide, and the last one of a line covers a space that differs from it only in colour.
 const GLYPHS = { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', clock: '◷', restart: '↻', update: '⇣', find: '⌕', track: '░', pointer: '❯', lineGap: ' ' };
 const FONT_GLYPHS = { topLeft: '┌', topRight: '┐', bottomLeft: '└', bottomRight: '┘', clock: '⊙', restart: '※', update: '↓', find: '/', track: '─', pointer: '>', lineGap: '  ' };
-export const glyphs = { ...GLYPHS };
+
+// The terminal drawn for: its measured widths and the glyphs that go with them (see setTerminalWidths).
+const terminalStore = new AsyncLocalStorage();
+const processTerminal = { widths: new Map(), glyphs: { ...GLYPHS } };
+const terminal = () => terminalStore.getStore() || processTerminal;
+// `extra`: what else is the terminal's window's: `env`, the environment of its shell, for what the session runs
+// (see childEnv).
+export const newTerminalProfile = (widths = [], extra = {}) => {
+  const t = { ...extra, widths: new Map(), glyphs: { ...GLYPHS } };
+  terminalStore.run(t, () => setTerminalWidths(widths));
+  return t;
+};
+// Run `fn` (and what it starts: timers, promises, streams) drawing for the terminal `profile`.
+export const inTerminal = (profile, fn) => (profile ? terminalStore.run(profile, fn) : fn());
+export const terminalContext = () => terminalStore.getStore() || null;
+export const glyphs = new Proxy({}, {
+  get: (_, key) => terminal().glyphs[key],
+  has: (_, key) => key in terminal().glyphs,
+  ownKeys: () => Reflect.ownKeys(terminal().glyphs),
+  getOwnPropertyDescriptor: (_, key) => (key in terminal().glyphs ? { value: terminal().glyphs[key], enumerable: true, configurable: true, writable: false } : undefined),
+});
 
 export function codePointWidth(cp) {
   if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0;
   if (inRanges(cp, ZERO)) return 0;
-  return terminalWidths.get(cp) ?? (inRanges(cp, WIDE) ? 2 : 1);
+  return terminal().widths.get(cp) ?? (inRanges(cp, WIDE) ? 2 : 1);
 }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });

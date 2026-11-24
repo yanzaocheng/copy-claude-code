@@ -80,6 +80,7 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_GATEWAY_URL: `Gateway address (default ${GATEWAY_DEFAULT_URL})`,
   CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online at the gateway whenever this computer is logged in, and sessions on your other computers (@computer/name) can send it tasks, once their computer is allowed here (/devices)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
+  CLAUDE_PRO_ATTACH: 'Set to 1 (experimental) to run terminal sessions inside the web console\'s process, the window attached to it as with tmux: one process for all sessions, and an update or a change of the source restarts that one process (the windows attach again) instead of each session',
 
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: 'max_tokens for each model response (default 48000; lowered automatically if the gateway allows less)',
   MAX_THINKING_TOKENS: 'Thinking budget: 0 disables thinking, N enables with budget N',

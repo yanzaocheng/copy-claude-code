@@ -413,7 +413,7 @@ export const remoteMethods = {
 
   // The web console only ends sessions it owns. The host process survives and the current HTTP request can reply.
   pageEnd({ force = false } = {}) {
-    if (!this.host) throw new Error('请在对应的终端结束这个会话');
+    if (!this.host || this.attached) throw new Error('请在对应的终端结束这个会话');
     if (!force && (this.working() || this.runningShells())) throw new Error('会话正在工作或有后台程序：先停止它们，或选择强制结束');
     this.exit(0);
     return { ending: true };
