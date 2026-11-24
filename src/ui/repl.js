@@ -890,7 +890,11 @@ export class App {
           name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '',
           cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION,
         }),
-        status: () => this.remoteStatus(),
+        // (what the other computers' sessions are shown, compared twice a second: only these, not remoteStatus)
+        status: () => ({
+          busy: this.isTurnRunning(), name: this.peerLabel(), title: this.sessionLabel() || path.basename(this.cwd),
+          cwd: (this.agent?.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model,
+        }),
         peerMessage: (msg) => this.moving || this.exiting ? false : this.onPeerMessage(msg),
         contactEvent: (ev) => this.onContactEvent(ev),
         changed: () => {

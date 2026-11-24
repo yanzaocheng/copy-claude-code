@@ -74,7 +74,7 @@ function startHeartbeat() {
     const now = Date.now();
     for (const { rec } of shells.values()) {
       if (rec.status !== 'running') continue;
-      learnMsys(rec);
+      learnMsysSoon(rec, 1, 0);
       rec.seen = now;
       save(rec);
     }
@@ -128,44 +128,62 @@ function learnMsys(rec) {
 
 function readFile(file) { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } }
 
-// The same without blocking, right after the start: Node puts the shell it starts (Git Bash's launcher) in a job
+// The same without blocking: right after the start (Node puts the shell it starts, Git Bash's launcher, in a job
 // object killed when Node exits, the real bash under it and what it starts not; once this process is gone, only the
-// real bash's id tells whether the command still runs. Tried a few times: the shell writes its id as it starts.
-function learnMsysSoon(rec, tries = 5) {
-  if (!isWin || rec.kind !== 'bash' || tries <= 0) return;
+// real bash's id tells whether the command still runs), and for a status asked of a shell taken up without it.
+// Tried a few times: the shell writes its id as it starts. Not in ps any more (the listing worked): `msysGone`.
+const looking = new WeakSet(); // the records a lookup runs for
+function learnMsysSoon(rec, tries = 5, delay = 700) {
+  if (!isWin || rec.kind !== 'bash' || tries <= 0 || looking.has(rec)) return;
+  looking.add(rec);
+  const again = () => { looking.delete(rec); learnMsysSoon(rec, tries - 1); };
   const timer = setTimeout(() => {
-    if (rec.msysWinpid || rec.status !== 'running') return;
-    const n = parseInt(String(readFile(fileOf(rec.uid, 'pid')) || ''), 10);
+    if (rec.msysWinpid || rec.msysGone || rec.status !== 'running') { looking.delete(rec); return; }
+    const n = rec.msysPid || parseInt(String(readFile(fileOf(rec.uid, 'pid')) || ''), 10);
     const ps = findPs();
-    if (!Number.isFinite(n) || !ps) { learnMsysSoon(rec, tries - 1); return; }
+    if (!Number.isFinite(n) || !ps) { again(); return; }
     rec.msysPid = n;
     let out = '';
     let child;
-    try { child = spawn(ps, ['-W'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return; }
+    try { child = spawn(ps, ['-W'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { looking.delete(rec); return; }
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d) => { out += d; });
-    child.on('error', () => {});
-    child.on('close', () => {
-      const row = parsePsRows(out).find((r) => r.pid === n);
-      if (row) { rec.msysWinpid = row.winpid; save(rec); } else learnMsysSoon(rec, tries - 1);
+    child.on('error', () => looking.delete(rec));
+    child.on('close', (code) => {
+      looking.delete(rec);
+      const rows = code === 0 ? parsePsRows(out) : [];
+      const row = rows.find((r) => r.pid === n);
+      if (row) { rec.msysWinpid = row.winpid; save(rec); } else if (rows.length) rec.msysGone = true; else learnMsysSoon(rec, tries - 1);
     });
     child.unref();
-  }, 700);
+  }, delay);
   timer.unref?.();
 }
 
-// Whether the command still runs, for a shell this process did not start (it has no child object to ask).
+// Whether the command still runs, for a shell this process did not start (it has no child object to ask). Asked
+// twice a second while a page shows the session: nothing here blocks on another program.
+const keyChecked = new WeakMap(); // record -> when its process's start time was last compared
 function stillRunning(rec) {
   if (isWin) {
-    learnMsys(rec); // (an adopted shell whose process did not get to know it)
     if (rec.msysWinpid) return processAlive(rec.msysWinpid);
+    if (rec.msysGone) return false;
+    if (!rec.msysPid) {
+      const n = parseInt(String(readFile(fileOf(rec.uid, 'pid')) || ''), 10);
+      if (Number.isFinite(n)) rec.msysPid = n;
+    }
+    // (an adopted shell whose process did not get to know it: looked up in the background, running until then)
+    if (rec.msysPid && rec.kind === 'bash') { learnMsysSoon(rec, 1, 0); return true; }
     return processAlive(rec.winpid);
   }
   if (!rec.pid) return false;
   if (processAlive(rec.pid)) {
-    const key = startKey(rec.pid);
-    if (rec.startKey && key && key !== rec.startKey) return false; // another process has its number by now
-    return true;
+    // another process may have its number by now: its start time tells (ps on macOS: once a minute is enough)
+    if (rec.startKey && !rec.pidReused && Date.now() - (keyChecked.get(rec) || 0) > 60_000) {
+      keyChecked.set(rec, Date.now());
+      const key = startKey(rec.pid);
+      if (key && key !== rec.startKey) rec.pidReused = true;
+    }
+    return !rec.pidReused;
   }
   // the shell has ended; what it left running in its process group is its
   try { process.kill(-rec.pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
