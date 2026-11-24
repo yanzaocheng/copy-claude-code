@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { npmInvocation } from '../src/utils/shell.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const GATEWAY = path.resolve(ROOT, '..', 'codex-gateway');
@@ -30,10 +31,10 @@ const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 const step = (s) => console.log(`\n${bold(`==> ${s}`)}`);
 const fail = (s) => { console.error(`\x1b[31m✘ ${s}\x1b[0m`); process.exit(1); };
 
-// a command, its output shown (or captured); npm through the shell on Windows (npm.cmd)
+// a command, its output shown (or captured); npm as npmInvocation runs it (this node's npm, no shell)
 function run(cmd, cmdArgs, { cwd = ROOT, capture = false, allowFail = false } = {}) {
-  const shell = isWin && /^(npm|npx)$/.test(cmd);
-  const r = spawnSync(shell ? `${cmd}.cmd` : cmd, cmdArgs, { cwd, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', shell, windowsHide: true });
+  const inv = cmd === 'npm' ? npmInvocation(cmdArgs) : { file: cmd, args: cmdArgs, shell: false };
+  const r = spawnSync(inv.file, inv.args, { cwd, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', shell: inv.shell, windowsHide: true });
   if (r.error) { if (allowFail) return { ok: false, out: '', err: r.error.message }; fail(`${cmd} ${cmdArgs.join(' ')}: ${r.error.message}`); }
   const res = { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
   if (!res.ok && !allowFail) fail(`${cmd} ${cmdArgs.join(' ')} failed${capture ? `:\n${res.err || res.out}` : ''}`);

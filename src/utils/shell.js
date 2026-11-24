@@ -102,6 +102,19 @@ export function msysTree(rows, rootPid) {
   return [...winpids];
 }
 
+// How to run npm for the node running this: its npm-cli.js with this node when it sits next to it (a Node install,
+// nvm, the portable Node of the install scripts), without a shell; else npm from PATH (npm.cmd needs cmd.exe on
+// Windows: one command line, as an argument array with a shell is deprecated, DEP0190). {file, args, shell}
+export function npmInvocation(args, { execPath = process.execPath } = {}) {
+  const dir = path.dirname(execPath);
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+    .find((p) => fs.existsSync(p));
+  if (cli) return { file: execPath, args: [cli, ...args], shell: false };
+  if (process.platform !== 'win32') return { file: 'npm', args, shell: false };
+  const quote = (a) => (/[\s"&|<>^()%!]/.test(a) ? `"${String(a).replace(/"/g, '""')}"` : a);
+  return { file: ['npm.cmd', ...args].map(quote).join(' '), args: [], shell: true };
+}
+
 let psCache;
 // Git Bash's ps.exe (`ps -W` lists MSYS's processes with their Windows ids), or null without Git Bash.
 export function findPs() {

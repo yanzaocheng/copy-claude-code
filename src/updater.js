@@ -8,7 +8,7 @@ import path from 'node:path';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { CONFIG_DIR, INSTALL_DIR, VERSION } from './config.js';
-import { killTree, processAlive as alive } from './utils/shell.js';
+import { killTree, processAlive as alive, npmInvocation } from './utils/shell.js';
 
 // The name on npm (scoped: npm refused plain `claude-pro` as too close to another package's name).
 const PACKAGE_NAME = JSON.parse(fs.readFileSync(path.join(INSTALL_DIR, 'package.json'), 'utf8')).name;
@@ -83,25 +83,18 @@ function latestVersion({ timeoutMs = 10_000 } = {}) {
   });
 }
 
-// The npm of the node running this, when it sits next to it (a Node install, nvm, the portable Node the install
-// script puts in ~/.claude-pro/runtime, whose directory is not on PATH): else the one on PATH. The npm on PATH can
-// belong to another Node, whose global directory is not this one's (install() then refuses).
-function npmCommand() {
-  const win = process.platform === 'win32';
-  const own = path.join(path.dirname(process.execPath), win ? 'npm.cmd' : 'npm');
-  if (fs.existsSync(own)) return win ? `"${own}"` : own; // (quoted for cmd.exe: C:\Program Files\nodejs)
-  return win ? 'npm.cmd' : 'npm';
-}
-
+// The npm of the node running this (npmInvocation): the npm on PATH can belong to another Node, whose global
+// directory is not this one's (install() then refuses), and the portable Node of the install scripts is not on PATH.
 function runNpm(args, { timeoutMs = 300_000 } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(npmCommand(), args, { shell: process.platform === 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const npm = npmInvocation(args);
+    const child = spawn(npm.file, npm.args, { shell: npm.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     const take = (d) => { out = (out + d).slice(-200_000); };
     child.stdout.on('data', take);
     child.stderr.on('data', take);
-    // With shell: true, child.kill() ends only cmd.exe: npm kept the pipes open, 'close' never came and the
-    // timeout did nothing. The whole tree goes.
+    // (through cmd.exe, child.kill() would end only cmd.exe: npm kept the pipes open, 'close' never came and the
+    // timeout did nothing. The whole tree goes.)
     const timer = setTimeout(() => { killTree(child); }, timeoutMs);
     child.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, output: e.message }); });
     child.on('close', (code) => { clearTimeout(timer); resolve({ ok: code === 0, output: out.trim() }); });
