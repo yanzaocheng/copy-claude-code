@@ -93,7 +93,7 @@ try {
   step('检查打包内容');
   const packed = JSON.parse(run('npm', ['pack', '--dry-run', '--json', '--silent'], { capture: true }).out)[0];
   const secret = packed.files.filter((f) => /(^|\/)(\.env(\..*)?|credentials\.json|\.npmrc|jar\.txt|[^/]*\.bundle|gateway\.json|providers\.json)$/i.test(f.path));
-  const need = ['bin/claude-pro.js', 'src/main.js', 'src/web/page.html', 'src/web/app.js', 'src/web/logo.svg', 'src/web/icon.ico', 'README.md', 'LICENSE'];
+  const need = ['bin/claude-pro.js', 'src/main.js', 'src/web/page.html', 'src/web/js/main.js', 'src/web/logo.svg', 'src/web/icon.ico', 'README.md', 'LICENSE'];
   const missing = need.filter((n) => !packed.files.some((f) => f.path === n));
   if (packed.version !== version) throw new Error(`打包的版本是 ${packed.version}`);
   if (secret.length) throw new Error(`包里有不该发布的文件：${secret.map((f) => f.path).join(', ')}`);

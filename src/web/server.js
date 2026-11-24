@@ -38,9 +38,11 @@ export const stateFile = () => path.join(CONFIG_DIR, 'web.json');
 // (__Host-: only this host can set it, not a page of another 7bit.fun subdomain; plain on http, in tests)
 const REMOTE_COOKIE = 'cpremote';
 const remoteCookieName = (origin) => (String(origin).startsWith('https:') ? `__Host-${REMOTE_COOKIE}` : REMOTE_COOKIE);
+// the page's script: ES modules in js/ (main.js starts it), each served as /js/<name>.js
+const SCRIPTS = fs.readdirSync(path.join(HERE, 'js')).filter((f) => f.endsWith('.js')).map((f) => `js/${f}`);
 const STATIC = {
   '/': ['page.html', 'text/html; charset=utf-8'],
-  '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  ...Object.fromEntries(SCRIPTS.map((f) => [`/${f}`, [f, 'text/javascript; charset=utf-8']])),
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['logo.svg', 'image/svg+xml'], // (also before 远程访问's login: its page shows it too)
   // installing the console as an app (the browser's 「安装」): fetched without the cookie, so before any log-in
@@ -55,7 +57,7 @@ const PUBLIC_ASSETS = new Set(['/favicon.svg', '/manifest.webmanifest', '/icon-1
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', 'app.js', 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', ...SCRIPTS, 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;

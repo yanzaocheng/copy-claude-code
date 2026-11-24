@@ -398,7 +398,7 @@ src/ui/repl.js        App（交互会话）的核心：终端、输入、对话�
 src/devices.js        跨电脑授权：设备身份与签名、已信任的电脑、入站策略
 src/remote.js         对话事件模型（applyEvent，控制台页面里有同一份）和网关的会话中继连接（跨电脑互发任务）
 src/live.js           本机 Web 控制台的实时查看：会话的对话事件流（经会话自己的 127.0.0.1 peer 服务）
-src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面，远程访问的密码和隧道（remote-access.js）
+src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面，远程访问的密码和隧道（remote-access.js）；页面脚本是 src/web/js/ 下的原生 ES 模块（main.js 启动，每个页面一个 page-*.js，不需要构建）
 src/commands.js       斜杠命令
 ```
 

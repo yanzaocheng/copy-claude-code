@@ -1,6 +1,6 @@
 // Two things: the transcript model that the local web console's live view uses (applyEvent, hydrate, transcriptItems,
 // snapshotItems: a conversation as a list of items — user messages, assistant text, thinking, tool calls, other
-// terminal output — that events update; the page, web/app.js, carries a copy of the reducer), and this session's
+// terminal output — that events update; the page, web/js/transcript.js, carries a copy of the reducer), and this session's
 // connection to the gateway's session relay (RemoteControl), which carries the tasks of the account's sessions on
 // other computers (`@公司 ...`, see peers.js; signed and authorized as devices.js says). The session never listens on
 // the network: it connects out to the gateway with the API key from /connect.
