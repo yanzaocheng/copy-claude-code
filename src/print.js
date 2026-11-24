@@ -55,6 +55,9 @@ export async function runPrint({ prompt, flags, cwd, stdout = process.stdout, st
   };
   let store = new SessionStore(cwd);
   const runtime = await createRuntime({ cwd, flags, io, sessionId: store.id });
+  // (nobody to ask here: an untrusted project's hooks, MCP servers and env stay off, said once)
+  const skipped = runtime.config.settings.projectTrust;
+  if (skipped?.needed) err(c.yellow(`This project's hooks, MCP servers and env are off: it is not trusted (${skipped.items.map((i) => i.name).join(', ')}). Trust it once in an interactive session (/trust), or set CLAUDE_PRO_TRUST_PROJECT=1.`));
   let cost = 0; // what this run's requests cost (total_cost_usd)
   let conversationCost = 0; // and the conversation's, kept with the session
   runtime.config.onCost = (usd) => {

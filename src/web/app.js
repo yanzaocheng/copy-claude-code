@@ -22,6 +22,7 @@
     if (!res.ok) {
       const err = new Error(data?.error || `请求失败 (${res.status})`);
       err.status = res.status;
+      err.data = data;
       if (res.status === 401 && data?.login) { location.reload(); return new Promise(() => {}); } // 远程访问: its login page
       if (res.status === 401) showLoggedOut(err.message);
       throw err;
@@ -393,11 +394,18 @@
 
   // ---------------------------------------------------------------- modal and file editor
 
-  function modal({ title, sub = "", body = "", foot = "", big = false }) {
+  function modal({ title, sub = "", body = "", foot = "", big = false, onClose = null }) {
     const back = document.createElement("div");
     back.className = "modal-back";
     back.innerHTML = `<div class="modal${big ? " big" : ""}" role="dialog"><div class="modal-head"><div><h2>${esc(title)}</h2>${sub ? `<div class="path">${esc(sub)}</div>` : ""}</div><button type="button" class="button secondary small" data-close>关闭</button></div><div class="modal-body">${body}</div>${foot ? `<div class="modal-foot">${foot}</div>` : ""}</div>`;
-    const close = () => { back.remove(); document.removeEventListener("keydown", onKey); };
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      back.remove();
+      document.removeEventListener("keydown", onKey);
+      onClose?.();
+    };
     const onKey = (e) => { if (e.key === "Escape") close(); };
     back.addEventListener("click", (e) => { if (e.target === back || e.target.closest("[data-close]")) close(); });
     document.addEventListener("keydown", onKey);
@@ -1348,12 +1356,41 @@
     pendingFirstSends.add(peerId);
   }
 
+  // What a project would run or change (see projectRisk in config.js), shown before its first session: resolves true
+  // (trust it), false (start without them).
+  function askProjectTrust(dir, trust) {
+    const labels = { mcp: "MCP 服务器（会启动的程序）", hooks: "hooks（会执行的命令）", env: "环境变量（可以改网关、shell 等）" };
+    const rows = Object.entries(labels).map(([k, label]) => [label, trust.items.filter((i) => i.kind === k).map((i) => i.name)]).filter(([, n]) => n.length);
+    const files = [...new Set(trust.items.map((i) => i.file))];
+    return new Promise((resolve) => {
+      let answered = false;
+      const m = modal({
+        title: "信任这个项目吗？", sub: dir,
+        body: `<p style="margin:0 0 10px">这个项目带有会在本机运行程序或改变设置的配置，只在你信得过它时启用（比如是你自己的项目）。</p>
+          ${rows.map(([label, names]) => `<div class="file-row"><span class="name" style="min-width:auto">${esc(label)}</span><span class="desc mono">${esc(names.join("、"))}</span></div>`).join("")}
+          <p class="muted" style="font-size:12.5px;margin:10px 0 0">来自 ${files.map((f) => `<code>${esc(f)}</code>`).join("、")}。配置改了会再问。</p>`,
+        foot: '<button class="button secondary" data-no>这次不启用</button><button class="button" data-yes>信任并启用</button>',
+        onClose: () => { if (!answered) resolve(false); },
+      });
+      const done = (v) => { answered = true; m.close(); resolve(v); };
+      $("[data-yes]", m.el).addEventListener("click", () => done(true));
+      $("[data-no]", m.el).addEventListener("click", () => done(false));
+    });
+  }
+
   // A new session in `dir`, run by the console; it is opened here and the message goes to it.
   async function startSession(dir, text, images, choices = {}) {
     if (!dir) throw new Error("先选一个目录");
     const here = location.hash;
     const before = new Set(ws.live.map((r) => r.peerId));
-    const r = await api("/api/live/new", { method: "POST", body: { cwd: dir, ...choices } });
+    let r;
+    try { r = await api("/api/live/new", { method: "POST", body: { cwd: dir, ...choices } }); }
+    catch (e) {
+      // a project whose hooks, MCP servers or env are not trusted yet: asked here, then started with the answer
+      if (e.status !== 409 || !e.data?.trust) throw e;
+      const trust = await askProjectTrust(dir, e.data.trust);
+      r = await api("/api/live/new", { method: "POST", body: { cwd: dir, ...choices, trust, trustHash: e.data.trust.hash } });
+    }
     localStorage.setItem("cpNewDir", r.cwd);
     const until = Date.now() + 30_000;
     let found = r.peerId ? { peerId: r.peerId } : null;

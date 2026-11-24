@@ -5,7 +5,7 @@ import path from 'node:path';
 import { c, glyphs, padEnd, truncate } from './ui/ansi.js';
 import { SelectDialog, TextInputDialog } from './ui/dialogs.js';
 import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/render.js';
-import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, pickedModels, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
+import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, pickedModels, projectRisk, projectTrusted, trustProject, untrustProject, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnections, saveConnection, removeConnection, normalizeBaseUrl, validBaseUrl, cleanProviderId, reservedProviderId, listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels } from './providers.js';
 import { SessionStore } from './session.js';
@@ -285,6 +285,39 @@ export function buildCommands(app) {
       app.runtime.invalidateSystemPrompt();
       app.screen.clearScreen();
       app.printWelcome();
+    },
+  });
+
+  add({
+    name: 'trust',
+    argHint: '[off]',
+    description: "Trust this project's hooks, MCP servers and env (or stop trusting it): they apply after a restart of the session",
+    async run(args) {
+      const cwd = app.agent?.cwd || app.cwd;
+      const risk = projectRisk(cwd);
+      if (/\b(off|remove|revoke|no)\b/i.test(args)) {
+        untrustProject(cwd);
+        out(risk ? c.dim("This project is no longer trusted: its hooks, MCP servers and env are off from the next start (/restart).") : c.dim('This project has nothing to trust.'));
+        return;
+      }
+      if (!risk) { out(c.dim('This project has no hooks, MCP servers or env of its own: nothing to trust.')); return; }
+      if (projectTrusted(cwd, risk)) { out(c.dim('This project is trusted already (/trust off to stop trusting it).')); return; }
+      const kinds = { mcp: 'MCP servers (programs it starts)', hooks: 'hooks (commands it runs)', env: 'env (it can point the gateway or the shell elsewhere)' };
+      const body = Object.entries(kinds).map(([k, label]) => [label, risk.items.filter((i) => i.kind === k).map((i) => i.name)]).filter(([, n]) => n.length).map(([label, n]) => `${label}: ${n.join(', ')}`);
+      const choice = await app.showDialog(new SelectDialog({
+        title: 'Trust this project',
+        body: [...body, c.dim(`from ${[...new Set(risk.items.map((i) => path.relative(cwd, i.file) || i.file))].join(', ')}`)],
+        question: 'Turn them on? Only for a project you trust (your own, say).',
+        color: c.yellow,
+        options: [
+          { label: 'Trust it and restart', value: 'yes', description: 'The session restarts with them, the conversation goes on' },
+          { label: 'Cancel', value: 'no' },
+        ],
+      }));
+      if (choice !== 'yes') return;
+      if (!trustProject(cwd, risk.hash)) { out(c.yellow('The project\'s configuration changed meanwhile: run /trust again to see it as it is now.')); return; }
+      const res = app.canRestart() ? app.requestRestart({ reason: 'trusted the project', alone: true }) : { ok: false };
+      if (!res.ok) out(c.dim(`Trusted. ${res.message ? `${res.message} ` : ''}It applies from the next start of ${APP_NAME} here.`));
     },
   });
 

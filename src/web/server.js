@@ -345,7 +345,7 @@ async function serve() {
       return send(res, 404, { error: `${req.method} ${url.pathname} is not part of the console` });
     } catch (e) {
       if (res.headersSent) { try { res.end(); } catch { /* gone */ } return; }
-      return send(res, e.status || 500, { error: e.message || String(e) });
+      return send(res, e.status || 500, { ...(e.data && typeof e.data === 'object' ? e.data : {}), error: e.message || String(e) });
     }
   });
 

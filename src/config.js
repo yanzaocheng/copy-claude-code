@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { normalizeTtl } from './cache.js';
 import { GATEWAY_PROVIDER, splitModelRef, providerModel, providerInfo, normalizeBaseUrl, connectedProviders, readConnections, knownModel } from './providers.js';
@@ -176,6 +177,91 @@ export function settingsFiles(cwd) {
 }
 
 
+// ---------------------------------------------------------------- trusting a project
+//
+// What a project can make this program run or send elsewhere: hooks and MCP servers (commands), and env (it can
+// point the gateway, the shell or a provider somewhere else) in its .claude-pro/settings.json and
+// settings.local.json, and the MCP servers of its .mcp.json. A repository cloned from elsewhere carries them, so they
+// apply only once the user trusted the project as it is: trusted-projects.json keeps, by project, a hash of them, and
+// a change asks again. A project that has none of them asks nothing. CLAUDE_PRO_TRUST_PROJECT=1 trusts without
+// asking (a script, CI).
+const trustFile = () => path.join(CONFIG_DIR, 'trusted-projects.json');
+const projectKey = (cwd) => {
+  const abs = path.resolve(cwd);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+};
+
+// The project files of `cwd` (not the user's own: in the home directory, .claude-pro/settings.json is the user's)
+function projectFiles(cwd) {
+  const files = settingsFiles(cwd);
+  const user = path.resolve(files.user);
+  const out = [];
+  for (const scope of ['project', 'local']) if (path.resolve(files[scope]) !== user) out.push(files[scope]);
+  return out;
+}
+
+// What of the project needs trust: {hash, items: [{kind: 'mcp'|'hooks'|'env', name, file}]}, or null when nothing.
+export function projectRisk(cwd) {
+  const parts = [];
+  const items = [];
+  for (const file of projectFiles(cwd)) {
+    const json = readJson(file);
+    if (!json) continue;
+    const pick = { mcpServers: json.mcpServers || null, hooks: json.hooks || null, env: json.env || null };
+    if (!pick.mcpServers && !pick.hooks && !pick.env) continue;
+    parts.push([path.basename(file), pick]); // (names, not paths: the same project however its path is written)
+    for (const name of Object.keys(pick.mcpServers || {})) items.push({ kind: 'mcp', name, file });
+    for (const [event, entries] of Object.entries(pick.hooks || {})) if (Array.isArray(entries) && entries.length) items.push({ kind: 'hooks', name: event, file });
+    for (const name of Object.keys(pick.env || {})) items.push({ kind: 'env', name, file });
+  }
+  const mcpFile = path.join(cwd, '.mcp.json');
+  // (in the home directory, as its .claude-pro/settings.json, a .mcp.json is the user's own)
+  const mcpJson = path.resolve(cwd) === path.resolve(os.homedir()) ? null : readJson(mcpFile);
+  if (mcpJson?.mcpServers && Object.keys(mcpJson.mcpServers).length) {
+    parts.push(['.mcp.json', { mcpServers: mcpJson.mcpServers }]);
+    for (const name of Object.keys(mcpJson.mcpServers)) items.push({ kind: 'mcp', name, file: mcpFile });
+  }
+  if (!items.length) return null;
+  const hash = crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+  return { hash, items };
+}
+
+function readTrust() {
+  try {
+    const data = JSON.parse(fs.readFileSync(trustFile(), 'utf8'));
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch { return {}; }
+}
+
+export function projectTrusted(cwd, risk = projectRisk(cwd)) {
+  if (!risk) return true;
+  if (/^(1|true|yes)$/i.test(process.env.CLAUDE_PRO_TRUST_PROJECT || '') || process.env.CLAUDE_PRO_SELF_CHECK === '1') return true;
+  return readTrust()[projectKey(cwd)]?.hash === risk.hash;
+}
+
+// Trust the project as it is now (`hash`: what was shown to the user, which must still be what is there).
+export function trustProject(cwd, hash) {
+  const risk = projectRisk(cwd);
+  if (!risk) return true;
+  if (hash && hash !== risk.hash) return false;
+  const data = readTrust();
+  data[projectKey(cwd)] = { hash: risk.hash, at: Date.now() };
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const tmp = `${trustFile()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, trustFile());
+  return true;
+}
+
+export function untrustProject(cwd) {
+  const data = readTrust();
+  if (!data[projectKey(cwd)]) return;
+  delete data[projectKey(cwd)];
+  const tmp = `${trustFile()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, trustFile());
+}
+
 export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   const env = {};
   const sources = {};
@@ -190,9 +276,17 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   const files = settingsFiles(cwd);
   // Settings files can still carry "permissions" from other tools; there are no permission rules here, so they are ignored.
   const settings = { mcpServers: {}, hooks: {} };
+  // a project's hooks, MCP servers and env apply once it is trusted (see projectRisk)
+  const risk = projectRisk(cwd);
+  const trusted = projectTrusted(cwd, risk);
+  const projectOnes = new Set(projectFiles(cwd).map((f) => path.resolve(f)));
   for (const [scope, file] of Object.entries(files)) {
-    const json = readJson(file);
+    let json = readJson(file);
     if (!json) continue;
+    if (!trusted && projectOnes.has(path.resolve(file))) {
+      const { mcpServers, hooks, env, ...safe } = json;
+      json = safe;
+    }
     set(json.env, file);
     for (const [key, spec] of Object.entries(BASIC_SETTINGS)) {
       if (spec.userOnly && scope !== 'user') continue;
@@ -208,8 +302,9 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
     settings[scope] = json;
   }
   // Project level .mcp.json, same format as Claude Code.
-  const mcpJson = readJson(path.join(cwd, '.mcp.json'));
+  const mcpJson = trusted ? readJson(path.join(cwd, '.mcp.json')) : null;
   if (mcpJson?.mcpServers) Object.assign(settings.mcpServers, mcpJson.mcpServers);
+  settings.projectTrust = risk && !trusted ? { needed: true, hash: risk.hash, items: risk.items } : null;
 
   const fromProcess = {};
   for (const k of Object.keys(KNOWN_KEYS)) if (process.env[k] !== undefined && process.env[k] !== '') fromProcess[k] = process.env[k];

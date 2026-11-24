@@ -8,6 +8,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import {
   CONFIG_DIR, INSTALL_DIR, SOURCE_CHECKOUT, VERSION, BASIC_SETTINGS, KNOWN_KEYS, loadConfig, settingsFiles,
   writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile, applyRememberedChoices, pickedModels, savePickedModels,
+  projectRisk, projectTrusted, trustProject,
 } from '../config.js';
 import {
   PRESETS, GATEWAY_PROVIDER, readConnections, saveConnection, removeConnection, providerInfo, connectedProviders,
@@ -642,6 +643,16 @@ async function newSession(body) {
   let st;
   try { st = fs.statSync(cwd); } catch { throw httpError(400, `目录不存在：${cwd}`); }
   if (!st.isDirectory()) throw httpError(400, `不是目录：${cwd}`);
+  // A project whose hooks, MCP servers or env are not trusted yet: the page asks (409 with what), then sends again
+  // with the answer, `trust` true (with the hash it showed) or false (the session starts without them).
+  const risk = projectRisk(cwd);
+  if (risk && !projectTrusted(cwd, risk)) {
+    if (body?.trust === true) {
+      if (!trustProject(cwd, body.trustHash)) throw Object.assign(httpError(409, '项目配置刚刚变了，请重新确认'), { data: { trust: { hash: risk.hash, items: risk.items } } });
+    } else if (body?.trust !== false) {
+      throw Object.assign(httpError(409, '这个项目的配置需要先确认信任'), { data: { trust: { hash: risk.hash, items: risk.items } } });
+    }
+  }
   return { ...(await launchSession(cwd, { initialChoices: readInitialChoices(body) })), cwd };
 }
 

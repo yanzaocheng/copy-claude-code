@@ -16,7 +16,7 @@ import {
 import { createRuntime } from '../runtime.js';
 import { SessionStore, firstUserText, moveSession } from '../session.js';
 import { defaultEffort, effortSupported, effortToSend, quickQuery } from '../api.js';
-import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR } from '../config.js';
+import { CONFIG_DIR, VERSION, APP_NAME, INSTALL_DIR, projectRisk, projectTrusted, trustProject } from '../config.js';
 import { gatewayLogin, loadGatewayModels, normalizeGatewayUrl, formatUsd } from '../gateway.js';
 import { connectedProviders } from '../providers.js';
 import { TOPIC_TITLE_SYSTEM, topicTitlePrompt } from '../prompts.js';
@@ -371,6 +371,10 @@ export class App {
       process.on('SIGHUP', () => this.exit(129));
     }
 
+    // A project whose hooks, MCP servers or env are not trusted yet (see projectRisk): asked before any of it runs, in
+    // plain lines, the interface not drawn yet. (The web console asks on its page before it starts a session.)
+    if (!this.host && !this.selfCheck && !this.flags.restart && stdin.isTTY) await this.askProjectTrust();
+    if (this.exiting) return this.exitCode;
     await this.startPeer();
     if (this.exiting) return this.exitCode;
     const runtime = await createRuntime({ cwd: this.cwd, flags: this.flags, io: this, sessionId: this.store.id });
@@ -411,6 +415,12 @@ export class App {
     // The tab label, as in the official client: what this session is about, then where and with what.
     this.screen.setTitle(() => this.terminalTitle(), path.basename(this.cwd) || this.cwd, { inherited: Boolean(restart) });
 
+    const skipped = this.config.settings.projectTrust;
+    if (skipped?.needed && (!restart || restart.changedDirectory)) {
+      const kinds = { mcp: 'MCP servers', hooks: 'hooks', env: 'env' };
+      const what = Object.entries(kinds).map(([k, label]) => [label, skipped.items.filter((i) => i.kind === k).map((i) => i.name)]).filter(([, n]) => n.length).map(([label, n]) => `${label} ${n.join(', ')}`).join('; ');
+      this.notice(`This project's ${what} are off: the project is not trusted (yet). If it is yours or you trust it, /trust turns them on.`, 'warn');
+    }
     if (restart) this.resumeAfterRestart(restart, resumable);
     else if (this.flags.resumeFile) this.loadSession(this.flags.resumeFile, this.flags.resumeId);
     else if (this.flags.resume) await this.commands.get('resume').run('');
@@ -1207,16 +1217,17 @@ export class App {
   // turn that asked for it still has to be answered and saved). `continueTurn`: the model gets a note in
   // the new process and goes on by itself. Returns {ok, message}.
   // `cwd`: the session goes on in that directory (/cd).
-  requestRestart({ reason = '', then = '', continueTurn = false, force = false, cwd = null } = {}) {
+  // `alone`: this session starts again by itself, no new code needed (in the web console, without waiting for the others)
+  requestRestart({ reason = '', then = '', continueTurn = false, force = false, cwd = null, alone = false } = {}) {
     if (!this.canRestart()) return { ok: false, message: 'This session cannot restart itself.' };
     const now = Date.now();
     const recent = this.restarts.filter((t) => now - t < RESTART_WINDOW_MS);
-    if (recent.length >= MAX_RESTARTS && !cwd) {
+    if (recent.length >= MAX_RESTARTS && !cwd && !alone) {
       return { ok: false, message: `The program was restarted ${recent.length} times in the last ${Math.round(RESTART_WINDOW_MS / 60_000)} minutes. That looks like a loop: stop restarting and tell the user what is going on.` };
     }
     const blockers = this.restartBlockers();
     if (blockers.length && !force) return { ok: false, message: `${cwd ? 'Changing the directory restarts the session, which would stop' : 'A restart would kill'}: ${blockers.join('; ')}.` };
-    this.restartRequest = { reason, then, continueTurn, cwd };
+    this.restartRequest = { reason, then, continueTurn, cwd, alone };
     this.screen.schedule();
     if (!this.isTurnRunning()) this.restartNow();
     return { ok: true };
@@ -1228,7 +1239,7 @@ export class App {
   restartNow() {
     const request = this.restartRequest || {};
     this.restartRequest = null;
-    if (this.host && !request.cwd) { this.host.restartFor(this, request); return; }
+    if (this.host && !request.cwd && !request.alone) { this.host.restartFor(this, request); return; }
     // /cd: the conversation's file goes along to the new directory's project (see moveSession); the old one is
     // removed once the next process is sure to find the new one
     let moved = null;
@@ -2233,6 +2244,35 @@ export class App {
   }
 
   // ---------------------------------------------------------------- dialogs
+
+  // The question of start(): one key, y trusts, anything else (Enter included) does not; Ctrl+C quits.
+  async askProjectTrust() {
+    const risk = projectRisk(this.cwd);
+    if (!risk || projectTrusted(this.cwd, risk)) return;
+    const labels = { mcp: 'MCP servers (programs it starts)', hooks: 'hooks (commands it runs)', env: 'env (it can point the gateway or the shell elsewhere)' };
+    const lines = ['', c.yellow(c.bold('This project comes with settings that run programs on this computer or change the configuration:'))];
+    for (const [kind, label] of Object.entries(labels)) {
+      const names = risk.items.filter((i) => i.kind === kind).map((i) => i.name);
+      if (names.length) lines.push(`  ${label}: ${names.join(', ')}`);
+    }
+    lines.push(c.dim(`  from ${[...new Set(risk.items.map((i) => path.relative(this.cwd, i.file) || i.file))].join(', ')}`));
+    lines.push('', `Turn them on only for a project you trust (your own, say). ${c.bold('[y]')} trust it   ${c.bold('[n]')} not this time `);
+    this.stdout.write(lines.join('\n'));
+    const key = await new Promise((resolve) => {
+      const onData = (d) => {
+        const ch = String(d)[0];
+        if (!ch) return;
+        this.stdin.off('data', onData);
+        this.stdin.pause();
+        resolve(ch);
+      };
+      this.stdin.on('data', onData);
+      this.stdin.resume();
+    });
+    this.stdout.write(`${key === 'y' || key === 'Y' ? 'trusted' : 'off'}\n\n`);
+    if (key === '\x03') { this.exit(130); return; }
+    if (key === 'y' || key === 'Y') trustProject(this.cwd, risk.hash);
+  }
 
   showDialog(dialog) {
     return new Promise((resolve) => {
