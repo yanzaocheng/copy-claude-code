@@ -2,6 +2,21 @@
 
 import { c, colorEnabled, stringWidth, truncate, padEnd, wordWrap, wrapLine } from './ansi.js';
 import { displayPath } from '../utils/paths.js';
+import { effortSupported, effortToSend } from '../api.js';
+
+// A model id as people say it: claude-sonnet-5-5 -> sonnet-5-5, claude-haiku-4-5-20251001 -> haiku-4-5.
+// (every model with its provider in front: 7bit/opus-5-5, deepseek/deepseek-v4-pro)
+export const modelTag = (model) => `${model?.provider ? `${model.provider}/` : ''}${String(model?.id ?? '').replace(/^claude-/, '').replace(/-\d{8}$/, '')}`;
+
+// The model and effort level that requests use now, for the footer and the terminal title. The effort
+// is left out when none is sent (auto) and for a model that does not take one.
+export function modelInfo(config) {
+  const model = config.model;
+  // What the requests carry: the nearest level the model takes (none goes out as low on gpt-6.1-sol, ultra as max on Claude).
+  const sent = effortToSend(config, model.id, config.effort);
+  const effort = sent && effortSupported(model.id) ? sent : null;
+  return { model: modelTag(model), effort };
+}
 
 export const DOT = '⏺';
 const RESULT_PREFIX = '  ⎿  ';

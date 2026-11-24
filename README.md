@@ -394,6 +394,8 @@ src/prompts.js        系统提示词、压缩提示词、自动记忆提示
 src/tools/*           各工具实现（含 Skill、NotebookEdit）
 src/mcp.js            MCP 客户端（stdio / HTTP）
 src/ui/*              终端 UI：屏幕管理、输入框、对话框、Markdown 渲染
+src/ui/repl.js        App（交互会话）的核心：终端、输入、对话轮次；其余按职责分在 app-peers.js（会话互发任务、跨电脑授权）、app-remote.js（网关连接、网页控制台实时视图）、app-restart.js（重启、热加载、更新）
+src/devices.js        跨电脑授权：设备身份与签名、已信任的电脑、入站策略
 src/remote.js         对话事件模型（applyEvent，控制台页面里有同一份）和网关的会话中继连接（跨电脑互发任务）
 src/live.js           本机 Web 控制台的实时查看：会话的对话事件流（经会话自己的 127.0.0.1 peer 服务）
 src/web/*             本机 Web 控制台（claude-pro web / /web）：服务端、API、页面，远程访问的密码和隧道（remote-access.js）
