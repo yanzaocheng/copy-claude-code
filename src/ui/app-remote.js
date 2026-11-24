@@ -320,10 +320,12 @@ export const remoteMethods = {
       await Promise.race([this.refreshRemotePeers(), new Promise((r) => setTimeout(r, 3000))]);
     }
     const found = this.suggest(text, cursor, { quiet: true });
-    if (!found?.items?.length) return { items: [] };
+    // (not the commands the page may not send: see remoteSend)
+    const items = (found?.items || []).filter((it) => !TERMINAL_ONLY.test(String(it.value)));
+    if (!items.length) return { items: [] };
     const plain = (s) => (s == null ? '' : stripAnsi(String(s)));
     return {
-      items: found.items.slice(0, 50).map((it) => ({ value: it.value, label: plain(it.label ?? it.value), description: plain(it.description), submitOnEnter: Boolean(it.submitOnEnter), noSpace: Boolean(it.noSpace) })),
+      items: items.slice(0, 50).map((it) => ({ value: it.value, label: plain(it.label ?? it.value), description: plain(it.description), submitOnEnter: Boolean(it.submitOnEnter), noSpace: Boolean(it.noSpace) })),
       from: found.from,
       to: found.to,
     };

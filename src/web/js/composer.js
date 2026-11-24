@@ -15,9 +15,15 @@ export function saveDraft(key, text, images) {
   if (images.length) draftImages.set(key, images); else draftImages.delete(key);
 }
 
+// What the session says of a completion, in the page's words.
+const suggestNote = (d) => (d === "file" ? "文件" : d === "directory" ? "目录" : String(d || "")
+  .replace(/^session · this computer · /, "会话 · 本机 · ").replace(/^session · /, "会话 · ").replace(/ · busy$/, " · 忙"));
+
 // A rounded box with the text, images (pasted, dropped or added with +), what goes left and right of the send button.
-// onSend(text, images) resolves when sent (the box is emptied) or throws (it is kept).
-export function composer(box, { placeholder, onSend, left = "", right = "", dropZone = box, draftKey = "" }) {
+// onSend(text, images) resolves when sent (the box is emptied) or throws (it is kept). `suggest(text, cursor)`: the
+// completions of what is typed at the cursor, `@` (files, and sessions here and on the other computers) and
+// `/commands`, as the terminal's input box offers them ({items, from, to}); without it there are none.
+export function composer(box, { placeholder, onSend, left = "", right = "", dropZone = box, draftKey = "", suggest = null }) {
   box.innerHTML = `<form class="composer"><div class="quotes hidden"></div><div class="thumbs hidden"></div><textarea rows="1" placeholder="${esc(placeholder)}"></textarea>
       <div class="composer-bar"><button type="button" class="icon-btn" data-add title="添加图片（也可以粘贴或拖进来）" aria-label="添加图片">${ICON.add}</button><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         <span class="composer-left">${left}</span><span class="grow"></span><span class="composer-right">${right}</span>
@@ -69,8 +75,91 @@ export function composer(box, { placeholder, onSend, left = "", right = "", drop
   });
   $("[data-add]", box).addEventListener("click", () => file.click());
   file.addEventListener("change", async () => { await add(file.files); file.value = ""; });
-  input.addEventListener("input", () => { autosize(); keep(); });
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); } });
+  // ---- completions: a list above the box while an `@word` or a `/command` is typed at the cursor
+  const list = document.createElement("div");
+  list.className = "suggest hidden";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", "补全");
+  form.prepend(list);
+  let sugg = null; // {items, from, to, index}
+  let suggSeq = 0, suggTimer = 0, filesAsked = false;
+  const wanted = () => {
+    if (!suggest || sending || input.selectionStart !== input.selectionEnd) return false;
+    const cursor = input.selectionStart;
+    return /(^|\s)@(?:"[^"@]*|[^\s@"]*)$/.test(input.value.slice(0, cursor)) || (/^\/\S*$/.test(input.value) && cursor === input.value.length);
+  };
+  const closeSuggest = () => {
+    clearTimeout(suggTimer);
+    suggSeq++;
+    sugg = null;
+    list.classList.add("hidden");
+    list.innerHTML = "";
+  };
+  const paintSuggest = () => {
+    list.innerHTML = sugg.items.map((it, i) => `<button type="button" role="option" data-i="${i}" aria-selected="${i === sugg.index}" class="${i === sugg.index ? "on" : ""}"><span>${esc(it.label || it.value)}</span>${it.description ? `<small>${esc(suggestNote(it.description))}</small>` : ""}</button>`).join("");
+    list.classList.remove("hidden");
+    $(".on", list)?.scrollIntoView({ block: "nearest" });
+  };
+  const askSuggest = ({ wait = 70 } = {}) => {
+    clearTimeout(suggTimer);
+    if (!wanted()) { if (sugg) closeSuggest(); return; }
+    const n = ++suggSeq;
+    const text = input.value, cursor = input.selectionStart;
+    suggTimer = setTimeout(async () => {
+      let r = null;
+      try { r = await suggest(text, cursor); } catch { /* none, then */ }
+      if (n !== suggSeq || input.value !== text || input.selectionStart !== cursor) return; // typed on meanwhile
+      if (r?.items?.length) {
+        const keep = sugg?.items[sugg.index]?.value;
+        const at = r.items.findIndex((it) => it.value === keep);
+        sugg = { items: r.items, from: r.from, to: r.to, index: at >= 0 ? at : 0 };
+        paintSuggest();
+      } else if (sugg) { sugg = null; list.classList.add("hidden"); list.innerHTML = ""; }
+      // the session lists its files when an @ is first typed: asked again once they are in
+      if (!filesAsked && text.slice(0, cursor).includes("@")) { filesAsked = true; setTimeout(() => { if (n === suggSeq) askSuggest({ wait: 0 }); }, 900); }
+    }, wait);
+  };
+  // `enter`: Enter took it, which also sends a command that needs nothing more (as in the terminal)
+  const accept = (i, { enter = false } = {}) => {
+    const it = sugg?.items[i];
+    if (!it) return;
+    const { from, to } = sugg;
+    const after = input.value.slice(to);
+    const send = enter && it.submitOnEnter;
+    const insert = it.value + (send || it.noSpace || after.startsWith(" ") ? "" : " ");
+    input.value = input.value.slice(0, from) + insert + after;
+    const caret = from + insert.length;
+    input.setSelectionRange(caret, caret);
+    closeSuggest();
+    autosize();
+    keep();
+    if (send) form.requestSubmit();
+    else if (it.noSpace) askSuggest({ wait: 0 }); // a directory: on inside it
+  };
+  list.addEventListener("pointerdown", (e) => e.preventDefault()); // (the box keeps the focus and the cursor)
+  list.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-i]");
+    if (b) { accept(Number(b.dataset.i)); input.focus(); }
+  });
+  input.addEventListener("blur", () => { if (sugg) closeSuggest(); });
+  input.addEventListener("keyup", (e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) askSuggest(); });
+  input.addEventListener("click", () => { if (sugg || wanted()) askSuggest(); });
+
+  input.addEventListener("input", () => { autosize(); keep(); askSuggest(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    if (sugg) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        sugg.index = (sugg.index + (e.key === "ArrowDown" ? 1 : -1) + sugg.items.length) % sugg.items.length;
+        paintSuggest();
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); accept(sugg.index, { enter: e.key === "Enter" }); return; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeSuggest(); return; }
+    } else if (e.key === "Tab" && !e.shiftKey && wanted()) { e.preventDefault(); askSuggest({ wait: 0 }); return; }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
   input.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file").map((it) => it.getAsFile());
     if (files.some((f) => f?.type.startsWith("image/"))) { e.preventDefault(); add(files); }
@@ -85,6 +174,7 @@ export function composer(box, { placeholder, onSend, left = "", right = "", drop
     // the quotes first, each a Markdown block quote, then what was typed
     const quoted = quotes.map((q) => q.split(/\r?\n/).map((l) => `> ${l}`.trimEnd()).join("\n")).join("\n\n");
     const text = quoted ? `${quoted}${typed.trim() ? `\n\n${typed}` : ""}` : typed;
+    closeSuggest();
     sending = true;
     input.readOnly = true;
     ready();

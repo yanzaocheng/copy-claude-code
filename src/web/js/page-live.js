@@ -32,6 +32,7 @@ export function liveView(peerId) {
     right: `<button type="button" class="chip" id="lmodel" title="切换模型"><span></span>${ICON.caret}</button><button type="button" class="chip" id="leffort" title="切换推理强度"><span></span>${ICON.caret}</button>`,
     dropZone: el,
     draftKey: `live:${peerId}`,
+    suggest: (text, cursor) => post("suggest", { text, cursor }),
     onSend: async (text, images) => {
       if (/^\s*\/(exit|quit|restart|reload|update)(\s|$)/i.test(text)) throw new Error("结束、重启会话和更新 claude-pro 只能在终端里操作");
       const r = await post("send", { text, images });
