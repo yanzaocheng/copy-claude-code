@@ -81,6 +81,8 @@ sequenceDiagram
 
 `Restart` 工具只在能重启的会话里才构建（子 agent 永远没有），系统提示词里也只有这时才有"你自己的源码"一节。`childEnv()` 会删掉这三个环境变量，Bash 工具启动的子进程不会误以为自己是可重启的会话。
 
+**终端附着（实验性，`CLAUDE_PRO_ATTACH=1`）**：设置打开时 `main()` 不在本进程跑 App，而是 `attachSession`（[`src/attach.js`](src/attach.js)）：`ensureWebServer()` 后在本窗口问光标行和字符宽度（`queryCursorRow`），经 HTTP Upgrade 连 `/api/attach`（127.0.0.1 + web.json 的密钥），发 HELLO（目录、flags、首个提示词、环境变量、窗口大小、光标行、测得的宽度、监督进程交来的重启状态）。控制台（[`src/web/terminals.js`](src/web/terminals.js)、`SessionHost.attachTerminal`）为它启动一个带真实 `Screen` 的 App（`attached`），stdin/stdout 是这条连接；App 和它启动的一切跑在这个窗口的终端配置里（`inTerminal`：AsyncLocalStorage 里的宽度表、字形和环境变量，`childEnv` 用窗口的环境）。帧：HELLO/INPUT/RESIZE（客户端→）、OUTPUT/READY/EXIT/ERROR（→客户端）。/exit 时发 EXIT，窗口进程带同一退出码结束；窗口关掉（连接断开）1.5 秒后会话以 129 结束；/cd 在同一窗口里重启那一个会话；控制台加载新代码时会话交出状态（`attached: true`），新控制台把它放进 `pendingAttach` 等窗口重连（客户端每 0.4 秒重试最多 1 分钟，超过 12 秒仍连不上就自己启动控制台），30 秒没等到就作为后台会话接起来。连不上（没有控制台、旧版本的控制台）就照旧在本窗口里运行。
+
 ### 3.1.2 远程控制
 
 登录了网关的电脑上，每个交互会话都接在**网关**（`config.gatewayUrl`，默认 7bit.fun）的远程控制上，用户在网关用户端的"远程控制"菜单里看和操作它（只限同一账户）；没有开关命令（`/remote-control`、`/rc`、`--rc` 已去掉，`--rc` 仍被接受并忽略），高级配置 `CLAUDE_PRO_ONLINE=0` 可关闭远程发布，也用于自检和测试；`CLAUDE_PRO_REMOTE_COMMANDS=0` 让这台电脑的会话在网页上只读（能看不能操作）。会话只发出站请求、不监听端口；模型请求和远程控制都使用 `/connect`（7bit.fun）保存的 key（`gatewayLogin`）。实现是 [`src/remote.js`](src/remote.js) 的 `RemoteControl`；网关那边的中转和页面在 codex-gateway 仓库。
@@ -110,8 +112,8 @@ sequenceDiagram
 - **在线**：登录了网关的电脑上，交互会话启动时连上网关（见 3.1.2 的"上线与下线"）。注册时带 `machine`（`machineName()`：`CLAUDE_PRO_MACHINE_NAME` 或主机名；网页据此把会话归到电脑下）和 `peerId`（本机 PeerNode 的 id，列表里据此去掉本机已经能直接联系的会话）。
 - **列表**：`GET /v1/remote/sessions` → 同账户的会话（在线的在前）。`App.refreshRemotePeers()` 只留在线、未结束、不是自己、不在本机的，变成 `{id, name, machine, cwd, remote: true, label: 'machine/name'}` 存在 `remotePeers`；连上时、每 60 秒、输入 `@` 时（超过 10 秒没刷新）、发送时找不到名字时刷新。
 - **寻址**：`resolvePeer(local, remote, ref)`：本机名字优先；然后 `machine/name`、只有一个远端会话叫这个名字、只有一个会话的电脑名、（模型发的才有）id 前缀；多个匹配时报歧义。用户与模型使用的会话前缀统一为 `@`：`suggest()` 在同一个 `@` 入口中合并文件和本机/远端会话补全，`sendTypedToPeer` 发送。
-- **发送**：`POST /v1/remote/sessions/:目标/messages {from: 自己的 id, kind, text, inReplyTo}` → `{id, delivered}`（不重试：任务发两次会做两次）。网关按发送方的注册信息填 `from`，推到目标命令流：`{type:'peer', cid, kind, text, inReplyTo, from:{id, name, machine, host, cwd}}`。task 发给不在线的会话返回 409；reply 进目标的信箱（内存，24 小时，100 条 / 4 MB），目标重连时（viewers 之后）按顺序重推。
-- **接收**：`RemoteControl.peerMessage` 按 `cid` 去重（重推的消息只确认），交给 `App.onPeerMessage`（`from.name` 是 `machine/name`，`from.remote = true`），然后用 `POST …/results {cid, ok: true}` 确认，确认后网关从信箱删除。之后的流程和本机消息相同：任务排队成一轮，`answerPeers` 在这一轮结束后把最终文本作为 reply 发回，远端的经网关（`remote.sendPeer`），本机的经 PeerNode。
+- **发送**：`POST /v1/remote/sessions/:目标/messages {from: 自己的 id, kind, text, inReplyTo, auth}` → `{id, delivered}`（不重试：任务发两次会做两次）。任务带 `auth {key, sig, at}`：本机设备私钥对“目标会话 id + 时间 + 文本哈希”的 Ed25519 签名（[`src/devices.js`](src/devices.js) `signTask`），注册时带 `device`（设备 ID = 公钥哈希）。网关按发送方的注册信息填 `from`（含 `device`），`auth` 原样转交、不校验，推到目标命令流：`{type:'peer', cid, kind, text, inReplyTo, auth, from:{id, name, machine, cwd, device}}`。`kind` 还可以是 `notice`：接收方告诉发送方“已送达，等待对方授权”，不触发一轮。task 发给不在线的会话返回 409；reply 进目标的信箱（内存，24 小时，100 条 / 4 MB），目标重连时（viewers 之后）按顺序重推。
+- **接收**：`RemoteControl.peerMessage` 按 `cid` 去重（重推的消息只确认），交给 `App.onPeerMessage`（`from.name` 是 `machine/name`，`from.remote = true`），然后用 `POST …/results {cid, ok: true}` 确认，确认后网关从信箱删除。其他电脑来的任务先过授权（`App.authorizePeerTask`，像远程桌面）：`verifyTask` 核对签名（设备 ID 对得上公钥、签的是本会话、时间在 1 小时内、同一签名只认一次）；入站策略是 `account`、签名有效且设备在 `trusted-devices.json` 里、或发送会话在本次连接里已被允许（`peerAllowed`，键是“会话 id | 设备”，随重启带过去）时直接执行；否则先给发送方发 notice，再弹 `SelectDialog`（允许本次连接 / 始终信任这台电脑（只有签名有效才有）/ 拒绝），网页控制台从 `liveStatus().authRequests` 在每个页面顶部显示同一个请求、按对话框回答；10 分钟没人回答按拒绝，拒绝时回复对方。`/devices` 和「远程访问」页管理已信任的电脑和入站策略。之后的流程和本机消息相同：任务排队成一轮，`answerPeers` 在这一轮结束后把最终文本作为 reply 发回，远端的经网关（`remote.sendPeer`），本机的经 PeerNode。
 - **`@` 补全**：`suggest()` 在光标前是 `(行首|空白)@词` 时把文件和会话放进同一列表（文件保留目录与带空格路径的引号逻辑，会话项显示本机/电脑和目录），所以句中的 `@公` 也能补全。行首命中会话的 `@名字 任务` 直接发送；文件和会话同名时用 `@./名字` 强制文件；其他位置的 `@名字` 由 `peerMentions` 解析后作为 system-reminder 告诉模型是哪个会话、可以用 MessagePeer 联系它。附带的图片如果来自文件（`source`），把路径也告诉模型。
 - **名字**：`/rename`（`App.renameSession`）改本机 PeerNode 的名字（`setName` 在本机重名时加 -2），没有 PeerNode 时记在 `sessionName`；同时作为对话标题 `customTitle`（`sessionLabel()` 优先用它，`refreshTopic` 不再改标题），写进会话文件的 meta `name`（`/resume` 时恢复名字和标题）；再向网关注册一次（网关用注册时的 name 填 `from`），并推一次状态（网关列表用状态里的 name）。名字允许任何文字的字母（`cleanName` 用 `\p{L}\p{M}\p{N}`）。
 
@@ -375,13 +377,18 @@ flowchart TD
 ~/.claude-pro/
 ├─ settings.json                 # 用户级配置
 └─ projects/<sanitized-cwd>/
-   ├─ <session-id>.jsonl         # 会话 meta/message/reset
+   ├─ <session-id>.jsonl         # 会话 meta/message/reset（只留最后一次 reset 及之后）
+   ├─ <session-id>.history.jsonl.gz  # 压实时移走的旧内容（gzip 追加，随会话移动/删除）
    ├─ tool-results/              # 超大工具结果，默认清理 7 天前文件
    ├─ checkpoints/               # 文件快照，默认清理 14 天前目录
    └─ memory/                    # 自动记忆索引和主题文件
 ```
 
 `<sanitized-cwd>` 是路径里 a-z、A-Z、0-9 以外的字符都换成 `-`（和 Claude Code 一样）。路径里有非 ASCII 字符时再加 `-<路径哈希前 8 位>`（`projectDir`，[`src/session.js`](src/session.js)）：否则 `D:\d\node\聊天` 和 `D:\d\node\共享` 都是 `D--d-node---`，会话和记忆混在一起。这样的项目第一次用新名字时接管旧目录（`adoptOldDir`）：旧目录里的会话（看第一行 meta 的 `cwd`）都是本项目的，就整个改名；是共享的，就只搬走本项目的会话和它们的 trace，记忆复制一份，其余留给另一个项目，等它打开时再接管。恢复的会话如果保存的系统提示词里还是旧的记忆目录，就重建提示词（`resumeSystemPrompt`），免得模型往旧目录写记忆。
+
+**压实**（`compactSession`）：会话文件只追加，/clear、压缩（reset）之前的内容加载时用不到。reset 之后（3 秒防抖）和后台每小时一次，把文件改写成“合并后的 meta（含 firstPrompt）+ 最后一次 reset 及之后的原文”，旧内容 gzip 追加到 `<id>.history.jsonl.gz`；正被别的进程写或有主的文件不动。
+
+**项目信任**（[`src/config.js`](src/config.js) `projectRisk`/`projectTrusted`）：项目 `.claude-pro/settings.json`、`settings.local.json` 里的 hooks、mcpServers、env 和 `.mcp.json` 会在本机运行程序或改配置，只有用户信任这个项目（`trusted-projects.json` 记项目路径 → 这些内容的哈希，内容一变就重问）后才生效：终端会话启动前问 y/n，网页新建会话前弹窗，会话里 `/trust`；家目录下的这些文件算用户自己的。`CLAUDE_PRO_TRUST_PROJECT=1` 不问直接信任。
 
 这些是本项目自己的会话状态；模型请求使用网关登录，不读取其他 CLI 的凭据或对话历史。`--continue` 和 `--resume` 读取的是上述 JSONL。
 
@@ -418,8 +425,11 @@ flowchart TD
 | [`src/hooks.js`](src/hooks.js) | 生命周期 command hooks |
 | [`src/session.js`](src/session.js) | JSONL 会话、工具结果、自动记忆目录 |
 | [`src/checkpoints.js`](src/checkpoints.js) | 文件快照与回滚 |
-| [`src/ui/`](src/ui/) | 终端屏幕、编辑器、Markdown、对话 UI |
-| [`src/remote.js`](src/remote.js) | 远程控制：经网关中转的客户端、事件归约（网关页面里有同一份） |
+| [`src/ui/`](src/ui/) | 终端屏幕、编辑器、Markdown、对话 UI；`repl.js` 是 App 的核心，`app-peers.js`（会话互发与授权）、`app-remote.js`（网关连接、网页实时视图）、`app-restart.js`（重启、热加载、更新）的方法挂到 `App.prototype` 上 |
+| [`src/devices.js`](src/devices.js) | 跨电脑授权：设备身份与签名、已信任的电脑、入站策略 |
+| [`src/attach.js`](src/attach.js) / [`src/web/terminals.js`](src/web/terminals.js) | 终端附着（`CLAUDE_PRO_ATTACH=1`，实验性）：会话跑在控制台进程里，窗口进程只转发按键、尺寸和画面 |
+| [`src/web/js/`](src/web/js/) | 网页控制台的原生 ES 模块（`main.js` 启动，每个页面一个 `page-*.js`，无构建） |
+| [`src/remote.js`](src/remote.js) | 网关会话中继的客户端（跨电脑互发任务）、事件归约（控制台页面 `web/js/transcript.js` 里有同一份） |
 | [`src/peers.js`](src/peers.js) | 本机会话之间的消息（注册表 `peers/<id>.json` 和 127.0.0.1 上的小 HTTP 服务） |
 | [`src/print.js`](src/print.js) | 非交互输出协议 |
 
