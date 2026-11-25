@@ -150,6 +150,25 @@ function hasSessionMark(dir, kind) {
   });
 }
 
+// The process that has the conversation `id` open (its pid), or 0. Asked before a conversation is opened because
+// the user said so (--continue, --resume, /resume): two processes appending to one file leave a conversation that
+// loads as neither's (messages interleaved, one's reset line dropping the other's). Not asked by claimSession
+// itself: a restart hands a conversation from one process to the next while the first still runs.
+export function sessionOpenIn(id) {
+  const key = crypto.createHash('sha256').update(process.platform === 'win32' ? id.toLowerCase() : id).digest('hex');
+  let names;
+  try { names = fs.readdirSync(path.join(CONFIG_DIR, 'session-owners', key)); } catch { return 0; }
+  for (const name of names) {
+    const pid = Number(/^owner-(\d+)-/.exec(name)?.[1]);
+    if (pid && processAlive(pid)) return pid;
+  }
+  return 0;
+}
+export const openElsewhere = (id) => {
+  const pid = sessionOpenIn(id);
+  return pid ? `That conversation is open in another ${pid === process.pid ? 'session of the web console' : `window (process ${pid})`}: go on with it there, or close it there first.` : '';
+};
+
 export function claimSession(id) {
   const mark = markSession(id, 'owner');
   try {
@@ -362,7 +381,9 @@ export async function compactSession(file, { owned = false, isOwned = () => fals
     fs.appendFileSync(hist, gz);
     const tmp = `${file}.${process.pid}.tmp`;
     try {
-      fs.writeFileSync(tmp, Buffer.concat([plan.keep, tail]));
+      // (on the disk before it takes the file's place: a power cut right after the rename would leave an empty file)
+      const fd = fs.openSync(tmp, 'w');
+      try { fs.writeSync(fd, Buffer.concat([plan.keep, tail])); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       fs.renameSync(tmp, file);
     } catch {
       // (the file is held open elsewhere, on Windows: as it was, and the history as it was, tried again next time)
@@ -422,14 +443,31 @@ export class SessionStore {
         fs.mkdirSync(this.dir, { recursive: true });
         this.started = true;
         if (!fs.existsSync(this.file)) fs.appendFileSync(this.file, JSON.stringify({ type: 'meta', cwd: this.cwd, created: new Date().toISOString() }) + '\n');
+        else this.torn = true; // (a process that ended in the middle of a write)
       }
+      if (this.torn) { this.endLine(); this.torn = false; }
       fs.appendFileSync(this.file, JSON.stringify(entry) + '\n');
     } catch (e) {
       // Best effort, but a message that did not get in leaves the file without it, and a restart or /resume would go
       // on from a conversation that lacks it: noted (`lost`, see App.restartNow), and said once (SessionStore.onError).
+      // A write that failed half way (a full disk) leaves part of a line: the next one starts on a line of its own.
       this.lost = true;
+      this.torn = true;
       if (!this.warned) { this.warned = true; try { (this.onError || SessionStore.onError)?.(e, this); } catch { /* ignore */ } }
     }
+  }
+
+  // The file ends with a line break: what follows is a line of its own, not the end of a torn one (which would make
+  // both one line that does not parse, and loading skip the one that came after too).
+  endLine() {
+    const fd = fs.openSync(this.file, 'r+');
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (!size) return;
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, size - 1);
+      if (last[0] !== 0x0a) fs.writeSync(fd, '\n', size);
+    } finally { fs.closeSync(fd); }
   }
 
   message(message) { this.append({ type: 'message', message, at: Date.now() }); }

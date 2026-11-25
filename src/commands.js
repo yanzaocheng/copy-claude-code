@@ -8,7 +8,7 @@ import { renderTodos, resultLines, formatTokens, formatDuration } from './ui/ren
 import { loadConfig, settingsFiles, configEntries, writeConfigSetting, unsetConfigSetting, rememberChoice, applyRememberedChoices, pickedModels, projectRisk, projectTrusted, trustProject, untrustProject, VERSION, APP_NAME, CONFIG_DIR } from './config.js';
 import { loginWithKey, gatewayLogin, gatewayKeyPage, clearGatewayLogin, fetchGatewayAccount, fetchGatewayModels, keptGatewayModels, loadGatewayModels, cachedGatewayModel, gatewayEfforts, formatUsd } from './gateway.js';
 import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnections, saveConnection, removeConnection, normalizeBaseUrl, validBaseUrl, cleanProviderId, reservedProviderId, listProviderModels, testProviderModel, modelsDevCatalogue, enrichModels } from './providers.js';
-import { SessionStore } from './session.js';
+import { SessionStore, openElsewhere } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
 import { renderSkill } from './agents.js';
@@ -1195,6 +1195,7 @@ export function buildCommands(app) {
           selected: options.length - 1,
         }));
         if (!id) return;
+        if (app.isTurnRunning()) { out(c.yellow('A turn started meanwhile: /rewind again once it is done.')); return; }
         if (id === 'previous') {
           app.agent.resetConversation();
           app.loadSession(previous.file, previous.id);
@@ -1212,6 +1213,7 @@ export function buildCommands(app) {
         if (!actions.length) { out(c.dim('Nothing to restore for that prompt (the conversation was compacted and no files changed).')); return; }
         actions.push({ label: 'Never mind', value: 'cancel', description: 'back to the list' });
         mode = await app.showDialog(new SelectDialog({ title: 'Rewind', question: `At: ${c.bold(truncate(entry.label || '(empty prompt)', 60))}`, color: c.blue, options: actions, cancelValue: 'cancel' }));
+        if (mode && mode !== 'cancel' && app.isTurnRunning()) { out(c.yellow('A turn started meanwhile: /rewind again once it is done.')); return; }
         if (mode && mode !== 'cancel') break;
       }
       const id = entry.id;
@@ -1280,6 +1282,10 @@ export function buildCommands(app) {
         if (!id) return;
         chosen = sessions.find((s) => s.id === id);
       }
+      // (a task of another session or a background agent's report may have started a turn while the list was open)
+      if (app.isTurnRunning()) { out(c.yellow('A turn started meanwhile: /resume again once it is done.')); return; }
+      const elsewhere = openElsewhere(chosen.id);
+      if (elsewhere) { out(c.yellow(elsewhere)); return; }
       app.agent.resetConversation();
       app.loadSession(chosen.file, chosen.id);
     },

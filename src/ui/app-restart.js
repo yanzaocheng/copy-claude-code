@@ -91,6 +91,13 @@ export const restartMethods = {
     const request = this.restartRequest || {};
     this.restartRequest = null;
     if (this.host && !request.cwd && !request.alone) { this.host.restartFor(this, request); return; }
+    // A write of the conversation failed at some point (a full disk): it is written again whole first, before /cd
+    // copies the file, or there is no restart: the next process would go on from a file that lacks part of it, and the
+    // only whole copy, this process's, would be gone.
+    if (!this.flushUnsavedConversation()) {
+      this.notice('Could not restart: the conversation could not be saved (is the disk full?). Free some space, then try again.', 'warn');
+      return;
+    }
     // /cd: the conversation's file goes along to the new directory's project (see moveSession); the old one is
     // removed once the next process is sure to find the new one
     let moved = null;

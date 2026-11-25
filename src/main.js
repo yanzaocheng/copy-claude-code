@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { VERSION, loadConfig, settingsFiles, configKey, configEntries, writeConfigSetting, unsetConfigSetting, applyRememberedChoices } from './config.js';
 import { loadGatewayModels } from './gateway.js';
 import { resolvePath } from './utils/paths.js';
-import { SessionStore } from './session.js';
+import { SessionStore, openElsewhere } from './session.js';
 import { takeRestartState } from './restart.js';
 
 const HELP = `Usage: claude-pro [options] [prompt]
@@ -216,6 +216,10 @@ export async function main(argv) {
     const found = flags.resumeId ? sessions.find((s) => s.id.startsWith(flags.resumeId)) : sessions[0];
     if (!found) {
       process.stderr.write(flags.resumeId ? `No conversation found with id ${flags.resumeId}\n` : 'No conversation found to continue\n');
+      return 1;
+    } else if (!flags.restart && openElsewhere(found.id)) {
+      // (two processes writing one conversation file leave it as neither's)
+      process.stderr.write(`${flags.resumeId ? '' : 'The newest conversation here: '}${openElsewhere(found.id)}${flags.resumeId ? '' : ' Another one: --resume <id>.'}\n`);
       return 1;
     } else {
       flags.resumeFile = found.file;
