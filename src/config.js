@@ -23,6 +23,16 @@ export const INSTALL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.u
 // edits its own code only in a checkout, since the next update replaces an installed copy.
 export const SOURCE_CHECKOUT = fs.existsSync(path.join(INSTALL_DIR, '.git'));
 export const CONFIG_DIR = process.env.CLAUDE_PRO_CONFIG_DIR || path.join(os.homedir(), '.claude-pro');
+// The config directory holds keys, conversations, the tokens with which sessions take tasks: on a computer with other
+// users (Linux, macOS; a home directory others may enter), only its owner may enter it. (Windows keeps a user's
+// profile to that user.)
+if (process.platform !== 'win32') {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    const st = fs.statSync(CONFIG_DIR);
+    if (st.uid === process.getuid?.() && (st.mode & 0o077)) fs.chmodSync(CONFIG_DIR, 0o700);
+  } catch { /* made later, as before */ }
+}
 export const APP_NAME = 'claude-pro';
 export const GATEWAY_DEFAULT_URL = 'https://7bit.fun';
 // The gateway's earlier address (until 2026-11-19), no longer used: a login or a setting saved with it means the same

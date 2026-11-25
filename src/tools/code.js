@@ -3,14 +3,14 @@
 // steps, and only what the code prints comes back: no quoting through Bash, no reloading for every question.
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { killTree, killTreeSync } from '../utils/shell.js';
 import { OutputDecoder } from '../utils/encoding.js';
 import { stripAnsi } from '../ui/ansi.js';
 import { childEnv, truncateOutput, saveFullOutput } from './bash.js';
+import { CONFIG_DIR } from '../config.js';
 
 export const replLimits = { defaultTimeoutMs: 120_000, maxTimeoutMs: 600_000, outputChars: 20_000 };
 // A run's output kept in memory: past OUTPUT_MAX characters only the newest OUTPUT_KEEP stay, as in Bash.
@@ -178,12 +178,20 @@ const LANGUAGES = {
   node: { label: 'Node.js', driver: NODE_DRIVER, ext: 'cjs' },
 };
 
-// The driver as a file (named by its content, so that two versions of claude-pro do not overwrite each other's).
+// The driver as a file (named by its content, so that two versions of claude-pro do not overwrite each other's), in
+// the config directory: in a temporary directory that other users of the computer share, one of them could put a file
+// of that name there first, and it would run as this user.
 function driverFile(lang) {
   const { driver, ext } = LANGUAGES[lang];
   const hash = crypto.createHash('sha256').update(driver).digest('hex').slice(0, 12);
-  const file = path.join(os.tmpdir(), `claude-pro-repl-${lang}-${hash}.${ext}`);
-  if (!fs.existsSync(file)) fs.writeFileSync(file, driver);
+  const dir = path.join(CONFIG_DIR, 'cache');
+  const file = path.join(dir, `claude-pro-repl-${lang}-${hash}.${ext}`);
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, driver);
+    fs.renameSync(tmp, file);
+  }
   return file;
 }
 

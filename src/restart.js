@@ -5,7 +5,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn } from './utils/proc.js';
 import { INSTALL_DIR } from './config.js';
 import { ENV_SUPERVISED, ENV_RESTART_FILE, ENV_RESTARTED, RESTART_EXIT_CODE } from './supervisor.js';
 
@@ -24,10 +24,23 @@ export function canRestart(env = process.env) {
 
 // Leave what the next process needs, where the supervisor said. Throws when it cannot be written, so
 // that a restart that would lose the conversation does not happen.
+// (The file is in the temporary directory, which other users of a Linux computer share: one of them may have put a
+// file or a link of that name there first, to read what is written, or to write what the next process takes up.
+// Written only as a new file of this user's.)
 export function writeRestartState(state, env = process.env) {
   const file = env[ENV_RESTART_FILE];
   if (!file) throw new Error('not running under the supervisor');
-  fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 });
+  if (fs.existsSync(file) || isLink(file)) {
+    if (!ownFile(file)) throw new Error(`${file} is not this user's file`);
+    fs.rmSync(file, { force: true });
+  }
+  fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
+}
+const isLink = (file) => { try { return fs.lstatSync(file).isSymbolicLink(); } catch { return false; } };
+// A plain file of this user's (always so on Windows, whose temporary directory is the user's own).
+function ownFile(file) {
+  if (typeof process.getuid !== 'function') return true;
+  try { const st = fs.lstatSync(file); return st.isFile() && st.uid === process.getuid(); } catch { return false; }
 }
 
 // In a process that was started by a restart: what the previous one left (once). {} when there is nothing
@@ -36,6 +49,7 @@ export function takeRestartState(env = process.env) {
   if (env[ENV_RESTARTED] !== '1') return null;
   const file = env[ENV_RESTART_FILE];
   if (!file) return {};
+  if (!ownFile(file)) return {};
   try {
     const state = JSON.parse(fs.readFileSync(file, 'utf8'));
     return state && typeof state === 'object' ? state : {};
