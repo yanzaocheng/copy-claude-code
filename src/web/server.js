@@ -14,7 +14,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { fileURLToPath } from 'node:url';
 import { CONFIG_DIR, VERSION, readGatewayLogin } from '../config.js';
 import { machineName } from '../peers.js';
@@ -31,7 +31,7 @@ const REPO = (() => {
   } catch { return null; }
 })();
 const IDLE_MS = 30 * 60_000;
-const BODY_LIMIT = 20 * 1024 * 1024;
+const BODY_LIMIT = 48 * 1024 * 1024; // (a message with six pictures of 5 MB, in base64)
 const COOKIE = 'cpweb';
 export const stateFile = () => path.join(CONFIG_DIR, 'web.json');
 
@@ -65,16 +65,30 @@ export function codeStamp() {
 
 // ---------------------------------------------------------------- the server
 
-function readBody(req) {
+// The request's JSON. `limit`: the most it may be; `timeoutMs`: how long it may take to arrive (for requests of
+// someone not logged in yet). A body over the limit is refused and no longer kept; the connection is cut a moment
+// later, so that the answer (413) still gets out.
+function readBody(req, { limit = BODY_LIMIT, timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
     let size = 0;
-    const chunks = [];
+    let chunks = [];
+    const refuse = (message, status) => {
+      if (!chunks) return;
+      chunks = null;
+      clearTimeout(timer);
+      reject(Object.assign(new Error(message), { status }));
+      setTimeout(() => req.destroy(), 1500).unref();
+    };
+    const timer = timeoutMs ? setTimeout(() => refuse('body too slow', 408), timeoutMs) : null;
+    timer?.unref();
     req.on('data', (d) => {
+      if (!chunks) return;
       size += d.length;
-      if (size > BODY_LIMIT) { reject(Object.assign(new Error('body too large'), { status: 413 })); req.destroy(); return; }
-      chunks.push(d);
+      if (size > limit) refuse('body too large', 413); else chunks.push(d);
     });
     req.on('end', () => {
+      if (!chunks) return;
+      clearTimeout(timer);
       const text = Buffer.concat(chunks).toString('utf8');
       if (!text) return resolve(undefined);
       try { resolve(JSON.parse(text)); } catch { reject(Object.assign(new Error('bad json'), { status: 400 })); }
@@ -142,11 +156,19 @@ async function serve() {
     if (!origin || String(req.headers.origin || '').toLowerCase() !== origin) return send(res, 403, { error: 'cross-site request refused' });
     const blocked = ra.loginBlocked(ip);
     if (blocked) return send(res, 429, { error: `密码错误次数太多，请 ${blocked} 分钟后再试` });
-    let body;
-    try { body = (await readBody(req)) || {}; } catch { return send(res, 400, { error: 'bad request' }); }
+    // The attempt counts from here, before its body is read: requests held open together are not each a free guess.
+    // The form is two short fields: anything larger, slower or not JSON is a failed attempt too.
+    const done = ra.loginBegin(ip);
     const ua = req.headers['user-agent'];
-    if (!ra.readRemote().enabled || !ra.checkPassword(String(body.password || ''))) {
+    let body;
+    try { body = (await readBody(req, { limit: 4096, timeoutMs: 10_000 })) || {}; } catch (e) {
       ra.loginFailed(ip);
+      done();
+      return send(res, e.status || 400, { error: 'bad request' }, { connection: 'close' });
+    }
+    let passed = false;
+    try { passed = Boolean(ra.readRemote().enabled) && ra.checkPassword(String(body.password || '')); } finally { if (!passed) ra.loginFailed(ip); done(); }
+    if (!passed) {
       ra.noteLogin({ ip, ua, ok: false });
       await new Promise((r) => setTimeout(r, 600)); // a little slower for each guess
       return send(res, 401, { error: '密码不对' });
@@ -196,7 +218,8 @@ async function serve() {
     res.setHeader('referrer-policy', 'no-referrer');
     // only requests for this server by its own name: a page elsewhere cannot reach it through a name that points here
     if (!hosts().has(String(req.headers.host || '').toLowerCase())) return send(res, 421, { error: 'wrong host' });
-    const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    let url; // (a path such as // is no address)
+    try { url = new URL(req.url, `http://127.0.0.1:${port}`); } catch { return send(res, 400, { error: 'bad request' }); }
     // 远程访问: through the tunnel, from https://<prefix>.7bit.fun: its own password and cookie, and its own origin
     const remote = equal(req.headers['x-cpweb-tunnel'], tunnelSecret) && /^(?:127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || '');
     // (the address the browser is at, https://<prefix>.7bit.fun, as the gateway says: changes must come from it)
@@ -222,7 +245,23 @@ async function serve() {
         }
         if (req.method !== 'GET' && req.method !== 'HEAD' && String(req.headers.origin || '').toLowerCase() !== remoteOrigin) return send(res, 403, { error: 'cross-site request refused' });
       }
-      // the secret, once, from /web: kept as a cookie, then out of the address
+      // Whether this is the console that holds the secret, asked before claude-pro sends it here (someone else may be
+      // listening on the port of a console that has ended): the answer proves it without giving it away.
+      if (!remote && url.pathname === '/api/hello' && req.method === 'GET') {
+        const n = url.searchParams.get('n') || '';
+        if (!/^[\w-]{16,64}$/.test(n)) return send(res, 400, { error: 'bad request' });
+        return send(res, 200, { proof: consoleProof(token, n) });
+      }
+      // a log-in link of /web: once, for a few minutes (the secret itself is never in an address, which other users of the
+      // computer could see in the browser's command line), kept as a cookie, then out of the address
+      if (!remote && req.method === 'GET' && url.pathname === '/' && url.searchParams.has('c')) {
+        const until = linkCodes.get(url.searchParams.get('c'));
+        linkCodes.delete(url.searchParams.get('c'));
+        if (!until || until < Date.now()) return send(res, 403, { error: '链接已失效：请在 claude-pro 里重新运行 /web' });
+        res.writeHead(302, { location: '/', 'set-cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}`, 'cache-control': 'no-store' });
+        return res.end();
+      }
+      // (the secret in the address: the links of claude-pro 0.18 and before)
       if (!remote && req.method === 'GET' && url.pathname === '/' && url.searchParams.has('t')) {
         if (!equal(url.searchParams.get('t'), token)) return send(res, 403, { error: '链接已失效：请在 claude-pro 里重新运行 /web' });
         res.writeHead(302, { location: '/', 'set-cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}`, 'cache-control': 'no-store' });
@@ -245,7 +284,17 @@ async function serve() {
         if (!origins().has(String(req.headers.origin || '').toLowerCase())) return send(res, 403, { error: 'cross-site request refused' });
         if (req.headers['content-length'] && req.headers['content-length'] !== '0' && !/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) return send(res, 415, { error: 'JSON body required' });
       }
-      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), repo: REPO, remote, hosted: host?.size ?? 0, pending: host?.pendingUpdate() || null });
+      // a log-in link (see /?c=), for claude-pro on this computer
+      if (url.pathname === '/api/link' && req.method === 'POST') {
+        if (!bearer) return send(res, 403, { error: 'claude-pro only' });
+        for (const [c, until] of linkCodes) if (until < Date.now()) linkCodes.delete(c);
+        if (linkCodes.size > 100) linkCodes.clear();
+        const c = crypto.randomBytes(18).toString('base64url');
+        linkCodes.set(c, Date.now() + 10 * 60_000);
+        return send(res, 200, { code: c });
+      }
+      // (`hosted` counts the sessions being taken up too: a console starting with new code must not take it for idle)
+      if (url.pathname === '/api/ping') return send(res, 200, { ok: true, version: VERSION, code, pid: process.pid, machine: machineName(), repo: REPO, remote, hosted: host ? host.size + host.launching + (host.recovering ? 1 : 0) + (host.pendingAttach?.size || 0) : 0, pending: host?.pendingUpdate() || null });
       // a newer console was started (ensureWebServer): this one gives way once its sessions are idle
       if (url.pathname === '/api/handover' && req.method === 'POST') { host?.requestHandover(); return send(res, 200, { ok: true }); }
       // a session an older version started in a hidden window moves in (App.maybeMoveIntoConsole): the state it leaves
@@ -355,7 +404,8 @@ async function serve() {
   // through the tunnel.
   const { acceptTerminal } = await import('./terminals.js');
   server.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    let url;
+    try { url = new URL(req.url, `http://127.0.0.1:${port}`); } catch { socket.destroy(); return; }
     const local = /^(?:127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress || '');
     const bearer = equal(String(req.headers.authorization || '').replace(/^Bearer /, ''), token);
     if (url.pathname !== '/api/attach' || String(req.headers.upgrade).toLowerCase() !== 'claude-pro-attach' || !local || !bearer || req.headers['x-cpweb-tunnel'] || !host) {
@@ -431,7 +481,25 @@ function readState() {
   try { return JSON.parse(fs.readFileSync(stateFile(), 'utf8')); } catch { return null; }
 }
 
+const consoleProof = (token, n) => crypto.createHmac('sha256', token).update(`claude-pro console ${n}`).digest('base64url');
+const linkCodes = new Map(); // one-time log-in codes -> until when
+
+// Whether the console of web.json is listening on its port: the one that holds its secret (see /api/hello), or, for a
+// console of claude-pro 0.18 and before, which does not answer that, one whose process is this user's. Nothing is sent
+// to the port before (another user of the computer may listen there once the console has ended).
+export async function consoleIsOurs(state) {
+  if (!state?.port || !state.token) return false;
+  const n = crypto.randomBytes(18).toString('base64url');
+  try {
+    const res = await fetch(`http://127.0.0.1:${state.port}/api/hello?n=${n}`, { signal: AbortSignal.timeout(1500) });
+    if (res.ok) return equal(String((await res.json())?.proof || ''), consoleProof(state.token, n));
+    if (res.status !== 401) return false;
+  } catch { return false; }
+  try { process.kill(state.pid, 0); return true; } catch { return false; }
+}
+
 async function ping(state) {
+  if (!(await consoleIsOurs(state))) return null;
   try {
     const res = await fetch(`http://127.0.0.1:${state.port}/api/ping`, { headers: { authorization: `Bearer ${state.token}` }, signal: AbortSignal.timeout(1500) });
     return res.ok ? await res.json() : null;
@@ -456,23 +524,48 @@ export async function ensureWebServer() {
     }
   }
   let started = false;
+  // one start at a time: sessions that start together (a terminal restoring its tabs, an update) would each start one
   if (!alive) {
-    const env = { ...process.env, FORCE_COLOR: '1' }; // the tool headers it renders keep their colours for the page
-    delete env.NO_COLOR;
-    delete env.CLAUDE_PRO_BACKGROUND; // (the server is no session: a 后台会话 that starts it must not pass that on)
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env });
-    child.on('error', () => {});
-    child.unref();
-    started = true;
-    const until = Date.now() + 8000;
-    for (;;) {
-      await sleep(150);
+    const lock = path.join(CONFIG_DIR, 'web-start.lock');
+    const take = () => { try { fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: 'wx' }); return true; } catch { return false; } };
+    let mine = take();
+    if (!mine) {
+      for (const until = Date.now() + 10_000; !alive && Date.now() < until;) {
+        await sleep(250);
+        state = readState();
+        if (state) alive = await ping(state);
+      }
+      if (!alive) { try { fs.rmSync(lock, { force: true }); } catch { /* not there */ } mine = take(); }
+    }
+    if (!alive) {
+      try { alive = await startConsole(); started = true; } finally { if (mine) try { fs.rmSync(lock, { force: true }); } catch { /* gone */ } }
       state = readState();
-      if (state?.pid === child.pid && (alive = await ping(state))) break;
-      if (Date.now() > until) throw new Error('the web console did not start (see whether port 7878 or the config directory is usable)');
     }
   }
-  return { url: `http://127.0.0.1:${state.port}/?t=${state.token}`, port: state.port, started };
+  let code = null;
+  try {
+    const res = await fetch(`http://127.0.0.1:${state.port}/api/link`, { method: 'POST', headers: { authorization: `Bearer ${state.token}` }, signal: AbortSignal.timeout(1500) });
+    if (res.ok) code = (await res.json()).code;
+  } catch { /* an older console: the secret in the link */ }
+  return { url: `http://127.0.0.1:${state.port}/?${code ? `c=${code}` : `t=${state.token}`}`, port: state.port, started };
+}
+
+// A console of this code, started: resolves with its ping once it answers.
+async function startConsole() {
+  const env = { ...process.env, FORCE_COLOR: '1' }; // the tool headers it renders keep their colours for the page
+  delete env.NO_COLOR;
+  delete env.CLAUDE_PRO_BACKGROUND; // (the server is no session: a 后台会话 that starts it must not pass that on)
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--serve'], { detached: true, stdio: 'ignore', windowsHide: true, env });
+  child.on('error', () => {});
+  child.unref();
+  const until = Date.now() + 8000;
+  for (;;) {
+    await sleep(150);
+    const state = readState();
+    let alive;
+    if (state?.pid === child.pid && (alive = await ping(state))) return alive;
+    if (Date.now() > until) throw new Error('the web console did not start (see whether port 7878 or the config directory is usable)');
+  }
 }
 
 // A session of an older version, in a hidden window, moves into the console's process: the console (started if need

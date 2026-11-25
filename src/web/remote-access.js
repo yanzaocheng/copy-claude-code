@@ -133,15 +133,33 @@ export function noteLogin({ ip, ua, ok }) {
 
 // Brute force: 5 wrong passwords from an address lock it for 15 minutes; 20 in an hour from anywhere lock all logins
 // for the rest of that hour.
+// An attempt counts while it is being made too (loginBegin): many requests opened together, their bodies held back,
+// are not each a guess beyond the limit.
 const failures = new Map(); // ip -> {count, until}
+const pending = new Map(); // ip -> attempts being made
+let pendingAll = 0;
 let hourly = { start: Date.now(), count: 0 };
 export function loginBlocked(ip) {
   const now = Date.now();
   if (now - hourly.start > 3600_000) hourly = { start: now, count: 0 };
-  if (hourly.count >= 20) return Math.ceil((hourly.start + 3600_000 - now) / 60_000);
+  if (hourly.count + pendingAll >= 20) return Math.max(1, Math.ceil((hourly.start + 3600_000 - now) / 60_000));
   const f = failures.get(ip);
   if (f && f.until > now) return Math.ceil((f.until - now) / 60_000);
+  if ((f?.count || 0) + (pending.get(ip) || 0) >= 5) return 1;
   return 0;
+}
+// An attempt of `ip` starts; call what it returns when it is over (after loginFailed or loginPassed).
+export function loginBegin(ip) {
+  pending.set(ip, (pending.get(ip) || 0) + 1);
+  pendingAll++;
+  let over = false;
+  return () => {
+    if (over) return;
+    over = true;
+    pendingAll--;
+    const left = (pending.get(ip) || 1) - 1;
+    if (left > 0) pending.set(ip, left); else pending.delete(ip);
+  };
 }
 export function loginFailed(ip) {
   hourly.count++;
@@ -149,6 +167,7 @@ export function loginFailed(ip) {
   f.count++;
   if (f.count >= 5) { f.until = Date.now() + 15 * 60_000; f.count = 0; }
   failures.set(ip, f);
+  if (failures.size > 2000) for (const [k, v] of failures) { if (v.until < Date.now() && failures.size > 1000) failures.delete(k); }
 }
 export function loginPassed(ip) { failures.delete(ip); }
 

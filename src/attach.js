@@ -132,7 +132,8 @@ export async function attachSession({ flags, cwd, prompt, stdin = process.stdin,
   });
 
   const first = await ask();
-  let sock = await (async () => { const s = server(); return s?.port ? connect(s.port, s.token) : null; })();
+  // (the secret goes only to the console that holds it: see consoleIsOurs)
+  let sock = await (async () => { const s = server(); return s?.port && (await web.consoleIsOurs(s)) ? connect(s.port, s.token) : null; })();
   if (!sock) { stdin.setRawMode(false); return null; }
   stdin.on('data', onKeys);
   stdin.resume();
@@ -160,7 +161,7 @@ export async function attachSession({ flags, cwd, prompt, stdin = process.stdin,
       // what it was running from its list (web-running.json)
       if (Date.now() - since > 12_000 && Date.now() - started > 15_000) { started = Date.now(); web.ensureWebServer().catch(() => {}); }
       const s = server();
-      if (s?.port) again = await connect(s.port, s.token);
+      if (s?.port && (await web.consoleIsOurs(s))) again = await connect(s.port, s.token);
     }
     waiting = false;
     if (!again) {

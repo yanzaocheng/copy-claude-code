@@ -24,13 +24,30 @@ const DIR = /^[\w.-]{1,250}$/;
 
 // What the list shows of a conversation file, read without parsing every message (a conversation with screenshots
 // is tens of MB): the messages are counted, only the first prompt and the meta lines are parsed. Kept on disk by
-// file, size and time (cache/web-sessions.json), so that only the files that changed are read again.
-function summarize(file) {
-  let count = 0;
-  let firstPrompt = null;
-  let meta = {};
-  let lastAt = 0;
-  const text = fs.readFileSync(file, 'utf8');
+// file, size and time (cache/web-sessions.json), so that only the files that changed are read again, and of a file
+// that grew (the conversation of a session at work, looked at every few seconds by the page) only what was added:
+// `state` is where the reading stopped ({ino, offset, count, firstPrompt, meta, lastAt}), good for as long as the
+// file is the same one (a compaction writes a new file) and has not shrunk.
+const META_KEPT = ['cwd', 'created', 'name', 'topic', 'cost', 'firstPrompt'];
+function summarize(file, st = fs.statSync(file), prev = null) {
+  const same = `${st.ino}:${Math.round(st.birthtimeMs)}`; // (the file itself: a compacted one is a new file)
+  const go = prev && prev.ino === same && prev.offset > 0 && prev.offset <= st.size;
+  let count = go ? prev.count : 0;
+  let firstPrompt = go ? prev.firstPrompt : null;
+  let meta = go ? { ...prev.meta } : {};
+  let lastAt = go ? prev.lastAt : 0;
+  let offset = go ? prev.offset : 0;
+  let buf;
+  if (!offset) buf = fs.readFileSync(file);
+  else {
+    buf = Buffer.alloc(Math.max(0, st.size - offset));
+    const fd = fs.openSync(file, 'r');
+    try { buf = buf.subarray(0, fs.readSync(fd, buf, 0, buf.length, offset)); } finally { fs.closeSync(fd); }
+  }
+  // whole lines only: one being written is read the next time
+  const whole = buf.lastIndexOf(10) + 1;
+  const text = buf.toString('utf8', 0, whole);
+  offset += whole;
   let start = 0;
   while (start < text.length) {
     let end = text.indexOf('\n', start);
@@ -53,20 +70,24 @@ function summarize(file) {
       } catch { /* skip */ }
     } else if (line.startsWith('{"type":"meta"')) {
       try {
-        const { systemPrompt, cacheState, ...e } = JSON.parse(line);
-        meta = { ...meta, ...e };
+        const e = JSON.parse(line);
+        for (const k of META_KEPT) if (k in e) meta[k] = e[k];
       } catch { /* skip */ }
     }
   }
+  const state = { ino: same, offset, count, firstPrompt: firstPrompt ? String(firstPrompt).slice(0, 500) : null, meta, lastAt };
   const name = typeof meta.name === 'string' && meta.name.trim() ? meta.name : null;
   const topic = typeof meta.topic === 'string' && meta.topic.trim() ? meta.topic : null;
   if (typeof meta.firstPrompt === 'string' && meta.firstPrompt) firstPrompt = meta.firstPrompt; // (a compacted file: see compactSession)
   return {
-    cwd: typeof meta.cwd === 'string' ? meta.cwd : null,
-    created: meta.created || null,
-    name, topic, firstPrompt, count,
-    cost: Number(meta.cost) > 0 ? Number(meta.cost) : 0,
-    lastAt,
+    data: {
+      cwd: typeof meta.cwd === 'string' ? meta.cwd : null,
+      created: meta.created || null,
+      name, topic, firstPrompt, count,
+      cost: Number(meta.cost) > 0 ? Number(meta.cost) : 0,
+      lastAt,
+    },
+    state,
   };
 }
 
@@ -79,13 +100,32 @@ function readSummaries() {
   return summaries;
 }
 
+// (written a while after a change, not at every look of the page at a session that is working)
+let saving = null;
 function saveSummaries() {
-  try {
-    fs.mkdirSync(path.dirname(cacheFile()), { recursive: true });
-    const tmp = `${cacheFile()}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(summaries)));
-    fs.renameSync(tmp, cacheFile());
-  } catch { /* read again next time */ }
+  saving ??= setTimeout(() => {
+    saving = null;
+    try {
+      fs.mkdirSync(path.dirname(cacheFile()), { recursive: true });
+      const tmp = `${cacheFile()}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(summaries)));
+      fs.renameSync(tmp, cacheFile());
+    } catch { /* read again next time */ }
+  }, 15_000);
+  saving.unref?.();
+}
+
+// A conversation as loaded, kept for a moment: its view asks for it, then for each of its pictures and long tool
+// outputs, and loading parses the whole file.
+let lastLoaded = null;
+function loadSession(file) {
+  const st = fs.statSync(file);
+  if (lastLoaded?.file === file && lastLoaded.mtime === st.mtimeMs && lastLoaded.size === st.size) return lastLoaded.loaded;
+  const loaded = SessionStore.load(file);
+  clearTimeout(lastLoaded?.timer);
+  const mine = lastLoaded = { file, mtime: st.mtimeMs, size: st.size, loaded, timer: setTimeout(() => { if (lastLoaded === mine) lastLoaded = null; }, 30_000) };
+  mine.timer.unref?.();
+  return loaded;
 }
 
 // Every conversation of every project, newest first: {id, dir, file, cwd, title, name, topic, firstPrompt, count,
@@ -108,7 +148,7 @@ export function listAllSessions() {
       seen.add(file);
       let e = cache.get(file);
       if (!e || e.mtime !== st.mtimeMs || e.size !== st.size) {
-        try { e = { mtime: st.mtimeMs, size: st.size, data: summarize(file) }; } catch { continue; }
+        try { e = { mtime: st.mtimeMs, size: st.size, ...summarize(file, st, e?.state) }; } catch { continue; }
         cache.set(file, e);
         changed = true;
       }
@@ -159,8 +199,8 @@ export const builtinTools = (cwd) => toolsFor(cwd).map((t) => ({ name: t.name, d
 // what the list knows of it.
 export function sessionDetail(dir, id) {
   const file = sessionFile(dir, id);
-  const loaded = SessionStore.load(file);
-  const cwd = summarize(file).cwd;
+  const loaded = loadSession(file);
+  const cwd = typeof loaded.meta.cwd === 'string' ? loaded.meta.cwd : null;
   const ctx = { cwd: cwd || os.homedir(), projectRoot: cwd || os.homedir() };
   const items = transcriptItems(loaded.messages, { tools: toolsFor(cwd), ctx, cwd: ctx.cwd, limit: Infinity, images: true, turns: loaded.turns });
   const st = fs.statSync(file);
@@ -173,7 +213,7 @@ export function sessionDetail(dir, id) {
 
 // The n-th image of a conversation's user messages: {mediaType, data (Buffer)} or null.
 export function sessionImage(dir, id, n) {
-  const loaded = SessionStore.load(sessionFile(dir, id));
+  const loaded = loadSession(sessionFile(dir, id));
   let i = 0;
   for (const m of loaded.messages) {
     if (m.role !== 'user' || typeof m.content === 'string') continue;
@@ -188,7 +228,7 @@ export function sessionImage(dir, id, n) {
 // The whole output of a tool call of a conversation (as the session's own remoteOutput gives it): the result's text,
 // or the file a large one was saved to; at most 1 MB.
 export function sessionToolOutput(dir, id, toolId) {
-  const loaded = SessionStore.load(sessionFile(dir, id));
+  const loaded = loadSession(sessionFile(dir, id));
   let result = null;
   for (const m of loaded.messages) {
     if (m.role !== 'user' || !Array.isArray(m.content)) continue;
@@ -235,7 +275,7 @@ export function renameSession(dir, id, name) {
 // Deleting moves a conversation (with its trace) into the trash, kept TRASH_DAYS days.
 export function trashSession(dir, id) {
   const file = sessionFile(dir, id);
-  const info = summarize(file);
+  const info = summarize(file).data;
   const stamp = Date.now();
   const base = path.join(trashRoot(), `${stamp}__${dir}__${id}`);
   fs.mkdirSync(base, { recursive: true });

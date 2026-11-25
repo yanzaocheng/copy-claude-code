@@ -8,9 +8,10 @@ export async function usage() {
   const period = days === 1 ? "今天" : `近 ${days} 天`;
   const el = page(`<h1>用量</h1><p class="sub">按天、模型、项目统计（来自每次请求的运行记录；有价格的模型才算得出花费）</p>
       <div class="toolbar">${[1, 7, 30, 90].map((d) => `<button class="button ${d === days ? "" : "secondary"} small" data-days="${d}">${d === 1 ? "今天" : `近 ${d} 天`}</button>`).join("")}<span style="flex:1"></span><label class="muted" style="font-size:13px">图表：<select id="metric"><option value="cost">花费</option><option value="tokens">tokens</option><option value="requests">请求数</option></select></label></div><div id="body"><div class="empty">正在统计…</div></div>`);
-  $$("[data-days]", el).forEach((b) => b.addEventListener("click", () => { sessionStorage.setItem("usageDays", b.dataset.days); usage(); }));
+  $$("[data-days]", el).forEach((b) => b.addEventListener("click", () => { sessionStorage.setItem("usageDays", b.dataset.days); view.cleanup?.(); view.cleanup = null; usage(); }));
   let u;
   try { u = await api(`/api/usage?days=${days}`); } catch (e) { $("#body", el).innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; return; }
+  if (!el.isConnected) return; // (another page was opened meanwhile: what it leaves behind is its own)
   const total = u.days.reduce((a, d) => ({ cost: a.cost + d.cost, requests: a.requests + d.requests, tokens: a.tokens + d.input + d.output + d.cacheRead + d.cacheWrite }), { cost: 0, requests: 0, tokens: 0 });
   const table = (rows, label) => rows.length ? `<table class="list"><thead><tr><th>${label}</th><th class="num">请求</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">缓存写</th><th class="num">花费</th></tr></thead><tbody>
       ${rows.map((r) => `<tr><td class="mono" style="word-break:break-all">${esc(shortPath(r.key))}</td><td class="num">${r.requests}</td><td class="num">${fmtTokens(r.input)}</td><td class="num">${fmtTokens(r.output)}</td><td class="num">${fmtTokens(r.cacheRead)}</td><td class="num">${fmtTokens(r.cacheWrite)}</td><td class="num">${r.cost ? fmtUsd(r.cost) : "—"}${r.unpriced ? ` <span class="faint" title="${r.unpriced} 次请求的模型没有价格">*</span>` : ""}</td></tr>`).join("")}

@@ -92,7 +92,12 @@ export class SessionHost {
   }
 
   log(e, what = '') {
-    try { fs.appendFileSync(errorLog(), `${new Date().toISOString()} ${what}${what ? ': ' : ''}${e?.stack || e}\n`); } catch { /* nowhere to say it */ }
+    try {
+      const file = errorLog();
+      // (kept small: the newer half stays when it has grown to 2 MB)
+      try { if (fs.statSync(file).size > 2 * 1024 * 1024) { const old = fs.readFileSync(file); fs.writeFileSync(file, old.subarray(old.indexOf(10, old.length >> 1) + 1)); } } catch { /* none yet */ }
+      fs.appendFileSync(file, `${new Date().toISOString()} ${what}${what ? ': ' : ''}${e?.stack || e}\n`);
+    } catch { /* nowhere to say it */ }
   }
 
   // A session: new in `cwd`, a saved one (`resumeFile`, `resumeId`), or one taken up again (`restart`: the state it

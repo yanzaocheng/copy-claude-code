@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync } from '../utils/proc.js';
 import {
   CONFIG_DIR, INSTALL_DIR, SOURCE_CHECKOUT, VERSION, BASIC_SETTINGS, KNOWN_KEYS, loadConfig, settingsFiles,
   writeConfigSetting, unsetConfigSetting, rememberChoice, updateSettingsFile, applyRememberedChoices, pickedModels, savePickedModels,
@@ -19,7 +19,7 @@ import { gatewayLogin, loginWithKey, clearGatewayLogin, fetchGatewayAccount, fet
 import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills } from '../agents.js';
 import { webModelChoices, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
-import { setArchived, archivedSessions, projectDir } from '../session.js';
+import { setArchived, archivedSessions, projectDir, sessionOpenIn } from '../session.js';
 import { deviceIdentity, readDeviceTrust, untrustDevice, setInboundPolicy } from '../devices.js';
 import { machineName } from '../peers.js';
 import {
@@ -51,10 +51,30 @@ function knownProjects() {
   }
   // the folders added to the 工作区, also before a conversation ran there
   for (const w of addedWorkspaces()) {
-    if (!byCwd.has(keyOf(w.cwd)) && fs.existsSync(w.cwd)) byCwd.set(keyOf(w.cwd), { cwd: w.cwd, dir: path.basename(projectDir(w.cwd)), sessions: 0, lastUsed: w.added || 0 });
+    if (!byCwd.has(keyOf(w.cwd)) && folderThere(w.cwd)) byCwd.set(keyOf(w.cwd), { cwd: w.cwd, dir: path.basename(projectDir(w.cwd)), sessions: 0, lastUsed: w.added || 0 });
   }
   return [...byCwd.values()].sort((a, b) => b.lastUsed - a.lastUsed);
 }
+
+// Whether a folder is there, without the request waiting for it: a folder on a network drive that is gone (a VPN that
+// dropped) takes the system a long time to say so, and a synchronous look from the page's refresh every few seconds
+// would stop every session of the console that long. What was found last is answered (a folder not looked at yet
+// counts as there), and it is looked at again in the background, at most every 30 s and one look at a time.
+const folders = new Map(); // path -> {there, at, looking}
+function folderThere(dir) {
+  let e = folders.get(dir);
+  if (!e) folders.set(dir, e = { there: true, at: 0, looking: false });
+  if (!e.looking && Date.now() - e.at > 30_000) {
+    e.looking = true;
+    fs.promises.stat(dir).then((st) => st.isDirectory(), () => false).then((there) => Object.assign(e, { there, at: Date.now(), looking: false }));
+  }
+  return e.there;
+}
+// The same, waited for a moment (for a list the user asked for): false when it does not answer in time.
+const folderThereSoon = (dir, ms = 1500) => Promise.race([
+  fs.promises.stat(dir).then((st) => st.isDirectory(), () => false),
+  new Promise((resolve) => { setTimeout(resolve, ms, false).unref(); }),
+]);
 
 // 工作区: folders the user added to the sidebar (添加工作区), listed with the projects that have conversations, also
 // before the first one runs there. CONFIG_DIR/workspaces.json, {dirs: [{cwd, added}]}, newest first.
@@ -167,8 +187,10 @@ async function projectDirectories(cwd) {
       { name: '下载', path: firstDir(path.join(home, 'Downloads')), kind: 'downloads' },
     ].filter((p) => p.path);
     // (A: and B: left out: an empty floppy drive answers slowly)
-    const drives = isWin ? [...'CDEFGHIJKLMNOPQRSTUVWXYZ'].map((l) => `${l}:\\`).filter(isDir).map((p) => ({ name: p.slice(0, 2), path: p, kind: 'drive' })) : [{ name: '/', path: '/', kind: 'drive' }];
-    const recent = knownProjects().filter((p) => isDir(p.cwd)).slice(0, 8).map((p) => ({ name: path.basename(p.cwd) || p.cwd, path: p.cwd, kind: 'project' }));
+    // (looked at together and not waited for long: a network drive that is gone answers after many seconds)
+    const present = async (list, of = (x) => x) => { const there = await Promise.all(list.map((x) => folderThereSoon(of(x)))); return list.filter((x, i) => there[i]); };
+    const drives = isWin ? (await present([...'CDEFGHIJKLMNOPQRSTUVWXYZ'].map((l) => `${l}:\\`))).map((p) => ({ name: p.slice(0, 2), path: p, kind: 'drive' })) : [{ name: '/', path: '/', kind: 'drive' }];
+    const recent = (await present(knownProjects().slice(0, 24), (p) => p.cwd)).slice(0, 8).map((p) => ({ name: path.basename(p.cwd) || p.cwd, path: p.cwd, kind: 'project' }));
     return { cwd: null, places, drives, recent, start: recent[0] ? path.dirname(recent[0].path) : home };
   }
   if (!path.isAbsolute(cwd) || (isWin && !windowsDrivePath(cwd))) throw httpError(400, '不是本机目录');
@@ -641,6 +663,9 @@ function openSession(dir, id, { terminal = false } = {}) {
     const live = (await running()).get(id);
     if (live && !terminal) return { opened: true, peerId: live.peerId, sessionId: id };
     if (live) throw httpError(409, '这个会话已经在运行');
+    // (a session too busy to answer is running all the same: its process holds the conversation)
+    const pid = sessionOpenIn(id);
+    if (pid) throw httpError(409, pid === process.pid ? '这个会话正在启动或结束，请稍后再试' : `这个会话正在另一个窗口里运行（进程 ${pid}），请在那里继续`);
     const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : home;
     if (!terminal) return launchSession(cwd, { resumeFile: session.file, resumeId: id });
     return launchTerminal(cwd, ['--resume', id], session.title);
@@ -721,7 +746,7 @@ export const routes = [
       sessions: listAllSessions().map(({ file, ...s }) => ({ ...s, running: peersById.get(s.id) ?? null })),
       live,
       projectOpen: { explorer: isWin, vscode: vscodeAvailable() },
-      workspaces: addedWorkspaces().filter((w) => fs.existsSync(w.cwd)),
+      workspaces: addedWorkspaces().filter((w) => folderThere(w.cwd)),
     };
   }],
   ['POST', /^\/api\/workspaces$/, (req, m, body) => addWorkspace(body)],
@@ -734,18 +759,18 @@ export const routes = [
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/image\/(\d+)$/, (req, [dir, id, n]) => {
     const image = sessionImage(dir, id, Number(n));
     if (!image) throw httpError(404, 'no such image');
-    return { raw: { type: image.mediaType, data: image.data } };
+    return { raw: { type: /^image\/(?:png|jpeg|gif|webp)$/.test(image.mediaType) ? image.mediaType : 'application/octet-stream', data: image.data } };
   }],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/output\/([\w-]+)$/, (req, [dir, id, tool]) => sessionToolOutput(dir, id, tool)],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/export$/, (req, [dir, id]) => ({ raw: { type: 'text/markdown; charset=utf-8', data: sessionMarkdown(dir, id), name: `claude-pro-${id.slice(0, 8)}.md` } })],
   ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/rename$/, async (req, [dir, id], body) => {
-    if ((await running()).has(id)) throw httpError(409, '会话正在运行：请在它的终端里用 /rename，或在「运行中」里给它发 /rename');
+    if ((await running()).has(id) || sessionOpenIn(id)) throw httpError(409, '会话正在运行：请在它的终端里用 /rename，或在「运行中」里给它发 /rename');
     return { name: renameSession(dir, id, body?.name) };
   }],
   ['POST', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)\/open$/, (req, [dir, id], body) => openSession(dir, id, { terminal: body?.terminal === true || body?.background === false })],
   ['DELETE', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, (req, [dir, id]) => sessionOperation(id, 'delete', async () => {
     if (host?.recovering || host?.restarting) throw httpError(409, '控制台正在恢复会话，请稍后再试');
-    if ((await running()).has(id)) throw httpError(409, '会话正在运行，请先关闭它再删除');
+    if ((await running()).has(id) || sessionOpenIn(id)) throw httpError(409, '会话正在运行，请先关闭它再删除');
     return trashSession(dir, id);
   })],
   // 归档: put conversations away from the workspace (or back), several at once (a whole project)
@@ -858,7 +883,11 @@ export const routes = [
     if (/settings(\.local)?\.json$/i.test(file)) throw httpError(400, '设置文件不能在这里删除');
     const trash = path.join(CONFIG_DIR, 'trash', 'files', `${Date.now()}__${path.basename(file)}`);
     fs.mkdirSync(path.dirname(trash), { recursive: true });
-    fs.renameSync(file, trash);
+    try { fs.renameSync(file, trash); } catch (e) {
+      if (e.code !== 'EXDEV') throw e; // (the project is on another drive than the configuration)
+      fs.copyFileSync(file, trash);
+      fs.rmSync(file);
+    }
     return { trashed: trash };
   }],
 
