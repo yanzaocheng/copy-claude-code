@@ -2,7 +2,7 @@
 // and WebSearch (the models' own search through the gateway, see searchWithModel; scraping DuckDuckGo or Bing only
 // as the last resort).
 
-import { quickQuery, streamMessage } from '../api.js';
+import { quickQuery, streamMessage, modelRoute } from '../api.js';
 import { localDate } from '../context.js';
 import { renderPage, CHECK_TITLE } from '../browser/render.js';
 import { safeUrl } from '../browser/session.js';
@@ -87,35 +87,107 @@ export function decodeEntities(s) {
   });
 }
 
+// A page as Markdown, in one pass over it. (Until 2026-11-25 it was a chain of patterns, each looking ahead from every
+// opening tag for its closing one: on a page with thousands of tags that never close, that took minutes, the whole
+// program frozen meanwhile.) Left out with what is inside them: these elements (a name ends where the tag's does:
+// <header>, <navbar-menu>, <style-guide> are other elements), and comments.
+const LEFT_OUT = new Set(['script', 'style', 'noscript', 'svg', 'iframe', 'template', 'head', 'nav', 'footer']);
+const MARKS = { strong: '**', b: '**', em: '*', i: '*', code: '`' };
+const TAG_NAME = /<(\/?)([a-zA-Z][\w:-]*)/y;
+const BLOCK_ENDS = new Set(['p', 'div', 'section', 'article', 'ul', 'ol', 'table', 'tr', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+
+// The text of some HTML without its tags (as /<[^>]+>/g would leave it, without looking ahead from each "<").
+function stripTags(t) {
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const i = t.indexOf('<', pos);
+    if (i < 0) return out + t.slice(pos);
+    const j = t.indexOf('>', i + 1);
+    if (j < 0) return out + t.slice(pos);
+    if (j === i + 1) { out += t.slice(pos, i + 1); pos = i + 1; continue; } // ("<>" is no tag)
+    out += t.slice(pos, i);
+    pos = j + 1;
+  }
+}
+
+// Where the closing tag of `name` is, from a position on: {at, end} or null. The pass asks in order, so what was found
+// answers the next questions until the pass is beyond it, and "none after here" answers them all: each name's closing
+// tags are looked for once over the page.
+function closingTags(s) {
+  const found = new Map(); // name -> {from, at, end, re}
+  return (name, from) => {
+    let f = found.get(name);
+    if (f && from >= f.from && (f.at < 0 || from <= f.at)) return f.at < 0 ? null : f;
+    const re = f?.re || new RegExp(`</${name}\\s*>`, 'gi');
+    re.lastIndex = from;
+    const m = re.exec(s);
+    f = m ? { from, at: m.index, end: re.lastIndex, re } : { from, at: -1, end: -1, re };
+    found.set(name, f);
+    return f.at < 0 ? null : f;
+  };
+}
+
 export function htmlToMarkdown(html, baseUrl) {
-  let s = html;
-  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(s)?.[1];
-  s = s.replace(/<!--[\s\S]*?-->/g, '')
-    // the name ends where the tag's does: <header>, <navbar-menu>, <style-guide> are other elements (taken for <head>,
-    // <nav>, <style>, they ran on to a later closing tag and took the page's text with them)
-    .replace(/<(script|style|noscript|svg|iframe|template|head)(?=[\s>/])[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(/<(nav|footer)(?=[\s>/])[\s\S]*?<\/\1\s*>/gi, '');
+  const s = String(html);
+  const closing = closingTags(s);
   const abs = (href) => { try { return new URL(decodeEntities(href), baseUrl).href; } catch { return href; } };
-  s = s.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (m, code) => `\n\`\`\`\n${decodeEntities(code.replace(/<[^>]+>/g, ''))}\n\`\`\`\n`)
-    .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (m, n, t) => `\n\n${'#'.repeat(+n)} ${t.replace(/<[^>]+>/g, '').trim()}\n\n`)
-    .replace(/<a\s[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (m, href, t) => {
-      const text = t.replace(/<[^>]+>/g, '').trim();
-      return text ? `[${text}](${abs(href)})` : '';
-    })
-    .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**')
-    .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, '*$2*')
-    .replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`')
-    .replace(/<li[^>]*>/gi, '\n- ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|section|article|ul|ol|table|tr|blockquote|h\d)>/gi, '\n\n')
-    .replace(/<(td|th)[^>]*>/gi, ' | ')
-    .replace(/<[^>]+>/g, '');
-  s = decodeEntities(s)
+  let title = null;
+  const t = /<title(?=[\s>/])/i.exec(s);
+  const tEnd = t ? s.indexOf('>', t.index) : -1;
+  if (tEnd >= 0) { const c = closing('title', tEnd + 1); if (c) title = s.slice(tEnd + 1, c.at); }
+  let out = '';
+  const marked = new Set(); // the MARKS open, waiting for their closing tag
+  let pos = 0;
+  while (pos < s.length) {
+    const i = s.indexOf('<', pos);
+    if (i < 0) { out += s.slice(pos); break; }
+    out += s.slice(pos, i);
+    if (s.startsWith('<!--', i)) {
+      const e = s.indexOf('-->', i + 4);
+      if (e >= 0) { pos = e + 3; continue; }
+    }
+    const j = s.indexOf('>', i + 1);
+    if (j < 0) { out += s.slice(i); break; } // (no tag from here on)
+    if (j === i + 1) { out += '<'; pos = i + 1; continue; }
+    pos = j + 1;
+    TAG_NAME.lastIndex = i;
+    const m = TAG_NAME.exec(s);
+    if (!m) continue; // <!doctype ...>, <?xml ...?>, "a < b > c"
+    const name = m[2].toLowerCase();
+    if (m[1]) {
+      if (MARKS[name] && marked.has(name)) { marked.delete(name); out += MARKS[name]; } else if (BLOCK_ENDS.has(name)) out += '\n\n';
+      continue;
+    }
+    // (an element that is never closed loses its tag only, as a browser would show it)
+    if (LEFT_OUT.has(name)) { const c = closing(name, pos); if (c) pos = c.end; continue; }
+    if (name === 'pre') {
+      const c = closing(name, pos);
+      if (c) { out += `\n\`\`\`\n${decodeEntities(stripTags(s.slice(pos, c.at)))}\n\`\`\`\n`; pos = c.end; }
+      continue;
+    }
+    if (name.length === 2 && name[0] === 'h' && name[1] >= '1' && name[1] <= '6') {
+      const c = closing(name, pos);
+      if (c) { out += `\n\n${'#'.repeat(+name[1])} ${stripTags(s.slice(pos, c.at)).trim()}\n\n`; pos = c.end; }
+      continue;
+    }
+    if (name === 'a') {
+      const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(s.slice(i, j + 1))?.[1];
+      const c = href ? closing(name, pos) : null;
+      if (c) { const text = stripTags(s.slice(pos, c.at)).trim(); out += text ? `[${text}](${abs(href)})` : ''; pos = c.end; }
+      continue;
+    }
+    if (MARKS[name]) { if (!marked.has(name) && closing(name, pos)) { marked.add(name); out += MARKS[name]; } continue; }
+    if (name === 'li') out += '\n- ';
+    else if (name === 'br') out += '\n';
+    else if (name === 'td' || name === 'th') out += ' | ';
+  }
+  const text = decodeEntities(out)
     .replace(/[ \t\f\v]+/g, ' ')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  return (title ? `# ${decodeEntities(title.trim())}\n\n` : '') + s;
+  return (title ? `# ${decodeEntities(title.trim())}\n\n` : '') + text;
 }
 
 // The cookies of one fetch, kept across its redirects as a browser keeps them (for their host or domain, path,
@@ -484,7 +556,9 @@ async function searchWithModel(config, model, input, signal) {
     cacheBucket: 'other',
     cacheMessages: false,
   }, { signal, waitForRateLimit: false });
-  return readSearchReply(res.message.content, domainFilter(input));
+  const blocks = res.message.content;
+  // (whether the model did search: the blocks the Messages API gives for it)
+  return { ...readSearchReply(blocks, domainFilter(input)), searched: blocks.some((b) => b.type === 'server_tool_use' || b.type === 'web_search_tool_result') };
 }
 
 function formatSearch(query, found, model) {
@@ -519,26 +593,31 @@ export const WebSearchTool = {
   summarize(input) { return `"${input.query}"${input.allowed_domains?.length ? ` on ${input.allowed_domains.join(', ')}` : ''}`; },
   async call(input, ctx) {
     const failures = [];
-    if (ctx.config) {
+    // The model searches where it can be given the search tool: through the gateway, or at a provider of the Messages
+    // API. A Chat Completions provider is not given it (openai-chat.js drops it), and would answer from memory, which
+    // must not come back as search results; so must not the answer of a provider that takes the tool and ignores it.
+    const route = ctx.config ? modelRoute(ctx.config, ctx.config.model) : null;
+    if (route && route.protocol !== 'anthropic') failures.push(`${ctx.config.model.id}: its provider has no web search tool`);
+    if (route?.protocol === 'anthropic') {
       const model = ctx.config.model;
       const timeout = AbortSignal.timeout(searchLimits.timeoutMs);
       try {
         const found = await searchWithModel(ctx.config, model, input, AbortSignal.any([...(ctx.signal ? [ctx.signal] : []), timeout]));
-        if (found.results.length || (found.text && !found.errors.length)) {
+        if (!route.gateway && !found.searched) {
+          failures.push(`${model.id}: its provider did not run a web search`);
+        } else if (found.results.length || (found.text && !found.errors.length)) {
           return { content: formatSearch(input.query, found, model), display: { summary: `Found ${found.results.length} results` } };
-        }
-        if (!found.errors.length) {
+        } else if (!found.errors.length) {
           // a search that worked and found nothing: so it is (another engine would not do better)
           return { content: `No results found for "${input.query}"${input.allowed_domains?.length ? ` on ${input.allowed_domains.join(', ')}` : ''}.`, display: { summary: 'No results' } };
-        }
-        failures.push(`${model.id}: ${found.errors.join(', ')}`);
+        } else failures.push(`${model.id}: ${found.errors.join(', ')}`);
       } catch (e) {
         if (ctx.signal?.aborted) throw e;
         failures.push(`${model.id}: ${timeout.aborted ? `timed out after ${searchLimits.timeoutMs / 1000}s` : (e.message || String(e)).slice(0, 200)}`);
       }
     }
     // The last resort: a search engine's page, scraped.
-    const note = failures.length ? `(The search through the gateway failed: ${failures.join('; ')}. These results are scraped from a search engine's page instead and may be off-topic.)\n\n` : '';
+    const note = failures.length ? `(The model's own web search was not used: ${failures.join('; ')}. These results are scraped from a search engine's page instead and may be off-topic.)\n\n` : '';
     let results = [];
     const errors = [];
     for (const engine of [searchDuckDuckGo, searchBing]) {

@@ -34,6 +34,12 @@ function endpointFor(config, model) {
   }
 }
 
+// How a model is reached: {gateway, protocol} (null when its provider is not connected). WebSearch asks: the search
+// tool is the gateway's and the Messages API's; a Chat Completions provider is not given it (see openai-chat.js).
+export function modelRoute(config, model) {
+  try { return { gateway: providerOf(model) === GATEWAY_PROVIDER, protocol: endpointFor(config, model).protocol }; } catch { return null; }
+}
+
 // One client per endpoint and key, kept while they stay the same. A Chat Completions provider gets a fetch that
 // translates (see openai-chat.js); the SDK above it does not know.
 const clients = new Map();

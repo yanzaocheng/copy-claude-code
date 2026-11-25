@@ -13,6 +13,8 @@ function toSource(text) {
 
 function findCell(nb, id) {
   const cells = nb.cells || [];
+  // (no id given names no cell: the cells of an older notebook have no id either, and the first would match)
+  if (id === undefined || id === null || id === '') return -1;
   const byId = cells.findIndex((c) => c.id === id);
   if (byId >= 0) return byId;
   const m = /^cell-(\d+)$/.exec(String(id)) || /^(\d+)$/.exec(String(id));
@@ -74,7 +76,7 @@ export const NotebookEditTool = {
       summary = `Inserted cell ${cell.id} at position ${at}`;
     } else {
       const i = findCell(nb, input.cell_id);
-      if (i < 0) return { isError: true, content: `Cell not found: ${input.cell_id ?? '(no cell_id given)'}` };
+      if (i < 0) return { isError: true, content: input.cell_id === undefined || input.cell_id === '' ? `Give the cell_id of the cell to ${mode} (its id, or cell-N for the N-th cell, from 0).` : `Cell not found: ${input.cell_id}` };
       if (mode === 'delete') {
         nb.cells.splice(i, 1);
         summary = `Deleted cell ${input.cell_id}`;

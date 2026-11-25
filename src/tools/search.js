@@ -4,7 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { resolvePath, displayPath } from '../utils/paths.js';
 import { ripgrepPath } from '../utils/shell.js';
 import { decodeText as decodeFile } from '../utils/encoding.js';
@@ -52,13 +52,23 @@ export const GlobTool = {
     return input.path ? `pattern: "${input.pattern}", path: "${displayPath(resolvePath(input.path, ctx.cwd), ctx.cwd)}"` : `pattern: "${input.pattern}"`;
   },
   async call(input, ctx) {
-    const base = resolvePath(input.path && input.path !== 'undefined' && input.path !== 'null' ? input.path : ctx.cwd, ctx.cwd);
+    let base = resolvePath(input.path && input.path !== 'undefined' && input.path !== 'null' ? input.path : ctx.cwd, ctx.cwd);
     if (!fs.existsSync(base)) return { isError: true, content: `Directory does not exist: ${base}` };
     let pattern = String(input.pattern || '').replace(/\\/g, '/');
-    // Absolute patterns inside the base dir become relative.
+    // An absolute pattern inside the base dir becomes relative; one outside it (another drive, a folder elsewhere) is
+    // looked for where it says: its leading folders, those without a wildcard, are the directory.
     if (path.isAbsolute(pattern)) {
-      const rel = path.relative(base, pattern).replace(/\\/g, '/');
-      if (!rel.startsWith('..')) pattern = rel;
+      const rel = path.relative(base, resolvePath(pattern, ctx.cwd)).replace(/\\/g, '/');
+      if (!rel.startsWith('..') && !path.isAbsolute(rel)) pattern = rel;
+      else {
+        const parts = pattern.split('/');
+        const wild = parts.findIndex((p) => /[*?[\]{}]/.test(p));
+        const cut = wild < 0 ? parts.length - 1 : wild;
+        const dir = resolvePath(parts.slice(0, cut).join('/') || '/', ctx.cwd);
+        if (!fs.existsSync(dir)) return { isError: true, content: `Directory does not exist: ${dir}` };
+        base = dir;
+        pattern = parts.slice(cut).join('/');
+      }
     }
     const explicit = [...IGNORED_DIRS].filter((d) => pattern.includes(d));
     const exclude = (p) => {

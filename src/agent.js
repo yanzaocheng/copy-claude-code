@@ -270,6 +270,7 @@ const recoveredToolResult = (id) => ({
 export function repairToolResults(messages) {
   const out = [];
   let pending = null;
+  let given = new Map(); // the pending calls that were given a new id -> the id they had
   let changed = false;
   let recoveryIndex = 0;
   const recovered = [];
@@ -296,12 +297,17 @@ export function repairToolResults(messages) {
     if (uses.length) {
       flushPending();
       const ids = [];
+      // A provider that numbers its calls (call_0 in every reply) or repeats an id within a reply: the call gets an
+      // id of its own, and so does its result, which is found by the id the call had (in order, see below).
+      given = new Map();
       for (const block of uses) {
-        let id = typeof block.id === 'string' && block.id ? block.id : null;
+        const had = typeof block.id === 'string' && block.id ? block.id : null;
+        let id = had;
         if (!id || usedIds.has(id)) {
           id = freshId();
           m.content[m.content.indexOf(block)] = { ...block, id };
           changed = true;
+          if (had) given.set(id, had);
         } else usedIds.add(id);
         ids.push(id);
       }
@@ -311,21 +317,23 @@ export function repairToolResults(messages) {
     }
 
     if (m.role === 'user' && pending?.length) {
-      const expected = new Set(pending);
       const seen = new Set();
       const results = [];
       const rest = [];
       for (const block of m.content) {
         if (block.type !== 'tool_result') { rest.push(block); continue; }
-        const id = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
-        if (!expected.has(id) || seen.has(id)) { changed = true; continue; }
+        const had = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+        // the call it answers: the one with this id, else the first renamed one that had it
+        const id = pending.find((p) => !seen.has(p) && p === had) ?? pending.find((p) => !seen.has(p) && given.get(p) === had);
+        if (!id) { changed = true; continue; }
         seen.add(id);
+        const result = id === had ? block : { ...block, tool_use_id: id };
         if (block.content === undefined || block.content === null) {
-          results.push({ ...block, content: '(no output)' });
+          results.push({ ...result, content: '(no output)' });
           changed = true;
           continue;
         }
-        results.push(block);
+        results.push(result);
       }
       for (const id of pending) if (!seen.has(id)) { results.push(interrupted(id)); changed = true; }
       const content = [...results, ...rest];
@@ -338,7 +346,7 @@ export function repairToolResults(messages) {
     // A tool_result without a directly preceding assistant tool_use is invalid too.
     if (m.role === 'user' && m.content.some((b) => b.type === 'tool_result')) {
       const content = m.content.filter((b) => b.type !== 'tool_result');
-      if (content.length !== m.content.length) { changed = true; out.push({ ...m, content }); }
+      if (content.length !== m.content.length) { changed = true; if (content.length) out.push({ ...m, content }); } // (a message with nothing left is refused)
       else out.push(m);
     } else {
       if (pending) flushPending();
