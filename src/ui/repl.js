@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { c, ESC, glyphs, stringWidth, stripAnsi, truncate, padEnd, wordWrap } from './ansi.js';
 import { Screen, HeadlessScreen, queryCursorRow } from './screen.js';
 import { Editor, shownQuotes } from './editor.js';

@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { Cdp, abortError } from './cdp.js';
 import { browserExecutables } from './executables.js';
 import { killTree, killTreeSync, processAlive } from '../utils/shell.js';

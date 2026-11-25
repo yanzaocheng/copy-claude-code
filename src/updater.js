@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import https from 'node:https';
-import { spawn } from 'node:child_process';
+import { spawn } from './utils/proc.js';
 import { CONFIG_DIR, INSTALL_DIR, VERSION } from './config.js';
 import { killTree, processAlive as alive, npmInvocation } from './utils/shell.js';
 

@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile } from '../utils/proc.js';
 import { INSTALL_DIR } from '../config.js';
 
 const NAME = 'claude-pro 控制台';

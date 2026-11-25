@@ -16,7 +16,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { fileURLToPath } from 'node:url';
 import { Cdp, CdpError, abortError } from './cdp.js';
 import { CONFIG_DIR } from '../config.js';

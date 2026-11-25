@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn } from './proc.js';
 
 export const MAX_IMAGE_EDGE = 1568;
 const API_MAX_EDGE = 2000; // what a request with many images accepts: sent as it is when it cannot be scaled

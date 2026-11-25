@@ -3,7 +3,7 @@
 // PowerShell query (CIM, for the command lines) and netstat; the model did the same through Bash about a thousand
 // times in two weeks, where PowerShell's $_ inside bash quoting made one call in ten fail.
 
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { OutputDecoder } from '../utils/encoding.js';
 import { findPs, parsePsRows, msysTree } from '../utils/shell.js';
 

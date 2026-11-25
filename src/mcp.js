@@ -3,7 +3,7 @@
 //   { "mcpServers": { "name": { "command": "npx", "args": [...], "env": {...} },
 //                     "remote": { "type": "http", "url": "https://...", "headers": {...} } } }
 
-import { spawn } from 'node:child_process';
+import { spawn, onPath } from './utils/proc.js';
 import { VERSION } from './config.js';
 import { childEnv, killTreeSync } from './utils/shell.js';
 
@@ -37,7 +37,8 @@ class StdioTransport {
     const command = expandEnv(this.cfg.command);
     const args = (this.cfg.args || []).map(expandEnv);
     if (isWin) {
-      const line = [command, ...args].map(quoteWinArg).join(' ');
+      // (cmd.exe looks in the working directory, the project, before PATH: the server's program is found here instead)
+      const line = [onPath(command, env, ['.com', '.exe', '.bat', '.cmd']), ...args].map(quoteWinArg).join(' ');
       this.child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { env, cwd: this.cwd, windowsHide: true, windowsVerbatimArguments: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } else {
       this.child = spawn(command, args, { env, cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] });

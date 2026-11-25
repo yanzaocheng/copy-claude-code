@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn } from '../utils/proc.js';
 import { Cdp, CdpError, abortError } from './cdp.js';
 import { closeRenderer } from './render.js';
 import { CONFIG_DIR } from '../config.js';

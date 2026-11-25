@@ -4,7 +4,7 @@
 // byte it did not change as it was. Decoding everything as UTF-8 used to turn each Chinese character of a GBK file
 // into U+FFFD on its first edit. A file that is none of these is marked `lossy`: it can be read, not rewritten.
 
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './proc.js';
 
 const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
 const lenientUtf8 = new TextDecoder('utf-8');

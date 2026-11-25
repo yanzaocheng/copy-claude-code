@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './utils/proc.js';
 import { CONFIG_DIR } from './config.js';
 import { spawnShell, findPs, parsePsRows, msysTree, killTree, killTreeSync, processAlive } from './utils/shell.js';
 import { OutputDecoder } from './utils/encoding.js';
