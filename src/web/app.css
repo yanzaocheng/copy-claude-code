@@ -372,6 +372,23 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .prefix-row input { flex: 1; min-width: 0; }
 .remote-setup .modal-error { color: var(--danger); font-size: 13px; }
 .dev-me { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+/* 我的电脑: a title with its button; the pairing dialog */
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.page-head > div { flex: 1 1 360px; min-width: 0; }
+.page-head .button { flex: none; display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
+.dev-mode { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.dev-mode select { font-size: 13px; padding: 4px 8px; }
+.pair-code { font-size: 38px; font-weight: 700; letter-spacing: .12em; text-align: center; margin: 8px 0 2px; color: var(--text); user-select: all; }
+.pair-left { text-align: center; font-size: 12.5px; margin-bottom: 14px; }
+.pair-steps { margin: 0 0 12px; padding-left: 20px; font-size: 13.5px; line-height: 1.7; }
+.pair-wait { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--hover); font-size: 13.5px; }
+.pair-wait .spinner { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: pair-spin .8s linear infinite; flex: none; }
+@keyframes pair-spin { to { transform: rotate(360deg); } }
+.pair-input { font-size: 22px; letter-spacing: .1em; text-align: center; }
+.pair-error { color: var(--danger); font-size: 13.5px; margin: 6px 0 12px; }
+.pair-done { display: flex; gap: 14px; align-items: flex-start; color: var(--text); }
+.pair-done svg { color: var(--ok, #16a34a); flex: none; }
+@media (max-width: 640px) { .pair-code { font-size: 30px; } }
 /* a computer asking to run a task here: on top of every page, as a remote desktop program asks */
 .auth-stack { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 60; display: flex; flex-direction: column; gap: 10px; width: min(560px, calc(100vw - 24px)); pointer-events: none; }
 .auth-card { pointer-events: auto; background: var(--surface); border: 1px solid var(--line-strong); border-top: 3px solid var(--warn); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 14px 16px; animation: pop-in .15s ease; }

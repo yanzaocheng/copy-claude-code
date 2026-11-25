@@ -196,7 +196,7 @@ async function loadModelLists(el, p) {
     const gw = e.target.closest("[data-gateway]");
     if (gw?.dataset.gateway === "change") return gatewayDialog(el, p);
     if (gw?.dataset.gateway === "remove") {
-      if (!confirm("断开 7bit.fun？保存的 Key 会删除：它的模型不能用了，这台电脑的会话也会下线（远程访问、跨电脑互发任务靠它）。")) return;
+      if (!confirm("断开 7bit.fun？保存的 Key 会删除：它的模型不能用了，远程访问也连不上了。（和配对的电脑互发任务不受影响，它不靠任何账号。）")) return;
       try { drawProviders(el, await api("/api/gateway", { method: "DELETE" })); toast("已断开 7bit.fun"); } catch (err) { fail(err); }
       return;
     }

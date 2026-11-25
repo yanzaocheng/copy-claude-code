@@ -1,10 +1,9 @@
-// 远程访问: the console from elsewhere through https://<prefix>.7bit.fun, and 跨电脑互发任务 (the computers trusted to send
-// tasks).
+// 远程访问: the console from elsewhere through https://<prefix>.7bit.fun. (The computers paired with this one are on 我的电脑:
+// page-devices.js.)
 
-import { esc, api, toast, fail, fmtTime, ago, ICON, $, $$ } from "./util.js";
+import { esc, api, toast, fail, fmtTime, ago, $ } from "./util.js";
 import { modal } from "./dialogs.js";
 import { view, page } from "./router.js";
-import { ws, loadWorkspace } from "./workspace.js";
 
 export async function remotePage() {
   const el = page('<h1>远程访问</h1><p class="sub">在手机或别的电脑上，通过你自己的域名（https://&lt;前缀&gt;.7bit.fun）打开这台电脑的控制台，要输入密码</p><div id="body"><div class="empty">正在加载…</div></div>');
@@ -49,10 +48,7 @@ function drawRemote(el, v, h) {
       <div class="section-head"><div><h2>已登录的设备</h2><p>${v.sessions.length} 台</p></div>${v.sessions.length ? '<button class="button danger small" id="rLogoutAll">全部退出</button>' : ""}</div>
       <div class="panel">${v.sessions.length ? `<table class="list"><tbody>${v.sessions.map((s) => `<tr><td>${esc(device(s.ua))}</td><td class="mono">${esc(s.ip || "")}</td><td>最近 ${esc(ago(s.lastSeen))}</td><td class="num muted">${s.remember ? "记住 30 天" : "1 天"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">没有</div>'}</div>
       <div class="section-head"><h2>最近的登录</h2></div>
-      <div class="panel">${v.logins.length ? `<table class="list"><tbody>${v.logins.map((l) => `<tr><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill off">密码错误</span>'}</td><td>${esc(device(l.ua))}</td><td class="mono">${esc(l.ip || "")}</td><td class="num">${esc(fmtTime(l.at))}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">还没有人登录过</div>'}</div>
-      <div class="section-head"><div><h2>跨电脑互发任务</h2><p>你其他电脑上的会话发来任务时，像远程桌面一样先征得这里同意：允许本次连接、始终信任这台电脑或拒绝。同一台电脑上的会话之间直接执行</p></div></div>
-      <div class="panel panel-pad" id="rDevices"><span class="muted">正在读取…</span></div>`;
-  drawDevices(el);
+      <div class="panel">${v.logins.length ? `<table class="list"><tbody>${v.logins.map((l) => `<tr><td>${l.ok ? '<span class="pill ok">成功</span>' : '<span class="pill off">密码错误</span>'}</td><td>${esc(device(l.ua))}</td><td class="mono">${esc(l.ip || "")}</td><td class="num">${esc(fmtTime(l.at))}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">还没有人登录过</div>'}</div>`;
   // 开机自动启动: the console started at log-in (a shortcut in Startup, a LaunchAgent, an XDG autostart entry)
   const drawAuto = (a) => {
     const box = $("#rAuto", el);
@@ -127,67 +123,4 @@ function drawRemote(el, v, h) {
     if (a !== b) return toast("两次输入不一样", "error");
     post({ password: a }, "密码已保存，所有已登录的设备都已退出").catch(fail);
   });
-}
-
-// 跨电脑互发任务: this computer, how tasks from the others are taken, the computers trusted (see devices.js)
-async function drawDevices(el, d = null) {
-  const box = $("#rDevices", el);
-  if (!box) return;
-  try { d ||= await api("/api/devices"); } catch (e) { box.innerHTML = `<span class="muted">读不到：${esc(e.message)}</span>`; return; }
-  if (!box.isConnected) return;
-  box.innerHTML = `<div class="dev-me"><div><div class="muted" style="font-size:12.5px">这台电脑</div><div style="font-weight:650;margin-top:2px">${esc(d.me.name)}</div>${d.me.id ? `<div class="mono faint" style="font-size:12px" title="设备 ID：第一次用到时生成，之后不变；发出的任务都用它签名">设备 ${esc(d.me.id)}</div>` : ""}</div>
-        <label class="field" style="margin:0;min-width:240px">来自其他电脑的任务<select id="devPolicy"><option value="ask"${d.policy === "ask" ? " selected" : ""}>每次询问（已信任的电脑除外）</option><option value="account"${d.policy === "account" ? " selected" : ""}>同一账号的电脑直接执行</option></select></label></div>
-      <div style="font-weight:650;margin:16px 0 6px">已信任的电脑</div>
-      ${d.devices.length ? `<table class="list"><tbody>${d.devices.map((x) => `<tr><td><strong>${esc(x.name)}</strong> <span class="mono faint" style="font-size:12px">${esc(x.id.slice(0, 8))}</span></td><td class="muted">信任于 ${esc(fmtTime(x.trustedAt))}</td><td class="muted">${x.lastSeen ? `最近任务 ${esc(ago(x.lastSeen))}` : ""}</td><td class="num"><button class="button danger small" data-untrust="${esc(x.id)}" data-name="${esc(x.name)}">撤销</button></td></tr>`).join("")}</tbody></table>`
-        : '<div class="muted" style="font-size:13px">还没有。其他电脑请求执行任务时选「始终信任这台电脑」，它就会出现在这里。</div>'}`;
-  $("#devPolicy", box).addEventListener("change", async (e) => {
-    const policy = e.target.value;
-    if (policy === "account" && !confirm("同一账号的任何电脑（包括用你的网关 Key 连上的）发来的任务都会直接执行，不再询问。确定？")) { e.target.value = d.policy; return; }
-    try { drawDevices(el, await api("/api/devices/policy", { method: "POST", body: { policy } })); toast(policy === "account" ? "同账号电脑的任务将直接执行" : "未信任电脑的任务会先询问"); } catch (err) { e.target.value = d.policy; fail(err); }
-  });
-  $$("[data-untrust]", box).forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm(`不再信任「${b.dataset.name}」？它之后发来的任务会先询问。`)) return;
-    try { drawDevices(el, await api("/api/devices/remove", { method: "POST", body: { id: b.dataset.untrust } })); toast("已撤销"); } catch (err) { fail(err); }
-  }));
-}
-
-// A computer asking to run a task in one of the sessions here (see App.askPeerTask): shown on top of every page,
-// whatever session is open, as a remote desktop program asks before a connection; answered as the session's dialog.
-const authAnswered = new Set();
-export function drawAuthRequests() {
-  let stack = $("#authStack");
-  const requests = [];
-  for (const l of ws.live) for (const r of l.status?.authRequests || []) if (!authAnswered.has(`${l.peerId}:${r.id}`)) requests.push({ ...r, live: l });
-  if (!requests.length) { stack?.remove(); return; }
-  if (!stack) { stack = document.createElement("div"); stack.id = "authStack"; stack.className = "auth-stack"; stack.setAttribute("role", "alert"); document.body.append(stack); }
-  const key = (r) => `${r.live.peerId}:${r.id}`;
-  const shown = new Set(requests.map(key));
-  for (const card of $$(".auth-card", stack)) if (!shown.has(card.dataset.key)) card.remove();
-  const LABELS = { once: "允许本次连接", always: "始终信任这台电脑", decline: "拒绝" };
-  for (const r of requests) {
-    if ($(`.auth-card[data-key="${CSS.escape(key(r))}"]`, stack)) continue;
-    const target = r.live.status?.title || r.live.name || "会话";
-    const device = r.verified ? `<span class="pill ok">设备已验证</span> <span class="mono faint">${esc(String(r.device).slice(0, 8))}</span>`
-      : r.signed ? '<span class="pill off">签名校验失败：可能不是它自称的那台电脑</span>' : '<span class="pill warn">无法识别设备（对方是旧版 claude-pro）</span>';
-    const card = document.createElement("div");
-    card.className = "auth-card";
-    card.dataset.key = key(r);
-    card.innerHTML = `<h3>${ICON.shield}另一台电脑请求执行任务</h3>
-        <div class="auth-from">电脑「<strong>${esc(r.machine)}</strong>」上的会话 @${esc(r.from)} 想让这里的「${esc(target)}」执行：</div>
-        <div class="auth-text">${esc(r.text)}</div>
-        <div class="auth-device">${device}</div>
-        <div class="actions">${r.options.map((o) => `<button class="button${o.value === "decline" ? " danger" : o.value === "always" ? " secondary" : ""} small" data-index="${o.index}">${o.value === "once" && !r.verified ? "只允许这一条任务" : LABELS[o.value] || esc(o.value)}</button>`).join("")}<a class="auth-view" href="#/live/${esc(r.live.peerId)}">查看会话</a></div>`;
-    $$("[data-index]", card).forEach((b) => b.addEventListener("click", async () => {
-      $$("button", card).forEach((x) => { x.disabled = true; });
-      try {
-        await api(`/api/live/${r.live.peerId}/dialog`, { method: "POST", body: { id: r.id, index: Number(b.dataset.index) } });
-        authAnswered.add(key(r));
-        card.remove();
-        if (!$(".auth-card", stack)) stack.remove();
-        toast(r.options[Number(b.dataset.index)]?.value === "decline" ? "已拒绝，对方会收到通知" : "已允许，任务开始执行");
-        loadWorkspace();
-      } catch (err) { $$("button", card).forEach((x) => { x.disabled = false; }); fail(err); }
-    }));
-    stack.append(card);
-  }
 }

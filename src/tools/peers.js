@@ -1,11 +1,11 @@
-// ListPeers and MessagePeer: talk to the other claude-pro sessions, on this machine and, through the gateway, on the
-// user's other computers (see peers.js and remote.js).
+// ListPeers and MessagePeer: talk to the other claude-pro sessions, on this machine and, through the relay, on the
+// computers paired with it (see peers.js, relay.js and devices.js).
 
 const unavailable = { isError: true, content: 'Talking to other sessions is only available in an interactive session.' };
 
 export const ListPeersTool = {
   name: 'ListPeers',
-  description: 'List the other claude-pro sessions (each is an agent with its own conversation, working in its own directory): those running on this machine, and those on the user\'s other computers that are online at the gateway, with the name to send them a message with MessagePeer.',
+  description: 'List the other claude-pro sessions (each is an agent with its own conversation, working in its own directory): those running on this machine, and those on the user\'s other computers paired with it, with the name to send them a message with MessagePeer.',
   input_schema: { type: 'object', properties: {} },
   summarize() { return ''; },
   async call(input, ctx) {
@@ -13,17 +13,17 @@ export const ListPeersTool = {
     const { me, local, remote, online } = await ctx.io.listAllPeers();
     const head = `You are "${me.name}" (${me.cwd})${online ? `; sessions on other computers know you as "${me.label}"` : ''}.`;
     const count = local.length + remote.length;
-    if (!count) return { content: `${head}\nNo other session is running${online ? '' : ' on this machine (this session is not online at the gateway, so sessions on other computers are not listed)'}.`, display: { summary: 'No other session' } };
+    if (!count) return { content: `${head}\nNo other session is running${online ? '' : ' on this machine (this session is not connected to the user\'s other computers: none is paired with this one, or the relay cannot be reached)'}.`, display: { summary: 'No other session' } };
     const lines = [head];
     if (local.length) lines.push('On this machine:', ...local.map((p) => `- ${p.name}: working in ${p.cwd}`));
-    if (remote.length) lines.push('On the user\'s other computers (through the gateway):', ...remote.map((p) => `- ${p.label}: working in ${p.cwd} on the computer "${p.machine}"${p.busy ? ' (busy now)' : ''}`));
+    if (remote.length) lines.push('On the user\'s other computers (paired with this one):', ...remote.map((p) => `- ${p.label}: working in ${p.cwd} on the computer "${p.machine}"${p.busy ? ' (busy now)' : ''}`));
     return { content: lines.join('\n'), display: { summary: `${count} other session${count === 1 ? '' : 's'}` } };
   },
 };
 
 export const MessagePeerTool = {
   name: 'MessagePeer',
-  description: `Send a task or a question to another claude-pro session, on this machine or on one of the user's other computers (ListPeers lists them). A session on another computer runs it once its user allowed this computer there (you may be told it waits for that). The other session's agent works on it in its own conversation and directory, and the final text of its answer comes back to you later as a <peer-message kind="reply"> message: you do not wait for it here. Use it to delegate work that belongs to another session's project or context, or to ask it something only it knows. Write the message so that it stands on its own: the other agent has not seen your conversation.
+  description: `Send a task or a question to another claude-pro session, on this machine or on one of the user's other computers paired with this one (ListPeers lists them). A computer set to ask first runs it once its user allowed it there (you are told when it waits for that). The other session's agent works on it in its own conversation and directory, and the final text of its answer comes back to you later as a <peer-message kind="reply"> message: you do not wait for it here. Use it to delegate work that belongs to another session's project or context, or to ask it something only it knows. Write the message so that it stands on its own: the other agent has not seen your conversation.
 
 Send it once and wait for the answer: do not send reminders or "please report" follow-ups while the other session works. Messages that arrive while it is busy are handled together after what it is doing, so they only add to its work; the answer comes by itself when it is done.`,
   input_schema: {

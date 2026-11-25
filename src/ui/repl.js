@@ -248,11 +248,7 @@ export class App {
     this.userSentToPeers = new Set(flags?.restart?.userSentToPeers || []); // ids of messages the user sent to other sessions with @name
     // messages sent to sessions on other computers that may still be answered ('sessionId:messageId' -> when)
     this.sentToRemote = new Map(flags?.restart?.sentToRemote || []);
-    // sessions on other computers whose tasks the user allowed for as long as they run ('sessionId|device', see
-    // authorizePeerTask), and the questions open about them
-    this.peerAllowed = new Set(flags?.restart?.peerAllowed || []);
-    this.peerAuthPending = new Map();
-    this.remote = null; // the browser page that watches and steers this session (see remote.js), when it is on
+    this.remote = null; // the connection to the relay, through which the paired computers reach this session (see relay.js)
     // the local web console's live view of this session (claude-pro web, see live.js and web/server.js)
     this.liveFeed = new LiveFeed({
       seed: () => [
@@ -268,7 +264,6 @@ export class App {
     this.remoteMuted = 0; // > 0 while printing something the page is told about in its own terms
     this.remoteDialogs = 0;
     this.remoteStarting = null;
-    this.remoteRefused = null; // a gateway key the gateway refused: not tried again by itself (a new /connect is)
     this.seedOutput = []; // lines the page is shown after the conversation when it starts from it (see resumeAfterRestart)
     // Where the turns of the conversation ended, with their "✻ Done at …" lines: [{after, text, msg}] (`msg`: the
     // message the line follows, to find it again when the messages are replaced), and the array they were made on.
@@ -277,7 +272,7 @@ export class App {
     this.selfCheck = selfCheck;
     this.sessionName = flags?.restart?.peerName || null; // this session's name when the sessions of this computer do not know it (CLAUDE_PRO_PEERS=0)
     this.customTitle = null; // the conversation's name given with /rename: the title, instead of the topic
-    this.remotePeers = []; // the account's sessions on other computers, as last listed by the gateway (see peers.js)
+    this.remotePeers = []; // the sessions on the paired computers, as last listed by the relay (see app-peers.js)
     this.remotePeersAt = 0;
     this.remotePeersLoading = null;
     this.remotePeersTimer = null;
@@ -430,7 +425,7 @@ export class App {
     if (!this.driven) {
       // Updates are deliberately manual: /update checks npm and installs the selected release.
       // Do not query the registry or install/restart a running session in the background.
-      // online or offline as this computer's gateway login changes (/connect or /disconnect of 7bit.fun in another window)
+      // connected or not as this computer's pairings change (/pair or /devices in another window, the web console)
       this.loginTimer = setInterval(() => this.syncRemote(), 10_000);
       this.loginTimer.unref?.();
     }
@@ -544,7 +539,8 @@ export class App {
       this.liveFeed?.close();
       clearInterval(this.remotePeersTimer);
       clearInterval(this.loginTimer);
-      remoteClosed = this.remote?.close({ restarting: restart });
+      this.pairing?.abort();
+      remoteClosed = this.remote?.close();
       const agent = this.runtime?.agent;
       const u = agent?.totalUsage();
       if (!restart && u?.requests) {
@@ -556,7 +552,6 @@ export class App {
       this.restoreTerminal({ handOver: restart, farewell });
       this.stdin.pause();
       if (!this.noProcessExit) {
-        // with remote control on, the gateway is told first (at most a second and a half; see RemoteControl.close)
         if (remoteClosed) remoteClosed.finally(() => process.exit(code));
         else setTimeout(() => process.exit(code), 50).unref();
       }
@@ -772,7 +767,7 @@ export class App {
     });
     const items = [...peers, ...fileItems];
     if (!items.length) {
-      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or online at the gateway' : 'No file or other session is available on this computer');
+      if (!q && m.index === 0 && !m[1] && !quiet && !this.fileIndex.loading) this.flash(this.remote ? 'No file or session is available here or on your paired computers' : 'No file or other session is available on this computer');
       return null;
     }
     return { items, from: cursor - q.length - (quoted ? 2 : 1), to: cursor };
@@ -1135,7 +1130,7 @@ export class App {
     if (loaded.name && loaded.name !== this.peerLabel()) {
       if (this.peers) this.peers.setName(loaded.name);
       else this.sessionName = loaded.name;
-      this.remote?.register().catch(() => {});
+      this.remote?.flush();
     }
     this.firstPrompt = loaded.title;
     this.cost = loaded.cost;

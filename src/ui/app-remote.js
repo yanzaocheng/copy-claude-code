@@ -1,21 +1,22 @@
-// The App's connection to the gateway's session relay (remote.js) and what the web console's live view shows and
-// sends (its status, dialogs, messages, images, the directory and suggestion lists). A part of App, see repl.js,
-// which puts these methods on App.prototype.
+// The App's connection to the relay through which the paired computers reach it (relay.js), and what the web
+// console's live view shows and sends (its status, dialogs, messages, images, the directory and suggestion lists). A
+// part of App, see repl.js, which puts these methods on App.prototype.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { c, stripAnsi } from './ansi.js';
 import { renderToolResult, modelInfo } from './render.js';
 import { defaultEffort } from '../api.js';
-import { VERSION, CONFIG_DIR } from '../config.js';
-import { gatewayLogin, normalizeGatewayUrl } from '../gateway.js';
+import { CONFIG_DIR } from '../config.js';
 import { webModelChoices, effortChoices } from '../commands.js';
 import { listDirectory, recentDirectories } from '../utils/dirs.js';
 import { formatClock } from '../ratelimit.js';
 import { estimateTokens } from '../agent.js';
 import { imageSize } from '../utils/images.js';
 import { machineName } from '../peers.js';
-import { onlineEnabled, RemoteControl, REMOTE_WIDTH } from '../remote.js';
+import { REMOTE_WIDTH } from '../remote.js';
+import { RelayClient, onlineEnabled, newSessionId } from '../relay.js';
+import { pairedIds, pairedDevice, unseal, takeMessage, removePaired, notePairedSeen } from '../devices.js';
 
 // What the page may not send (see App.remoteSend): ending or restarting the session, or updating claude-pro (which
 // restarts it), with or without arguments. The gateway uses the same pattern.
@@ -60,93 +61,58 @@ export const remoteMethods = {
     return b?.source?.type === 'base64' ? { mediaType: b.source.media_type, data: Buffer.from(b.source.data, 'base64') } : null;
   },
 
-  // Whether this session should be online at the gateway (see remote.js): whenever this computer is logged in to
-  // it. CLAUDE_PRO_ONLINE=0 keeps it off (the self-check sets it); the tests, which drive the App themselves, go
-  // online only with CLAUDE_PRO_ONLINE=1.
+  // Whether this session connects to the relay (relay.js): when this computer is paired with another (/pair), so that
+  // the sessions there reach it. CLAUDE_PRO_ONLINE=0 keeps it off (the self-check sets it); the tests, which drive the
+  // App themselves, connect only with CLAUDE_PRO_ONLINE=1.
   onlineWanted() {
     const env = this.config.env;
     if (!onlineEnabled(env)) return false;
     if (this.driven && !/^(1|true|yes|on)$/i.test(env.CLAUDE_PRO_ONLINE || '')) return false;
-    return Boolean(gatewayLogin(this.config.gatewayUrl));
+    return pairedIds().length > 0;
   },
 
-  // Online at the gateway from the start when this computer is logged in, and after a restart with the same
-  // session id so that an already-open page keeps following it.
+  // Connected from the start when this computer is paired, after a restart with the same session id (an answer on
+  // its way finds it again).
   autoStartRemote(restart) {
-    const id = restart?.remote?.id || null;
-    if (!id && !this.onlineWanted()) return;
-    this.startRemote({ id }).catch((e) => {
-      if (e.code === 'NO_GATEWAY_LOGIN') return;
-      this.notice(`This session could not go online at the gateway: ${e.message}`, 'warn');
-    });
+    if (!this.onlineWanted()) return;
+    this.startRemote({ id: restart?.remote?.id || null }).catch((e) => this.notice(`Your other computers cannot reach this session: ${e.message}`, 'warn'));
   },
 
-  // Connect this session to the gateway (see remote.js): the web page and the sessions on the account's other
-  // computers reach it from then on. Needs the gateway login from /connect; throws
-  // {code: 'NO_GATEWAY_LOGIN'} without it. A gateway that cannot be reached now is tried again in the background;
-  // one that refuses the key throws, and that key is not tried again (see syncRemote).
   startRemote({ id } = {}) {
     if (this.remote) return Promise.resolve(this.remote);
     this.remoteStarting ??= this.connectRemote({ id }).finally(() => { this.remoteStarting = null; });
     return this.remoteStarting;
   },
 
-  // Online or offline as this computer's gateway login is now: after /connect and /disconnect, and every few seconds (a
-  // login or a logout in another window, another account). Resolves with the connection, or null.
+  // Connected or not as this computer's pairings are now: after /pair and /devices, and every few seconds (a pairing
+  // made in another window or in the web console). Resolves with the connection, or null.
   syncRemote() {
     if (this.exiting) return Promise.resolve(null);
     if (this.remoteStarting) return this.remoteStarting.catch(() => null);
-    const login = gatewayLogin(this.config.gatewayUrl);
-    const r = this.remote;
-    // logged out, or another account: not this account's session any more
-    if (r && (!login || login.apiKey !== r.apiKey || normalizeGatewayUrl(login.url || this.config.gatewayUrl) !== normalizeGatewayUrl(r.base))) this.stopRemote();
-    if (this.remote) return Promise.resolve(this.remote);
-    if (!login || login.apiKey === this.remoteRefused || !this.onlineWanted()) return Promise.resolve(null);
-    return this.startRemote().catch((e) => {
-      this.notice(`This session could not go online at the gateway: ${e.message}`, 'warn');
-      return null;
-    });
+    if (this.remote && !this.onlineWanted()) this.stopRemote();
+    if (this.remote) { this.remote.syncAllow().catch(() => {}); return Promise.resolve(this.remote); }
+    if (!this.onlineWanted()) return Promise.resolve(null);
+    return this.startRemote().catch(() => null);
   },
 
   async connectRemote({ id }) {
-    const login = gatewayLogin(this.config.gatewayUrl);
-    if (!login) throw Object.assign(new Error(`this computer is not logged in to the gateway ${this.config.gatewayUrl} (/connect 7bit.fun connects it)`), { code: 'NO_GATEWAY_LOGIN' });
-    const remote = new RemoteControl({
-      gateway: { url: login.url || this.config.gatewayUrl, apiKey: login.apiKey },
-      id,
+    const remote = new RelayClient({
+      session: id || newSessionId(),
       handlers: {
-        info: () => ({
-          name: this.peerLabel(), machine: machineName(this.config.env), peerId: this.peers?.id || null, title: this.sessionLabel() || '',
-          cwd: (this.agent.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, version: VERSION,
-        }),
-        // (what the other computers' sessions are shown, compared twice a second: only these, not remoteStatus)
+        // (what the paired computers' sessions are shown, compared twice a second, sealed for each)
         status: () => ({
           busy: this.isTurnRunning(), name: this.peerLabel(), title: this.sessionLabel() || path.basename(this.cwd),
-          cwd: (this.agent?.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model,
+          cwd: (this.agent?.cwd || this.cwd).replace(/\\/g, '/'), model: modelInfo(this.config).model, machine: machineName(this.config.env),
         }),
-        peerMessage: (msg) => this.moving || this.exiting ? false : this.onPeerMessage(msg),
+        message: (frame) => (this.moving || this.exiting ? false : this.onRelayMessage(frame)),
         changed: () => {
           this.screen.schedule();
           if (remote.online && Date.now() - this.remotePeersAt > 10_000) this.refreshRemotePeers();
         },
-        // The key was refused after the start (revoked on the web page, say): offline until the login changes.
-        refused: () => {
-          this.remoteRefused = login.apiKey;
-          if (this.remote === remote) { this.remote = null; this.remotePeers = []; }
-          this.notice('The gateway refused this computer\'s key: this session is offline there now (/connect 7bit.fun to enter another key).', 'warn');
-        },
       },
-    });
-    remote.account = login.account?.email || login.account?.name || null;
-    try {
-      await remote.start({ persistent: true });
-    } catch (e) {
-      if (e.status === 401 || e.status === 403) this.remoteRefused = login.apiKey;
-      throw e;
-    }
+    }).start();
     if (this.exiting) { remote.close(); return remote; }
     this.remote = remote;
-    this.remoteRefused = null;
     this.remotePeersTimer ??= setInterval(() => { if (this.remote?.online) this.refreshRemotePeers(); }, 60_000);
     this.remotePeersTimer.unref?.();
     this.screen.schedule();
@@ -160,20 +126,50 @@ export const remoteMethods = {
     this.screen.schedule();
   },
 
-  // This session at the gateway (its session relay: tasks across computers), for /status: {text}.
-  remoteState() {
-    const r = this.remote;
-    if (r) {
-      const who = r.account ? ` as ${r.account}` : '';
-      const text = r.online ? `${c.green('online')}${who}${c.dim(' · your other computers can send it tasks (/devices)')}` : r.registered ? c.yellow(`not connected now, retrying${who}`) : `connecting to ${r.base}${who}…`;
-      return { text };
+  // A message from a paired computer: opened with the key only the two of them have (a message that does not open is
+  // not from it, and is dropped), taken once, and handed on as a message of another session. Its notice that it is no
+  // longer paired with this one removes it here too.
+  onRelayMessage(frame) {
+    const p = unseal(frame.from, frame.data);
+    if (!p || typeof p !== 'object') return;
+    if (p.t === 'unpair') {
+      const gone = removePaired(frame.from, { notify: false });
+      if (gone.length) this.notice(`${gone[0].name} is no longer paired with this computer (it was unpaired there).`, 'warn');
+      this.syncRemote();
+      return;
     }
-    if (this.remoteStarting) return { text: 'connecting…' };
-    const login = gatewayLogin(this.config.gatewayUrl);
-    if (!login) return { text: c.dim(`offline: this computer is not logged in to the gateway ${this.config.gatewayUrl} (/connect 7bit.fun)`) };
-    if (login.apiKey === this.remoteRefused) return { text: c.red('offline: the gateway refused this computer\'s key (/connect 7bit.fun to enter another)') };
-    if (!onlineEnabled(this.config.env)) return { text: c.dim('offline (CLAUDE_PRO_ONLINE=0)') };
-    return { text: c.dim('offline') };
+    if (!['task', 'reply', 'notice'].includes(p.t) || p.to !== this.remote?.session || !takeMessage(p.id, p.at)) return;
+    const device = pairedDevice(frame.from);
+    // (what the other side calls itself is shown to the user and said to the model: one plain line each)
+    const plain = (v, max) => String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f<>"]/g, ' ').trim().slice(0, max);
+    const machine = plain(p.from?.machine, 60) || device?.name || 'computer';
+    notePairedSeen(frame.from, p.from?.machine);
+    return this.onPeerMessage({
+      id: p.id,
+      kind: p.t,
+      text: String(p.text ?? ''),
+      inReplyTo: typeof p.inReplyTo === 'string' ? p.inReplyTo : null,
+      from: { id: plain(p.from?.session, 64), device: frame.from, name: `${machine}/${plain(p.from?.name, 80) || 'session'}`, cwd: plain(p.from?.cwd, 500), machine, remote: true },
+    });
+  },
+
+  // A message for a session on a paired computer, as onRelayMessage reads it there.
+  relayPayload(t, text, { to, inReplyTo = null } = {}) {
+    return {
+      t, id: newSessionId(), at: Date.now(), to, text, ...(inReplyTo ? { inReplyTo } : {}),
+      from: { session: this.remote?.session, name: this.peerLabel(), machine: machineName(this.config.env), cwd: (this.agent?.cwd || this.cwd).replace(/\\/g, '/') },
+    };
+  },
+
+  // The connection to the paired computers, for /status: {text}.
+  remoteState() {
+    const n = pairedIds().length;
+    if (!n) return { text: c.dim('not paired with another computer (/pair pairs one)') };
+    if (!onlineEnabled(this.config.env)) return { text: c.dim('off (CLAUDE_PRO_ONLINE=0)') };
+    const r = this.remote;
+    if (r?.online) return { text: `${c.green('connected')}${c.dim(` · ${n} paired computer${n === 1 ? '' : 's'} can send it tasks (/devices)`)}` };
+    if (r || this.remoteStarting) return { text: c.yellow(`connecting to the relay ${r?.base || ''}…`) };
+    return { text: c.dim('not connected') };
   },
 
   // The state the page shows below the transcript; sent whenever it changes.

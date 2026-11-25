@@ -1,6 +1,6 @@
 // The App's talk with the other sessions (a part of App, see repl.js, which puts these methods on App.prototype):
-// those of this computer directly (peers.js), those of the account's other computers through the gateway, whose
-// tasks run once their computer is allowed here (devices.js), as a remote desktop program asks before a connection.
+// those of this computer directly (peers.js), those of the computers paired with this one through the relay (relay.js,
+// sealed end to end: devices.js). A paired computer's tasks run, or ask the user first, as its entry in /devices says.
 
 import path from 'node:path';
 import { c, wordWrap } from './ansi.js';
@@ -8,7 +8,7 @@ import { SelectDialog } from './dialogs.js';
 import { renderMarkdown } from './markdown.js';
 import { displayPath } from '../utils/paths.js';
 import { peersEnabled, PeerNode, cleanName, resolvePeer, machineName, peerMessagePrompt, findPeer } from '../peers.js';
-import { verifyTask, readDeviceTrust, noteDeviceSeen, trustDevice } from '../devices.js';
+import { pairedDevice } from '../devices.js';
 
 const PEER_AUTH_TIMEOUT_MS = 10 * 60_000; // a task from another computer that nobody allowed in this time is declined
 const SENT_KEPT_MS = 24 * 3600_000; // how long an answer from another computer is waited for
@@ -59,7 +59,7 @@ export const peerMethods = {
   // This session's name for the others.
   peerLabel() { return this.peers?.name || this.sessionName || cleanName(path.basename(this.cwd)) || 'claude-pro'; },
 
-  // /rename: the session's name, for the other sessions (@name, here and at the gateway) and as the conversation's
+  // /rename: the session's name, for the other sessions (@name, here and on the paired computers) and as the conversation's
   // title (the tab, /resume, the web page), instead of the topic. Returns the name it got: name-2... when another
   // session on this computer has it.
   renameSession(name) {
@@ -67,14 +67,13 @@ export const peerMethods = {
     const got = this.peers ? this.peers.setName(clean) : (this.sessionName = clean);
     this.customTitle = got;
     this.store.setName(got);
-    this.remote?.register().catch(() => { /* the gateway takes it at the next registration */ });
     this.remote?.flush();
     this.screen.schedule();
     return got;
   },
 
-  // `target`: a peer entry, or what names one (see resolvePeer): a session on this computer, or one on another
-  // computer, reached through the gateway. `byModel`: the MessagePeer tool sent it, so the answer goes to the
+  // `target`: a peer entry, or what names one (see resolvePeer): a session on this computer, or one on a paired
+  // computer, reached through the relay. `byModel`: the MessagePeer tool sent it, so the answer goes to the
   // model; otherwise the user typed `@name ...` and the answer is only shown (and noted for the model).
   async sendToPeer(target, text, { byModel = false } = {}) {
     let peer = target && typeof target === 'object' ? target : null;
@@ -83,16 +82,19 @@ export const peerMethods = {
       let found = resolvePeer(local, this.remotePeers, target);
       if (!found.peer && !found.error && this.remote) found = resolvePeer(local, await this.refreshRemotePeers(), target);
       if (!found.peer) {
-        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this one is online at the gateway (/connect 7bit.fun).';
+        const offline = this.remote ? '' : ' Sessions on your other computers can be reached once this computer is paired with them (/pair).';
         throw new Error(found.error || `No running session called "${String(target).replace(/^[@&＆]/, '')}". /peers lists them.${offline}`);
       }
       peer = found.peer;
     }
-    if (peer.remote && !this.remote) throw new Error(`@${peer.label} is on another computer, and this session is not online at the gateway (/status says why).`);
+    if (peer.remote && !this.remote?.online) throw new Error(`@${peer.label} is on another computer, and this session is not connected to the relay now (/status says why).`);
     if (!peer.remote && !this.peers) throw new Error('Talking to other sessions on this computer is off (CLAUDE_PRO_PEERS=0).');
-    const r = peer.remote
-      ? { ...(await this.remote.sendPeer(peer.id, { text })), peer }
-      : await this.peers.send(peer, { text });
+    let r;
+    if (peer.remote) {
+      const payload = this.relayPayload('task', text, { to: peer.id });
+      await this.remote.send(peer.device, peer.id, payload);
+      r = { id: payload.id, peer };
+    } else r = await this.peers.send(peer, { text });
     if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
     // (an answer from another computer is taken only for what was sent there: see onPeerMessage)
     if (peer.remote) {
@@ -102,23 +104,22 @@ export const peerMethods = {
     return r;
   },
 
-  // The account's sessions on other computers that are online now, from the gateway (what was known stays when
-  // it cannot be asked). Sessions of this computer are left out: they are reached directly.
+  // The sessions on the paired computers that are connected now, from the relay, each with the status it sealed for
+  // this computer (what was known stays when the relay cannot be asked).
   refreshRemotePeers() {
-    if (!this.remote?.registered) return Promise.resolve(this.remotePeers);
+    if (!this.remote?.online) return Promise.resolve(this.remotePeers);
     this.remotePeersLoading ??= (async () => {
       try {
-        const near = new Set([this.peers?.id, ...(this.peers?.peers() || []).map((p) => p.id)].filter(Boolean));
-        const own = await this.remote.sessions();
-        this.remotePeers = own
-          .filter((p) => p.online && !p.ended && p.id !== this.remote?.id && !near.has(p.peerId))
-          .map((p) => {
-            const machine = p.machine || p.host || 'computer';
-            const name = p.name || 'session';
-            return { id: p.id, name, machine, cwd: p.cwd || '', remote: true, label: `${machine}/${name}`, busy: Boolean(p.busy), title: p.title || '' };
+        const plain = (v, max) => String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f<>"@\s]/g, '-').replace(/^-+|-+$/g, '').slice(0, max);
+        this.remotePeers = (await this.remote.sessions())
+          .filter((s) => s.session && s.status && pairedDevice(s.device))
+          .map((s) => {
+            const machine = plain(s.status.machine, 60) || plain(pairedDevice(s.device).name, 60) || 'computer';
+            const name = plain(s.status.name, 80) || 'session';
+            return { id: s.session, device: s.device, name, machine, cwd: String(s.status.cwd || '').slice(0, 500), remote: true, label: `${machine}/${name}`, busy: Boolean(s.status.busy), title: String(s.status.title || '').slice(0, 200) };
           });
         this.remotePeersAt = Date.now();
-      } catch { /* the gateway cannot be asked now */ } finally {
+      } catch { /* the relay cannot be asked now */ } finally {
         this.remotePeersLoading = null;
       }
       return this.remotePeers;
@@ -138,61 +139,40 @@ export const peerMethods = {
     };
   },
 
-  // A task from a session on another computer runs when that computer is trusted here (its signature checks out, see
-  // devices.js), the session was allowed earlier for as long as it runs, or the user lets every session of the
-  // account in (/devices policy account); otherwise the user is asked first, as a remote desktop program asks before
-  // a connection. One question at a time for each sending session of an identified computer; a computer that cannot
-  // be identified (no signature, or one that does not check out) is asked about for every task, since nothing says
-  // that the next one comes from the same place. Resolves with whether the task runs.
+  // A task from a session on a paired computer runs as that computer's entry says (/devices): at once (run, the
+  // default), or once the user allowed it (ask), as a remote desktop program asks before a connection. A computer that
+  // is not paired any more (it was removed meanwhile) gets nothing done. Resolves with whether the task runs.
   authorizePeerTask(msg) {
-    const f = msg.from;
-    const device = verifyTask({ auth: msg.auth, device: f.device, to: msg.to, text: msg.text });
-    const trust = readDeviceTrust();
-    if (trust.policy === 'account') return Promise.resolve(true);
-    if (device && Object.hasOwn(trust.devices, device)) { noteDeviceSeen(device, f.machine); return Promise.resolve(true); }
-    if (!device) return this.askPeerTask(msg, null, null);
-    const key = `${f.id}|${device}`;
-    if (this.peerAllowed.has(key)) return Promise.resolve(true);
-    if (!this.peerAuthPending.has(key)) {
-      this.peerAuthPending.set(key, this.askPeerTask(msg, device, key).finally(() => this.peerAuthPending.delete(key)));
-    }
-    return this.peerAuthPending.get(key);
+    const device = pairedDevice(msg.from.device);
+    if (!device) return Promise.resolve(false);
+    if (device.mode !== 'ask') return Promise.resolve(true);
+    return this.askPeerTask(msg, device);
   },
 
-  async askPeerTask(msg, device, key) {
+  async askPeerTask(msg, device) {
     const f = msg.from;
     const me = `${machineName(this.config.env)}/${this.peerLabel()}`;
-    // the sender is told that it waits (an older claude-pro, which signs nothing, would take a notice for a task)
-    if (f.device) this.remote?.sendPeer(f.id, { kind: 'notice', text: `Delivered to ${me}: waiting for its user to allow the task.`, inReplyTo: msg.id }).catch(() => {});
+    // the sender is told that it waits
+    this.remote?.send(f.device, f.id, this.relayPayload('notice', `Delivered to ${me}: waiting for its user to allow the task.`, { to: f.id, inReplyTo: msg.id }), { queue: true }).catch(() => {});
     const text = shown(msg.text);
     const preview = text.length > 1200 ? `${text.slice(0, 1200)}…` : text;
-    const who = device ? `device ${device.slice(0, 8)}`
-      : f.device ? c.yellow('its signature does not check out: it may not be the computer it says')
-        : 'an older claude-pro, which cannot be identified';
     const dialog = new SelectDialog({
-      title: `Task from another computer: ${f.machine}`,
-      body: [c.dim(`From the session @${f.name} (${who}):`), ...preview.split('\n').flatMap((line) => wordWrap(line, Math.max(20, this.width - 8))).slice(0, 20)],
+      title: `Task from ${device.name}`,
+      body: [c.dim(`From the session @${f.name} on your paired computer ${device.name}:`), ...preview.split('\n').flatMap((line) => wordWrap(line, Math.max(20, this.width - 8))).slice(0, 20)],
       question: 'Let this session work on it? Its final answer is sent back.',
       color: c.yellow,
       options: [
-        device ? { label: 'Allow this connection', value: 'once', description: `This task, and later ones from @${f.name} while that session runs` }
-          : { label: 'Allow this task', value: 'once', description: 'Only this one: a computer that cannot be identified is asked about every time' },
-        ...(device ? [{ label: `Always trust ${f.machine}`, value: 'always', description: 'The tasks of its sessions run without asking (/devices to revoke)' }] : []),
+        { label: 'Allow this task', value: 'once', description: `${device.name} is set to ask first (/devices run ${device.name} lets its tasks run at once)` },
         { label: 'Decline', value: 'decline', description: 'They are told that you declined it' },
       ],
     });
     // (for the web console, which shows it at the top whatever page is open)
-    dialog.peerAuth = { from: f.name, machine: f.machine, device: device || null, verified: Boolean(device), signed: Boolean(f.device), text: preview };
+    dialog.peerAuth = { from: f.name, machine: device.name, device: f.device, text: preview };
     const timer = setTimeout(() => dialog.resolve('timeout'), PEER_AUTH_TIMEOUT_MS);
     timer.unref?.();
     let choice;
     try { choice = await this.showDialog(dialog); } finally { clearTimeout(timer); }
-    if (choice === 'always') {
-      // (the list of trusted computers lets it in from now on, so that taking it off the list stops it here too)
-      try { trustDevice(device, f.machine); } catch (e) { this.notice(`Could not save the trusted computer: ${e.message}`, 'warn'); this.peerAllowed.add(key); }
-      return true;
-    }
-    if (choice === 'once') { if (key) this.peerAllowed.add(key); return true; }
+    if (choice === 'once') return true;
     const timedOut = choice === 'timeout';
     this.screen.log(c.dim(`  ✉ ${timedOut ? 'Nobody answered: declined' : 'Declined'} the task from @${f.name}`), '');
     this.replyToPeer(msg, timedOut ? `Nobody at ${me} allowed this task within ${PEER_AUTH_TIMEOUT_MS / 60_000} minutes: it was not run.` : `The user of ${me} declined this task.`);
@@ -203,8 +183,7 @@ export const peerMethods = {
     if (this.exiting) return;
     if (msg.from.remote && msg.kind !== 'task') {
       // An answer or a notice from another computer is one to a message this session sent that session, and to
-      // nothing else: taken as it comes, it would be a task that nobody was asked about (whoever holds the gateway
-      // key can send one).
+      // nothing else: taken as it comes, it would be a task that nobody was asked about.
       const key = `${msg.from.id}:${msg.inReplyTo}`;
       if (!this.sentToRemote.has(key)) {
         this.screen.log(c.dim(`  ✉ Left out ${msg.kind === 'reply' ? 'an answer' : 'a notice'} from @${msg.from.name} to nothing this session sent it`), '');
@@ -236,13 +215,13 @@ export const peerMethods = {
     this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });
   },
 
-  // Send `text` as the answer to `msg`, a message of another session: here, or through the gateway.
+  // Send `text` as the answer to `msg`, a message of another session: here, or through the relay.
   replyToPeer(msg, text) {
     const done = () => this.screen.log(c.dim(`  ⎿  Answer sent to @${msg.from.name}`));
     const failed = (e) => this.notice(`Could not send the answer to @${msg.from.name}: ${e.message}`, 'warn');
-    if (msg.from.remote) { // from another computer: back through the gateway
-      if (!this.remote) { this.notice(`This session is no longer online at the gateway: the answer to @${msg.from.name} was not sent.`, 'warn'); return; }
-      this.remote.sendPeer(msg.from.id, { kind: 'reply', text, inReplyTo: msg.id }).then(done, failed);
+    if (msg.from.remote) { // from a paired computer: back through the relay (it waits there for a session that is restarting)
+      if (!this.remote) { this.notice(`This session is not connected to the relay: the answer to @${msg.from.name} was not sent.`, 'warn'); return; }
+      this.remote.send(msg.from.device, msg.from.id, this.relayPayload('reply', text, { to: msg.from.id, inReplyTo: msg.id }), { queue: true }).then(done, failed);
       return;
     }
     if (!this.peers) return;
@@ -267,8 +246,8 @@ export const peerMethods = {
     for (const msg of lastOfEach.values()) this.replyToPeer(msg, text);
   },
 
-  // `@name message`: the message goes to that session, as a task for it. A session on another computer of the
-  // gateway account: `@machine/name message`, or `@machine message` when that computer runs one session. A known
+  // `@name message`: the message goes to that session, as a task for it. A session on a paired computer:
+  // `@machine/name message`, or `@machine message` when that computer runs one session. A known
   // file wins only when no session matches; use `@./name` to force a file when the names collide.
   sendTypedToPeer(text) {
     // Quoted @ tokens are file syntax; session names are clean and never contain spaces.
@@ -325,7 +304,7 @@ export const peerMethods = {
     }
     const items = this.peerSuggestionItems(q);
     if (!items.length) {
-      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or online at the gateway' : 'No other session is running on this computer');
+      if (!q && atStart && !quiet) this.flash(this.remote ? 'No other session is running here or on your paired computers' : 'No other session is running on this computer');
       return null;
     }
     return { items, from: cursor - q.length - 1, to: cursor };

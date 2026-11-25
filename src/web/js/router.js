@@ -7,6 +7,7 @@ import { markActive } from "./workspace.js";
 import { newView } from "./page-new.js";
 import { liveView } from "./page-live.js";
 import { remotePage } from "./page-remote.js";
+import { devicesPage } from "./page-devices.js";
 import { providers } from "./page-providers.js";
 import { settings } from "./page-settings.js";
 import { memory } from "./page-memory.js";
@@ -28,7 +29,7 @@ export function route() {
   if (view.cleanup) { try { view.cleanup(); } catch { /* ignore */ } view.cleanup = null; }
   main.scrollTop = 0;
   setDrawer(false);
-  const views = { new: newView, remote: remotePage, overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => (parts[1] ? liveView(parts[1]) : newView()), providers, settings, memory, extensions, usage };
+  const views = { new: newView, remote: remotePage, devices: devicesPage, overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => (parts[1] ? liveView(parts[1]) : newView()), providers, settings, memory, extensions, usage };
   (views[page] || newView)();
 }
 // mode: true = full width, "chat" = the conversation layout (full height, its own scrolling)

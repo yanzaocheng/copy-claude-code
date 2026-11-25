@@ -2,9 +2,8 @@
 // CONFIG_DIR/peers/<id>.json (name, directory, pid, and a port and token of a small HTTP server on 127.0.0.1)
 // so that sessions can send each other tasks: the user with `@name task` in the input box, the model with the
 // MessagePeer tool. A task is answered automatically with the final text of the turn that handled it.
-// Sessions on the user's other computers are reached through the gateway instead (see remote.js): they are
-// listed as {id, name, machine, cwd, remote: true, label: 'machine/name'} and addressed by that label. Their tasks run
-// here once the user allowed their computer (devices.js); those of this computer's sessions run at once.
+// Sessions on the computers paired with this one are reached through the relay instead (relay.js, devices.js): they
+// are listed as {id, device, name, machine, cwd, remote: true, label: 'machine/name'} and addressed by that label.
 
 import fs from 'node:fs';
 import os from 'node:os';

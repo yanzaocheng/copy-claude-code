@@ -20,7 +20,9 @@ import { checkForUpdate, installUpdate } from '../updater.js';
 import { loadAgents, loadSkills } from '../agents.js';
 import { webModelChoices, effortChoices as sessionEfforts, refreshModelLists } from '../commands.js';
 import { setArchived, archivedSessions, projectDir, sessionOpenIn } from '../session.js';
-import { deviceIdentity, readDeviceTrust, untrustDevice, setInboundPolicy } from '../devices.js';
+import { deviceIdentity, readPaired, pairedIds, removePaired, setPairedMode, MODES } from '../devices.js';
+import { RelayClient } from '../relay.js';
+import { hostPairing, joinPairing, parseCode } from '../pairing.js';
 import { machineName } from '../peers.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
@@ -288,15 +290,43 @@ function readJsonFile(file) {
 
 // Every setting with its value in effect, where that comes from, and what each settings file holds. `project`: the
 // directory whose project settings count (default: none, the user's own).
-function devicesView() {
-  const { policy, devices } = readDeviceTrust();
+// 我的电脑: this computer, the computers paired with it (devices.js), and which of them have sessions connected now
+// (asked of the relay, which tells only the paired ones; null when it cannot be asked).
+async function devicesView() {
   let me = null;
   try { me = deviceIdentity().id; } catch { /* a damaged device.json: shown without */ }
+  const { devices } = readPaired();
+  let online = null;
+  if (Object.keys(devices).length) {
+    try {
+      const relay = new RelayClient({ session: null });
+      await relay.request('POST', '/allow', { devices: pairedIds() }, { timeout: 4000 });
+      online = {};
+      for (const s of await relay.sessions()) if (s.session) online[s.device] = (online[s.device] || 0) + 1;
+    } catch { /* not known now */ }
+  }
   return {
     me: { id: me, name: machineName(loadConfig({ cwd: home }).env) },
-    policy,
-    devices: Object.entries(devices).map(([id, d]) => ({ id, ...d })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)),
+    devices: Object.entries(devices).map(([id, d]) => ({ id, name: d.name, mode: d.mode, pairedAt: d.pairedAt, lastSeen: d.lastSeen, sessions: online ? online[id] || 0 : null }))
+      .sort((x, y) => (y.lastSeen || 0) - (x.lastSeen || 0)),
+    pairing: pairingView(),
   };
+}
+
+// The pairing code this console shows (one at a time): {state: waiting|paired|failed, code, expiresAt, device, error}.
+let pairing = null;
+const pairingView = () => (pairing ? { state: pairing.state, code: pairing.code, expiresAt: pairing.expiresAt, device: pairing.device || null, error: pairing.error || null } : null);
+async function openPairing() {
+  pairing?.ctrl.abort();
+  const mine = { state: 'starting', ctrl: new AbortController() };
+  pairing = mine;
+  const shown = new Promise((resolve, reject) => {
+    hostPairing({ name: machineName(loadConfig({ cwd: home }).env), signal: mine.ctrl.signal, onCode: (code, expiresAt) => { Object.assign(mine, { state: 'waiting', code, expiresAt }); resolve(); } })
+      .then((d) => Object.assign(mine, { state: 'paired', device: { id: d.id, name: d.name } }),
+        (e) => { Object.assign(mine, { state: e.name === 'AbortError' ? 'cancelled' : 'failed', error: e.message }); reject(e); });
+  });
+  try { await shown; } catch (e) { throw httpError(502, `没能生成配对码：${e.message}`); }
+  return pairingView();
 }
 
 function settingsView(project) {
@@ -800,15 +830,29 @@ export const routes = [
     return r.body;
   }],
 
-  // 跨电脑互发任务: this computer, and the computers trusted to send it tasks without asking (see devices.js)
+  // 我的电脑: the computers paired with this one (see devices.js)
   ['GET', /^\/api\/devices$/, () => devicesView()],
-  ['POST', /^\/api\/devices\/remove$/, (req, m, body) => {
-    if (!untrustDevice(String(body?.id || '')).length) throw httpError(404, '没有这台已信任的电脑');
+  ['POST', /^\/api\/devices\/remove$/, async (req, m, body) => {
+    if (!removePaired(String(body?.id || '')).length) throw httpError(404, '没有这台配对的电脑');
+    // (it is told to forget this computer too, now if it can be reached, else when a session here connects)
+    await new RelayClient({ session: null }).tellUnpaired().catch(() => {});
     return devicesView();
   }],
-  ['POST', /^\/api\/devices\/policy$/, (req, m, body) => {
-    try { setInboundPolicy(String(body?.policy || '')); } catch (e) { throw httpError(400, e.message); }
+  ['POST', /^\/api\/devices\/mode$/, (req, m, body) => {
+    if (!MODES.includes(body?.mode)) throw httpError(400, 'mode 是 run 或 ask');
+    if (!setPairedMode(String(body?.id || ''), body.mode).length) throw httpError(404, '没有这台配对的电脑');
     return devicesView();
+  }],
+  // pairing: this console shows a code (open, then the page asks how it goes), or takes the code another one shows
+  ['POST', /^\/api\/pair\/open$/, () => openPairing()],
+  ['GET', /^\/api\/pair$/, () => ({ pairing: pairingView() })],
+  ['POST', /^\/api\/pair\/cancel$/, () => { pairing?.ctrl.abort(); pairing = null; return { ok: true }; }],
+  ['POST', /^\/api\/pair\/join$/, async (req, m, body) => {
+    if (!parseCode(body?.code)) throw httpError(400, '配对码是 9 位数字（另一台电脑上显示的）');
+    try {
+      const d = await joinPairing({ code: String(body.code), name: machineName(loadConfig({ cwd: home }).env) });
+      return { ok: true, device: { id: d.id, name: d.name } };
+    } catch (e) { throw httpError(400, e.message); }
   }],
 
   ['GET', /^\/api\/settings$/, (req, m, b, url) => settingsView(url.searchParams.get('project'))],

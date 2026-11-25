@@ -18,7 +18,9 @@ import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS 
 import { hasRipgrep } from './utils/shell.js';
 import { displayPath, normalizeDir, resolvePath } from './utils/paths.js';
 import { cleanName, machineName } from './peers.js';
-import { deviceIdentity, readDeviceTrust, untrustDevice, setInboundPolicy } from './devices.js';
+import { deviceIdentity, readPaired, removePaired, setPairedMode } from './devices.js';
+import { hostPairing, joinPairing, parseCode, formatCode } from './pairing.js';
+import { RelayClient } from './relay.js';
 import { rewind, promptAt } from './checkpoints.js';
 import { runSelfCheck } from './restart.js';
 
@@ -509,16 +511,6 @@ export function buildCommands(app) {
       app.screen.schedule();
     }
   };
-  // The gateway connected: this session goes online there at once, for tasks from your other computers.
-  const goOnline = async () => {
-    const remote = await app.syncRemote();
-    if (!remote) return;
-    const page = 'sessions on your other computers can send it tasks, each computer allowed here first (/devices)';
-    out(remote.registered
-      ? `${c.green('⇄')} This session is online at the gateway: ${page}.`
-      : c.dim(`⇄ This session goes online at the gateway as soon as ${remote.base} can be reached.`));
-  };
-
   // Connecting the gateway (7bit.fun in /connect): a key of the user's account, made on the gateway's page and pasted
   // here (/login did this until 2026-11-19, and before that sent the browser to the gateway). As with the other
   // providers, a saved key is kept with Enter or replaced by pasting another; a refused one is asked for again, with
@@ -549,7 +541,6 @@ export function buildCommands(app) {
         else account = await checking('Checking the saved key', (signal) => fetchGatewayAccount(saved, { signal }));
         afterLogin();
         out([`${c.green('✔')} Connected the gateway ${c.bold(url)}: ${cfg.model.label}`, accountLine(account), c.dim(`Top up and usage: ${page}`)]);
-        await goOnline();
         return;
       } catch (e) {
         if (e.name === 'AbortError') return;
@@ -575,15 +566,13 @@ export function buildCommands(app) {
       : ` No connected provider serves a model now: /connect connects one.`;
   }
 
-  // Forgetting the gateway's key (7bit.fun in /disconnect; /logout until 2026-11-19): this session goes offline there,
-  // and the other sessions of this computer follow within seconds (see App.syncRemote).
+  // Forgetting the gateway's key (7bit.fun in /disconnect; /logout until 2026-11-19). (The paired computers do not
+  // depend on it: they reach each other through the relay without any account.)
   function disconnectGateway() {
     const cfg = app.runtime.config;
     const had = clearGatewayLogin();
-    const wasOnline = Boolean(app.remote);
-    app.stopRemote();
     out(had
-      ? `Disconnected 7bit.fun: its key is forgotten.${wasOnline ? ' This session is offline there now.' : ''}${fallBack()}`
+      ? `Disconnected 7bit.fun: its key is forgotten.${fallBack()}`
       : c.dim(`7bit.fun (${cfg.gatewayUrl}) was not connected.`));
   }
 
@@ -813,7 +802,7 @@ export function buildCommands(app) {
     const me = app.peerLabel();
     if (!gatewayLogin(cfg.gatewayUrl)) return [row('Name', `@${me} ${c.dim('(for the other sessions of this computer; /rename changes it)')}`)];
     return [
-      row('Remote session', app.remoteState().text),
+      row('Other computers', app.remoteState().text),
       row('Name', `@${me} ${c.dim(`(on your other computers: @${machineName(cfg.env)}/${me}; /rename changes it)`)}`),
     ];
   }
@@ -982,7 +971,7 @@ export function buildCommands(app) {
     name: 'peers',
     aliases: ['sessions'],
     argHint: '[name NEW-NAME]',
-    description: 'List the other sessions, on this computer and (through the gateway) on your other computers; send one a task with @name ...',
+    description: 'List the other sessions, on this computer and on your paired computers (/pair); send one a task with @name ...',
     async run(args) {
       const [action, ...rest] = args.split(/\s+/).filter(Boolean);
       if (action === 'name' && rest.length) { out(`This session is now ${c.bold('@' + app.renameSession(rest.join('-')))}`); return; }
@@ -990,11 +979,11 @@ export function buildCommands(app) {
       out([
         `This session: ${c.bold('@' + me.name)} ${c.dim(displayPath(me.cwd, app.cwd))}${online ? c.dim(` · from other computers: @${me.label}`) : ''}`,
         ...local.map((p) => `${c.bold('@' + p.name)} ${c.dim(`${p.cwd} · pid ${p.pid}`)}`),
-        ...(remote.length ? [c.dim('On your other computers, through the gateway:'), ...remote.map((p) => `${c.bold('@' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
+        ...(remote.length ? [c.dim('On your paired computers:'), ...remote.map((p) => `${c.bold('@' + p.label)} ${c.dim(`${p.cwd}${p.busy ? ' · busy' : ''}`)}`)] : []),
         ...(local.length || remote.length ? [] : [c.dim('No other session is running.')]),
         c.dim(online
           ? 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. On another computer: "@computer/name task", or "@computer task" when it runs one session. /rename names this session. The agent can use ListPeers / MessagePeer too.'
-          : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this one is online at the gateway (/connect 7bit.fun; /status says why it is not).'),
+          : 'Type "@" for the combined file/session list, "@name task" to send a task; its answer is shown here. Sessions on your other computers show up here once this computer is paired with them (/pair; /status says why it is not connected).'),
       ]);
     },
   });
@@ -1115,37 +1104,89 @@ export function buildCommands(app) {
     out(lines);
   }
 
-  // The computers whose sessions may run tasks here without asking (see devices.js), and this computer's identity.
+  // Pairing this computer with another (pairing.js), as remote desktop programs pair: one shows a code, the other types
+  // it. Then the sessions of the two can send each other tasks (@computer/name ...), through the relay, sealed end to
+  // end; no account is involved.
+  add({
+    name: 'pair',
+    argHint: '[CODE | cancel]',
+    description: 'Pair this computer with another, as remote desktop programs do: /pair shows a code, /pair CODE on the other computer takes it; then their sessions can send each other tasks',
+    async run(args) {
+      const arg = args.trim();
+      if (arg === 'cancel') {
+        if (app.pairing) { app.pairing.abort(); out('The pairing code is cancelled.'); } else out(c.dim('No pairing code is shown now.'));
+        return;
+      }
+      const name = machineName(app.config.env);
+      if (arg) {
+        if (!parseCode(arg)) { out(c.red('A pairing code is nine digits, as the other computer shows it: /pair 482 913 706')); return; }
+        try {
+          const d = await checking('Pairing', (signal) => joinPairing({ code: arg, name, signal }));
+          out([`${c.green('✔')} Paired with ${c.bold(d.name)}.`, c.dim(`The sessions of the two computers can send each other tasks now: @${d.name}/session task, or ask the agent. /devices lists your paired computers.`)]);
+          app.syncRemote();
+        } catch (e) { if (e.name !== 'AbortError') out(c.red(`Not paired: ${e.message}`)); }
+        return;
+      }
+      if (app.pairing) { out(c.dim('A pairing code is shown already (above). /pair cancel cancels it.')); return; }
+      const ctrl = new AbortController();
+      app.pairing = ctrl;
+      hostPairing({
+        name, signal: ctrl.signal,
+        onCode: (code, until) => out([
+          `Pairing code: ${c.bold(formatCode(code))}  ${c.dim(`(until ${new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`)}`,
+          c.dim(`On the other computer: /pair ${code}, or in its web console 我的电脑 → 添加电脑. A wrong code may be tried three times. /pair cancel cancels it.`),
+        ]),
+      }).then((d) => {
+        app.screen.log(resultLines([`${c.green('✔')} Paired with ${c.bold(d.name)}.`, c.dim('Its sessions and the sessions here can send each other tasks now. /devices lists your paired computers, and sets which ones ask you first.')]), '');
+        app.syncRemote();
+      }, (e) => {
+        if (e.name !== 'AbortError') app.notice(`Not paired: ${e.message}`, 'warn');
+      }).finally(() => { if (app.pairing === ctrl) app.pairing = null; });
+    },
+  });
+
+  // The computers paired with this one (devices.js): their tasks run at once or ask first, and unpairing.
   add({
     name: 'devices',
-    argHint: '[remove <name|id>] [policy ask|account]',
-    description: 'The computers you trust to send this computer tasks without asking (as in remote desktop programs): list, remove, or let the whole account in',
-    run(args) {
+    argHint: '[ask|run|remove NAME]',
+    description: 'Your paired computers (/pair pairs one): list them, set whether their tasks ask you first (ask) or run at once (run), or unpair one (remove)',
+    async run(args) {
       const [action = '', ...rest] = args.trim().split(/\s+/).filter(Boolean);
       const what = rest.join(' ');
       try {
         if (action === 'remove') {
-          if (!what) { out(c.red('/devices remove NAME or ID')); return; }
-          const removed = untrustDevice(what);
-          out(removed.length ? `${c.green('✔')} No longer trusted: ${removed.map((d) => d.name).join(', ')}. Its tasks are asked about again.` : c.yellow(`No trusted computer "${what}".`));
+          if (!what) { out(c.red('/devices remove NAME')); return; }
+          const removed = removePaired(what);
+          if (!removed.length) { out(c.yellow(`No paired computer "${what}".`)); return; }
+          // (told before this session lets go of the relay: with no paired computer left it disconnects)
+          await (app.remote || new RelayClient({ session: null })).tellUnpaired().catch(() => {});
+          await app.syncRemote();
+          out(`${c.green('✔')} Unpaired ${removed.map((d) => d.name).join(', ')}: it cannot reach the sessions here any more, and is told to forget this computer too.`);
           return;
         }
-        if (action === 'policy') {
-          setInboundPolicy(what.toLowerCase());
-          out(`${c.green('✔')} ${what.toLowerCase() === 'account' ? 'Every session of your gateway account now runs tasks here without asking.' : 'Tasks from a computer you have not trusted are asked about first.'}`);
+        if (action === 'ask' || action === 'run') {
+          if (!what) { out(c.red(`/devices ${action} NAME`)); return; }
+          const set = setPairedMode(what, action);
+          out(set.length ? `${c.green('✔')} ${set.map((d) => d.name).join(', ')}: ${action === 'ask' ? 'its tasks wait for you to allow each.' : 'its tasks run at once.'}` : c.yellow(`No paired computer "${what}".`));
           return;
         }
-        if (action) { out(c.red('/devices, /devices remove NAME|ID, /devices policy ask|account')); return; }
+        if (action) { out(c.red('/devices, /devices ask|run NAME, /devices remove NAME')); return; }
       } catch (e) { out(c.red(e.message)); return; }
-      const { policy, devices } = readDeviceTrust();
+      const { devices } = readPaired();
+      const rows = Object.entries(devices).sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
       let me = null;
       try { me = deviceIdentity(); } catch (e) { out(c.yellow(e.message)); }
-      const rows = Object.entries(devices).sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
+      await app.refreshRemotePeers();
+      const sessions = (id) => app.remotePeers.filter((p) => p.device === id).length;
       out([
         `This computer: ${c.bold(machineName(app.config.env))}${me ? c.dim(` · device ${me.id}`) : ''}`,
-        `Tasks from your other computers: ${policy === 'account' ? c.yellow('run without asking (policy account)') : 'asked about unless the computer is trusted'}`,
-        ...(rows.length ? [c.dim('Trusted computers:'), ...rows.map(([id, d]) => `  ${c.bold(d.name)} ${c.dim(`${id} · trusted ${new Date(d.trustedAt).toLocaleDateString()}${d.lastSeen ? ` · last task ${new Date(d.lastSeen).toLocaleString()}` : ''}`)}`)] : [c.dim('No trusted computer yet: choose "Always trust" when one asks to run a task.')]),
-        c.dim('/devices remove NAME|ID stops trusting one; /devices policy account lets every session of your account in, policy ask (default) asks. Sessions of this computer talk to each other without asking.'),
+        ...(rows.length
+          ? [c.dim('Paired computers:'), ...rows.map(([id, d]) => {
+            const n = sessions(id);
+            return `  ${c.bold(d.name)} ${n ? c.green(`● ${n} session${n === 1 ? '' : 's'}`) : c.dim('○ no session connected')} ${d.mode === 'ask' ? c.yellow('asks first') : c.dim('runs at once')} ${c.dim(`· paired ${new Date(d.pairedAt).toLocaleDateString()} · ${id}`)}`;
+          })]
+          : [c.dim('No paired computer yet: /pair shows a code to type on the other one.')]),
+        c.dim('/pair pairs another computer · /devices ask|run NAME · /devices remove NAME unpairs one. Sessions of this computer talk to each other directly.'),
       ]);
     },
   });

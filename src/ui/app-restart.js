@@ -167,7 +167,6 @@ export const restartMethods = {
       peerName: request.cwd && !this.customTitle ? null : this.peers?.name || this.sessionName,
       peerId: this.peers?.id,
       remote: this.remote?.handoff() || null,
-      peerAllowed: [...this.peerAllowed],
       userSentToPeers: [...this.userSentToPeers].slice(-200),
       sentToRemote: [...this.sentToRemote],
       restartNote: this.restartNote || null, // the last restart line, merged with the next one when nothing came between

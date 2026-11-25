@@ -4,7 +4,6 @@
 // (its user page, "API 密钥") and pastes it into /connect (7bit.fun), which checks it (GET /v1/account) and saves it.
 // (Until 2026-11-19 /login did, and before that it opened the gateway's page in the browser and took a key back
 // through a local callback server.)
-// The same key puts the sessions online at the gateway (remote.js), whichever provider the model requests go to.
 
 import fs from 'node:fs';
 import path from 'node:path';

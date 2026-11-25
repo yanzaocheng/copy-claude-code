@@ -81,7 +81,7 @@ const BUILTIN_MCP = [
   { tool: "Read", tools: "Read · Write · Edit · MultiEdit · Glob · Grep", name: "文件系统", desc: "读写、修改、搜索本机文件", like: "Filesystem MCP" },
   { tool: "REPL", tools: "REPL", name: "代码执行", desc: "常驻的 Python / Node.js 进程，处理数据、跑脚本", like: "代码执行类 MCP" },
   { tool: "Processes", tools: "Processes", name: "进程管理", desc: "查看进程和占用的端口，结束进程", like: "系统 / 进程类 MCP" },
-  { tool: "MessagePeer", tools: "ListPeers · MessagePeer", name: "多会话协作", desc: "和本机、你的其他电脑、联系人的 claude-pro 会话互发任务", like: "" },
+  { tool: "MessagePeer", tools: "ListPeers · MessagePeer", name: "多会话协作", desc: "和本机、你配对过的其他电脑上的 claude-pro 会话互发任务", like: "" },
 ];
 
 // 让 AI 新建: the new conversation's box with the request (where the file goes, its format), the project's directory

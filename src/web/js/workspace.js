@@ -4,7 +4,7 @@ import { esc, api, toast, fail, fmtTokens, fmtUsd, ago, shortPath, ICON, $, $$ }
 import { view, route } from "./router.js";
 import { popMenu } from "./composer.js";
 import { browseProjectDirectories, startSession } from "./page-new.js";
-import { drawAuthRequests } from "./page-remote.js";
+import { drawAuthRequests } from "./page-devices.js";
 
 // how long ago, as short as the sidebar wants it: 刚刚, 5分, 3小时, 16天, 2个月, 1年
 function shortAgo(ms) {

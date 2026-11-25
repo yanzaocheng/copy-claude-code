@@ -88,7 +88,7 @@ export const BASIC_SETTINGS = {
 // unrelated env entries; those are left alone, but are not advertised as configuration of this program.
 export const KNOWN_KEYS = {
   CLAUDE_PRO_GATEWAY_URL: `Gateway address (default ${GATEWAY_DEFAULT_URL})`,
-  CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the gateway. Otherwise a session is online at the gateway whenever this computer is logged in, and sessions on your other computers (@computer/name) can send it tasks, once their computer is allowed here (/devices)',
+  CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the relay. Otherwise, once this computer is paired with another (/pair), each session connects to the relay so that the sessions there can send it tasks (@computer/name)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
   CLAUDE_PRO_ATTACH: 'Set to 1 (experimental) to run terminal sessions inside the web console\'s process, the window attached to it as with tmux: one process for all sessions, and an update or a change of the source restarts that one process (the windows attach again) instead of each session',
 
