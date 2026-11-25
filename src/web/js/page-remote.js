@@ -176,7 +176,7 @@ export function drawAuthRequests() {
         <div class="auth-from">电脑「<strong>${esc(r.machine)}</strong>」上的会话 @${esc(r.from)} 想让这里的「${esc(target)}」执行：</div>
         <div class="auth-text">${esc(r.text)}</div>
         <div class="auth-device">${device}</div>
-        <div class="actions">${r.options.map((o) => `<button class="button${o.value === "decline" ? " danger" : o.value === "always" ? " secondary" : ""} small" data-index="${o.index}">${LABELS[o.value] || esc(o.value)}</button>`).join("")}<a class="auth-view" href="#/live/${esc(r.live.peerId)}">查看会话</a></div>`;
+        <div class="actions">${r.options.map((o) => `<button class="button${o.value === "decline" ? " danger" : o.value === "always" ? " secondary" : ""} small" data-index="${o.index}">${o.value === "once" && !r.verified ? "只允许这一条任务" : LABELS[o.value] || esc(o.value)}</button>`).join("")}<a class="auth-view" href="#/live/${esc(r.live.peerId)}">查看会话</a></div>`;
     $$("[data-index]", card).forEach((b) => b.addEventListener("click", async () => {
       $$("button", card).forEach((x) => { x.disabled = true; });
       try {

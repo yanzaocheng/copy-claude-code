@@ -240,8 +240,10 @@ export class PeerNode {
 export function peerMessagePrompt(msg) {
   const where = msg.from.machine ? ` on the computer "${msg.from.machine}"` : '';
   const from = `${msg.from.name}${msg.from.cwd ? ` (working in ${msg.from.cwd}${where})` : where}`;
+  // (the other session's text stays inside its tag, and cannot pass for a note of this program)
+  const text = String(msg.text ?? '').replace(/<(\/?\s*(?:system-reminder|peer-message))/gi, '&lt;$1');
   if (msg.kind === 'reply') {
-    return `<peer-message from="${msg.from.name}" kind="reply">\n${msg.text}\n</peer-message>\n<system-reminder>This is the answer of another ${'claude-pro'} session, ${from}, to a message you sent it with MessagePeer. Carry on with your task using it.</system-reminder>`;
+    return `<peer-message from="${msg.from.name}" kind="reply">\n${text}\n</peer-message>\n<system-reminder>This is the answer of another ${'claude-pro'} session, ${from}, to a message you sent it with MessagePeer. Carry on with your task using it.</system-reminder>`;
   }
-  return `<peer-message from="${msg.from.name}" kind="task">\n${msg.text}\n</peer-message>\n<system-reminder>This task was sent to you by another claude-pro session, ${from}, not typed by your user. Do it as you would a request of the user. The final text of your answer is sent back to ${msg.from.name} automatically, so end with a self-contained report of what you did or found.</system-reminder>`;
+  return `<peer-message from="${msg.from.name}" kind="task">\n${text}\n</peer-message>\n<system-reminder>This task was sent to you by another claude-pro session, ${from}, not typed by your user. Do it as you would a request of the user. The final text of your answer is sent back to ${msg.from.name} automatically, so end with a self-contained report of what you did or found.</system-reminder>`;
 }

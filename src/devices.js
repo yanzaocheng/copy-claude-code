@@ -16,6 +16,7 @@ import { CONFIG_DIR } from './config.js';
 
 const identityFile = () => path.join(CONFIG_DIR, 'device.json');
 const trustFile = () => path.join(CONFIG_DIR, 'trusted-devices.json');
+const seenFile = () => path.join(CONFIG_DIR, 'device-tasks-seen.json');
 const SKEW_MS = 60 * 60_000; // how far a signature's time may be from this computer's clock
 export const POLICIES = ['ask', 'account'];
 
@@ -68,19 +69,43 @@ export function signTask(to, text) {
   return { key: me.key, sig: crypto.sign(null, payload(to, at, text), me.privateKey).toString('base64url'), at };
 }
 
-const seen = new Set(); // signatures already taken (the same task sent again)
+// A signature is taken once: the same task sent again (by whoever saw it pass) is not the computer's. What was taken
+// is kept, by the hash of the signature's bytes, for as long as its time would still be accepted: in this process,
+// and in a file, so that a restart (they are frequent: new code, an update) does not forget it.
+const seen = new Map(); // hash -> the signature's time
+function takeSignature(bytes, at) {
+  const id = crypto.createHash('sha256').update(bytes).digest('base64url').slice(0, 22);
+  const now = Date.now();
+  const fresh = (t) => Math.abs(now - t) <= SKEW_MS + 60_000;
+  let stored = {};
+  try { stored = JSON.parse(fs.readFileSync(seenFile(), 'utf8')) || {}; } catch { /* none yet */ }
+  if (seen.has(id) || Object.hasOwn(stored, id)) return false;
+  for (const [k, t] of seen) if (!fresh(t)) seen.delete(k);
+  seen.set(id, at);
+  const kept = Object.fromEntries(Object.entries(stored).filter(([, t]) => Number.isFinite(t) && fresh(t)));
+  kept[id] = at;
+  try { writeFile(seenFile(), kept, 0o600); } catch { /* remembered in this process at least */ }
+  return true;
+}
+
+// One way to write the bytes: a signature or key with padding, a line end or other characters after it decodes to the
+// same bytes, and would pass for another one.
+const decode = (text, length) => {
+  const bytes = Buffer.from(text, 'base64url');
+  return bytes.length === length && bytes.toString('base64url') === text ? bytes : null;
+};
+
 // The sender's computer when `auth` is its valid signature of `text` for the session `to` and `device` is its id;
 // null otherwise (unsigned, forged, too old, or taken already).
 export function verifyTask({ auth, device, to, text }) {
   if (!auth || typeof auth !== 'object' || !device || typeof auth.key !== 'string' || typeof auth.sig !== 'string') return null;
   try {
     if (idOf(auth.key) !== device || !Number.isFinite(auth.at) || Math.abs(Date.now() - auth.at) > SKEW_MS) return null;
-    if (seen.has(auth.sig)) return null;
+    const sig = decode(auth.sig, 64);
+    if (!sig || !decode(auth.key, 32)) return null;
     const key = crypto.createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: auth.key }, format: 'jwk' });
-    if (!crypto.verify(null, payload(to, auth.at, text), key, Buffer.from(auth.sig, 'base64url'))) return null;
-    seen.add(auth.sig);
-    if (seen.size > 2000) seen.delete(seen.values().next().value);
-    return device;
+    if (!crypto.verify(null, payload(to, auth.at, text), key, sig)) return null;
+    return takeSignature(sig, auth.at) ? device : null;
   } catch { return null; }
 }
 

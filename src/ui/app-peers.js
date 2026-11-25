@@ -11,6 +11,10 @@ import { peersEnabled, PeerNode, cleanName, resolvePeer, machineName, peerMessag
 import { verifyTask, readDeviceTrust, noteDeviceSeen, trustDevice } from '../devices.js';
 
 const PEER_AUTH_TIMEOUT_MS = 10 * 60_000; // a task from another computer that nobody allowed in this time is declined
+const SENT_KEPT_MS = 24 * 3600_000; // how long an answer from another computer is waited for
+// Another computer's text as the terminal may show it: without the control characters (escape sequences that move
+// the cursor or write the clipboard) that would let it redraw what the user is asked.
+const shown = (text) => String(text ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 
 export const peerMethods = {
   // Register this session so that the other sessions on the machine can send it tasks. Not in the tests
@@ -90,6 +94,11 @@ export const peerMethods = {
       ? { ...(await this.remote.sendPeer(peer.id, { text })), peer }
       : await this.peers.send(peer, { text });
     if (!byModel) this.userSentToPeers.add(`${r.peer.id}:${r.id}`);
+    // (an answer from another computer is taken only for what was sent there: see onPeerMessage)
+    if (peer.remote) {
+      this.sentToRemote.set(`${r.peer.id}:${r.id}`, Date.now());
+      for (const [key, at] of this.sentToRemote) if (Date.now() - at > SENT_KEPT_MS || this.sentToRemote.size > 500) this.sentToRemote.delete(key); else break;
+    }
     return r;
   },
 
@@ -132,14 +141,17 @@ export const peerMethods = {
   // A task from a session on another computer runs when that computer is trusted here (its signature checks out, see
   // devices.js), the session was allowed earlier for as long as it runs, or the user lets every session of the
   // account in (/devices policy account); otherwise the user is asked first, as a remote desktop program asks before
-  // a connection. One question at a time for each sending session. Resolves with whether the task runs.
+  // a connection. One question at a time for each sending session of an identified computer; a computer that cannot
+  // be identified (no signature, or one that does not check out) is asked about for every task, since nothing says
+  // that the next one comes from the same place. Resolves with whether the task runs.
   authorizePeerTask(msg) {
     const f = msg.from;
     const device = verifyTask({ auth: msg.auth, device: f.device, to: msg.to, text: msg.text });
     const trust = readDeviceTrust();
     if (trust.policy === 'account') return Promise.resolve(true);
     if (device && Object.hasOwn(trust.devices, device)) { noteDeviceSeen(device, f.machine); return Promise.resolve(true); }
-    const key = `${f.id}|${device || 'unidentified'}`;
+    if (!device) return this.askPeerTask(msg, null, null);
+    const key = `${f.id}|${device}`;
     if (this.peerAllowed.has(key)) return Promise.resolve(true);
     if (!this.peerAuthPending.has(key)) {
       this.peerAuthPending.set(key, this.askPeerTask(msg, device, key).finally(() => this.peerAuthPending.delete(key)));
@@ -152,7 +164,8 @@ export const peerMethods = {
     const me = `${machineName(this.config.env)}/${this.peerLabel()}`;
     // the sender is told that it waits (an older claude-pro, which signs nothing, would take a notice for a task)
     if (f.device) this.remote?.sendPeer(f.id, { kind: 'notice', text: `Delivered to ${me}: waiting for its user to allow the task.`, inReplyTo: msg.id }).catch(() => {});
-    const preview = msg.text.length > 1200 ? `${msg.text.slice(0, 1200)}…` : msg.text;
+    const text = shown(msg.text);
+    const preview = text.length > 1200 ? `${text.slice(0, 1200)}…` : text;
     const who = device ? `device ${device.slice(0, 8)}`
       : f.device ? c.yellow('its signature does not check out: it may not be the computer it says')
         : 'an older claude-pro, which cannot be identified';
@@ -162,7 +175,8 @@ export const peerMethods = {
       question: 'Let this session work on it? Its final answer is sent back.',
       color: c.yellow,
       options: [
-        { label: 'Allow this connection', value: 'once', description: `This task, and later ones from @${f.name} while that session runs` },
+        device ? { label: 'Allow this connection', value: 'once', description: `This task, and later ones from @${f.name} while that session runs` }
+          : { label: 'Allow this task', value: 'once', description: 'Only this one: a computer that cannot be identified is asked about every time' },
         ...(device ? [{ label: `Always trust ${f.machine}`, value: 'always', description: 'The tasks of its sessions run without asking (/devices to revoke)' }] : []),
         { label: 'Decline', value: 'decline', description: 'They are told that you declined it' },
       ],
@@ -174,9 +188,11 @@ export const peerMethods = {
     let choice;
     try { choice = await this.showDialog(dialog); } finally { clearTimeout(timer); }
     if (choice === 'always') {
-      try { trustDevice(device, f.machine); } catch (e) { this.notice(`Could not save the trusted computer: ${e.message}`, 'warn'); }
+      // (the list of trusted computers lets it in from now on, so that taking it off the list stops it here too)
+      try { trustDevice(device, f.machine); } catch (e) { this.notice(`Could not save the trusted computer: ${e.message}`, 'warn'); this.peerAllowed.add(key); }
+      return true;
     }
-    if (choice === 'once' || choice === 'always') { this.peerAllowed.add(key); return true; }
+    if (choice === 'once') { if (key) this.peerAllowed.add(key); return true; }
     const timedOut = choice === 'timeout';
     this.screen.log(c.dim(`  ✉ ${timedOut ? 'Nobody answered: declined' : 'Declined'} the task from @${f.name}`), '');
     this.replyToPeer(msg, timedOut ? `Nobody at ${me} allowed this task within ${PEER_AUTH_TIMEOUT_MS / 60_000} minutes: it was not run.` : `The user of ${me} declined this task.`);
@@ -185,6 +201,17 @@ export const peerMethods = {
 
   onPeerMessage(msg) {
     if (this.exiting) return;
+    if (msg.from.remote && msg.kind !== 'task') {
+      // An answer or a notice from another computer is one to a message this session sent that session, and to
+      // nothing else: taken as it comes, it would be a task that nobody was asked about (whoever holds the gateway
+      // key can send one).
+      const key = `${msg.from.id}:${msg.inReplyTo}`;
+      if (!this.sentToRemote.has(key)) {
+        this.screen.log(c.dim(`  ✉ Left out ${msg.kind === 'reply' ? 'an answer' : 'a notice'} from @${msg.from.name} to nothing this session sent it`), '');
+        return;
+      }
+      if (msg.kind === 'reply') this.sentToRemote.delete(key);
+    }
     if (msg.kind === 'notice') {
       // about a task this session sent: it waits for the user over there (the text is ours, not the other side's)
       this.screen.log(`${c.blue('✉')} ${c.bold(`@${msg.from.name}`)} ${c.dim('got the task: it waits for its user to allow it')}`, '');
@@ -199,11 +226,11 @@ export const peerMethods = {
     const width = this.width - 1;
     if (msg.kind === 'reply' && this.userSentToPeers.delete(`${msg.from.id}:${msg.inReplyTo}`)) {
       // the answer to something the user sent: shown, and noted for the model, without a turn of its own
-      this.screen.log(`${c.blue('✉')} ${from} ${c.dim('answered:')}`, ...renderMarkdown(msg.text, { width: width - 2 }).map((l) => '  ' + l), '');
+      this.screen.log(`${c.blue('✉')} ${from} ${c.dim('answered:')}`, ...renderMarkdown(shown(msg.text), { width: width - 2 }).map((l) => '  ' + l), '');
       this.agent.addReminder(`The user sent a message to another claude-pro session, ${msg.from.name} (${msg.from.cwd}), which answered:\n${msg.text}`);
       return;
     }
-    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${msg.text}`;
+    const display = `✉ ${msg.kind === 'reply' ? 'answer from' : 'task from'} @${msg.from.name}: ${shown(msg.text)}`;
     const item = { text: peerMessagePrompt(msg), images: [], display, peer: msg.kind === 'task' ? msg : null };
     if (this.isTurnRunning()) { this.queue.push(item); this.screen.schedule(); return; }
     this.startTurn(item.text, { display, peers: item.peer ? [item.peer] : [] });

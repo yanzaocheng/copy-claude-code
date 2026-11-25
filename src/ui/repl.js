@@ -245,7 +245,9 @@ export class App {
     this.skipAutoReload = false;
     this.peers = null; // this session as seen by the other sessions on the machine (see peers.js)
     this.turnPeers = []; // tasks from other sessions that the running turn answers: [{msg}]
-    this.userSentToPeers = new Set(); // ids of messages the user sent to other sessions with @name
+    this.userSentToPeers = new Set(flags?.restart?.userSentToPeers || []); // ids of messages the user sent to other sessions with @name
+    // messages sent to sessions on other computers that may still be answered ('sessionId:messageId' -> when)
+    this.sentToRemote = new Map(flags?.restart?.sentToRemote || []);
     // sessions on other computers whose tasks the user allowed for as long as they run ('sessionId|device', see
     // authorizePeerTask), and the questions open about them
     this.peerAllowed = new Set(flags?.restart?.peerAllowed || []);
@@ -1209,6 +1211,7 @@ export class App {
   async askProjectTrust() {
     const risk = projectRisk(this.cwd);
     if (!risk || projectTrusted(this.cwd, risk)) return;
+    if (this.attached) this.host?.terminalAsks?.(this); // (its window sends keys from now on, see attach.js)
     const labels = { mcp: 'MCP servers (programs it starts)', hooks: 'hooks (commands it runs)', env: 'env (it can point the gateway or the shell elsewhere)' };
     const lines = ['', c.yellow(c.bold('This project comes with settings that run programs on this computer or change the configuration:'))];
     for (const [kind, label] of Object.entries(labels)) {

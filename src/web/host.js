@@ -139,6 +139,12 @@ export class SessionHost {
     return app;
   }
 
+  // A session of an attached terminal asks its user something before it is up (the project's trust): the window's
+  // keys, which wait for the session to be ready, are let through now.
+  terminalAsks(app) {
+    if (app.attached?.link) terminalReady(app.attached.link, app);
+  }
+
   // A window attaches (see terminals.js): a new session for it, the one a supervised session of its own leaves when it
   // restarts into this (`hello.restart`), or the one the console before this one handed over (`hello.reattach`).
   async attachTerminal(link, hello) {

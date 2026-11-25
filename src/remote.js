@@ -368,7 +368,9 @@ export class RemoteControl {
       const f = cmd.from || {};
       // (a contact's message, another account's, that an older gateway still delivers: not taken)
       if (typeof f.account === 'string' && f.account) throw new Error('通讯录 is gone');
-      const machine = f.machine || f.host || 'computer';
+      // (what the other side calls itself is shown to the user and said to the model: one plain line each)
+      const plain = (s, max) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f<>"]/g, ' ').trim().slice(0, max);
+      const machine = plain(f.machine || f.host, 80) || 'computer';
       const accepted = this.handlers.peerMessage?.({
         id: cmd.cid,
         kind: cmd.kind === 'reply' || cmd.kind === 'notice' ? cmd.kind : 'task',
@@ -377,7 +379,7 @@ export class RemoteControl {
         // the sender's signature, and the session it was for (see devices.js verifyTask)
         auth: cmd.auth || null,
         to: this.id,
-        from: { id: f.id, name: `${machine}/${f.name || 'session'}`, cwd: f.cwd || '', machine, remote: true, device: typeof f.device === 'string' ? f.device : null },
+        from: { id: String(f.id ?? ''), name: `${machine}/${plain(f.name, 80) || 'session'}`, cwd: plain(f.cwd, 500), machine, remote: true, device: typeof f.device === 'string' ? f.device : null },
       });
       if (accepted === false) {
         // A session moving into the console cannot take new work. Leave it in the mailbox for the next stream.

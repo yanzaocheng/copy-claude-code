@@ -95,7 +95,13 @@ export async function attachSession({ flags, cwd, prompt, stdin = process.stdin,
   let ready = false;
   const pending = []; // keys typed while (re)attaching
   const send = (type, payload) => { if (socket && !socket.destroyed) socket.write(frame(type, payload)); };
-  const onKeys = (d) => { if (ready && socket && !socket.destroyed) send(FRAME.INPUT, Buffer.from(d)); else pending.push(Buffer.from(d)); };
+  let waiting = false; // for the console to come back: Ctrl+C gives up
+  let gaveUp = false;
+  const onKeys = (d) => {
+    if (ready && socket && !socket.destroyed) send(FRAME.INPUT, Buffer.from(d));
+    else if (waiting && Buffer.from(d).includes(3)) gaveUp = true;
+    else pending.push(Buffer.from(d));
+  };
   const onResize = () => send(FRAME.RESIZE, size());
 
   // One connection: resolves 'exit', 'closed' (the console went away: attach again) or 'refused' (before READY).
@@ -147,7 +153,8 @@ export async function attachSession({ flags, cwd, prompt, stdin = process.stdin,
     let again = null;
     const since = Date.now();
     let started = 0;
-    for (const until = since + 60_000; !again && Date.now() < until;) {
+    waiting = true;
+    for (const until = since + 60_000; !again && !gaveUp && Date.now() < until;) {
       await sleep(400);
       // a console that went away without starting the next one (a crash, a kill) is started from here: it takes up
       // what it was running from its list (web-running.json)
@@ -155,8 +162,9 @@ export async function attachSession({ flags, cwd, prompt, stdin = process.stdin,
       const s = server();
       if (s?.port) again = await connect(s.port, s.token);
     }
+    waiting = false;
     if (!again) {
-      stdout.write(`${ESC.bracketedPasteOff}${ESC.showCursor}\r\nThe web console did not come back: the session goes on there (claude-pro web) once it starts again.\r\n`);
+      stdout.write(`${ESC.bracketedPasteOff}${ESC.showCursor}\r\n${gaveUp ? 'Stopped waiting for the web console' : 'The web console did not come back'}: the session goes on there (claude-pro web) once it starts again.\r\n`);
       exitCode = 1;
       break;
     }
