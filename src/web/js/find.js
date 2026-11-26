@@ -13,6 +13,20 @@ const CLOSE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" strok
 export const FIND_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
 const highlights = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight !== "undefined";
 
+// A conversation opened from the sidebar's search, found by what was said in it: the words looked for once it is
+// drawn (its view takes them, takePendingFind), or at once when it is the one shown (the cp-find event).
+let pending = null;
+export function findWhenOpened(sessionId, q) {
+  pending = { sessionId, q, at: Date.now() };
+  document.dispatchEvent(new CustomEvent("cp-find", { detail: { sessionId } }));
+}
+export function takePendingFind(sessionId) {
+  if (!pending || pending.sessionId !== sessionId || Date.now() - pending.at > 60_000) return null;
+  const { q } = pending;
+  pending = null;
+  return q;
+}
+
 // root: what is searched (the conversation's log); scroller: what scrolls it; host: where the box goes (positioned);
 // button: the header's 🔍. Returns {open(), close(), dispose()}.
 export function findInConversation({ root, scroller, host, button }) {
@@ -154,8 +168,22 @@ export function findInConversation({ root, scroller, host, button }) {
     open();
   };
   document.addEventListener("keydown", onKey);
+  // the box opened on `q`, at its first place in the conversation (from the top); how many places there are
+  function show(q) {
+    opened = true;
+    bar.classList.remove("hidden");
+    button?.setAttribute("aria-pressed", "true");
+    input.value = q;
+    query = q;
+    current = -1;
+    search();
+    current = ranges.length ? 0 : -1;
+    paint();
+    reveal();
+    return ranges.length;
+  }
   return {
-    open, close,
+    open, close, show,
     dispose() { watch.disconnect(); clearTimeout(timer); clearMarks(); document.removeEventListener("keydown", onKey); bar.remove(); },
   };
 }

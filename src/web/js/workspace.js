@@ -7,6 +7,7 @@ import { browseProjectDirectories, startSession } from "./page-new.js";
 import { drawAuthRequests } from "./page-devices.js";
 import { setDockWorkspace, dockWorkspace, openFilesTab, openTerminal } from "./dock.js";
 import { modal } from "./dialogs.js";
+import { findWhenOpened } from "./find.js";
 
 // how long ago, as short as the sidebar wants it: 刚刚, 5分, 3小时, 16天, 2个月, 1年
 function shortAgo(ms) {
@@ -314,6 +315,12 @@ export function wireSidebar() {
   const box = $("#ws");
   const tip = $("#tip");
   box.addEventListener("click", (e) => {
+    // a conversation found by what was said in it: opened at that place (the words looked for in it, find.js)
+    const hit = e.target.closest(".ws-item.has-snippet");
+    if (hit && !e.target.closest("[data-session-menu]")) {
+      const it = ws.tips.get(hit.parentElement.dataset.tip);
+      if (it?.id && ws.q) findWhenOpened(it.id, ws.q);
+    }
     const menu = e.target.closest("[data-session-menu]");
     if (menu) {
       tip.classList.add("hidden");

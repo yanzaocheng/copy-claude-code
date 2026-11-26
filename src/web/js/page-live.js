@@ -10,7 +10,7 @@ import { composer, quoteSelection, popMenu, modelMenuItems } from "./composer.js
 import { pendingFirstSends } from "./page-new.js";
 import { mobileLayout } from "./main.js";
 import { setDockWorkspace, dockButton } from "./dock.js";
-import { findInConversation, FIND_ICON } from "./find.js";
+import { findInConversation, FIND_ICON, takePendingFind } from "./find.js";
 
 export function liveView(peerId) {
   const el = page(`<div class="chat-page">
@@ -214,6 +214,7 @@ export function liveView(peerId) {
         if (status.dialog) toast("消息已保留为草稿：请先完成会话的提示，再发送");
         else c.submit(); // only once; the composer holds the draft on any unacknowledged send
       }
+      findAsked();
       return;
     }
     if (msg.t === "status") { setStatus(msg.status); return; }
@@ -233,6 +234,14 @@ export function liveView(peerId) {
   const tick = setInterval(renderStatus, 250);
   const unquote = quoteSelection(log, (text) => c.quote(text));
   const finder = findInConversation({ root: log, scroller, host: $(".chat-page", el), button: $("#lfind", el) });
-  view.cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); finder.dispose(); };
+  // opened from the sidebar's search by what was said in it: at the place the words are (once the conversation is
+  // drawn; at once when it is this one)
+  function findAsked() {
+    const q = status.sessionId && takePendingFind(status.sessionId);
+    if (q && !finder.show(q)) toast(`这里显示的是最近的对话，里面没有「${q}」：它在更早的部分，或在没有完整显示的工具输出里`);
+  }
+  const onFind = (e) => { if (e.detail?.sessionId && e.detail.sessionId === status.sessionId && state.items.length) findAsked(); };
+  document.addEventListener("cp-find", onFind);
+  view.cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); finder.dispose(); document.removeEventListener("cp-find", onFind); };
   if (!mobileLayout.matches) c.input.focus();
 }
