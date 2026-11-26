@@ -26,7 +26,7 @@ import { hostPairing, joinPairing, parseCode } from '../pairing.js';
 import { machineName } from '../peers.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
-  purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools, searchSessionContent,
+  purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools, searchSessionContent, forkSession,
 } from './data.js';
 import { listDir, listDirs, statFile, readFile, writeFile, createEntry, renameEntry, trashEntry, rawFile, findFiles } from './files.js';
 import { listTerminals, createTerminal, terminalInput, terminalResize, closeTerminal } from './pty.js';
@@ -772,6 +772,14 @@ export const routes = [
   }],
   ['POST', /^\/api\/update$/, (req, m, body) => startWebUpdate(body?.version)],
 
+  // 在新对话中分支: a new conversation from one of a conversation's turns (data.js forkSession), run by the console at once
+  ['POST', /^\/api\/sessions\/fork$/, async (req, m, body) => {
+    const id = typeof body?.id === 'string' && /^[\w-]{8,80}$/.test(body.id) ? body.id : '';
+    if (!id) throw httpError(400, '无效的会话');
+    const fork = forkSession(id, { turn: body.turn, nth: body.nth });
+    const cwd = fs.existsSync(fork.cwd) ? fork.cwd : home;
+    return { ...(await launchSession(cwd, { resumeFile: fork.file, resumeId: fork.id })), sessionId: fork.id, dir: fork.dir };
+  }],
   // the sidebar's search, in what the conversations say (data.js searchSessionContent)
   ['GET', /^\/api\/sessions\/search$/, (req, m, b, url) => searchSessionContent(url.searchParams.get('q'))],
   ['GET', /^\/api\/sessions$/, async () => {

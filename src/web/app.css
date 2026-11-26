@@ -536,6 +536,12 @@ details.proj > div { padding: 0 0 6px 18px; }
 .turn-meta .tm-done { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-weight: 600; }
 .turn-meta .tm-check { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--ok-soft); color: var(--ok); }
 .turn-meta .tm-dim { color: var(--faint); opacity: .85; }
+/* what can be done with an answer (transcript.js): 在新对话中分支 */
+.turn-meta > .tm-acts::before { content: none; }
+.tm-acts { display: inline-flex; gap: 2px; margin-left: 10px; }
+.tm-act { display: inline-grid; place-items: center; width: 26px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--faint); cursor: pointer; }
+.tm-act:hover { background: var(--hover); color: var(--text); }
+.tm-act:disabled { opacity: .5; cursor: progress; }
 .it-output pre + .turn-meta, .turn-meta + pre { margin-top: 8px; }
 
 /* live: the cards above the message box (background work, todos), the queue, a question */

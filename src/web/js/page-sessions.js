@@ -1,7 +1,7 @@
 // 会话: all conversations, the trash, and one conversation as history.
 
 import { esc, api, toast, fail, fmtBytes, fmtUsd, fmtTime, ago, shortPath, ICON, $ } from "./util.js";
-import { itemHtml } from "./transcript.js";
+import { itemHtml, wireForks } from "./transcript.js";
 import { folded } from "./images.js";
 import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
@@ -99,6 +99,7 @@ export async function sessionView(dir, id) {
   const image = (n) => `${base}/image/${n}`;
   // drawn in pieces: a long conversation has thousands of items
   let i = 0;
+  wireForks(log, () => id);
   const wholes = wholeOutputs(log, async (tool) => (await api(`${base}/output/${encodeURIComponent(tool)}`)).text, (tool, text) => {
     const node = log.querySelector(`[data-cut="${CSS.escape(tool)}"]`);
     const old = node?.querySelector(".fold, pre");

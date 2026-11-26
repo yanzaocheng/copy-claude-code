@@ -1,7 +1,7 @@
 // The transcript model of a live session: a copy of the reducer in src/remote.js (applyEvent), and how its items are
 // drawn.
 
-import { esc } from "./util.js";
+import { esc, api, toast, fail } from "./util.js";
 import { ansi, ansiLines, plain, md } from "./markdown.js";
 import { folded } from "./images.js";
 import { truncated } from "./dialogs.js";
@@ -102,7 +102,30 @@ function turnMeta(text) {
     return esc(p);
   });
   const check = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
-  return `<div class="turn-meta" title="${esc(text)}"><span class="tm-done"><span class="tm-check">${check}</span>${esc(at)} 完成</span>${parts.map((p) => `<span>${p}</span>`).join("")}</div>`;
+  return `<div class="turn-meta" title="${esc(text)}" data-turn="${esc(text)}"><span class="tm-done"><span class="tm-check">${check}</span>${esc(at)} 完成</span>${parts.map((p) => `<span>${p}</span>`).join("")}<span class="tm-acts"><button type="button" class="tm-act" data-fork title="在新对话中分支：从这里接着聊，这个对话不受影响" aria-label="在新对话中分支">${BRANCH}</button></span></div>`;
+}
+const BRANCH = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="12" r="2.2"/><circle cx="18" cy="5.5" r="2.2"/><circle cx="18" cy="18.5" r="2.2"/><path d="M8 11 16 6.6M8 13l8 4.4"/></svg>';
+
+// 在新对话中分支 under an answer: a new conversation with this one up to there (data.js forkSession), run by the console
+// and opened. The answer is told by its done line, and which of the lines that read the same it is, from the last.
+export function wireForks(log, sessionIdOf) {
+  log.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-fork]");
+    if (!b || b.disabled) return;
+    const meta = b.closest(".turn-meta");
+    const turn = meta?.dataset.turn;
+    const id = sessionIdOf();
+    if (!turn || !id) { toast("这个对话还没有保存，稍后再试"); return; }
+    const same = [...log.querySelectorAll(".turn-meta")].filter((m) => m.dataset.turn === turn);
+    const nth = same.length - 1 - same.indexOf(meta);
+    b.disabled = true;
+    try {
+      const r = await api("/api/sessions/fork", { method: "POST", body: { id, turn, nth } });
+      toast("已在新对话中分支：从这一轮接着聊，原来的对话不变");
+      if (r.peerId) location.hash = `#/live/${r.peerId}`;
+      else if (r.dir && r.sessionId) location.hash = `#/session/${r.dir}/${r.sessionId}`;
+    } catch (err) { fail(err); } finally { b.disabled = false; }
+  });
 }
 
 // A user's message: its leading "> " lines (引用) shown as quotes above what was typed.

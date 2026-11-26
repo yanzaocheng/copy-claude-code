@@ -357,6 +357,30 @@ export function sessionMarkdown(dir, id) {
 }
 
 // /rename for a conversation that is not running: its name, appended as the session does it.
+// 在新对话中分支: a new conversation with what this one had when one of its turns ended, in the same folder: its
+// messages up to there (with their times), the done lines under them, and the system prompt it ran behind (so that
+// the branch goes on from the same prompt cache), named after it. `turn`: that done line as the page shows it
+// ("✻ Done at 17:37 · worked …"); `nth`: which of the lines that read the same, counted from the last (0).
+export function forkSession(id, { turn, nth = 0 } = {}) {
+  const s = listAllSessions().find((x) => x.id === id);
+  if (!s) throw httpError(404, '会话不存在');
+  const loaded = SessionStore.load(s.file);
+  const want = stripAnsi(String(turn || '')).trim();
+  const same = loaded.turns.filter((t) => stripAnsi(t.text).trim() === want);
+  const mark = same[same.length - 1 - Math.max(0, Number(nth) | 0)];
+  if (!mark) throw httpError(409, '在会话记录里找不到这一轮（可能是压缩之前的内容）');
+  const cwd = s.cwd || loaded.meta.cwd;
+  if (!cwd) throw httpError(409, '这个会话没有记下它的目录');
+  const store = new SessionStore(cwd);
+  const name = String(s.title || '会话').replace(/^分支：/, '').slice(0, 60);
+  store.append({ type: 'meta', name: `分支：${name}`, forkedFrom: { id, after: mark.after }, at: Date.now() });
+  if (loaded.systemPrompt) store.append({ type: 'meta', systemPrompt: loaded.systemPrompt, promptCode: loaded.promptCode, at: Date.now() });
+  for (let i = 0; i < mark.after; i++) store.append({ type: 'message', message: loaded.messages[i], at: loaded.times[i] || Date.now() });
+  store.setTurns(loaded.turns.filter((t) => t.after <= mark.after));
+  if (store.lost) throw httpError(500, '分支没能写下来（磁盘满了？）');
+  return { id: store.id, dir: path.basename(store.dir), file: store.file, cwd };
+}
+
 export function renameSession(dir, id, name) {
   const file = sessionFile(dir, id);
   const clean = String(name ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
