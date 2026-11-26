@@ -31,6 +31,8 @@ function liveState(st = {}) {
 
 export const ws = {
   sessions: [], live: [], projectOpen: {}, workspaces: [], q: "", loaded: false,
+  // the search in what the conversations say (/api/sessions/search): id -> a piece of the text, for `hitsFor`
+  hits: new Map(), hitsFor: "", searching: false,
   closed: new Set(JSON.parse(localStorage.getItem("cpWsClosed") || "[]")),
   expanded: new Set(),
   tips: new Map(),
@@ -75,9 +77,15 @@ function drawWorkspace() {
   // running sessions with nothing written yet (just started)
   for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: l.startedAt || 0, peer: l });
   const q = ws.q.toLowerCase();
+  const hits = ws.hitsFor === ws.q ? ws.hits : new Map();
   const groups = new Map();
   for (const it of items) {
-    if (q && !`${it.title} ${it.cwd}`.toLowerCase().includes(q)) continue;
+    // (found by its name or folder; else by what was said in it, shown under its name)
+    it.snippet = null;
+    if (q && !`${it.title} ${it.cwd}`.toLowerCase().includes(q)) {
+      if (!it.id || !hits.has(it.id)) continue;
+      it.snippet = hits.get(it.id);
+    }
     const key = projectKey(it.cwd);
     if (!groups.has(key)) groups.set(key, { key, cwd: it.cwd, items: [], last: 0, live: false });
     const g = groups.get(key);
@@ -107,13 +115,43 @@ function drawWorkspace() {
       ws.tips.set(id, it);
       const [cls] = it.peer ? liveState(it.peer.status) : [""];
       const active = here === it.href || (it.alt && here === it.alt);
-      return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${backgroundOf(it).length ? bgBadge(backgroundOf(it)) : ""}${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
+      return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}${it.snippet ? " has-snippet" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${backgroundOf(it).length ? bgBadge(backgroundOf(it)) : ""}${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}${it.snippet ? `<span class="ws-snippet">${marked(it.snippet, q)}</span>` : ""}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
     }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "")
       + (!closed && !g.items.length ? '<div class="ws-hint">还没有会话，点右边的 + 新建</div>' : "");
     const running = g.items.filter(working).length;
     const bg = g.items.flatMap(backgroundOf);
     return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${bg.length ? bgBadge(bg) : ""}${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" data-cwd="${esc(g.cwd)}" title="更多" aria-label="项目菜单" aria-expanded="false">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
-  }).join("") : `<div class="ws-empty">${q ? "没有符合的会话" : "还没有会话：点上方的文件夹图标添加工作区"}</div>`;
+  }).join("") : `<div class="ws-empty">${q ? (ws.searching ? "正在搜索对话内容…" : "没有符合的会话") : "还没有会话：点上方的文件夹图标添加工作区"}</div>`;
+  if (q && ws.searching && list.length) box.insertAdjacentHTML("beforeend", '<div class="ws-empty">正在搜索对话内容…</div>');
+}
+
+// a piece of a conversation, the words searched for marked
+function marked(text, q) {
+  const i = text.toLowerCase().indexOf(q);
+  if (i < 0) return esc(text);
+  return `${esc(text.slice(0, i))}<mark>${esc(text.slice(i, i + q.length))}</mark>${esc(text.slice(i + q.length))}`;
+}
+
+// The search, in what the conversations say too: asked once typing pauses; an answer to an older query is dropped.
+let searchTimer = 0, searchSeq = 0;
+function searchContent() {
+  clearTimeout(searchTimer);
+  const q = ws.q;
+  if (q.length < 2) { ws.hits = new Map(); ws.hitsFor = q; ws.searching = false; return; }
+  if (ws.hitsFor === q) { searchSeq++; ws.searching = false; return; }
+  ws.searching = true;
+  searchTimer = setTimeout(async () => {
+    const seq = ++searchSeq;
+    try {
+      const r = await api(`/api/sessions/search?q=${encodeURIComponent(q)}`);
+      if (seq !== searchSeq || ws.q !== q) return;
+      ws.hits = new Map(r.hits.map((h) => [h.id, h.snippet]));
+      ws.hitsFor = q;
+    } catch { if (seq === searchSeq) { ws.hits = new Map(); ws.hitsFor = q; } }
+    if (seq !== searchSeq) return;
+    ws.searching = false;
+    drawWorkspace();
+  }, 250);
 }
 
 // 添加工作区: a folder chosen on the computer claude-pro runs on (the system's folder dialog here, the directory
@@ -305,9 +343,9 @@ export function wireSidebar() {
   $("#wsSearchBtn").addEventListener("click", () => {
     const input = $("#wsSearch");
     input.classList.toggle("hidden");
-    if (!input.classList.contains("hidden")) input.focus(); else { input.value = ""; ws.q = ""; drawWorkspace(); }
+    if (!input.classList.contains("hidden")) input.focus(); else { input.value = ""; ws.q = ""; searchContent(); drawWorkspace(); }
   });
-  $("#wsSearch").addEventListener("input", (e) => { ws.q = e.target.value.trim(); drawWorkspace(); });
+  $("#wsSearch").addEventListener("input", (e) => { ws.q = e.target.value.trim(); searchContent(); drawWorkspace(); });
   $("#wsRefresh").addEventListener("click", () => loadWorkspace());
   $("#wsAddDir").addEventListener("click", () => addWorkspaceDir().catch(fail));
 }

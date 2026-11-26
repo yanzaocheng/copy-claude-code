@@ -26,7 +26,7 @@ import { hostPairing, joinPairing, parseCode } from '../pairing.js';
 import { machineName } from '../peers.js';
 import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
-  purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools,
+  purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools, searchSessionContent,
 } from './data.js';
 import { listDir, listDirs, statFile, readFile, writeFile, createEntry, renameEntry, trashEntry, rawFile, findFiles } from './files.js';
 import { listTerminals, createTerminal, terminalInput, terminalResize, closeTerminal } from './pty.js';
@@ -772,6 +772,8 @@ export const routes = [
   }],
   ['POST', /^\/api\/update$/, (req, m, body) => startWebUpdate(body?.version)],
 
+  // the sidebar's search, in what the conversations say (data.js searchSessionContent)
+  ['GET', /^\/api\/sessions\/search$/, (req, m, b, url) => searchSessionContent(url.searchParams.get('q'))],
   ['GET', /^\/api\/sessions$/, async () => {
     const live = await runningSessions();
     const peersById = new Map(live.filter((r) => r.status?.sessionId).map((r) => [r.status.sessionId, r.peerId]));

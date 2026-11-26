@@ -13,6 +13,8 @@ import { loadAgents, loadSkills } from '../agents.js';
 import { listPeers } from '../peers.js';
 import { costOf } from '../pricing.js';
 import { stripAnsi } from '../ui/ansi.js';
+import { ripgrepPath } from '../utils/shell.js';
+import { spawn } from '../utils/proc.js';
 
 export const projectsRoot = () => path.join(CONFIG_DIR, 'projects');
 export const trashRoot = () => path.join(CONFIG_DIR, 'trash', 'sessions');
@@ -166,6 +168,96 @@ export function listAllSessions() {
   const archived = archivedSessions();
   for (const s of out) if (archived[s.id]) s.archived = archived[s.id].at || true;
   return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+// ---------------------------------------------------------------- finding words in conversations
+
+// The conversations (not archived) whose messages hold `query` (case aside), newest first, each with a piece of text
+// around the first place: {hits: [{id, dir, snippet}], more}. What the model was given besides the messages (the
+// system prompt and tool descriptions kept in meta lines), JSON keys, pictures (base64) and thinking signatures are
+// not searched. ripgrep first picks the files the words are in at all (a tenth of a second for the whole store);
+// those are then read newest first, for a limited time.
+const SEARCH_BUDGET_MS = 2500;
+const SKIPPED_KEYS = new Set(['data', 'signature', 'id', 'tool_use_id', 'media_type', 'type', 'role']);
+const reEscape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function filesWith(needle) {
+  const rg = ripgrepPath();
+  if (!rg) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const out = [];
+    let child;
+    try {
+      child = spawn(rg, ['-l', '-i', '-F', '--no-ignore', '--hidden', '--null', '-g', '*.jsonl', '-e', needle, projectsRoot()], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { resolve(null); return; }
+    const timer = setTimeout(() => child.kill(), 15_000);
+    child.stdout.on('data', (d) => out.push(d));
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve(new Set(Buffer.concat(out).toString('utf8').split('\0').filter(Boolean).map((p) => path.resolve(p).toLowerCase())));
+    });
+  });
+}
+
+// Where an unescaped quote is, looking from `i` towards `step` (-1: back, 1: on)
+function quoteAt(line, i, step) {
+  for (let j = i; j >= 0 && j < line.length; j += step) {
+    if (line[j] !== '"') continue;
+    let k = j - 1, slashes = 0;
+    while (k >= 0 && line[k] === '\\') { slashes++; k--; }
+    if (slashes % 2 === 0) return j;
+  }
+  return -1;
+}
+const unescapeJson = (t) => t.replace(/\\(u[0-9a-fA-F]{4}|.)/g, (m, c) => (c[0] === 'u' && c.length === 5 ? String.fromCharCode(parseInt(c.slice(1), 16)) : c === 'n' || c === 'r' || c === 't' ? ' ' : c));
+
+// The first place in a conversation file the words are in a message's text: a piece of that text around them
+function snippetIn(text, re) {
+  let start = 0;
+  while (start < text.length) {
+    let end = text.indexOf('\n', start);
+    if (end < 0) end = text.length;
+    const isMessage = text.startsWith('{"type":"message"', start) || text.startsWith('{"type":"reset"', start);
+    if (isMessage) {
+      const line = text.slice(start, end);
+      re.lastIndex = 0;
+      for (let m; (m = re.exec(line));) {
+        const open = quoteAt(line, m.index - 1, -1);
+        const close = quoteAt(line, m.index + m[0].length, 1);
+        if (open < 0 || close < 0) continue;
+        if (line[close + 1] === ':') continue; // (a key)
+        const key = /"(\w+)":$/.exec(line.slice(Math.max(0, open - 40), open))?.[1];
+        if (key && SKIPPED_KEYS.has(key)) continue;
+        const before = unescapeJson(line.slice(Math.max(open + 1, m.index - 160), m.index)).replace(/\s+/g, ' ');
+        const after = unescapeJson(line.slice(m.index + m[0].length, Math.min(close, m.index + m[0].length + 240))).replace(/\s+/g, ' ');
+        return { snippet: (before.length > 40 ? `…${before.slice(-40)}` : before) + unescapeJson(m[0]) + (after.length > 80 ? `${after.slice(0, 80)}…` : after) };
+      }
+    }
+    start = end + 1;
+  }
+  return null;
+}
+
+export async function searchSessionContent(query, { limit = 100 } = {}) {
+  const q = String(query || '').trim();
+  if (q.length < 2) return { hits: [], more: false };
+  const needle = JSON.stringify(q).slice(1, -1); // (as the files write it)
+  const re = new RegExp(reEscape(needle), 'gi');
+  const inFiles = await filesWith(needle);
+  const until = Date.now() + SEARCH_BUDGET_MS;
+  const hits = [];
+  let more = false;
+  for (const s of listAllSessions()) {
+    if (s.archived) continue;
+    if (inFiles && !inFiles.has(path.resolve(s.file).toLowerCase())) continue;
+    if (hits.length >= limit || Date.now() > until) { more = true; break; }
+    let text;
+    try { text = await fs.promises.readFile(s.file, 'utf8'); } catch { continue; }
+    const found = snippetIn(text, re);
+    if (found) hits.push({ id: s.id, dir: s.dir, snippet: found.snippet });
+  }
+  return { hits, more };
 }
 
 export function sessionFile(dir, id) {

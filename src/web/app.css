@@ -111,6 +111,10 @@ h3 { font-size: 14px; margin: 0 0 6px; font-weight: 650; }
 .ws-row .ws-item.active { background: var(--surface); color: var(--text); font-weight: 500; box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); }
 .ws-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-ago { color: var(--faint); font-size: 11.5px; flex: none; font-variant-numeric: tabular-nums; }
+/* found by what was said in it (the search): a piece of that text under the name */
+.ws-item.has-snippet { flex-wrap: wrap; row-gap: 1px; }
+.ws-snippet { flex-basis: 100%; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.ws-snippet mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 /* background programs of a session (or of a project's sessions): a small terminal mark with their number */
 .ws-bg { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px 0 5px; border-radius: 99px; background: var(--surface-3); color: var(--text-2); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .ws-bg svg { width: 11px; height: 11px; }
