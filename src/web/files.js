@@ -160,20 +160,21 @@ public static class CpRecycle {
 '@
 exit [CpRecycle]::Recycle($env:CP_TRASH_PATH)`;
 
-async function toSystemTrash(target) {
+async function toSystemTrash(target, timeout) {
   if (isWin) {
     const sys = process.env.SystemRoot || 'C:\\Windows';
-    return run(path.join(sys, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', RECYCLE_PS], { env: { ...process.env, CP_TRASH_PATH: target } });
+    return run(path.join(sys, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', RECYCLE_PS], { env: { ...process.env, CP_TRASH_PATH: target }, timeout });
   }
-  if (process.platform === 'darwin') return run('osascript', ['-e', 'on run argv', '-e', 'tell application "Finder" to delete (POSIX file (item 1 of argv))', '-e', 'end run', target]);
-  return run('gio', ['trash', '--', target]);
+  if (process.platform === 'darwin') return run('osascript', ['-e', 'on run argv', '-e', 'tell application "Finder" to delete (POSIX file (item 1 of argv))', '-e', 'end run', target], { timeout });
+  return run('gio', ['trash', '--', target], { timeout });
 }
 
-export async function trashEntry(body) {
+// (`timeout`: a whole project folder takes the bin minutes)
+export async function trashEntry(body, { timeout = 60_000 } = {}) {
   const target = absolute(body?.path, '路径');
   if (path.dirname(target) === target) throw httpError(400, '不能删除磁盘的根目录');
   try { await fs.promises.lstat(target); } catch (e) { throw fsError(e, '文件'); }
-  if ((await toSystemTrash(target)) && !fs.existsSync(target)) return { path: target, recycled: true };
+  if ((await toSystemTrash(target, timeout)) && !fs.existsSync(target)) return { path: target, recycled: true };
   if (!fs.existsSync(target)) return { path: target, recycled: true };
   const dest = path.join(CONFIG_DIR, 'trash', 'files', `${Date.now()}__${path.basename(target)}`);
   try {

@@ -211,6 +211,37 @@ async function projectDirectories(cwd) {
   } catch (e) { throw httpError(e.status || 404, '无法读取这个目录，请选择其他目录'); }
 }
 
+// Whether a workspace's folder may be deleted with it: not a drive's root, not the home folder or one of its usual
+// folders, not the system's, not claude-pro's own (its code, its configuration), nor a folder holding any of them.
+function folderDeletable(dir) {
+  const d = path.resolve(dir);
+  let st = null;
+  try { st = fs.statSync(d); } catch { throw httpError(404, '目录已经不在了'); }
+  if (!st.isDirectory()) throw httpError(400, '这不是一个目录');
+  if (path.dirname(d) === d) throw httpError(400, '不能删除磁盘的根目录');
+  const kept = [home, ...['Desktop', 'Documents', 'Downloads', 'OneDrive'].map((n) => path.join(home, n)), CONFIG_DIR, INSTALL_DIR,
+    process.env.SystemRoot, process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramData, process.env.APPDATA, process.env.LOCALAPPDATA,
+    ...(isWin ? [] : ['/usr', '/etc', '/var', '/opt', '/bin', '/lib', '/System', '/Applications'])].filter(Boolean);
+  for (const k of kept) {
+    if (same(d, k) || inside(k, d)) throw httpError(400, `这个目录不能整个删除（它是或包含 ${k}）`);
+    if ((k === CONFIG_DIR || k === INSTALL_DIR) && inside(d, k)) throw httpError(400, `这个目录属于 claude-pro 自己（${k}），不能删除`);
+  }
+  return d;
+}
+
+// The folder of a workspace being deleted: its terminals in the panel closed (a shell's working directory keeps it
+// from going), then to the recycle bin (files.js trashEntry), given the minutes a large one takes.
+async function deleteWorkspaceFolder(cwd) {
+  const d = folderDeletable(cwd);
+  try {
+    const { terminals } = await listTerminals();
+    const here = terminals.filter((t) => [t.cwd, t.workspace].some((p) => p && (same(p, d) || inside(path.resolve(p), d))));
+    for (const t of here) await closeTerminal(t.id).catch(() => {});
+    if (here.length) await new Promise((r) => setTimeout(r, 800)); // (their processes let go of the folder)
+  } catch { /* no terminal host */ }
+  return trashEntry({ path: d }, { timeout: 15 * 60_000 });
+}
+
 const inside = (file, dir) => {
   const rel = path.relative(dir, file);
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -795,22 +826,30 @@ export const routes = [
   ['POST', /^\/api\/workspaces$/, (req, m, body) => addWorkspace(body)],
   ['POST', /^\/api\/workspaces\/remove$/, (req, m, body) => removeWorkspace(body)],
   // 删除工作区: out of the sidebar, and its conversations (archived ones too) to the trash, kept 7 days. The page has
-  // put away those the console ran; one still running (in a terminal) is left as it is and said. The folder and its
-  // files are not touched.
+  // put away those the console ran; one still running (in a terminal) is left as it is and said. With `files`, the
+  // folder itself goes too, to the system's recycle bin (deleteWorkspaceFolder): checked before anything is done.
   ['POST', /^\/api\/workspaces\/delete$/, async (req, m, body) => {
     const cwd = typeof body?.cwd === 'string' ? body.cwd : '';
     if (!cwd || !path.isAbsolute(cwd)) throw httpError(400, '无效的目录');
     if (host?.recovering || host?.restarting) throw httpError(409, '控制台正在恢复会话，请稍后再试');
     const live = await running();
+    const mine = listAllSessions().filter((s) => s.cwd && same(s.cwd, cwd));
+    const busy = (s) => live.has(s.id) || sessionOpenIn(s.id) || pendingSessions.has(s.id);
+    if (body.files) {
+      folderDeletable(cwd);
+      const still = mine.filter(busy);
+      if (still.length) throw httpError(409, `还有 ${still.length} 个会话在这个目录里运行（在终端窗口里）：先结束它们，再连目录一起删除`);
+    }
     let trashed = 0;
     const kept = [];
-    for (const s of listAllSessions()) {
-      if (!s.cwd || !same(s.cwd, cwd)) continue;
-      if (live.has(s.id) || sessionOpenIn(s.id) || pendingSessions.has(s.id)) { kept.push(s.title); continue; }
+    for (const s of mine) {
+      if (busy(s)) { kept.push(s.title); continue; }
       try { trashSession(s.dir, s.id); trashed++; } catch { kept.push(s.title); }
     }
     saveWorkspaces(addedWorkspaces().filter((w) => !same(w.cwd, cwd)));
-    return { trashed, kept };
+    let folder = null;
+    if (body.files) folder = await deleteWorkspaceFolder(cwd);
+    return { trashed, kept, folder };
   }],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     const detail = sessionDetail(dir, id);

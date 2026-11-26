@@ -269,16 +269,27 @@ function deleteWorkspace(cwd, key) {
       <li>${goes ? `<strong>${goes} 个会话</strong>移到回收站，7 天内可以在「全部会话与回收站」里恢复${mine.some((s) => s.archived) ? "（包括已归档的）" : ""}` : "这个工作区没有会话"}</li>
       ${hosted.length ? `<li>${hosted.length} 个会话正在运行，会先停止${busy ? `（其中 ${busy} 个正在工作，当前任务会中断）` : ""}</li>` : ""}
       ${inTerminal.length ? `<li>${inTerminal.length} 个会话在终端窗口里运行，不会删除：在终端里结束后再删</li>` : ""}
-      <li>目录和里面的文件<strong>不会</strong>被删除</li></ul>`,
+      <li data-files-line>目录和里面的文件<strong>不会</strong>被删除</li></ul>
+      <label class="ws-del-files"><input type="checkbox" data-files${inTerminal.length ? " disabled" : ""}> 同时删除整个目录和里面的所有文件${inTerminal.length ? "（有会话在终端里运行，先结束它们）" : ""}</label>`,
     foot: '<button type="button" class="button secondary" data-close>取消</button><button type="button" class="button danger" data-ok>确认删除</button>',
   });
   const ok = $("[data-ok]", m.el);
+  const files = $("[data-files]", m.el);
+  const label = () => (files.checked ? "删除会话和整个目录" : "确认删除");
+  files.addEventListener("change", () => {
+    $("[data-files-line]", m.el).innerHTML = files.checked
+      ? `<span class="ws-del-warn">整个「${esc(baseName(cwd))}」目录和里面的<strong>所有文件</strong>也会删除，移到系统回收站（可以从回收站还原；太大、放不进回收站的目录 Windows 会直接删掉）。面板里开在这个目录的终端会被关闭。</span>`
+      : "目录和里面的文件<strong>不会</strong>被删除";
+    ok.textContent = label();
+  });
   ok.addEventListener("click", async () => {
+    const withFiles = files.checked;
     ok.disabled = true;
-    ok.textContent = "正在删除…";
+    files.disabled = true;
+    ok.textContent = withFiles ? "正在删除（大目录要一会儿）…" : "正在删除…";
     try {
       for (const s of hosted) await putAway(s.id, { force: true, peer: peerOf(s) }).catch(() => {});
-      const r = await api("/api/workspaces/delete", { method: "POST", body: { cwd } });
+      const r = await api("/api/workspaces/delete", { method: "POST", body: { cwd, files: withFiles } });
       m.close();
       // what the page kept of it: the panel's tabs and tree, the folder of the next new conversation
       for (const k of [`cpDock:${key}`, `cpDockTree:${key}`]) localStorage.removeItem(k);
@@ -288,11 +299,13 @@ function deleteWorkspace(cwd, key) {
       const here = mine.some((s) => location.hash.includes(s.id)) || projectKey(dockWorkspace() || "") === key;
       await loadWorkspace({ afterPending: true });
       if (here) { setDockWorkspace(null); if (location.hash === "#/new") route(); else location.hash = "#/new"; }
-      toast(`已删除工作区 ${baseName(cwd)}${r.trashed ? `：${r.trashed} 个会话移到了回收站` : ""}${r.kept.length ? `；${r.kept.length} 个运行中的会话没有删除` : ""}`);
+      const where = r.folder ? (r.folder.recycled ? "；目录移到了系统回收站" : `；目录移到了 ${r.folder.trashed}`) : "";
+      toast(`已删除工作区 ${baseName(cwd)}${r.trashed ? `：${r.trashed} 个会话移到了回收站` : ""}${where}${r.kept.length ? `；${r.kept.length} 个运行中的会话没有删除` : ""}`);
     } catch (e) {
       fail(e);
       ok.disabled = false;
-      ok.textContent = "确认删除";
+      files.disabled = Boolean(inTerminal.length);
+      ok.textContent = label();
     }
   });
 }
