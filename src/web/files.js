@@ -114,8 +114,11 @@ export async function writeFile(body) {
 export async function createEntry(body) {
   const target = absolute(body?.path, '路径');
   try {
-    if (body.dir) await fs.promises.mkdir(target);
-    else {
+    // (a/b: the folders on the way made too)
+    if (body.dir) {
+      if (fs.existsSync(target)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      await fs.promises.mkdir(target, { recursive: true });
+    } else {
       await fs.promises.mkdir(path.dirname(target), { recursive: true });
       await fs.promises.writeFile(target, '', { flag: 'wx' });
     }

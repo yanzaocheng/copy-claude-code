@@ -30,6 +30,10 @@ export function explorer(ctx) {
   const sigs = new Map();
   const loading = new Set();
   let selected = null, selectedDir = false, revealing = false;
+  // a name being typed in the tree, as in VS Code: {kind: "new", dir, isDir} or {kind: "rename", path, isDir}, with
+  // `error` (said under the box) and `fresh` (the box not focused yet)
+  let editing = null, committing = false, redrawing = false;
+  const isWin = /^[a-z]:|\\/i.test(root);
   let mode = "tree"; // or "find"
   let hits = [], hit = 0, findSeq = 0, findTimer = 0;
   let timer = 0, shown = false;
@@ -51,14 +55,28 @@ export function explorer(ctx) {
     if (mode === "tree") draw();
   }
 
+  // the box a name is typed in, with what is said under it (the folder it goes in, or what is wrong with the name)
+  function editRow(depth, isDir, name) {
+    const where = editing.kind === "new" ? editing.dir : parentOf(editing.path);
+    const hint = editing.error || (where.endsWith("\\") || where.endsWith("/") ? where : where + (isWin ? "\\" : "/"));
+    return `<div class="ft-row ft-edit" style="--d:${depth}"><span class="ft-chev"></span>${isDir ? FOLDER : fileIcon(name || "")}<input class="ft-input" spellcheck="false" autocomplete="off" aria-label="${isDir ? "文件夹名" : "文件名"}"><div class="ft-edit-hint${editing.error ? " err" : ""}">${esc(hint)}</div></div>`;
+  }
+
   function rows(dir, depth, out) {
     const l = lists.get(dir);
     if (!l) { out.push(`<div class="ft-note" style="--d:${depth}">加载中…</div>`); if (!loading.has(dir)) load(dir); return; }
     if (l.error) { out.push(`<div class="ft-note err" style="--d:${depth}">${esc(l.error)}</div>`); return; }
-    if (!l.entries.length && depth === 0) out.push('<div class="ft-note" style="--d:0">（空文件夹）</div>');
+    // (a new file or folder: its box first in the folder, as in VS Code)
+    if (editing?.kind === "new" && samePath(editing.dir, dir)) out.push(editRow(depth, editing.isDir, ""));
+    else if (!l.entries.length && depth === 0) out.push('<div class="ft-note" style="--d:0">（空文件夹）</div>');
     for (const e of l.entries) {
       const p = joinPath(dir, e.name);
       const open = e.dir && expanded.has(p);
+      if (editing?.kind === "rename" && samePath(editing.path, p)) {
+        out.push(editRow(depth, e.dir, e.name));
+        if (open) rows(p, depth + 1, out);
+        continue;
+      }
       const sel = selected && samePath(p, selected);
       const cls = `ft-row${e.dir ? " dir" : ""}${open ? " open" : ""}${sel ? " sel" : ""}${e.name.startsWith(".") ? " dim" : ""}`;
       out.push(`<div class="${cls}" style="--d:${depth}" data-p="${esc(p)}"${e.dir ? ' data-dir="1"' : ""} title="${esc(e.name)}"><span class="ft-chev">${e.dir ? CHEV : ""}</span>${e.dir ? (open ? FOLDER_OPEN : FOLDER) : fileIcon(e.name)}<span class="ft-name">${esc(e.name)}</span>${e.link ? '<span class="ft-link" title="链接">↗</span>' : ""}</div>`);
@@ -70,7 +88,25 @@ export function explorer(ctx) {
     if (mode !== "tree") return;
     const out = [];
     rows(root, 0, out);
-    list.innerHTML = out.join("");
+    // (a name being typed lives through the redraw: what is typed, where the cursor is, the focus)
+    const before = list.querySelector(".ft-input");
+    const keep = before && { value: before.value, start: before.selectionStart, end: before.selectionEnd, focused: document.activeElement === before };
+    redrawing = true;
+    try { list.innerHTML = out.join(""); } finally { redrawing = false; }
+    const box = list.querySelector(".ft-input");
+    if (box && keep) {
+      box.value = keep.value;
+      if (keep.focused) { box.focus({ preventScroll: true }); box.setSelectionRange(keep.start, keep.end); }
+    } else if (box && editing?.fresh) {
+      editing.fresh = false;
+      const name = editing.kind === "rename" ? baseOf(editing.path) : "";
+      box.value = name;
+      box.focus();
+      // (renaming: the name without its extension selected, as in VS Code)
+      const dot = editing.isDir ? -1 : name.lastIndexOf(".");
+      box.setSelectionRange(0, dot > 0 ? dot : name.length);
+      box.scrollIntoView({ block: "nearest" });
+    }
     // (a file asked to be shown: scrolled to once its folders are loaded)
     if (revealing) {
       const row = list.querySelector(".ft-row.sel");
@@ -125,7 +161,7 @@ export function explorer(ctx) {
   }
   list.addEventListener("click", (e) => {
     const row = e.target.closest("[data-p]");
-    if (!row) return;
+    if (!row || editing) return;
     selected = row.dataset.p;
     selectedDir = Boolean(row.dataset.dir);
     if (selectedDir) toggle(selected);
@@ -135,34 +171,102 @@ export function explorer(ctx) {
     }
   });
 
-  // ---- what can be done with a file or folder
-  async function create(dir, isDir) {
-    const name = prompt(isDir ? `在 ${baseOf(dir) || dir} 里新建文件夹：` : `在 ${baseOf(dir) || dir} 里新建文件（可以带子目录，如 src/a.js）：`);
-    if (!name || !name.trim()) return;
-    try {
-      const r = await api("/api/fs/create", { method: "POST", body: { path: joinPath(dir, name.trim()), dir: isDir } });
-      for (let d = parentOf(r.path); d.length > root.length && d !== parentOf(d); d = parentOf(d)) expanded.add(d);
-      if (isDir) expanded.add(r.path);
-      saveExpanded();
-      selected = r.path;
-      selectedDir = isDir;
-      await refresh(true);
-      if (!isDir) ctx.openFile(r.path);
-    } catch (e) { fail(e); }
+  // ---- new files and folders, and new names: typed in the tree, as in VS Code (Enter, or leaving the box, does it;
+  // Esc gives up)
+  function startEdit(next) {
+    if (mode !== "tree") { input.value = ""; mode = "tree"; hits = []; }
+    const dir = next.kind === "new" ? next.dir : parentOf(next.path);
+    for (let d = dir; d.length > root.length && d !== parentOf(d); d = parentOf(d)) expanded.add(d);
+    saveExpanded();
+    editing = { ...next, error: "", fresh: true };
+    draw();
   }
-  async function rename(p) {
-    const name = prompt("新名字：", baseOf(p));
-    if (!name || !name.trim() || name.trim() === baseOf(p)) return;
-    try {
-      const r = await api("/api/fs/rename", { method: "POST", body: { from: p, to: joinPath(parentOf(p), name.trim()) } });
-      if (expanded.delete(p)) expanded.add(r.path);
-      saveExpanded();
-      selected = r.path;
-      ctx.renamed(p, r.path);
-      await refresh(true);
-    } catch (e) { fail(e); }
+  const create = (dir, isDir) => startEdit({ kind: "new", dir, isDir });
+  const rename = (p, isDir) => startEdit({ kind: "rename", path: p, isDir });
+  // what is wrong with the name typed ("": nothing)
+  function problem(name) {
+    if (isWin && /[<>:"|?*]/.test(name)) return "名字里不能有 < > : \" | ? *";
+    if (editing.kind === "rename" && /[\\/]/.test(name)) return "名字里不能有 / 或 \\";
+    if (/(^|[\\/])\.{1,2}([\\/]|$)/.test(name)) return "不能用 . 或 .. 做名字";
+    if (/[\\/]/.test(name)) return ""; // (a/b.js: folders made on the way, checked by the console)
+    const dir = editing.kind === "new" ? editing.dir : parentOf(editing.path);
+    const there = lists.get(dir)?.entries?.find((e) => (isWin ? e.name.toLowerCase() === name.toLowerCase() : e.name === name));
+    if (there && !(editing.kind === "rename" && samePath(joinPath(dir, there.name), editing.path))) return `这里已经有「${there.name}」了，换一个名字`;
+    return "";
   }
+  function sayProblem(text) {
+    if (!editing || editing.error === text) return;
+    editing.error = text;
+    const hint = list.querySelector(".ft-edit-hint");
+    if (hint) { hint.textContent = text || (editing.kind === "new" ? editing.dir : parentOf(editing.path)) + (isWin ? "\\" : "/"); hint.classList.toggle("err", Boolean(text)); }
+  }
+  function endEdit() {
+    editing = null;
+    draw();
+    list.focus({ preventScroll: true });
+  }
+  async function commit() {
+    if (!editing || committing) return;
+    const box = list.querySelector(".ft-input");
+    const name = (box?.value || "").trim();
+    const was = editing;
+    if (!name || (was.kind === "rename" && name === baseOf(was.path))) { endEdit(); return; }
+    const wrong = problem(name);
+    if (wrong) { sayProblem(wrong); box?.focus(); return; }
+    committing = true;
+    try {
+      if (was.kind === "new") {
+        const r = await api("/api/fs/create", { method: "POST", body: { path: joinPath(was.dir, name), dir: was.isDir } });
+        for (let d = parentOf(r.path); d.length > root.length && d !== parentOf(d); d = parentOf(d)) expanded.add(d);
+        if (was.isDir) expanded.add(r.path);
+        selected = r.path;
+        selectedDir = was.isDir;
+        if (editing === was) editing = null; // (another box may have been opened meanwhile)
+        saveExpanded();
+        await refresh(true);
+        draw();
+        list.focus({ preventScroll: true });
+        if (!was.isDir) ctx.openFile(r.path);
+      } else {
+        const r = await api("/api/fs/rename", { method: "POST", body: { from: was.path, to: joinPath(parentOf(was.path), name) } });
+        if (expanded.delete(was.path)) expanded.add(r.path);
+        saveExpanded();
+        selected = r.path;
+        if (editing === was) editing = null;
+        ctx.renamed(was.path, r.path);
+        await refresh(true);
+        draw();
+        list.focus({ preventScroll: true });
+      }
+    } catch (e) {
+      // (said under the box, which stays for another name)
+      if (editing === was) { sayProblem(e.message); list.querySelector(".ft-input")?.focus(); } else fail(e);
+    } finally { committing = false; }
+  }
+  list.addEventListener("keydown", (e) => {
+    if (e.target.classList?.contains("ft-input")) {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); endEdit(); }
+      return;
+    }
+    // F2: the name of the file or folder picked
+    if (e.key === "F2" && selected && !editing) { e.preventDefault(); rename(selected, selectedDir); }
+  });
+  list.addEventListener("input", (e) => {
+    if (!e.target.classList?.contains("ft-input") || !editing) return;
+    sayProblem(problem(e.target.value.trim()));
+    // (a new file's icon follows the name typed)
+    if (editing.kind === "new" && !editing.isDir) e.target.previousElementSibling.outerHTML = fileIcon(e.target.value.trim());
+  });
+  list.addEventListener("focusout", (e) => {
+    if (!e.target.classList?.contains("ft-input") || redrawing || committing || !editing) return;
+    if (!e.target.isConnected) return;
+    // (leaving the box: done, as in VS Code; nothing typed, or a name that cannot be: given up)
+    const name = e.target.value.trim();
+    if (!name || problem(name)) endEdit(); else commit();
+  });
   list.addEventListener("contextmenu", (e) => {
+    if (e.target.classList?.contains("ft-input")) return; // (the box's own menu: cut, copy, paste)
     e.preventDefault();
     const row = e.target.closest("[data-p]");
     const p = row?.dataset.p || null;
@@ -171,14 +275,14 @@ export function explorer(ctx) {
     if (p) { selected = p; selectedDir = isDir; if (mode === "tree") draw(); }
     const items = [];
     if (p && !isDir) items.push({ label: "打开", value: "open" });
-    items.push({ label: "新建文件…", value: "newfile" }, { label: "新建文件夹…", value: "newdir" }, { label: "在终端中打开", description: shortPath(here), value: "term" });
-    if (p) items.push({ label: "重命名…", value: "rename" }, { label: "复制路径", value: "copy" }, { label: "复制相对路径", value: "copyrel" });
+    items.push({ label: "新建文件", value: "newfile" }, { label: "新建文件夹", value: "newdir" }, { label: "在终端中打开", description: shortPath(here), value: "term" });
+    if (p) items.push({ label: "重命名", description: "F2", value: "rename" }, { label: "复制路径", value: "copy" }, { label: "复制相对路径", value: "copyrel" });
     items.push({ label: "刷新", value: "refresh" });
     menuAt(e.clientX, e.clientY, items, (v) => {
       if (v === "open") ctx.openFile(p);
       else if (v === "newfile" || v === "newdir") create(here, v === "newdir");
       else if (v === "term") ctx.openTerminal({ cwd: here });
-      else if (v === "rename") rename(p);
+      else if (v === "rename") rename(p, isDir);
       else if (v === "copy") copyText(p);
       else if (v === "copyrel") copyText(relativeTo(root, p), "相对路径");
       else if (v === "refresh") refresh(true);
