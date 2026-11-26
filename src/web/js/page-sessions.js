@@ -8,6 +8,7 @@ import { view, page } from "./router.js";
 import { loadWorkspace, archive } from "./workspace.js";
 import { composer, popMenu } from "./composer.js";
 import { queueFirstMessage } from "./page-new.js";
+import { setDockWorkspace, dockButton } from "./dock.js";
 
 let sessionCache = null;
 export async function sessions() {
@@ -89,8 +90,9 @@ export async function sessionView(dir, id) {
   // replaces this one; what is drawn here meanwhile is the same conversation. (The console puts it away again once
   // nobody has looked at it for a while: see SessionHost.reap.)
   const base = `/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`;
+  if (d.cwd) setDockWorkspace(d.cwd);
   el.innerHTML = `<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div><button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div>${dockButton()}<button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-composer" id="hcomp"></div></div></div>`;
   const log = $("#log", el);

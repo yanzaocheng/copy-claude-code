@@ -28,6 +28,8 @@ import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
   purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools,
 } from './data.js';
+import { listDir, listDirs, statFile, readFile, writeFile, createEntry, renameEntry, rawFile, findFiles } from './files.js';
+import { listTerminals, createTerminal, terminalInput, terminalResize, closeTerminal } from './pty.js';
 
 const mask = (key) => {
   const k = String(key || '');
@@ -960,6 +962,23 @@ export const routes = [
   }],
 
   ['GET', /^\/api\/usage$/, (req, m, b, url) => usageReport({ days: Math.min(90, Math.max(1, Math.round(Number(url.searchParams.get('days'))) || 30)) })],
+
+  // the panel beside a conversation: the workspace's files (files.js) and its terminals (pty.js; their screens'
+  // streams are in server.js)
+  ['GET', /^\/api\/fs\/list$/, (req, m, b, url) => listDir(url.searchParams.get('path'))],
+  ['POST', /^\/api\/fs\/lists$/, (req, m, body) => listDirs(body?.paths)],
+  ['GET', /^\/api\/fs\/stat$/, (req, m, b, url) => statFile(url.searchParams.get('path'))],
+  ['GET', /^\/api\/fs\/read$/, (req, m, b, url) => readFile(url.searchParams.get('path'))],
+  ['GET', /^\/api\/fs\/raw$/, (req, m, b, url) => rawFile(url.searchParams.get('path'))],
+  ['PUT', /^\/api\/fs\/write$/, (req, m, body) => writeFile(body)],
+  ['POST', /^\/api\/fs\/create$/, (req, m, body) => createEntry(body)],
+  ['POST', /^\/api\/fs\/rename$/, (req, m, body) => renameEntry(body)],
+  ['GET', /^\/api\/fs\/find$/, (req, m, b, url) => findFiles(url.searchParams.get('root'), url.searchParams.get('q'))],
+  ['GET', /^\/api\/terminals$/, () => listTerminals()],
+  ['POST', /^\/api\/terminals$/, (req, m, body) => createTerminal(body)],
+  ['POST', /^\/api\/terminals\/([0-9a-f]{12})\/input$/, (req, [id], body) => terminalInput(id, body)],
+  ['POST', /^\/api\/terminals\/([0-9a-f]{12})\/resize$/, (req, [id], body) => terminalResize(id, body)],
+  ['DELETE', /^\/api\/terminals\/([0-9a-f]{12})$/, (req, [id]) => closeTerminal(id)],
 ];
 
 function checkedProject(project) {

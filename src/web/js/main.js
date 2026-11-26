@@ -6,6 +6,7 @@ import { modal } from "./dialogs.js";
 import { view, route } from "./router.js";
 import { loadWorkspace, wireSidebar } from "./workspace.js";
 import { scheduleUpdateCheck } from "./update.js";
+import "./dock.js";
 
 const theme = localStorage.getItem("cpTheme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
 document.documentElement.dataset.theme = theme;

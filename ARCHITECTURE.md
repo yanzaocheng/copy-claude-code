@@ -95,6 +95,14 @@ sequenceDiagram
   - 页面上改名字、目录、模型、effort 都是发斜杠命令，和终端里输入一样。
 - **`/cd <目录>`**（`App.changeDirectory`）：不存在、不是目录、和当前目录相同时只打印一行，不重启；忙时拒绝。否则走重启：`requestRestart({cwd})` → `restartNow` 先把补写失败的对话整个写一次（失败就不重启），再用 `moveSession()`（[`src/session.js`](src/session.js)）把会话文件写到新目录的项目目录，重启状态里带 `cwd` 和 `changedDirectory: true`，写成功后才删旧文件。新进程在取到重启状态后 `process.chdir(state.cwd)`，项目设置、CLAUDE.md、auto memory、系统提示词、`@` 文件索引、输入历史全部按新目录加载；对话、中转上的会话 id（`handoff()`）、模型/effort、待办、排队的消息、草稿保持不变。`/cd` 不计入"5 分钟 5 次"的重启循环保护。
 
+### 3.1.2.1 网页控制台的文件与终端面板
+
+会话页右边的面板（[`src/web/js/dock.js`](src/web/js/dock.js)）按工作区（会话的目录）分组：每个工作区一套标签页（`files` 目录树、`file` 编辑器、`term` 终端、`launcher` 加号页），页面打开期间都留在内存里（未保存的修改不丢），标签列表记在 localStorage `cpDock:<工作区>`。视图用 `setDockWorkspace(cwd)` 说自己在哪个工作区（新会话页、实时页、历史页），其他页面由 router 设成 `null`，面板隐藏。
+
+- **文件**（[`src/web/files.js`](src/web/files.js)，`/api/fs/*`）：目录一次列一级（`lists` 批量刷新展开的目录，页面每 4 秒一次，只在内容变了时重画）；读写用 `utils/encoding.js` 的 `decodeText`/`encodeText`，写回原编码和换行；保存带读取时的 mtime，磁盘上变了就回 409（除非 `force`）。按文件名查找用 `rg --files`（没有 ripgrep 时 JS 遍历），列表按根目录缓存 30 秒，在服务端打分只回前 60 个。这些接口不限制路径：和 agent 的工具一样，门槛是控制台的登录。
+- **编辑器和终端的前端**：CodeMirror 6 和 xterm.js 由 [`scripts/build-vendor.mjs`](scripts/build-vendor.mjs)（esbuild，开发依赖）打包到 `src/web/vendor/` 并提交；CodeMirror 的语言各是一个 chunk，打开那种文件时才加载。控制台把 vendor 文件带 ETag 发出去。升级它们：改 devDependencies 的版本，重新运行脚本。
+- **终端**（[`src/web/pty.js`](src/web/pty.js) → [`src/web/pty-host.js`](src/web/pty-host.js)）：控制台每次加载新代码都会整体重启，PTY 挂在它身上就会跟着结束，所以终端跑在一个单独的、detached 的 `pty-host.js` 进程里（`@lydell/node-pty`，各平台自带编译好的二进制），状态文件 `CONFIG_DIR/web-pty.json {pid, port, token, code, v}`。它不知道 claude-pro：运行什么、在哪、用什么环境变量都由控制台在请求里给（`shells()`、`terminalEnv()`），所以旧代码的 host 也能服务新控制台；控制台发现 host 的 `code`（pty-host.js 内容的哈希）和现在的不同、又没有在跑的终端时，让它退出、起一个新的。每个终端在 host 里有一个 `@xterm/headless` 屏幕（带 3000 行滚动）：页面的 `GET /api/terminals/<id>/events`（控制台原样转发的 SSE）先收到 `snapshot`（`@xterm/addon-serialize` 序列化的屏幕），再收 `out`；取屏幕时先 `term.write('', cb)` 等前面的输出画完，这期间新来的输出先放在这个客户端的缓冲里，屏幕发出后紧跟着发，不重不漏。输入是顺序的 POST（一个在路上时后面的按键攒着一起发），这样远程访问的隧道（只转 HTTP，不转 WebSocket 升级）也能用。host 没有终端 3 分钟后退出；已结束、没人看的终端 30 分钟后丢掉。终端按 `workspace` 归属工作区，另一个浏览器打开同一工作区时也列出来。
+
 ### 3.1.3 会话之间的消息（本机和配对的电脑）
 
 本机的会话经 [`src/peers.js`](src/peers.js) 的 `PeerNode` 互发（`CONFIG_DIR/peers/<id>.json` 登记、127.0.0.1 上的小 HTTP 服务），直接执行。其他电脑上的会话只有在两台电脑**配对**之后才能互发，经网关的**设备中转**（codex-gateway 的 `src/device-relay.mjs`，`/v1/relay/*`），不需要任何账号或网关 key（2026-11-26 起；之前是按 7bit.fun 账号的会话中继，加签名授权）：
@@ -423,7 +431,9 @@ flowchart TD
 | [`src/pairing.js`](src/pairing.js) | 配对：9 位配对码 + CPace（PAKE） |
 | [`src/relay.js`](src/relay.js) | 网关设备中转的客户端（不需要账号，请求用设备密钥签名） |
 | [`src/attach.js`](src/attach.js) / [`src/web/terminals.js`](src/web/terminals.js) | 终端附着（`CLAUDE_PRO_ATTACH=1`，实验性）：会话跑在控制台进程里，窗口进程只转发按键、尺寸和画面 |
-| [`src/web/js/`](src/web/js/) | 网页控制台的原生 ES 模块（`main.js` 启动，每个页面一个 `page-*.js`，无构建） |
+| [`src/web/js/`](src/web/js/) | 网页控制台的原生 ES 模块（`main.js` 启动，每个页面一个 `page-*.js`，右侧面板 `dock*.js`，无构建） |
+| [`src/web/files.js`](src/web/files.js) / [`src/web/pty.js`](src/web/pty.js) / [`src/web/pty-host.js`](src/web/pty-host.js) | 右侧面板的文件接口；终端（独立的 PTY 进程，控制台重启不断） |
+| `src/web/vendor/` | CodeMirror、xterm.js 的打包文件（`scripts/build-vendor.mjs` 生成，不要手改） |
 | [`src/remote.js`](src/remote.js) | 事件归约（控制台页面 `web/js/transcript.js` 里有同一份） |
 | [`src/peers.js`](src/peers.js) | 本机会话之间的消息（注册表 `peers/<id>.json` 和 127.0.0.1 上的小 HTTP 服务） |
 | [`src/print.js`](src/print.js) | 非交互输出协议 |

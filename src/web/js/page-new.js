@@ -6,6 +6,7 @@ import { page } from "./router.js";
 import { ws, projectKey, baseName, loadWorkspace } from "./workspace.js";
 import { draftImages, draftText, saveDraft, composer, popMenu, modelMenuItems } from "./composer.js";
 import { mobileLayout } from "./main.js";
+import { setDockWorkspace, dockButton } from "./dock.js";
 
 // The folder browser (添加工作区, 其他目录…): in the page, so on top and at once, and the same from a phone (the
 // folders are those of the computer claude-pro runs on). The places on the side, the path in pieces, the folder's
@@ -92,7 +93,7 @@ export function browseProjectDirectories(initial, onSelect, { title = "选择项
 }
 
 export async function newView() {
-  const el = page(`<div class="chat-page"><div class="welcome"><img class="welcome-logo" src="/favicon.svg" alt="" width="56" height="56"><h1>你好，今天要做什么？</h1><p class="muted">选一个项目目录，告诉它要做什么：你在这里看着它工作、随时给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
+  const el = page(`<div class="chat-page"><div class="chat-tools">${dockButton()}</div><div class="welcome"><img class="welcome-logo" src="/favicon.svg" alt="" width="56" height="56"><h1>你好，今天要做什么？</h1><p class="muted">选一个项目目录，告诉它要做什么：你在这里看着它工作、随时给它发消息。</p></div><div class="chat-composer" id="ncomp"></div></div>`, "chat");
   let projects = [];
   try { projects = (await api("/api/projects")).projects; } catch { /* the folder chooser still works */ }
   if (!el.isConnected) return;
@@ -106,7 +107,11 @@ export async function newView() {
     draftKey: "new",
   });
   const chip = $("#ndir", el);
-  const paintDir = () => { $("span", chip).textContent = dir ? baseName(dir) : "选择目录"; chip.title = dir ? `会话在 ${dir} 里工作` : "选择目录"; };
+  const paintDir = () => {
+    $("span", chip).textContent = dir ? baseName(dir) : "选择目录";
+    chip.title = dir ? `会话在 ${dir} 里工作` : "选择目录";
+    setDockWorkspace(dir || null); // (the panel shows the folder chosen)
+  };
   paintDir();
   const modelChip = $("#nmodel", el), effortChip = $("#neffort", el);
   const options = (kind) => api(`/api/live/new/options?${new URLSearchParams({ cwd: dir, kind, ...(model ? { model } : {}), ...(effort ? { effort } : {}) })}`);

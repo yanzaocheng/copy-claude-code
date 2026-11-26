@@ -14,6 +14,7 @@ import { memory } from "./page-memory.js";
 import { extensions } from "./page-extensions.js";
 import { usage } from "./page-usage.js";
 import { showUserMenu, setDrawer } from "./main.js";
+import { setDockWorkspace } from "./dock.js";
 
 // what the current view leaves behind (timers, streams), and how to close a menu that is open
 export const view = { cleanup: null, closeMenu: null };
@@ -29,6 +30,8 @@ export function route() {
   if (view.cleanup) { try { view.cleanup(); } catch { /* ignore */ } view.cleanup = null; }
   main.scrollTop = 0;
   setDrawer(false);
+  // (the conversation views say their workspace themselves, once they know it; the other pages have none)
+  if (!/^(new|live|session)$/.test(page)) setDockWorkspace(null);
   const views = { new: newView, remote: remotePage, devices: devicesPage, overview, sessions, session: () => sessionView(parts[1], parts[2]), live: () => (parts[1] ? liveView(parts[1]) : newView()), providers, settings, memory, extensions, usage };
   (views[page] || newView)();
 }

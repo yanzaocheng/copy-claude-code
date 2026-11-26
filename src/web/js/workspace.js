@@ -5,6 +5,7 @@ import { view, route } from "./router.js";
 import { popMenu } from "./composer.js";
 import { browseProjectDirectories, startSession } from "./page-new.js";
 import { drawAuthRequests } from "./page-devices.js";
+import { setDockWorkspace, dockWorkspace, openFilesTab, openTerminal } from "./dock.js";
 
 // how long ago, as short as the sidebar wants it: 刚刚, 5分, 3小时, 16天, 2个月, 1年
 function shortAgo(ms) {
@@ -212,6 +213,20 @@ function sidebarSessionMenu(button, it) {
   }, { dropdown: true });
 }
 
+// 浏览文件 / 新建终端 of a project's menu: the panel of that folder, beside the page shown when it is that folder's,
+// else beside a new conversation there
+function openPanel(cwd, what) {
+  const go = () => {
+    setDockWorkspace(cwd);
+    if (what === "files") openFilesTab({ focusSearch: false }); else openTerminal({});
+  };
+  if (projectKey(dockWorkspace() || "") === projectKey(cwd)) return go();
+  localStorage.setItem("cpNewDir", cwd);
+  if (location.hash === "#/new" || !location.hash) { route(); go(); return; }
+  addEventListener("hashchange", () => setTimeout(go, 0), { once: true }); // (after the router's)
+  location.hash = "#/new";
+}
+
 export function wireSidebar() {
   const box = $("#ws");
   const tip = $("#tip");
@@ -227,7 +242,10 @@ export function wireSidebar() {
     if (pm) {
       const key = pm.dataset.pmenu;
       const ids = ws.sessions.filter((s) => !s.archived && !s.running && projectKey(s.cwd || s.dir) === key).map((s) => s.id);
-      const items = [];
+      const items = [
+        { label: "浏览文件", description: "在右侧面板里打开，可以直接编辑", value: "files" },
+        { label: "新建终端", description: "在这个目录里运行命令", value: "terminal" },
+      ];
       if (ws.projectOpen.explorer) items.push({ label: "在资源管理器中打开", value: "explorer" });
       if (ws.projectOpen.vscode) items.push({ label: "在 VS Code 中打开", value: "vscode" });
       items.push({ label: ids.length ? `归档全部会话（${ids.length} 个）` : "没有可以归档的会话", description: ids.length ? "从工作区收起，内容保留，可以在「全部会话 → 已归档」里找回" : "运行中的会话不能归档", value: "all" });
@@ -235,7 +253,8 @@ export function wireSidebar() {
       if (pinned) items.push({ label: "从工作区移除", description: "只是不再固定显示，目录和会话都不动", value: "unpin" });
       popMenu(pm, [{ key: "p", title: "", items }], async (_, value) => {
         try {
-          if (value === "unpin") {
+          if (value === "files" || value === "terminal") openPanel(pm.dataset.cwd, value);
+          else if (value === "unpin") {
             await api("/api/workspaces/remove", { method: "POST", body: { cwd: pinned.cwd } });
             await loadWorkspace({ afterPending: true });
             toast(`已从工作区移除 ${baseName(pinned.cwd)}`);

@@ -40,9 +40,12 @@ const REMOTE_COOKIE = 'cpremote';
 const remoteCookieName = (origin) => (String(origin).startsWith('https:') ? `__Host-${REMOTE_COOKIE}` : REMOTE_COOKIE);
 // the page's script: ES modules in js/ (main.js starts it), each served as /js/<name>.js
 const SCRIPTS = fs.readdirSync(path.join(HERE, 'js')).filter((f) => f.endsWith('.js')).map((f) => `js/${f}`);
+// what the page loads when it opens a file or a terminal: CodeMirror and xterm.js, built by scripts/build-vendor.mjs
+const VENDOR = (() => { try { return fs.readdirSync(path.join(HERE, 'vendor')).filter((f) => /\.(js|css)$/.test(f)).map((f) => `vendor/${f}`); } catch { return []; } })();
 const STATIC = {
   '/': ['page.html', 'text/html; charset=utf-8'],
   ...Object.fromEntries(SCRIPTS.map((f) => [`/${f}`, [f, 'text/javascript; charset=utf-8']])),
+  ...Object.fromEntries(VENDOR.map((f) => [`/${f}`, [f, f.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8']])),
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['logo.svg', 'image/svg+xml'], // (also before 远程访问's login: its page shows it too)
   // installing the console as an app (the browser's 「安装」): fetched without the cookie, so before any log-in
@@ -57,7 +60,7 @@ const PUBLIC_ASSETS = new Set(['/favicon.svg', '/manifest.webmanifest', '/icon-1
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', ...SCRIPTS, 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'files.js', 'pty.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', ...SCRIPTS, 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;
@@ -118,6 +121,10 @@ async function serve() {
   // The page as it was when this server started: a page read from disk at every load could be newer than the API
   // this process serves (an update or an edit waits for the sessions to be idle) and call routes it does not have.
   const pages = Object.fromEntries(Object.values(STATIC).map(([file]) => [file, fs.readFileSync(path.join(HERE, file))]));
+  // (the vendor files are large and change only with a version of them: the browser keeps them, asking whether they
+  // changed)
+  const etags = Object.fromEntries(VENDOR.map((f) => [f, `"${crypto.createHash('sha1').update(pages[f]).digest('base64url').slice(0, 16)}"`]));
+  const pty = await import('./pty.js');
   const { routes, useHost } = await import('./api.js');
   const data = await import('./data.js');
   const ra = await import('./remote-access.js');
@@ -269,6 +276,11 @@ async function serve() {
       }
       if (req.method === 'GET' && STATIC[url.pathname]) {
         const [file, type] = STATIC[url.pathname];
+        if (etags[file]) {
+          if (req.headers['if-none-match'] === etags[file]) { res.writeHead(304, { etag: etags[file], 'cache-control': 'no-cache' }); return res.end(); }
+          res.writeHead(200, { 'content-type': type, etag: etags[file], 'cache-control': 'no-cache' });
+          return res.end(pages[file]);
+        }
         res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
         return res.end(pages[file]);
       }
@@ -380,6 +392,12 @@ async function serve() {
         return;
       }
 
+      // a terminal of the page's panel: its screen, then its output, from the terminal host (pty.js)
+      const termEvents = /^\/api\/terminals\/([0-9a-f]{12})\/events$/.exec(url.pathname);
+      if (termEvents && req.method === 'GET') {
+        return pty.pipeTerminalEvents(termEvents[1], res, { opened: () => { streams++; }, closed: () => { streams--; lastActivity = Date.now(); } });
+      }
+
       for (const [method, pattern, handler] of routes) {
         if (method !== req.method) continue;
         const m = pattern.exec(url.pathname);
@@ -387,8 +405,8 @@ async function serve() {
         const body = method === 'GET' || method === 'DELETE' ? undefined : await readBody(req);
         const result = await handler(req, m.slice(1).map(decodeURIComponent), body, url);
         if (result?.raw) {
-          const { type, data: payload, name } = result.raw;
-          res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...(name ? { 'content-disposition': `attachment; filename="${name}"` } : {}) });
+          const { type, data: payload, name, headers } = result.raw;
+          res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', ...(name ? { 'content-disposition': `attachment; filename="${name}"` } : {}), ...headers });
           return res.end(payload);
         }
         return send(res, 200, result ?? {});
