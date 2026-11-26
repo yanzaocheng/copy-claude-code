@@ -5,7 +5,7 @@
 // large ones are not opened.
 
 import { esc, api, toast, fail, fmtBytes, $ } from "./util.js";
-import { relativeTo, baseOf, copyText } from "./dock-files.js";
+import { relativeTo, baseOf, copyText } from "./dock-util.js";
 
 const POLL_MS = 3000;
 let cmLoad = null;
@@ -52,7 +52,7 @@ export function editorPane(ctx, filePath) {
   let file = filePath;
   let info = null; // what the file was when read (mtime, encoding, bom, eol, readonly)
   let view = null, cm = null, clean = null, langComp = null, themeComp = null, roComp = null;
-  let dirty = false, saving = false, timer = 0, shown = false, externalNote = false, disposed = false;
+  let dirty = false, saving = false, timer = 0, shown = false, externalNote = false, disposed = false, wantFocus = false;
 
   const paintPath = () => {
     const rel = relativeTo(ctx.cwd, file);
@@ -150,7 +150,7 @@ export function editorPane(ctx, filePath) {
     view.retheme = () => view.dispatch({ effects: themeComp.reconfigure(themeOf(cm)) });
     views.add(view);
     if (r.readonly) note("warn", esc(r.readonly));
-    if (shown) view.focus();
+    if (wantFocus) { wantFocus = false; view.focus(); }
     const lang = await language(baseOf(file));
     if (!disposed && view) view.dispatch({ effects: langComp.reconfigure(lang) });
   }
@@ -215,10 +215,10 @@ export function editorPane(ctx, filePath) {
       clearInterval(timer);
       timer = setInterval(poll, POLL_MS);
       poll();
-      view?.focus();
     },
     deactivate() { shown = false; clearInterval(timer); },
-    focus() { view?.focus(); },
+    // (asked before the file is read: once it is)
+    focus() { if (view) view.focus(); else wantFocus = true; },
     setPath(p) { file = p; paintPath(); if (view && cm) language(baseOf(p)).then((l) => view && view.dispatch({ effects: langComp.reconfigure(l) })); },
     canClose: () => !dirty || confirm(`「${baseOf(file)}」有没保存的修改，关闭会丢掉它们。确定关闭？`),
     dispose() {

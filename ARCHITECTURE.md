@@ -97,7 +97,7 @@ sequenceDiagram
 
 ### 3.1.2.1 网页控制台的文件与终端面板
 
-会话页右边的面板（[`src/web/js/dock.js`](src/web/js/dock.js)）按工作区（会话的目录）分组：每个工作区一套标签页（`files` 目录树、`file` 编辑器、`term` 终端、`launcher` 加号页），页面打开期间都留在内存里（未保存的修改不丢），标签列表记在 localStorage `cpDock:<工作区>`。视图用 `setDockWorkspace(cwd)` 说自己在哪个工作区（新会话页、实时页、历史页），其他页面由 router 设成 `null`，面板隐藏。
+会话页右边的面板（[`src/web/js/dock.js`](src/web/js/dock.js)：头部、宽度、快捷键）按工作区（会话的目录）各有一个工作台（[`dock-workbench.js`](src/web/js/dock-workbench.js)），布局照 VS Code：左边文件树（`dock-files.js`），右边上方编辑器组（每个文件一个标签，`dock-editor.js`，第一次显示时才读文件），下方终端面板（每个终端一个标签，`dock-terminal.js`）。可见性是状态推出来的（`has-files`、`has-panel`、`tree-hidden` 三个 class，`update()` 里同时告诉各个 pane 显示与否，`setOn` 只在变化时调 activate/deactivate：编辑器的磁盘轮询、终端的 SSE 都只在显示时进行）。工作台宽度小于 560px 时文件树改成按需覆盖（`treeOver`，不保存），否则是并排（`hideTree`，保存）。工作台在页面打开期间都留在内存里（未保存的修改不丢），`persist()` 的 `{v:2, open, active, terms, term, hide, panel}` 记在 localStorage `cpDock:<工作区>`（2026-11-26 以前文件和终端是面板顶部的标签，旧格式 `{tabs, active}` 在 `savedOf` 里换算）。视图用 `setDockWorkspace(cwd)` 说自己在哪个工作区（新会话页、实时页、历史页），其他页面由 router 设成 `null`，面板隐藏。
 
 - **文件**（[`src/web/files.js`](src/web/files.js)，`/api/fs/*`）：目录一次列一级（`lists` 批量刷新展开的目录，页面每 4 秒一次，只在内容变了时重画）；读写用 `utils/encoding.js` 的 `decodeText`/`encodeText`，写回原编码和换行；保存带读取时的 mtime，磁盘上变了就回 409（除非 `force`）。按文件名查找用 `rg --files`（没有 ripgrep 时 JS 遍历），列表按根目录缓存 30 秒，在服务端打分只回前 60 个。这些接口不限制路径：和 agent 的工具一样，门槛是控制台的登录。
 - **编辑器和终端的前端**：CodeMirror 6 和 xterm.js 由 [`scripts/build-vendor.mjs`](scripts/build-vendor.mjs)（esbuild，开发依赖）打包到 `src/web/vendor/` 并提交；CodeMirror 的语言各是一个 chunk，打开那种文件时才加载。控制台把 vendor 文件带 ETag 发出去。升级它们：改 devDependencies 的版本，重新运行脚本。

@@ -7,7 +7,7 @@
 // page's requests.
 
 import { esc, api, fail, $ } from "./util.js";
-import { copyText } from "./dock-files.js";
+import { copyText } from "./dock-util.js";
 
 let xtLoad = null;
 function loadXterm() {
@@ -43,7 +43,7 @@ export function terminalPane(ctx, info) {
   const host = $(".term-host", el);
   const notes = $(".term-notes", el);
   let term = null, fit = null, es = null, ro = null, opened = false, shown = false, disposed = false, exited = Boolean(info.exited);
-  let queue = "", sending = false, fitTimer = 0, lastSize = "", idleTimer = 0, closed = false;
+  let queue = "", sending = false, fitTimer = 0, lastSize = "", idleTimer = 0, closed = false, wantFocus = false;
   ctx.setTitle(info.label, `${info.label} · ${info.cwd}`);
 
   function showNote(kind, html, actions = {}) {
@@ -149,7 +149,7 @@ export function terminalPane(ctx, info) {
     ro.observe(host);
     doFit();
     connect();
-    if (shown) term.focus();
+    if (wantFocus) { wantFocus = false; term.focus(); }
   }
 
   return {
@@ -162,14 +162,14 @@ export function terminalPane(ctx, info) {
       if (!opened) { openTerm(); return; }
       if (term && !es && !closed) connect();
       doFit();
-      term?.focus();
     },
     deactivate() {
       shown = false;
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => { if (!shown) disconnect(); }, 5000);
     },
-    focus() { term?.focus(); },
+    // (asked before xterm is loaded: once it is)
+    focus() { if (term) term.focus(); else wantFocus = true; },
     canClose: () => exited || confirm("关闭这个终端会结束它里面运行的程序。确定关闭？"),
     dispose({ kill = true } = {}) {
       disposed = true;

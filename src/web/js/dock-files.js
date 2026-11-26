@@ -1,24 +1,11 @@
-// The 文件 tab of the panel (dock.js): the workspace's folders as a tree, a level loaded at a time and refreshed while
-// it is shown (an agent's new files appear), and a box that finds files by name (Ctrl+P; files.js findFiles). A file
-// opens in the editor (dock-editor.js); a right click offers what can be done with it.
+// The file tree of the panel's workbench (dock-workbench.js): the workspace's folders, a level loaded at a time and
+// refreshed while shown (an agent's new files appear), a box that finds files by name (Ctrl+P; files.js findFiles),
+// and a right click for what can be done with a file or folder. A file picked opens in the editor beside it.
 
-import { esc, api, toast, fail, shortPath, ICON, $ } from "./util.js";
-import { popMenu } from "./composer.js";
+import { esc, api, fail, shortPath, ICON, $ } from "./util.js";
+import { fileIcon, joinPath, parentOf, baseOf, samePath, relativeTo, copyText, menuAt } from "./dock-util.js";
 
 const REFRESH_MS = 4000;
-const EXT_COLORS = {
-  js: "#d4a017", mjs: "#d4a017", cjs: "#d4a017", jsx: "#2fa7c9", ts: "#3178c6", tsx: "#2fa7c9", json: "#7f9f3a", md: "#4a7fd6",
-  py: "#3b77a8", html: "#e4572e", htm: "#e4572e", css: "#8e5bd6", scss: "#c6538c", vue: "#3fae7c", go: "#00a3c4", rs: "#c8673a",
-  java: "#d9822b", kt: "#8e5bd6", c: "#5c7fb8", h: "#5c7fb8", cpp: "#5c7fb8", cs: "#6a8f3a", sh: "#4f9a46", bash: "#4f9a46",
-  ps1: "#3a6fb5", bat: "#7a7a7a", cmd: "#7a7a7a", yml: "#c9465f", yaml: "#c9465f", toml: "#a0715a", xml: "#d9822b", svg: "#e09a2d",
-  png: "#a65cc4", jpg: "#a65cc4", jpeg: "#a65cc4", gif: "#a65cc4", webp: "#a65cc4", ico: "#a65cc4", sql: "#c67a1b", lock: "#9a948c",
-};
-// a file's icon, tinted by its kind
-export function fileIcon(name) {
-  const ext = String(name).toLowerCase().split(".").pop();
-  const color = EXT_COLORS[ext] || "var(--faint)";
-  return `<svg class="fi" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h8l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" fill="${color}" fill-opacity=".12"/><path d="M14 3v5h5"/></svg>`;
-}
 const CHEV = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 const FOLDER = '<svg class="fo" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
 const FOLDER_OPEN = '<svg class="fo" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1"/><path d="M3 19l2.5-7.5A2 2 0 0 1 7.4 10H21l-2.7 8a2 2 0 0 1-1.9 1H5a2 2 0 0 1-2-2"/></svg>';
@@ -26,48 +13,12 @@ const NEW_FILE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 const NEW_FOLDER = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10.5v5M9.5 13h5"/></svg>';
 const COLLAPSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5M7 4l5 5 5-5"/></svg>';
 
-export const sepOf = (p) => (String(p).includes("\\") ? "\\" : "/");
-export const joinPath = (dir, name) => {
-  const sep = sepOf(dir);
-  return dir.endsWith(sep) ? dir + name : dir + sep + String(name).replace(/[\\/]/g, sep);
-};
-export const parentOf = (p) => {
-  const sep = sepOf(p);
-  const s = p.length > 1 ? p.replace(/[\\/]+$/, "") : p;
-  const i = s.lastIndexOf(sep);
-  if (i < 0) return p;
-  if (i === 0) return sep;
-  return i === 2 && /^[a-z]:/i.test(s) ? s.slice(0, 3) : s.slice(0, i);
-};
-export const baseOf = (p) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).pop();
-// `p` relative to the workspace, as shown (forward slashes), or the whole path when outside it
-export function relativeTo(root, p) {
-  const r = shortPath(root).replace(/\/+$/, ""), f = shortPath(p);
-  return f.toLowerCase().startsWith(`${r.toLowerCase()}/`) ? f.slice(r.length + 1) : f;
-}
-
-export async function copyText(text, what = "路径") {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast(`已复制${what}`);
-  } catch { prompt(`请手动复制${what}`, text); }
-}
-
-// A menu where the pointer is (popMenu places it by an element: one made there for it).
-export function menuAt(x, y, items, onPick) {
-  const a = document.createElement("span");
-  a.style.cssText = `position:fixed;left:${x}px;top:${y}px;width:230px;height:1px;pointer-events:none`;
-  document.body.appendChild(a);
-  popMenu(a, [{ key: "m", title: "", items }], (k, v) => onPick(v), { dropdown: true });
-  a.remove();
-}
-
 // ctx: {cwd, key, openFile(path), openTerminal({cwd}), renamed(from, to)}
-export function filesPane(ctx) {
+export function explorer(ctx) {
   const root = ctx.cwd;
   const el = document.createElement("div");
-  el.className = "dock-pane ft";
-  el.innerHTML = `<div class="ft-head"><span class="ft-root" title="${esc(root)}">${esc(root)}</span>
+  el.className = "wb-explorer";
+  el.innerHTML = `<div class="ft-head"><span class="ft-root" title="${esc(root)}">${esc(baseOf(root) || root)}</span>
       <button type="button" class="icon-btn" data-act="newfile" title="新建文件">${NEW_FILE}</button><button type="button" class="icon-btn" data-act="newdir" title="新建文件夹">${NEW_FOLDER}</button><button type="button" class="icon-btn" data-act="refresh" title="刷新">${ICON.refresh}</button><button type="button" class="icon-btn" data-act="collapse" title="全部折叠">${COLLAPSE}</button></div>
     <div class="ft-find">${ICON.search}<input type="search" placeholder="按文件名查找（Ctrl+P）" spellcheck="false" autocomplete="off"></div>
     <div class="ft-list" tabindex="-1"></div>`;
@@ -78,7 +29,7 @@ export function filesPane(ctx) {
   const lists = new Map(); // folder -> {entries, truncated} | {error}
   const sigs = new Map();
   const loading = new Set();
-  let selected = null, selectedDir = false;
+  let selected = null, selectedDir = false, revealing = false;
   let mode = "tree"; // or "find"
   let hits = [], hit = 0, findSeq = 0, findTimer = 0;
   let timer = 0, shown = false;
@@ -108,8 +59,9 @@ export function filesPane(ctx) {
     for (const e of l.entries) {
       const p = joinPath(dir, e.name);
       const open = e.dir && expanded.has(p);
-      const cls = `ft-row${e.dir ? " dir" : ""}${open ? " open" : ""}${p === selected ? " sel" : ""}${e.name.startsWith(".") ? " dim" : ""}`;
-      out.push(`<div class="${cls}" style="--d:${depth}" data-p="${esc(p)}"${e.dir ? ' data-dir="1"' : ""}><span class="ft-chev">${e.dir ? CHEV : ""}</span>${e.dir ? (open ? FOLDER_OPEN : FOLDER) : fileIcon(e.name)}<span class="ft-name">${esc(e.name)}</span>${e.link ? '<span class="ft-link" title="链接">↗</span>' : ""}</div>`);
+      const sel = selected && samePath(p, selected);
+      const cls = `ft-row${e.dir ? " dir" : ""}${open ? " open" : ""}${sel ? " sel" : ""}${e.name.startsWith(".") ? " dim" : ""}`;
+      out.push(`<div class="${cls}" style="--d:${depth}" data-p="${esc(p)}"${e.dir ? ' data-dir="1"' : ""} title="${esc(e.name)}"><span class="ft-chev">${e.dir ? CHEV : ""}</span>${e.dir ? (open ? FOLDER_OPEN : FOLDER) : fileIcon(e.name)}<span class="ft-name">${esc(e.name)}</span>${e.link ? '<span class="ft-link" title="链接">↗</span>' : ""}</div>`);
       if (open) rows(p, depth + 1, out);
     }
     if (l.truncated) out.push(`<div class="ft-note" style="--d:${depth}">只列出了前 5000 项</div>`);
@@ -119,6 +71,11 @@ export function filesPane(ctx) {
     const out = [];
     rows(root, 0, out);
     list.innerHTML = out.join("");
+    // (a file asked to be shown: scrolled to once its folders are loaded)
+    if (revealing) {
+      const row = list.querySelector(".ft-row.sel");
+      if (row) { row.scrollIntoView({ block: "center" }); revealing = false; }
+    }
   }
 
   function drawHits(r) {
@@ -176,10 +133,6 @@ export function filesPane(ctx) {
       if (mode === "tree") draw();
       ctx.openFile(selected);
     }
-  });
-  list.addEventListener("auxclick", (e) => {
-    const row = e.target.closest("[data-p]");
-    if (e.button === 1 && row && !row.dataset.dir) ctx.openFile(row.dataset.p);
   });
 
   // ---- what can be done with a file or folder
@@ -261,7 +214,6 @@ export function filesPane(ctx) {
 
   return {
     el,
-    title: "文件",
     activate() {
       shown = true;
       if (!lists.has(root)) draw(); else refresh(true);
@@ -271,7 +223,24 @@ export function filesPane(ctx) {
     deactivate() { shown = false; clearInterval(timer); },
     focus() { list.focus({ preventScroll: true }); },
     focusSearch() { input.focus(); input.select(); },
+    // the file of the editor's tab, marked in the tree where its folders are open
+    select(p) {
+      selected = p;
+      selectedDir = false;
+      if (mode !== "tree") return;
+      draw();
+      list.querySelector(".ft-row.sel")?.scrollIntoView({ block: "nearest" });
+    },
+    // 在文件列表中显示: its folders opened, scrolled to
+    reveal(p) {
+      if (mode !== "tree") { input.value = ""; mode = "tree"; hits = []; }
+      for (let d = parentOf(p); d.length > root.length && d !== parentOf(d); d = parentOf(d)) expanded.add(d);
+      saveExpanded();
+      selected = p;
+      selectedDir = false;
+      revealing = true;
+      draw();
+    },
     dispose() { clearInterval(timer); clearTimeout(findTimer); },
-    persist: () => ({ k: "files" }),
   };
 }
