@@ -307,6 +307,7 @@ table.list td.num, table.list th.num { text-align: right; font-variant-numeric: 
 .editor { width: 100%; height: 100%; min-height: 360px; font-family: var(--mono); font-size: 13px; line-height: 1.55; resize: none; tab-size: 2; }
 .modal.big .modal-body { display: flex; }
 .modal-error { color: var(--danger); font-size: 13px; margin-right: auto; align-self: center; }
+.ws-del { display: grid; gap: 6px; margin: 0; padding-left: 20px; }
 
 /* providers */
 .prov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }

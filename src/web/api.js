@@ -786,6 +786,24 @@ export const routes = [
   }],
   ['POST', /^\/api\/workspaces$/, (req, m, body) => addWorkspace(body)],
   ['POST', /^\/api\/workspaces\/remove$/, (req, m, body) => removeWorkspace(body)],
+  // 删除工作区: out of the sidebar, and its conversations (archived ones too) to the trash, kept 7 days. The page has
+  // put away those the console ran; one still running (in a terminal) is left as it is and said. The folder and its
+  // files are not touched.
+  ['POST', /^\/api\/workspaces\/delete$/, async (req, m, body) => {
+    const cwd = typeof body?.cwd === 'string' ? body.cwd : '';
+    if (!cwd || !path.isAbsolute(cwd)) throw httpError(400, '无效的目录');
+    if (host?.recovering || host?.restarting) throw httpError(409, '控制台正在恢复会话，请稍后再试');
+    const live = await running();
+    let trashed = 0;
+    const kept = [];
+    for (const s of listAllSessions()) {
+      if (!s.cwd || !same(s.cwd, cwd)) continue;
+      if (live.has(s.id) || sessionOpenIn(s.id) || pendingSessions.has(s.id)) { kept.push(s.title); continue; }
+      try { trashSession(s.dir, s.id); trashed++; } catch { kept.push(s.title); }
+    }
+    saveWorkspaces(addedWorkspaces().filter((w) => !same(w.cwd, cwd)));
+    return { trashed, kept };
+  }],
   ['GET', /^\/api\/sessions\/([\w.-]+)\/([\w-]+)$/, async (req, [dir, id]) => {
     const detail = sessionDetail(dir, id);
     const live = await running();

@@ -4,8 +4,9 @@ import { esc, toast, fail, ICON, $ } from "./util.js";
 import { MAX_IMAGES, prepareImage } from "./images.js";
 import { view } from "./router.js";
 
-// What was typed and not sent, per box (`draftKey`): kept when the page shows another conversation and back. The text
-// also in localStorage (it survives a reload), the images only in memory (their object URLs live as long as the page).
+// What was typed and not sent, per box (`draftKey`): kept when the page shows another conversation and back, and
+// across a reload: the text in localStorage, the images in IndexedDB (cpDrafts; a screenshot alone can be more than
+// localStorage holds), each written when it changed. Images kept for a box nobody came back to go after a week.
 export const draftImages = new Map();
 const draftQuotes = new Map(); // draftKey → the passages quoted in that box (引用), while the page is open
 export const draftText = (key) => (key ? localStorage.getItem(`cpDraft:${key}`) || "" : "");
@@ -13,7 +14,66 @@ export function saveDraft(key, text, images) {
   if (!key) return;
   if (text) localStorage.setItem(`cpDraft:${key}`, text); else localStorage.removeItem(`cpDraft:${key}`);
   if (images.length) draftImages.set(key, images); else draftImages.delete(key);
+  keepImages(key, images);
 }
+
+const DRAFT_IMAGES_DAYS = 7;
+let idbOpen = null;
+const idb = () => (idbOpen ||= new Promise((resolve) => {
+  try {
+    const r = indexedDB.open("cpDrafts", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("images");
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => resolve(null);
+  } catch { resolve(null); }
+}));
+const written = new Map(); // key -> what was last written (count and sizes), not to write the same at every keystroke
+const reading = new Set(); // keys whose images are being read back (a keystroke meanwhile must not delete them)
+async function keepImages(key, images) {
+  if (reading.has(key) && !images.length) return;
+  const sig = images.map((i) => `${i.size}:${i.data.length}:${i.data.slice(-12)}`).join("|");
+  if (written.get(key) === sig) return;
+  written.set(key, sig);
+  const db = await idb();
+  if (!db) return;
+  try {
+    const store = db.transaction("images", "readwrite").objectStore("images");
+    if (images.length) store.put({ at: Date.now(), images: images.map(({ media_type, data, size }) => ({ media_type, data, size })) }, key);
+    else store.delete(key);
+  } catch { /* the browser keeps none: only for this page, then */ }
+}
+// The images of a draft from before the reload, as the box shows them (data URLs), or []
+async function keptImages(key) {
+  reading.add(key);
+  const db = await idb();
+  if (!db) { reading.delete(key); return []; }
+  return new Promise((resolve) => {
+    try {
+      const r = db.transaction("images").objectStore("images").get(key);
+      r.onsuccess = () => {
+        const list = Array.isArray(r.result?.images) ? r.result.images : [];
+        written.set(key, list.map((i) => `${i.size}:${i.data.length}:${i.data.slice(-12)}`).join("|"));
+        resolve(list.map((i) => ({ ...i, url: `data:${i.media_type};base64,${i.data}` })));
+      };
+      r.onerror = () => resolve([]);
+    } catch { resolve([]); }
+  }).finally(() => reading.delete(key));
+}
+// (once a page load: the drafts' images nobody came back to for a week)
+setTimeout(async () => {
+  const db = await idb();
+  if (!db) return;
+  try {
+    const store = db.transaction("images", "readwrite").objectStore("images");
+    const r = store.openCursor();
+    r.onsuccess = () => {
+      const c = r.result;
+      if (!c) return;
+      if (!(c.value?.at > Date.now() - DRAFT_IMAGES_DAYS * 86400_000)) c.delete();
+      c.continue();
+    };
+  } catch { /* next time */ }
+}, 5000);
 
 // What the session says of a completion, in the page's words.
 const suggestNote = (d) => (d === "file" ? "文件" : d === "directory" ? "目录" : String(d || "")
@@ -191,6 +251,14 @@ export function composer(box, { placeholder, onSend, left = "", right = "", drop
   });
   input.value = draftText(draftKey);
   if (images.length) paint();
+  // (after a reload: the images of the draft, from IndexedDB)
+  else if (draftKey && !draftImages.has(draftKey)) {
+    keptImages(draftKey).then((list) => {
+      if (!list.length || images.length || sending || !box.isConnected) return;
+      images = list.slice(0, MAX_IMAGES);
+      paint();
+    });
+  }
   if (quotes.length) paintQuotes();
   requestAnimationFrame(autosize); // (measured once the box is on the page)
   return {

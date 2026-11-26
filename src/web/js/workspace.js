@@ -6,6 +6,7 @@ import { popMenu } from "./composer.js";
 import { browseProjectDirectories, startSession } from "./page-new.js";
 import { drawAuthRequests } from "./page-devices.js";
 import { setDockWorkspace, dockWorkspace, openFilesTab, openTerminal } from "./dock.js";
+import { modal } from "./dialogs.js";
 
 // how long ago, as short as the sidebar wants it: 刚刚, 5分, 3小时, 16天, 2个月, 1年
 function shortAgo(ms) {
@@ -251,6 +252,50 @@ function sidebarSessionMenu(button, it) {
   }, { dropdown: true });
 }
 
+// 删除工作区: asked once more in the page's own dialog, which says what goes (the conversations, to the trash for 7
+// days; those the console runs are stopped first) and what stays (the folder; conversations running in a terminal).
+function deleteWorkspace(cwd, key) {
+  const mine = ws.sessions.filter((s) => projectKey(s.cwd || s.dir) === key);
+  const peerOf = (s) => ws.live.find((l) => l.status?.sessionId === s.id);
+  const hosted = mine.filter((s) => s.running && peerOf(s)?.status?.hidden);
+  const inTerminal = mine.filter((s) => s.running && !peerOf(s)?.status?.hidden);
+  const busy = hosted.filter((s) => working({ peer: peerOf(s) })).length;
+  const goes = mine.length - inTerminal.length;
+  const m = modal({
+    title: `删除工作区「${baseName(cwd)}」？`,
+    sub: shortPath(cwd),
+    body: `<ul class="ws-del">
+      <li>${goes ? `<strong>${goes} 个会话</strong>移到回收站，7 天内可以在「全部会话与回收站」里恢复${mine.some((s) => s.archived) ? "（包括已归档的）" : ""}` : "这个工作区没有会话"}</li>
+      ${hosted.length ? `<li>${hosted.length} 个会话正在运行，会先停止${busy ? `（其中 ${busy} 个正在工作，当前任务会中断）` : ""}</li>` : ""}
+      ${inTerminal.length ? `<li>${inTerminal.length} 个会话在终端窗口里运行，不会删除：在终端里结束后再删</li>` : ""}
+      <li>目录和里面的文件<strong>不会</strong>被删除</li></ul>`,
+    foot: '<button type="button" class="button secondary" data-close>取消</button><button type="button" class="button danger" data-ok>确认删除</button>',
+  });
+  const ok = $("[data-ok]", m.el);
+  ok.addEventListener("click", async () => {
+    ok.disabled = true;
+    ok.textContent = "正在删除…";
+    try {
+      for (const s of hosted) await putAway(s.id, { force: true, peer: peerOf(s) }).catch(() => {});
+      const r = await api("/api/workspaces/delete", { method: "POST", body: { cwd } });
+      m.close();
+      // what the page kept of it: the panel's tabs and tree, the folder of the next new conversation
+      for (const k of [`cpDock:${key}`, `cpDockTree:${key}`]) localStorage.removeItem(k);
+      if (projectKey(localStorage.getItem("cpNewDir") || "") === key) localStorage.removeItem("cpNewDir");
+      ws.closed.delete(key);
+      localStorage.setItem("cpWsClosed", JSON.stringify([...ws.closed]));
+      const here = mine.some((s) => location.hash.includes(s.id)) || projectKey(dockWorkspace() || "") === key;
+      await loadWorkspace({ afterPending: true });
+      if (here) { setDockWorkspace(null); if (location.hash === "#/new") route(); else location.hash = "#/new"; }
+      toast(`已删除工作区 ${baseName(cwd)}${r.trashed ? `：${r.trashed} 个会话移到了回收站` : ""}${r.kept.length ? `；${r.kept.length} 个运行中的会话没有删除` : ""}`);
+    } catch (e) {
+      fail(e);
+      ok.disabled = false;
+      ok.textContent = "确认删除";
+    }
+  });
+}
+
 // 浏览文件 / 新建终端 of a project's menu: the panel of that folder, beside the page shown when it is that folder's,
 // else beside a new conversation there
 function openPanel(cwd, what) {
@@ -289,9 +334,11 @@ export function wireSidebar() {
       items.push({ label: ids.length ? `归档全部会话（${ids.length} 个）` : "没有可以归档的会话", description: ids.length ? "从工作区收起，内容保留，可以在「全部会话 → 已归档」里找回" : "运行中的会话不能归档", value: "all" });
       const pinned = ws.workspaces.find((w) => projectKey(w.cwd) === key);
       if (pinned) items.push({ label: "从工作区移除", description: "只是不再固定显示，目录和会话都不动", value: "unpin" });
+      items.push({ label: "删除工作区", description: "连同它的会话一起删除（会话先进回收站），目录里的文件不动", value: "delete", danger: true });
       popMenu(pm, [{ key: "p", title: "", items }], async (_, value) => {
         try {
           if (value === "files" || value === "terminal") openPanel(pm.dataset.cwd, value);
+          else if (value === "delete") deleteWorkspace(pm.dataset.cwd, key);
           else if (value === "unpin") {
             await api("/api/workspaces/remove", { method: "POST", body: { cwd: pinned.cwd } });
             await loadWorkspace({ afterPending: true });
