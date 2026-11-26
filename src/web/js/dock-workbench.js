@@ -9,7 +9,8 @@
 import { esc, api, fail, $ } from "./util.js";
 import { popMenu } from "./composer.js";
 import { explorer } from "./dock-files.js";
-import { editorPane } from "./dock-editor.js";
+import { editorPane, diffPane } from "./dock-editor.js";
+import { gitPanel } from "./dock-git.js";
 import { terminalPane } from "./dock-terminal.js";
 import { fileIcon, CLOSE_ICON, baseOf, samePath, within, relativeTo, copyText, menuAt, workspaceKey } from "./dock-util.js";
 
@@ -65,14 +66,32 @@ export function workbench(ctx, saved = {}) {
       <div class="wb-hsplit" title="拖动调整高度"></div>
       <div class="wb-panel"><div class="wb-pbar"><div class="wb-ptabs" role="tablist"></div><button type="button" class="icon-btn" data-p="new" title="新建终端">${PLUS}</button><button type="button" class="icon-btn wb-shells" data-p="shells" title="选择 shell 新建终端">${CARET}</button><span class="wb-gap"></span><button type="button" class="icon-btn" data-p="hide" title="隐藏终端（Ctrl+\`）">${HIDE}</button></div><div class="wb-pbody"></div></div>
     </div>`;
-  const files = []; // {path, title, pane (made when first shown), dirty}
+  // the editor's tabs: files {id, path, title, pane (made when first shown), dirty}, and changes opened from 源代码管理
+  // (`diff`: {rel, staged}; not kept for the next visit)
+  const files = [];
+  let fileSeq = 0;
   const terms = []; // {id, title, pane}
   let active = null, activeTerm = null, shown = false, creating = false;
   // the tree: beside the rest unless hidden (`hideTree`, kept); where it is narrow, over the rest only while asked
   // for (`treeOver`: the tree button, Ctrl+P), until a file is picked or the rest touched
   let hideTree = Boolean(saved.hide), treeOver = false, panelOpen = Boolean(saved.panel);
   const ex = explorer({ cwd: ctx.cwd, key: ctx.key, openFile: (p, o) => openFile(p, o), openTerminal: (o) => newTerminal(o), renamed, deleted });
-  el.prepend(ex.el);
+  const gp = gitPanel({
+    cwd: ctx.cwd,
+    openDiff: ({ rel, staged }) => openDiff(rel, staged),
+    openFile: (p) => openFile(p),
+    reveal: (p) => { showTree(); update(); ex.reveal(p); },
+  });
+  // the left column: the tree, and 源代码管理 under it (its height dragged, kept for every workspace)
+  const side = document.createElement("div");
+  side.className = "wb-side";
+  const gsplit = document.createElement("div");
+  gsplit.className = "wb-gsplit";
+  gsplit.title = "拖动调整高度";
+  side.append(ex.el, gsplit, gp.el);
+  el.prepend(side);
+  const gitH = Number(store.get("cpDockGitHeight")) || 0;
+  if (gitH) el.style.setProperty("--wb-git", `${gitH}px`);
   const main = $(".wb-main", el), tabsEl = $(".wb-tabs", el), body = $(".wb-body", el);
   const ptabs = $(".wb-ptabs", el), pbody = $(".wb-pbody", el);
   const narrow = () => el.clientWidth > 0 && el.clientWidth < NARROW;
@@ -80,7 +99,7 @@ export function workbench(ctx, saved = {}) {
   if (treeW) el.style.setProperty("--wb-tree", `${treeW}px`);
   const panelH = Number(store.get("cpDockPanelHeight")) || 0;
   if (panelH) el.style.setProperty("--wb-panel", `${panelH}px`);
-  const fileOf = (p) => files.find((f) => samePath(f.path, p));
+  const fileOf = (p) => files.find((f) => !f.diff && samePath(f.path, p));
   const anyDirty = () => files.some((f) => f.dirty);
   const hasFiles = () => files.length > 0;
   const hasPanel = () => panelOpen && terms.length > 0;
@@ -94,6 +113,7 @@ export function workbench(ctx, saved = {}) {
     el.classList.toggle("has-panel", hasPanel());
     el.classList.toggle("tree-hidden", !treeShown());
     setOn(ex, shown && treeShown());
+    setOn(gp, shown && treeShown());
     for (const f of files) setOn(f.pane, shown && f === active);
     for (const t of terms) setOn(t.pane, shown && hasPanel() && t === activeTerm);
     ctx.changed();
@@ -101,16 +121,18 @@ export function workbench(ctx, saved = {}) {
 
   // ---- the editors
   function drawTabs() {
-    tabsEl.innerHTML = files.map((f) => `<div class="wb-tab${f === active ? " active" : ""}${f.dirty ? " dirty" : ""}" role="tab" aria-selected="${f === active}" data-f="${esc(f.path)}" title="${esc(f.path)}">${fileIcon(f.title)}<span class="wb-tab-label">${esc(f.title)}</span><button type="button" class="wb-tab-x" data-close title="关闭" aria-label="关闭">${CLOSE_ICON}</button></div>`).join("");
+    tabsEl.innerHTML = files.map((f) => `<div class="wb-tab${f === active ? " active" : ""}${f.dirty ? " dirty" : ""}${f.diff ? " diff" : ""}" role="tab" aria-selected="${f === active}" data-f="${f.id}" title="${esc(f.diff ? `${f.diff.rel}（${f.diff.staged ? "已暂存的更改" : "工作区里的更改"}）` : f.path)}">${fileIcon(f.diff ? baseOf(f.diff.rel) : f.title)}<span class="wb-tab-label">${esc(f.title)}</span><button type="button" class="wb-tab-x" data-close title="关闭" aria-label="关闭">${CLOSE_ICON}</button></div>`).join("");
     tabsEl.querySelector(".wb-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   function paneOf(f) {
     if (!f.pane) {
-      f.pane = editorPane({
-        cwd: ctx.cwd,
-        setDirty: (d) => { f.dirty = d; drawTabs(); ctx.changed(); },
-        setTitle: (title) => { f.title = title; drawTabs(); },
-      }, f.path);
+      f.pane = f.diff
+        ? diffPane({ cwd: ctx.cwd, setTitle: (title) => { f.title = title; drawTabs(); }, openFile: (p) => openFile(p) }, { cwd: ctx.cwd, ...f.diff })
+        : editorPane({
+          cwd: ctx.cwd,
+          setDirty: (d) => { f.dirty = d; drawTabs(); ctx.changed(); },
+          setTitle: (title) => { f.title = title; drawTabs(); },
+        }, f.path);
       f.pane.el.hidden = true;
       body.appendChild(f.pane.el);
     }
@@ -122,18 +144,28 @@ export function workbench(ctx, saved = {}) {
     paneOf(f).el.hidden = false;
     update();
     if (focus) f.pane.focus();
-    ex.select(f.path);
+    if (!f.diff) ex.select(f.path);
     drawTabs();
     ctx.save();
   }
   function openFile(p, { focus = true } = {}) {
     let f = fileOf(p);
     if (!f) {
-      f = { path: p, title: baseOf(p), pane: null, dirty: false };
+      f = { id: `f${++fileSeq}`, path: p, title: baseOf(p), pane: null, dirty: false };
       files.splice(active ? files.indexOf(active) + 1 : files.length, 0, f);
     }
     treeOver = false; // (where narrow, the tree was over the editor)
     show(f, { focus });
+  }
+  // a change from 源代码管理: its own tab (one per file and side), read again each time it is shown
+  function openDiff(rel, staged) {
+    let f = files.find((x) => x.diff && x.diff.rel === rel && x.diff.staged === staged);
+    if (!f) {
+      f = { id: `f${++fileSeq}`, path: rel, title: baseOf(rel), pane: null, dirty: false, diff: { rel, staged } };
+      files.splice(active ? files.indexOf(active) + 1 : files.length, 0, f);
+    }
+    treeOver = false;
+    show(f, { focus: false });
   }
   async function closeFile(f, { ask = true } = {}) {
     if (ask && f.pane?.canClose && !(await f.pane.canClose())) return false;
@@ -162,6 +194,7 @@ export function workbench(ctx, saved = {}) {
   // renamed in the tree: the files open there (or under the folder) follow
   function renamed(from, to) {
     for (const f of files) {
+      if (f.diff) continue;
       if (samePath(f.path, from)) f.path = to;
       else if (samePath(f.path.slice(0, from.length), from) && /[\\/]/.test(f.path[from.length])) f.path = to + f.path.slice(from.length);
       else continue;
@@ -171,7 +204,7 @@ export function workbench(ctx, saved = {}) {
     drawTabs();
     ctx.save();
   }
-  const fileAt = (target) => { const t = target.closest("[data-f]"); return t && fileOf(t.dataset.f); };
+  const fileAt = (target) => { const t = target.closest("[data-f]"); return t && files.find((f) => f.id === t.dataset.f); };
   tabsEl.addEventListener("click", (e) => {
     const f = fileAt(e.target);
     if (!f) return;
@@ -191,11 +224,13 @@ export function workbench(ctx, saved = {}) {
       { label: "关闭", value: "close" }, { label: "关闭其他", value: "others" }, { label: "全部关闭", value: "all" },
       { label: "在文件列表中显示", value: "reveal" }, { label: "复制路径", value: "copy" }, { label: "复制相对路径", value: "copyrel" },
     ], async (v) => {
+      // (a change's tab: the file it is of, once it was read)
+      const p = f.diff ? f.pane?.path || f.diff.rel : f.path;
       if (v === "close") closeFile(f);
       else if (v === "others" || v === "all") { for (const x of [...files]) if (v === "all" || x !== f) { if (!(await closeFile(x))) break; } }
-      else if (v === "reveal") { showTree(); update(); ex.reveal(f.path); }
-      else if (v === "copy") copyText(f.path);
-      else if (v === "copyrel") copyText(relativeTo(ctx.cwd, f.path), "相对路径");
+      else if (v === "reveal") { showTree(); update(); ex.reveal(p); }
+      else if (v === "copy") copyText(p);
+      else if (v === "copyrel") copyText(relativeTo(ctx.cwd, p), "相对路径");
     });
   });
 
@@ -319,10 +354,17 @@ export function workbench(ctx, saved = {}) {
       el.style.setProperty("--wb-panel", `${h}px`);
     }, () => { if (h) store.set("cpDockPanelHeight", String(h)); });
     $(".wb-hsplit", el).addEventListener("dblclick", () => { el.style.removeProperty("--wb-panel"); store.set("cpDockPanelHeight", null); });
+    let g = 0;
+    dragger(gsplit, (x, y) => {
+      const r = side.getBoundingClientRect();
+      g = Math.round(Math.max(120, Math.min(r.height - 120, r.bottom - y)));
+      el.style.setProperty("--wb-git", `${g}px`);
+    }, () => { if (g) store.set("cpDockGitHeight", String(g)); });
+    gsplit.addEventListener("dblclick", () => { el.style.removeProperty("--wb-git"); store.set("cpDockGitHeight", null); });
   }
 
   // ---- what was open the last time: the files (each read when first shown), the terminals still running
-  for (const p of Array.isArray(saved.open) ? saved.open : []) if (typeof p === "string" && !fileOf(p)) files.push({ path: p, title: baseOf(p), pane: null, dirty: false });
+  for (const p of Array.isArray(saved.open) ? saved.open : []) if (typeof p === "string" && !fileOf(p)) files.push({ id: `f${++fileSeq}`, path: p, title: baseOf(p), pane: null, dirty: false });
   if (files.length) show((saved.active && fileOf(saved.active)) || files[0], { focus: false });
   update();
   const ready = ctx.terminalsInfo(true).then((info) => {
@@ -371,7 +413,7 @@ export function workbench(ctx, saved = {}) {
       else togglePanel(true);
     },
     persist: () => ({
-      v: 2, open: files.map((f) => f.path), active: active?.path || null, terms: terms.map((t) => t.id), term: activeTerm?.id || null,
+      v: 2, open: files.filter((f) => !f.diff).map((f) => f.path), active: active && !active.diff ? active.path : null, terms: terms.map((t) => t.id), term: activeTerm?.id || null,
       ...(hideTree ? { hide: true } : {}), ...(panelOpen ? { panel: true } : {}),
     }),
   };

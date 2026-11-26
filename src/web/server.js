@@ -60,7 +60,7 @@ const PUBLIC_ASSETS = new Set(['/favicon.svg', '/manifest.webmanifest', '/icon-1
 // What the code of the console is: the version, and in a source checkout the times of its files, so that a server
 // started by older code gives way to the new one.
 export function codeStamp() {
-  const files = ['server.js', 'api.js', 'data.js', 'files.js', 'pty.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', ...SCRIPTS, 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
+  const files = ['server.js', 'api.js', 'data.js', 'files.js', 'git.js', 'pty.js', 'remote-access.js', 'autostart.js', 'page.html', 'login.html', ...SCRIPTS, 'app.css', 'logo.svg', 'manifest.webmanifest'].map((f) => path.join(HERE, f));
   files.push(path.join(HERE, '..', 'live.js'), path.join(HERE, '..', 'remote.js'), path.join(HERE, '..', 'session.js'), path.join(HERE, '..', 'config.js'), path.join(HERE, '..', 'updater.js'));
   const times = files.map((f) => { try { return Math.round(fs.statSync(f).mtimeMs); } catch { return 0; } });
   return `${VERSION}:${crypto.createHash('sha1').update(times.join(',')).digest('hex').slice(0, 10)}`;

@@ -6,3 +6,4 @@ export { indentWithTab } from '@codemirror/commands';
 export { LanguageDescription, syntaxHighlighting, defaultHighlightStyle, indentUnit } from '@codemirror/language';
 export { languages } from '@codemirror/language-data';
 export { oneDarkTheme, oneDarkHighlightStyle } from '@codemirror/theme-one-dark';
+export { unifiedMergeView, getChunks, goToNextChunk, goToPreviousChunk } from '@codemirror/merge';

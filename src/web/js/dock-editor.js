@@ -229,3 +229,72 @@ export function editorPane(ctx, filePath) {
     persist: () => ({ k: "file", p: file }),
   };
 }
+
+// A change, opened from the 源代码管理 panel (dock-git.js): the file with what changed marked in it (CodeMirror's
+// unified merge view), read only, at its first change; staged: HEAD against the index, else the index against the
+// file on disk (git.js gitDiff). Read again whenever it is shown (the change moves on as files are edited).
+// ctx: {cwd (the workspace), setTitle(text), openFile(path)}; change: {cwd (asked with), rel, staged}
+export function diffPane(ctx, change) {
+  const el = document.createElement("div");
+  el.className = "dock-pane ed";
+  el.innerHTML = `<div class="ed-bar"><span class="ed-path"></span><span class="ed-badges"><span class="ed-badge">${change.staged ? "已暂存" : "工作区"}</span></span><button type="button" class="icon-btn" data-act="prev" title="上一处更改">${PREV}</button><button type="button" class="icon-btn" data-act="next" title="下一处更改">${NEXT}</button><button type="button" class="button secondary small" data-act="open">打开文件</button></div><div class="ed-host"><div class="ed-empty">正在比较…</div></div>`;
+  const host = $(".ed-host", el);
+  let view = null, cm = null, themeComp = null, file = null, disposed = false, seq = 0, wantFocus = false;
+  $(".ed-path", el).textContent = change.rel;
+  $(".ed-path", el).title = change.rel;
+  ctx.setTitle(`${baseOf(change.rel)}（${change.staged ? "已暂存" : "工作区"}）`);
+
+  async function load() {
+    const mine = ++seq;
+    let r;
+    try { r = await api(`/api/git/diff?${new URLSearchParams({ cwd: change.cwd, rel: change.rel, staged: change.staged ? "1" : "0" })}`); } catch (e) {
+      if (mine === seq && !view) host.innerHTML = `<div class="ed-empty">${esc(e.message)}</div>`;
+      return;
+    }
+    if (disposed || mine !== seq) return;
+    file = r.path;
+    if (r.binary) { view?.destroy(); views.delete(view); view = null; host.innerHTML = '<div class="ed-empty">二进制文件，不显示差异</div>'; return; }
+    cm ||= await loadCM();
+    if (disposed || mine !== seq) return;
+    const desc = cm.LanguageDescription.matchFilename(cm.languages, baseOf(change.rel));
+    let lang = [];
+    try { if (desc) lang = await desc.load(); } catch { /* plain */ }
+    if (disposed || mine !== seq) return;
+    themeComp = new cm.Compartment();
+    const state = cm.EditorState.create({
+      doc: r.modified,
+      extensions: [
+        cm.basicSetup, lang, themeComp.of(themeOf(cm)), cm.EditorState.readOnly.of(true),
+        cm.unifiedMergeView({ original: r.original, mergeControls: false, gutter: true }),
+      ],
+    });
+    const first = !view;
+    if (view) view.setState(state);
+    else {
+      host.innerHTML = "";
+      view = new cm.EditorView({ state, parent: host });
+      view.retheme = () => view.dispatch({ effects: themeComp.reconfigure(themeOf(cm)) });
+      views.add(view);
+    }
+    const chunk = cm.getChunks(view.state)?.chunks?.[0];
+    if (first && chunk) view.dispatch({ selection: { anchor: Math.min(chunk.fromB, view.state.doc.length) }, effects: cm.EditorView.scrollIntoView(Math.min(chunk.fromB, view.state.doc.length), { y: "center" }) });
+    if (wantFocus) { wantFocus = false; view.focus(); }
+  }
+  el.querySelector(".ed-bar").addEventListener("click", (e) => {
+    const act = e.target.closest("[data-act]")?.dataset.act;
+    if (act === "open" && file) ctx.openFile(file);
+    else if ((act === "next" || act === "prev") && view && cm) { (act === "next" ? cm.goToNextChunk : cm.goToPreviousChunk)(view); view.focus(); }
+  });
+  return {
+    el,
+    get path() { return file || change.rel; },
+    dirty: false,
+    activate() { load(); },
+    deactivate() {},
+    focus() { if (view) view.focus(); else wantFocus = true; },
+    canClose: () => true,
+    dispose() { disposed = true; if (view) { views.delete(view); view.destroy(); view = null; } },
+  };
+}
+const PREV = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>';
+const NEXT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';

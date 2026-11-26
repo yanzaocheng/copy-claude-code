@@ -30,6 +30,7 @@ import {
 } from './data.js';
 import { listDir, listDirs, statFile, readFile, writeFile, createEntry, renameEntry, trashEntry, rawFile, findFiles } from './files.js';
 import { listTerminals, createTerminal, terminalInput, terminalResize, closeTerminal } from './pty.js';
+import { gitStatus, gitDiff, gitStage, gitUnstage, gitDiscard, gitCommit, gitSync, gitBranches, gitCheckout, gitInit } from './git.js';
 
 const mask = (key) => {
   const k = String(key || '');
@@ -975,6 +976,16 @@ export const routes = [
   ['POST', /^\/api\/fs\/rename$/, (req, m, body) => renameEntry(body)],
   ['POST', /^\/api\/fs\/trash$/, (req, m, body) => trashEntry(body)],
   ['GET', /^\/api\/fs\/find$/, (req, m, b, url) => findFiles(url.searchParams.get('root'), url.searchParams.get('q'))],
+  ['GET', /^\/api\/git\/status$/, (req, m, b, url) => gitStatus(url.searchParams.get('cwd'))],
+  ['GET', /^\/api\/git\/diff$/, (req, m, b, url) => gitDiff(url.searchParams.get('cwd'), url.searchParams.get('rel'), url.searchParams.get('staged') === '1')],
+  ['GET', /^\/api\/git\/branches$/, (req, m, b, url) => gitBranches(url.searchParams.get('cwd'))],
+  ['POST', /^\/api\/git\/stage$/, (req, m, body) => gitStage(body)],
+  ['POST', /^\/api\/git\/unstage$/, (req, m, body) => gitUnstage(body)],
+  ['POST', /^\/api\/git\/discard$/, (req, m, body) => gitDiscard(body)],
+  ['POST', /^\/api\/git\/commit$/, (req, m, body) => gitCommit(body)],
+  ['POST', /^\/api\/git\/(fetch|pull|push)$/, (req, [what], body) => gitSync(body, what)],
+  ['POST', /^\/api\/git\/checkout$/, (req, m, body) => gitCheckout(body)],
+  ['POST', /^\/api\/git\/init$/, (req, m, body) => gitInit(body)],
   ['GET', /^\/api\/terminals$/, () => listTerminals()],
   ['POST', /^\/api\/terminals$/, (req, m, body) => createTerminal(body)],
   ['POST', /^\/api\/terminals\/([0-9a-f]{12})\/input$/, (req, [id], body) => terminalInput(id, body)],
