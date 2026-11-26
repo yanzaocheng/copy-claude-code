@@ -2,6 +2,8 @@
 // included, hidden elements left out), cut down to what can be acted on and what gives it structure, one line per
 // element, each with a ref (e + the element's backend node id, stable while the element lives) to act on it.
 
+import { cutText } from '../utils/text.js';
+
 // Roles that are acted on. Their children are not shown: their text is the name.
 const INTERACTIVE = new Set([
   'button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton',
@@ -22,7 +24,7 @@ const CHECKABLE = new Set(['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'm
 export const snapshotLimits = { nameChars: 100, valueChars: 100, textChars: 300 };
 
 const clean = (s) => String(s ?? '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
-const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const cut = cutText; // (never between the halves of an emoji: see utils/text.js)
 const quote = (s) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 const prop = (node, name) => node.properties?.find((p) => p.name === name)?.value?.value;
 

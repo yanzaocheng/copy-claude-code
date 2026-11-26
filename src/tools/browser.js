@@ -9,6 +9,7 @@ import { browserSessionFor, BrowserError, CdpError, refId, safeUrl } from '../br
 import { snapshotLines, renderLines, diffLines, renderDiff, findLines } from '../browser/snapshot.js';
 import { CONFIG_DIR } from '../config.js';
 import { resolvePath } from '../utils/paths.js';
+import { cutText } from '../utils/text.js';
 
 // The browser session of the call being run: the session's own (see browserSessionFor), passed down the call.
 const current = new AsyncLocalStorage();
@@ -21,7 +22,7 @@ const ACTIONS = ['tabs', 'open', 'switch', 'navigate', 'back', 'forward', 'reloa
 // After a step that reads the page (the model chose how to look at it), the page is not shown again at the end.
 const READING = new Set(['find', 'text', 'eval', 'screenshot']);
 
-const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const cut = cutText; // (never between the halves of an emoji: see utils/text.js)
 
 // The browser tool is left out when CLAUDE_PRO_BROWSER=off.
 export const browserToolEnabled = (config) => String(config?.env?.CLAUDE_PRO_BROWSER ?? '').trim().toLowerCase() !== 'off';

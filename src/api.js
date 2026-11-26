@@ -9,6 +9,7 @@ import { gatewayLogin, loadGatewayModels, cachedGatewayModel, gatewayEffort, gat
 import { GATEWAY_PROVIDER, providerEndpoint, priceCost } from './providers.js';
 import { chatFetch } from './openai-chat.js';
 import { fitImagesIn } from './utils/images.js';
+import { wellFormed } from './utils/text.js';
 import { costOf } from './pricing.js';
 
 const SIGNATURE_PREFIX = 'cgw1:';
@@ -219,6 +220,10 @@ export function buildParams(config, { model, system, messages, tools, maxTokens,
   const toCodex = provider === GATEWAY_PROVIDER && /^gpt-/i.test(model.id);
   let turnLostThinking = false;
   ({ messages, inTurn: turnLostThinking } = withoutForeignThinking(messages, provider, toCodex));
+  // (no half of an emoji, which the API's JSON parser refuses for the whole request: see utils/text.js)
+  messages = wellFormed(messages);
+  system = wellFormed(system);
+  tools = wellFormed(tools);
   const params = {
     model: model.id,
     max_tokens: outputCaps.has(keyOf(model)) ? Math.min(wanted, outputCaps.get(keyOf(model))) : wanted,
