@@ -6,7 +6,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from '../utils/proc.js';
+import { spawn, execFile } from '../utils/proc.js';
+import { CONFIG_DIR } from '../config.js';
 import { ripgrepPath } from '../utils/shell.js';
 import { decodeText, encodeText, encodingName } from '../utils/encoding.js';
 import { httpError } from './data.js';
@@ -134,6 +135,56 @@ export async function renameEntry(body) {
   if (!sameFile && fs.existsSync(to)) throw httpError(409, '已经有同名的文件或文件夹');
   try { await fs.promises.rename(from, to); } catch (e) { throw fsError(e, '文件'); }
   return { path: to };
+}
+
+// 删除: never outright. To the system's recycle bin (Windows), the desktop's trash (macOS, Linux with gio), else to
+// CONFIG_DIR/trash/files. The path goes to the helper as data (an environment variable, an argument), never as code.
+const run = (cmd, args, opts = {}) => new Promise((resolve) => {
+  execFile(cmd, args, { windowsHide: true, timeout: 60_000, ...opts }, (err) => resolve(!err));
+});
+// SHFileOperation with FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT: to the bin, no window of any
+// kind (the console may be used from a phone). About a second, the first time three.
+const RECYCLE_PS = `$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class CpRecycle {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct Op { public IntPtr hwnd; public uint wFunc; public string pFrom; public string pTo; public ushort fFlags; public bool aborted; public IntPtr maps; public string title; }
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern int SHFileOperation(ref Op op);
+  public static int Recycle(string path) {
+    var op = new Op { wFunc = 3, pFrom = path + "\\0\\0", fFlags = 0x40 | 0x10 | 0x400 | 0x4 };
+    int r = SHFileOperation(ref op);
+    return r != 0 ? r : (op.aborted ? -1 : 0);
+  }
+}
+'@
+exit [CpRecycle]::Recycle($env:CP_TRASH_PATH)`;
+
+async function toSystemTrash(target) {
+  if (isWin) {
+    const sys = process.env.SystemRoot || 'C:\\Windows';
+    return run(path.join(sys, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', RECYCLE_PS], { env: { ...process.env, CP_TRASH_PATH: target } });
+  }
+  if (process.platform === 'darwin') return run('osascript', ['-e', 'on run argv', '-e', 'tell application "Finder" to delete (POSIX file (item 1 of argv))', '-e', 'end run', target]);
+  return run('gio', ['trash', '--', target]);
+}
+
+export async function trashEntry(body) {
+  const target = absolute(body?.path, '路径');
+  if (path.dirname(target) === target) throw httpError(400, '不能删除磁盘的根目录');
+  try { await fs.promises.lstat(target); } catch (e) { throw fsError(e, '文件'); }
+  if ((await toSystemTrash(target)) && !fs.existsSync(target)) return { path: target, recycled: true };
+  if (!fs.existsSync(target)) return { path: target, recycled: true };
+  const dest = path.join(CONFIG_DIR, 'trash', 'files', `${Date.now()}__${path.basename(target)}`);
+  try {
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    try { await fs.promises.rename(target, dest); } catch (e) {
+      if (e.code !== 'EXDEV') throw e; // (another drive than the configuration's)
+      await fs.promises.cp(target, dest, { recursive: true });
+      await fs.promises.rm(target, { recursive: true, force: true });
+    }
+  } catch (e) { throw fsError(e, '文件'); }
+  return { path: target, trashed: dest };
 }
 
 // A picture, for the editor's tab: served with a policy that runs nothing, should it be opened on its own.

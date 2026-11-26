@@ -28,7 +28,7 @@ import {
   listAllSessions, sessionDetail, sessionImage, sessionToolOutput, sessionMarkdown, renameSession, trashSession, listTrash, restoreSession,
   purgeTrash, runningSessions, findPeerById, peerRequest, usageReport, dirSize, projectsRoot, httpError, builtinTools,
 } from './data.js';
-import { listDir, listDirs, statFile, readFile, writeFile, createEntry, renameEntry, rawFile, findFiles } from './files.js';
+import { listDir, listDirs, statFile, readFile, writeFile, createEntry, renameEntry, trashEntry, rawFile, findFiles } from './files.js';
 import { listTerminals, createTerminal, terminalInput, terminalResize, closeTerminal } from './pty.js';
 
 const mask = (key) => {
@@ -973,6 +973,7 @@ export const routes = [
   ['PUT', /^\/api\/fs\/write$/, (req, m, body) => writeFile(body)],
   ['POST', /^\/api\/fs\/create$/, (req, m, body) => createEntry(body)],
   ['POST', /^\/api\/fs\/rename$/, (req, m, body) => renameEntry(body)],
+  ['POST', /^\/api\/fs\/trash$/, (req, m, body) => trashEntry(body)],
   ['GET', /^\/api\/fs\/find$/, (req, m, b, url) => findFiles(url.searchParams.get('root'), url.searchParams.get('q'))],
   ['GET', /^\/api\/terminals$/, () => listTerminals()],
   ['POST', /^\/api\/terminals$/, (req, m, body) => createTerminal(body)],

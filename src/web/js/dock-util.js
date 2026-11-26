@@ -38,6 +38,8 @@ export const parentOf = (p) => {
 export const baseOf = (p) => String(p).replace(/[\\/]+$/, "").split(/[\\/]/).pop();
 // whether two paths name the same file (on Windows, whatever their case)
 export const samePath = (a, b) => (/^[a-z]:|\\/i.test(String(a)) ? String(a).toLowerCase() === String(b).toLowerCase() : a === b);
+// whether `p` is `dir` or inside it
+export const within = (p, dir) => samePath(p, dir) || (samePath(String(p).slice(0, dir.length), dir) && /[\\/]/.test(String(p)[dir.length] || ""));
 // `p` relative to the workspace, as shown (forward slashes), or the whole path when outside it
 export function relativeTo(root, p) {
   const r = shortPath(root).replace(/\/+$/, ""), f = shortPath(p);

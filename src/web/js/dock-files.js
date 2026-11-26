@@ -2,8 +2,9 @@
 // refreshed while shown (an agent's new files appear), a box that finds files by name (Ctrl+P; files.js findFiles),
 // and a right click for what can be done with a file or folder. A file picked opens in the editor beside it.
 
-import { esc, api, fail, shortPath, ICON, $ } from "./util.js";
-import { fileIcon, joinPath, parentOf, baseOf, samePath, relativeTo, copyText, menuAt } from "./dock-util.js";
+import { esc, api, toast, fail, shortPath, ICON, $ } from "./util.js";
+import { modal } from "./dialogs.js";
+import { fileIcon, joinPath, parentOf, baseOf, samePath, within, relativeTo, copyText, menuAt } from "./dock-util.js";
 
 const REFRESH_MS = 4000;
 const CHEV = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
@@ -13,7 +14,7 @@ const NEW_FILE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 const NEW_FOLDER = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10.5v5M9.5 13h5"/></svg>';
 const COLLAPSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5M7 4l5 5 5-5"/></svg>';
 
-// ctx: {cwd, key, openFile(path), openTerminal({cwd}), renamed(from, to)}
+// ctx: {cwd, key, openFile(path), openTerminal({cwd}), renamed(from, to), deleted(path)}
 export function explorer(ctx) {
   const root = ctx.cwd;
   const el = document.createElement("div");
@@ -167,8 +168,15 @@ export function explorer(ctx) {
     if (selectedDir) toggle(selected);
     else {
       if (mode === "tree") draw();
-      ctx.openFile(selected);
+      // (as in VS Code: a click shows the file and leaves the keys to the tree, F2 or Delete; a double click or
+      // Enter goes into the editor)
+      ctx.openFile(selected, { focus: mode !== "tree" });
+      if (mode === "tree") list.focus({ preventScroll: true });
     }
+  });
+  list.addEventListener("dblclick", (e) => {
+    const row = e.target.closest("[data-p]");
+    if (row && !row.dataset.dir && !editing) ctx.openFile(row.dataset.p, { focus: true });
   });
 
   // ---- new files and folders, and new names: typed in the tree, as in VS Code (Enter, or leaving the box, does it;
@@ -249,9 +257,43 @@ export function explorer(ctx) {
       else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); endEdit(); }
       return;
     }
-    // F2: the name of the file or folder picked
+    // F2: the name of the file or folder picked; Delete: it, to the recycle bin
     if (e.key === "F2" && selected && !editing) { e.preventDefault(); rename(selected, selectedDir); }
+    if (e.key === "Enter" && selected && !selectedDir && !editing) { e.preventDefault(); ctx.openFile(selected, { focus: true }); }
+    if (e.key === "Delete" && selected && !editing && mode === "tree") { e.preventDefault(); remove(selected, selectedDir); }
   });
+
+  // 删除: asked once in the page's own dialog (Enter confirms), then to the recycle bin (files.js trashEntry)
+  function remove(p, isDir) {
+    const name = baseOf(p);
+    const m = modal({
+      title: `删除${isDir ? "文件夹" : "文件"}「${name}」？`,
+      sub: p,
+      body: `<p style="margin:0">${isDir ? "文件夹和里面的所有内容" : "文件"}会移到回收站，可以从回收站还原。</p>`,
+      foot: '<button type="button" class="button secondary" data-close>取消</button><button type="button" class="button danger" data-del>移到回收站</button>',
+      onClose: () => list.focus({ preventScroll: true }),
+    });
+    const go = $("[data-del]", m.el);
+    go.focus();
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      go.textContent = "正在删除…";
+      try {
+        const r = await api("/api/fs/trash", { method: "POST", body: { path: p } });
+        m.close();
+        for (const d of [...expanded]) if (within(d, p)) expanded.delete(d);
+        saveExpanded();
+        if (selected && within(selected, p)) { selected = null; selectedDir = false; }
+        ctx.deleted(p);
+        await refresh(true);
+        toast(r.recycled ? `已把「${name}」移到回收站` : `已把「${name}」移到 ${r.trashed}`);
+      } catch (e) {
+        fail(e);
+        go.disabled = false;
+        go.textContent = "移到回收站";
+      }
+    });
+  }
   list.addEventListener("input", (e) => {
     if (!e.target.classList?.contains("ft-input") || !editing) return;
     sayProblem(problem(e.target.value.trim()));
@@ -278,6 +320,7 @@ export function explorer(ctx) {
     items.push({ label: "新建文件", value: "newfile" }, { label: "新建文件夹", value: "newdir" }, { label: "在终端中打开", description: shortPath(here), value: "term" });
     if (p) items.push({ label: "重命名", description: "F2", value: "rename" }, { label: "复制路径", value: "copy" }, { label: "复制相对路径", value: "copyrel" });
     items.push({ label: "刷新", value: "refresh" });
+    if (p) items.push({ label: "删除", description: "移到回收站 · Delete", value: "delete", danger: true });
     menuAt(e.clientX, e.clientY, items, (v) => {
       if (v === "open") ctx.openFile(p);
       else if (v === "newfile" || v === "newdir") create(here, v === "newdir");
@@ -286,6 +329,7 @@ export function explorer(ctx) {
       else if (v === "copy") copyText(p);
       else if (v === "copyrel") copyText(relativeTo(root, p), "相对路径");
       else if (v === "refresh") refresh(true);
+      else if (v === "delete") remove(p, isDir);
     });
   });
   el.querySelector(".ft-head").addEventListener("click", (e) => {

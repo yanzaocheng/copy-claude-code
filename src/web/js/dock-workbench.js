@@ -11,7 +11,7 @@ import { popMenu } from "./composer.js";
 import { explorer } from "./dock-files.js";
 import { editorPane } from "./dock-editor.js";
 import { terminalPane } from "./dock-terminal.js";
-import { fileIcon, CLOSE_ICON, baseOf, samePath, relativeTo, copyText, menuAt, workspaceKey } from "./dock-util.js";
+import { fileIcon, CLOSE_ICON, baseOf, samePath, within, relativeTo, copyText, menuAt, workspaceKey } from "./dock-util.js";
 
 const NARROW = 560; // px: narrower, the tree shows over the rest
 const TERM_ICON = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 7 5 5-5 5M12 17h7"/></svg>';
@@ -71,7 +71,7 @@ export function workbench(ctx, saved = {}) {
   // the tree: beside the rest unless hidden (`hideTree`, kept); where it is narrow, over the rest only while asked
   // for (`treeOver`: the tree button, Ctrl+P), until a file is picked or the rest touched
   let hideTree = Boolean(saved.hide), treeOver = false, panelOpen = Boolean(saved.panel);
-  const ex = explorer({ cwd: ctx.cwd, key: ctx.key, openFile: (p) => openFile(p), openTerminal: (o) => newTerminal(o), renamed });
+  const ex = explorer({ cwd: ctx.cwd, key: ctx.key, openFile: (p, o) => openFile(p, o), openTerminal: (o) => newTerminal(o), renamed, deleted });
   el.prepend(ex.el);
   const main = $(".wb-main", el), tabsEl = $(".wb-tabs", el), body = $(".wb-body", el);
   const ptabs = $(".wb-ptabs", el), pbody = $(".wb-pbody", el);
@@ -153,6 +153,11 @@ export function workbench(ctx, saved = {}) {
     drawTabs();
     ctx.save();
     return true;
+  }
+  // deleted in the tree: its tabs (or those under the folder) closed, but not one with unsaved changes (its editor says
+  // the file is gone; saving makes it again)
+  function deleted(p) {
+    for (const f of [...files]) if (within(f.path, p) && !f.dirty) closeFile(f, { ask: false });
   }
   // renamed in the tree: the files open there (or under the folder) follow
   function renamed(from, to) {
