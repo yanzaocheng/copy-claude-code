@@ -10,10 +10,11 @@ import { composer, quoteSelection, popMenu, modelMenuItems } from "./composer.js
 import { pendingFirstSends } from "./page-new.js";
 import { mobileLayout } from "./main.js";
 import { setDockWorkspace, dockButton } from "./dock.js";
+import { findInConversation, FIND_ICON } from "./find.js";
 
 export function liveView(peerId) {
   const el = page(`<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill warn" hidden></span>${dockButton()}<button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill warn" hidden></span><button type="button" class="icon-btn find-toggle" id="lfind" title="在对话中查找（Ctrl+F）" aria-label="在对话中查找" aria-pressed="false">${FIND_ICON}</button>${dockButton()}<button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-extra"><div class="bgwork" id="lbg"></div><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
         <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
@@ -231,6 +232,7 @@ export function liveView(peerId) {
   es.onerror = () => { conn.textContent = es.readyState === EventSource.CLOSED ? "连接已断开，请刷新页面" : "正在重新连接…"; conn.hidden = false; };
   const tick = setInterval(renderStatus, 250);
   const unquote = quoteSelection(log, (text) => c.quote(text));
-  view.cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); };
+  const finder = findInConversation({ root: log, scroller, host: $(".chat-page", el), button: $("#lfind", el) });
+  view.cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); finder.dispose(); };
   if (!mobileLayout.matches) c.input.focus();
 }

@@ -870,3 +870,20 @@ body.dock-dragging iframe, body.dock-dragging .xterm, body.dock-dragging .cm-edi
   .chat-head, .chat-foot { padding-left: 16px; padding-right: 16px; }
   .chat-page > .chat-composer { padding: 0 14px; }
 }
+/* 在对话中查找 (find.js): a box under the conversation's header; the places marked with the browser's highlights */
+.find-bar { position: absolute; z-index: 8; top: 64px; right: 24px; display: flex; align-items: center; gap: 2px; padding: 4px 4px 4px 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg); }
+.find-bar input { width: 220px; min-width: 0; padding: 4px 4px; border: 0; background: none; box-shadow: none !important; font-size: 13px; }
+.find-bar.none input { color: var(--danger); }
+.find-count { min-width: 52px; color: var(--muted); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.find-bar .icon-btn { width: 26px; height: 26px; border-radius: 6px; }
+.find-toggle[aria-pressed="true"] { background: var(--active); color: var(--text); }
+::highlight(cp-find) { background-color: rgba(250, 204, 21, .45); }
+::highlight(cp-find-current) { background-color: rgba(234, 108, 32, .9); color: #fff; }
+@media (max-width: 860px) {
+  .find-bar { left: 10px; right: 10px; top: calc(60px + env(safe-area-inset-top)); }
+  .find-bar input { flex: 1; width: auto; }
+}
+@container main (max-width: 640px) {
+  .find-bar { left: 12px; right: 12px; }
+  .find-bar input { flex: 1; width: auto; }
+}
