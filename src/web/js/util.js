@@ -32,8 +32,12 @@ export function toast(message, kind = "ok") {
   if (!el) { el = document.createElement("div"); document.body.appendChild(el); }
   el.className = `toast${kind === "error" ? " error" : ""}`;
   el.textContent = message;
+  // under the notes of an update when one is shown (they are at the same place)
+  const below = Math.max(0, ...$$(".reload-note").map((n) => n.getBoundingClientRect().bottom));
+  el.style.top = below ? `${Math.round(below) + 8}px` : "";
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.remove(), kind === "error" ? 6000 : 3000);
+  // (a longer message stays longer, to be read)
+  toastTimer = setTimeout(() => el.remove(), Math.min(9000, Math.max(kind === "error" ? 6000 : 3000, String(message).length * 110)));
 }
 export const fail = (e) => toast(e?.message || String(e), "error");
 
