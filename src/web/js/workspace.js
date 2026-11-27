@@ -65,6 +65,7 @@ export async function loadWorkspace({ afterPending = false } = {}) {
 }
 
 const sidebarMenuOpen = () => $("#ws :is([data-session-menu], [data-pmenu])[aria-expanded=true]");
+const SIDEBAR_LISTS = "#ws, #wsResults";
 
 function drawWorkspace() {
   if (sidebarMenuOpen()) view.closeMenu?.();
@@ -78,16 +79,8 @@ function drawWorkspace() {
   });
   // running sessions with nothing written yet (just started)
   for (const l of ws.live) if (!known.has(l.status?.sessionId)) items.push({ href: `#/live/${l.peerId}`, title: l.status?.title || l.name, cwd: l.status?.cwd || l.cwd, mtime: l.startedAt || 0, peer: l });
-  const q = ws.q.toLowerCase();
-  const hits = ws.hitsFor === ws.q ? ws.hits : new Map();
   const groups = new Map();
   for (const it of items) {
-    // (found by its name or folder; else by what was said in it, shown under its name)
-    it.snippet = null;
-    if (q && !`${it.title} ${it.cwd}`.toLowerCase().includes(q)) {
-      if (!it.id || !hits.has(it.id)) continue;
-      it.snippet = hits.get(it.id);
-    }
     const key = projectKey(it.cwd);
     if (!groups.has(key)) groups.set(key, { key, cwd: it.cwd, items: [], last: 0, live: false });
     const g = groups.get(key);
@@ -101,7 +94,6 @@ function drawWorkspace() {
   for (const w of ws.workspaces) {
     const key = projectKey(w.cwd);
     if (groups.has(key)) { groups.get(key).added = true; continue; }
-    if (q && !w.cwd.toLowerCase().includes(q)) continue;
     groups.set(key, { key, cwd: w.cwd, items: [], last: w.added || 0, live: false, added: true });
   }
   const list = [...groups.values()].sort((a, b) => b.live - a.live || b.last - a.last || a.key.localeCompare(b.key));
@@ -110,21 +102,49 @@ function drawWorkspace() {
   let n = 0;
   box.innerHTML = list.length ? list.map((g) => {
     g.items.sort((a, b) => working(b) - working(a) || (backgroundOf(b).length > 0) - (backgroundOf(a).length > 0) || b.mtime - a.mtime);
-    const closed = ws.closed.has(g.key) && !q;
-    const limit = ws.expanded.has(g.key) || q ? Infinity : 6;
+    const closed = ws.closed.has(g.key);
+    const limit = ws.expanded.has(g.key) ? Infinity : 6;
     const rows = closed ? "" : g.items.slice(0, limit).map((it) => {
       const id = `t${n++}`;
       ws.tips.set(id, it);
       const [cls] = it.peer ? liveState(it.peer.status) : [""];
       const active = here === it.href || (it.alt && here === it.alt);
-      return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}${it.snippet ? " has-snippet" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${backgroundOf(it).length ? bgBadge(backgroundOf(it)) : ""}${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}${it.snippet ? `<span class="ws-snippet">${marked(it.snippet, q)}</span>` : ""}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
+      return `<div class="ws-row${it.id ? " has-menu" : ""}" data-tip="${id}"><a class="ws-item${active ? " active" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${esc(it.title)}</span>${backgroundOf(it).length ? bgBadge(backgroundOf(it)) : ""}${working(it) ? "" : `<span class="ws-ago">${esc(shortAgo(it.mtime))}</span>`}</a>${it.id ? `<button type="button" class="ws-menu" data-session-menu aria-label="对话操作：${esc(it.title)}" aria-expanded="false">${ICON.more}</button>` : ""}</div>`;
     }).join("") + (!closed && g.items.length > limit ? `<button type="button" class="ws-more" data-expand="${esc(g.key)}">展开其余 ${g.items.length - limit} 个</button>` : "")
       + (!closed && !g.items.length ? '<div class="ws-hint">还没有会话，点右边的 + 新建</div>' : "");
     const running = g.items.filter(working).length;
     const bg = g.items.flatMap(backgroundOf);
     return `<div class="ws-group"><div class="ws-folder-row"><button type="button" class="ws-folder" data-folder="${esc(g.key)}" title="${esc(shortPath(g.cwd))}">${closed ? ICON.folder : ICON.folderOpen}<span>${esc(baseName(g.cwd))}</span>${bg.length ? bgBadge(bg) : ""}${running ? `<span class="ws-count">${running}</span>` : ""}</button><button type="button" class="ws-pmenu" data-pmenu="${esc(g.key)}" data-cwd="${esc(g.cwd)}" title="更多" aria-label="项目菜单" aria-expanded="false">${ICON.more}</button><button type="button" class="ws-add" data-add="${esc(g.cwd)}" title="在 ${esc(baseName(g.cwd))} 里新建会话" aria-label="新建会话">${ICON.add}</button></div>${rows}</div>`;
-  }).join("") : `<div class="ws-empty">${q ? (ws.searching ? "正在搜索对话内容…" : "没有符合的会话") : "还没有会话：点上方的文件夹图标添加工作区"}</div>`;
-  if (q && ws.searching && list.length) box.insertAdjacentHTML("beforeend", '<div class="ws-empty">正在搜索对话内容…</div>');
+  }).join("") : '<div class="ws-empty">还没有会话：点上方的文件夹图标添加工作区</div>';
+  drawResults(items, () => `t${n++}`);
+}
+
+// The search's results, in a box of their own above the 工作区, which stays as it is (the user asked for it,
+// 2026-11-27: the list was gone while searching): the conversations found by their name or project, or by what was
+// said in them (a piece of it under the name), newest first.
+function drawResults(items, nextId) {
+  const box = $("#wsResults");
+  const q = ws.q.toLowerCase();
+  box.classList.toggle("hidden", !q);
+  if (!q) { box.innerHTML = ""; return; }
+  const hits = ws.hitsFor === ws.q ? ws.hits : new Map();
+  const found = [];
+  for (const it of items) {
+    const byName = it.title.toLowerCase().includes(q) || baseName(it.cwd).toLowerCase().includes(q);
+    const snippet = it.id && !it.title.toLowerCase().includes(q) ? hits.get(it.id) : null;
+    if (byName || snippet) found.push({ ...it, snippet });
+  }
+  found.sort((a, b) => working(b) - working(a) || b.mtime - a.mtime);
+  const here = location.hash;
+  const rows = found.map((it) => {
+    const id = nextId();
+    ws.tips.set(id, it);
+    const [cls] = it.peer ? liveState(it.peer.status) : [""];
+    const active = here === it.href || (it.alt && here === it.alt);
+    return `<div class="ws-row" data-tip="${id}"><a class="ws-item${active ? " active" : ""}${it.snippet ? " has-snippet" : ""}" href="${esc(it.href)}">${working(it) ? `<span class="ws-dot ${cls}"></span>` : ""}<span class="ws-title">${marked(it.title, q)}</span><span class="ws-ago">${esc(shortAgo(it.mtime))}</span><span class="ws-where">${ICON.folder}${marked(baseName(it.cwd), q)}</span>${it.snippet ? `<span class="ws-snippet">${marked(it.snippet, q)}</span>` : ""}</a></div>`;
+  }).join("");
+  const status = ws.searching ? "正在搜索对话内容…" : found.length ? "" : "没有符合的会话";
+  box.innerHTML = `<div class="ws-results-head"><span>搜索结果</span>${found.length ? `<span class="ws-results-n">${found.length}</span>` : ""}</div>${rows}${status ? `<div class="ws-empty">${status}</div>` : ""}`;
 }
 
 // a piece of a conversation, the words searched for marked
@@ -176,7 +196,7 @@ async function addWorkspaceDir() {
 
 export function markActive() {
   const here = location.hash;
-  $$("#ws .ws-item").forEach((a) => {
+  $$(":is(#ws, #wsResults) .ws-item").forEach((a) => {
     const it = ws.tips.get(a.parentElement.dataset.tip);
     a.classList.toggle("active", Boolean(it && (here === it.href || (it.alt && here === it.alt))));
   });
@@ -325,9 +345,9 @@ function openPanel(cwd, what) {
 }
 
 export function wireSidebar() {
-  const box = $("#ws");
   const tip = $("#tip");
-  box.addEventListener("click", (e) => {
+  const lists = $$(SIDEBAR_LISTS);
+  const onClick = (e) => {
     // a conversation found by what was said in it: opened at that place (the words looked for in it, find.js)
     const hit = e.target.closest(".ws-item.has-snippet");
     if (hit && !e.target.closest("[data-session-menu]")) {
@@ -389,8 +409,8 @@ export function wireSidebar() {
       drawWorkspace();
     }
     if (x) { ws.expanded.add(x.dataset.expand); drawWorkspace(); }
-  });
-  box.addEventListener("mouseover", (e) => {
+  };
+  const onOver = (e) => {
     const a = e.target.closest("[data-tip]");
     const it = a && ws.tips.get(a.dataset.tip);
     if (!it || sidebarMenuOpen() || e.target.closest("[data-session-menu]")) { tip.classList.add("hidden"); return; }
@@ -401,12 +421,16 @@ export function wireSidebar() {
     tip.classList.remove("hidden");
     tip.style.left = `${r.right + 8}px`;
     tip.style.top = `${Math.min(window.innerHeight - tip.offsetHeight - 8, r.top)}px`;
-  });
-  box.addEventListener("mouseleave", () => tip.classList.add("hidden"));
-  box.addEventListener("scroll", () => {
-    tip.classList.add("hidden");
-    if (sidebarMenuOpen()) view.closeMenu?.();
-  });
+  };
+  for (const list of lists) {
+    list.addEventListener("click", onClick);
+    list.addEventListener("mouseover", onOver);
+    list.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+    list.addEventListener("scroll", () => {
+      tip.classList.add("hidden");
+      if (sidebarMenuOpen()) view.closeMenu?.();
+    });
+  }
   $("#wsSearchBtn").addEventListener("click", () => {
     const input = $("#wsSearch");
     input.classList.toggle("hidden");

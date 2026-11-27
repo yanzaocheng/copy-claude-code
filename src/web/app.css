@@ -86,6 +86,18 @@ h3 { font-size: 14px; margin: 0 0 6px; font-weight: 650; }
 .ws-tools button:hover, .ws-tools a:hover { background: var(--hover); color: var(--text); }
 .ws-search { margin: 0 4px 6px; font-size: 13px; padding: 6px 10px; }
 .ws { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -4px; padding: 0 4px 6px; }
+/* the search's results: a box of their own between the search and the 工作区, which stays whole (workspace.js drawResults) */
+.ws-results { flex: none; max-height: 46vh; overflow-y: auto; margin: 0 4px 10px; padding: 0 4px 4px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.ws-results-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 6px; margin: 0 -4px; padding: 8px 12px 6px; background: var(--surface); color: var(--faint); font-size: 12px; font-weight: 600; letter-spacing: .03em; }
+.ws-results-n { min-width: 18px; padding: 0 6px; border-radius: 99px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+.ws-results .ws-item { flex-wrap: wrap; row-gap: 1px; padding: 6px 8px; }
+.ws-results .ws-item .ws-dot { position: static; }
+.ws-results .ws-title mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color: var(--accent-text); }
+.ws-results .ws-row .ws-item.active { background: var(--active); box-shadow: none; }
+.ws-where { flex-basis: 100%; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--faint); font-size: 11.5px; }
+.ws-where svg { flex: none; width: 12px; height: 12px; }
+.ws-where mark { background: none; color: var(--accent-text); font-weight: 600; }
+.ws-results .ws-empty { padding: 6px 8px 8px; font-size: 12.5px; }
 .ws-empty { color: var(--faint); font-size: 13px; padding: 10px; }
 .ws-group { margin-bottom: 6px; }
 .ws-folder { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 8px; background: none; color: var(--text-2); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; text-align: left; }
