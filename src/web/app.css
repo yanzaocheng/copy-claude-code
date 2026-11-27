@@ -516,6 +516,18 @@ details.proj > div { padding: 0 0 6px 18px; }
 .fold:not(.open) pre { max-height: calc(5 * 1.55em + 16px); overflow: hidden; -webkit-mask-image: linear-gradient(#000 65%, transparent); mask-image: linear-gradient(#000 65%, transparent); }
 .fold-btn { margin: 6px 0 0 16px; padding: 3px 11px; border: 1px solid var(--line-strong); border-radius: 99px; background: var(--surface); color: var(--muted); font: 12px/1.4 var(--font); cursor: pointer; box-shadow: var(--shadow-sm); }
 .fold-btn:hover { color: var(--text); border-color: var(--accent-line); }
+/* 执行过程 (transcript.js processBlocks): a turn's steps folded under one line, which stays at the top while they scroll */
+.proc { min-width: 0; }
+.proc-head { position: sticky; top: 6px; z-index: 3; display: flex; align-items: center; gap: 7px; width: fit-content; max-width: 100%; min-width: 0; padding: 4px 13px 4px 9px; border: 1px solid var(--line-strong); border-radius: 99px; background: var(--surface); color: var(--muted); font: 12.5px/1.5 var(--font); text-align: left; cursor: pointer; box-shadow: var(--shadow-sm); }
+.proc-head:hover { color: var(--text); border-color: var(--accent-line); }
+.proc-chev { flex: none; transition: transform .15s; }
+.proc.open .proc-chev { transform: rotate(90deg); }
+.proc-label { flex: none; font-weight: 600; color: var(--text-2); }
+.proc-sum { flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
+.proc-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-family: var(--mono); font-size: 11.5px; }
+.proc-pulse { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+.proc-body { display: none; }
+.proc.open .proc-body { display: grid; gap: 14px; margin: 10px 0 0 15px; padding: 2px 0 2px 16px; border-left: 2px solid var(--line); }
 .a-add { background: var(--diff-add-bg); color: var(--diff-add-fg); }
 .a-del { background: var(--diff-del-bg); color: var(--diff-del-fg); }
 .a-add.a-word { background: var(--diff-add-word); }
@@ -666,6 +678,8 @@ details.proj > div { padding: 0 0 6px 18px; }
   .title-cell strong, .title-cell .path { max-width: 62vw; }
   .md table { display: block; max-width: 100%; overflow-x: auto; }
   .it-user { max-width: 92%; }
+  .proc.open .proc-body { margin-left: 4px; padding-left: 10px; }
+  .proc-head { padding-top: 6px; padding-bottom: 6px; }
   .it-image img { max-width: 100%; height: auto; }
   .toolbar input[type="search"] { min-width: 0; flex-basis: 100%; }
   .section-head:has(.head-actions) { flex-wrap: wrap; }

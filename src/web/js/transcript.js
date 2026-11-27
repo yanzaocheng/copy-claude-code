@@ -128,6 +128,107 @@ export function wireForks(log, sessionIdOf) {
   });
 }
 
+// ---------------------------------------------------------------- 执行过程
+// The steps of a turn (its thinking, its tool calls and what was said between them, up to its last tool call or
+// thinking) under one line that folds them, so that the answers stand out: the user asked for it (2026-11-27), as
+// scrolling up through a long turn to find the answer before it took long. A finished turn's steps are folded, a
+// running one's open, unless 展开全部执行过程 was chosen (the header's button, localStorage cpProcOpen); each one opens
+// and folds by its line, which stays at the top of the view while the steps scroll under it.
+
+const DONE_LINE = /^✻ Done at \d{1,2}:\d{2}\b/;
+const doneSeen = new WeakMap(); // output item -> [lines checked, has a done line]
+function isDoneOutput(it) {
+  if (it.k !== "output") return false;
+  const lines = it.lines || [];
+  const known = doneSeen.get(it);
+  if (known && known[0] === lines.length) return known[1];
+  const done = lines.some((l) => DONE_LINE.test(plain(l).trim()));
+  doneSeen.set(it, [lines.length, done]);
+  return done;
+}
+const BOUNDARY = new Set(["user", "image", "summary"]);
+
+// The items as they are drawn: an item, or {proc: {key, items, tools, head, complete, last}} for the steps of a turn
+// with a tool call. A turn ends at the next message (or summary) or at its done line; `complete`: it has ended.
+export function processBlocks(items) {
+  const blocks = [];
+  const n = items.length;
+  let i = 0;
+  while (i < n) {
+    if (BOUNDARY.has(items[i].k)) { blocks.push(items[i++]); continue; }
+    let end = i;
+    while (end < n && !BOUNDARY.has(items[end].k)) if (isDoneOutput(items[end++])) break;
+    let last = end - 1;
+    while (last >= i && items[last].k !== "tool" && items[last].k !== "thinking") last--;
+    const steps = items.slice(i, last + 1);
+    const tools = steps.filter((it) => it.k === "tool");
+    if (tools.length) {
+      blocks.push({ proc: { key: items[i], items: steps, tools: tools.length, head: tools[tools.length - 1].head, complete: end < n || isDoneOutput(items[end - 1]), last: end >= n } });
+      for (let j = last + 1; j < end; j++) blocks.push(items[j]);
+    } else for (let j = i; j < end; j++) blocks.push(items[j]);
+    i = end;
+  }
+  return blocks;
+}
+
+export const procsOpenByDefault = () => { try { return localStorage.getItem("cpProcOpen") === "1"; } catch { return false; } };
+// open unless it has ended (`keep`: it ended while the user was reading it, see page-live.js)
+export const procOpen = (p, keep = false) => procsOpenByDefault() || !p.complete || keep;
+
+const CHEV = '<svg class="proc-chev" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
+function procHead(p, running) {
+  return `${CHEV}${running ? '<span class="proc-pulse"></span>' : ""}<span class="proc-label">${running ? "执行中" : "执行过程"}</span><span class="proc-sum">${p.tools} 次工具调用</span>${running ? `<span class="proc-now">${esc(plain(p.head || ""))}</span>` : ""}`;
+}
+// the steps drawn (`inner`: their HTML; empty for the live view, which puts its own nodes in .proc-body)
+export function procHtml(p, inner, { open, running = false }) {
+  return `<div class="proc${open ? " open" : ""}" data-complete="${p.complete ? 1 : 0}"><button type="button" class="proc-head" data-proc aria-expanded="${open}" title="${open ? "折叠执行过程" : "展开执行过程"}">${procHead(p, running)}</button><div class="proc-body">${inner}</div></div>`;
+}
+function setProcOpen(box, open) {
+  box.classList.toggle("open", open);
+  const head = box.firstElementChild;
+  head.setAttribute("aria-expanded", String(open));
+  head.title = open ? "折叠执行过程" : "展开执行过程";
+}
+const shownHead = new WeakMap();
+// a box of procHtml brought up to date: its line, and open or folded unless the user chose (data-user)
+export function updateProc(box, p, { open, running = false }) {
+  if (box.dataset.user !== "1" && box.classList.contains("open") !== open) setProcOpen(box, open);
+  box.dataset.complete = p.complete ? "1" : "0";
+  const html = procHead(p, running);
+  if (shownHead.get(box) !== html) { box.firstElementChild.innerHTML = html; shownHead.set(box, html); }
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-proc]");
+  if (!b) return;
+  const box = b.closest(".proc");
+  const open = !box.classList.contains("open");
+  setProcOpen(box, open);
+  box.dataset.user = "1";
+  // folded from its line at the top of the view: the view goes to where it is now, with the answer under it
+  const top = box.closest(".chat-scroll")?.getBoundingClientRect().top ?? 0;
+  if (!open && box.getBoundingClientRect().top < top) box.scrollIntoView({ block: "start" });
+});
+
+// The header's button: every 执行过程 of the conversation opened (or folded), and so from then on.
+const UNFOLD_ALL = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>';
+const FOLD_ALL = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5M7 4l5 5 5-5"/></svg>';
+export const procToggleButton = (id) => `<button type="button" class="icon-btn" id="${id}"></button>`;
+export function wireProcToggle(button, root) {
+  const paint = () => {
+    const open = procsOpenByDefault();
+    button.innerHTML = open ? FOLD_ALL : UNFOLD_ALL;
+    button.title = open ? "折叠全部执行过程（之后完成的也自动折叠）" : "展开全部执行过程（之后的也保持展开）";
+    button.setAttribute("aria-label", open ? "折叠全部执行过程" : "展开全部执行过程");
+  };
+  paint();
+  button.addEventListener("click", () => {
+    const open = !procsOpenByDefault();
+    try { if (open) localStorage.setItem("cpProcOpen", "1"); else localStorage.removeItem("cpProcOpen"); } catch { /* private mode */ }
+    for (const box of root.querySelectorAll(".proc")) { setProcOpen(box, open); box.dataset.user = "1"; }
+    paint();
+  });
+}
+
 // A user's message: its leading "> " lines (引用) shown as quotes above what was typed.
 function userText(text) {
   const lines = String(text || "").split("\n");

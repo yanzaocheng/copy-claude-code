@@ -2,7 +2,7 @@
 // is shown of the conversation: every place marked, the current one in a stronger colour and scrolled to, Enter and
 // Shift+Enter (or ↓ ↑) going from one to the next. The marks are the browser's own highlights (CSS.highlights), not
 // elements: the conversation goes on being drawn while it streams, and the places are found again as it changes.
-// A place inside something folded (thinking, a long tool output) unfolds when it becomes the current one.
+// A place inside something folded (thinking, a long tool output, 执行过程) unfolds when it becomes the current one.
 
 import { $ } from "./util.js";
 
@@ -85,6 +85,8 @@ export function findInConversation({ root, scroller, host, button }) {
     const r = ranges[current];
     if (!r) return;
     const el = r.startContainer.parentElement;
+    const proc = el?.closest(".proc");
+    if (proc && !proc.classList.contains("open")) proc.querySelector("[data-proc]")?.click();
     const details = el?.closest("details");
     if (details && !details.open) details.open = true;
     const fold = el?.closest(".fold");

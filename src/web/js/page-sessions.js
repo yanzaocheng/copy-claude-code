@@ -1,7 +1,7 @@
 // 会话: all conversations, the trash, and one conversation as history.
 
 import { esc, api, toast, fail, fmtBytes, fmtUsd, fmtTime, ago, shortPath, ICON, $ } from "./util.js";
-import { itemHtml, wireForks } from "./transcript.js";
+import { itemHtml, wireForks, processBlocks, procHtml, procOpen, procToggleButton, wireProcToggle } from "./transcript.js";
 import { folded } from "./images.js";
 import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
@@ -92,14 +92,16 @@ export async function sessionView(dir, id) {
   const base = `/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`;
   if (d.cwd) setDockWorkspace(d.cwd);
   el.innerHTML = `<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div>${dockButton()}<button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div>${procToggleButton("hproc")}${dockButton()}<button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-composer" id="hcomp"></div></div></div>`;
   const log = $("#log", el);
   const image = (n) => `${base}/image/${n}`;
-  // drawn in pieces: a long conversation has thousands of items
+  // drawn in pieces: a long conversation has thousands of items (a turn's steps, 执行过程, in one piece)
+  const blocks = processBlocks(d.items);
   let i = 0;
   wireForks(log, () => id);
+  wireProcToggle($("#hproc", el), log);
   const wholes = wholeOutputs(log, async (tool) => (await api(`${base}/output/${encodeURIComponent(tool)}`)).text, (tool, text) => {
     const node = log.querySelector(`[data-cut="${CSS.escape(tool)}"]`);
     const old = node?.querySelector(".fold, pre");
@@ -107,10 +109,16 @@ export async function sessionView(dir, id) {
   });
   view.cleanup = () => wholes.disconnect();
   const step = () => {
-    log.insertAdjacentHTML("beforeend", d.items.slice(i, i + 200).map((it) => itemHtml(it, { image })).join(""));
+    let html = "";
+    for (let n = 0; i < blocks.length && n < 200; i++) {
+      const b = blocks[i];
+      if (!b.proc) { html += itemHtml(b, { image }); n++; continue; }
+      html += procHtml(b.proc, b.proc.items.map((it) => itemHtml(it, { image })).join(""), { open: procOpen(b.proc) });
+      n += b.proc.items.length;
+    }
+    log.insertAdjacentHTML("beforeend", html);
     wholes.observe();
-    i += 200;
-    if (i < d.items.length) requestAnimationFrame(step);
+    if (i < blocks.length) requestAnimationFrame(step);
     else if (!d.items.length) log.innerHTML = '<div class="chat-empty">没有内容</div>';
   };
   step();

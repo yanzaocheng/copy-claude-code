@@ -2,7 +2,7 @@
 
 import { esc, api, toast, fail, fmtTokens, fmtUsd, fmtDuration, shortPath, ICON, $, $$ } from "./util.js";
 import { ansi, ansiLines, md } from "./markdown.js";
-import { applyEvent, hydrate, itemHtml, wireForks } from "./transcript.js";
+import { applyEvent, hydrate, itemHtml, wireForks, processBlocks, procHtml, procOpen, updateProc, procToggleButton, wireProcToggle } from "./transcript.js";
 import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
 import { ws, loadWorkspace, archive, putAway } from "./workspace.js";
@@ -14,7 +14,7 @@ import { findInConversation, FIND_ICON, takePendingFind } from "./find.js";
 
 export function liveView(peerId) {
   const el = page(`<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill warn" hidden></span><button type="button" class="icon-btn find-toggle" id="lfind" title="在对话中查找（Ctrl+F）" aria-label="在对话中查找" aria-pressed="false">${FIND_ICON}</button>${dockButton()}<button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2 id="ltitle">连接中…</h2><div class="chat-sub" id="lsub"></div></div><span id="lconn" class="pill warn" hidden></span>${procToggleButton("lproc")}<button type="button" class="icon-btn find-toggle" id="lfind" title="在对话中查找（Ctrl+F）" aria-label="在对话中查找" aria-pressed="false">${FIND_ICON}</button>${dockButton()}<button type="button" class="icon-btn" id="lmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="lscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-extra"><div class="bgwork" id="lbg"></div><div class="todos" id="ltodos"></div><div class="queue" id="lqueue"></div><div id="ldialog"></div></div>
         <div class="status-line" id="lstatus"></div><div class="chat-composer" id="lcomp"></div><div class="chat-stats" id="lstats"></div></div>
@@ -96,17 +96,53 @@ export function liveView(peerId) {
       node = document.createElement("div");
       node.style.display = "contents";
       elements.set(item, node);
-      log.appendChild(node);
+      log.appendChild(node); // (put in its place by layout)
     }
     const open = node.querySelector("details")?.open;
     node.innerHTML = html;
     if (open) { const det = node.querySelector("details"); if (det) det.open = true; }
     if (item.k === "tool" && item.status !== "running") wholes?.observe();
   }
+  // 执行过程: the items' nodes in the boxes of their turn's steps (transcript.js processBlocks), each node moved only
+  // when it is out of place. `stick`: the view follows the end, so a turn's steps that just ended fold (else they stay
+  // open while it is the last turn: the user was reading them).
+  const procs = new Map(); // first item of a turn -> its box
+  const ended = new Map(), keep = new Set();
+  const arrange = (parent, nodes) => {
+    let at = parent.firstChild;
+    for (const node of nodes) { if (node === at) at = at.nextSibling; else parent.insertBefore(node, at); }
+  };
+  function layout(stick = true) {
+    const busy = Boolean(status.turn ?? status.busy);
+    const top = [], used = new Set();
+    for (const b of processBlocks(state.items)) {
+      if (!b.proc) { const node = elements.get(b); if (node) top.push(node); continue; }
+      const p = b.proc;
+      let box = procs.get(p.key);
+      if (!box) {
+        const t = document.createElement("template");
+        t.innerHTML = procHtml(p, "", { open: procOpen(p) });
+        box = t.content.firstElementChild;
+        procs.set(p.key, box);
+      }
+      if (ended.get(p.key) === false && p.complete && !stick) keep.add(p.key);
+      ended.set(p.key, p.complete);
+      arrange(box.lastElementChild, p.items.map((it) => elements.get(it)).filter(Boolean));
+      updateProc(box, p, { open: procOpen(p, p.last && keep.has(p.key)), running: busy && p.last && !p.complete });
+      used.add(p.key);
+      top.push(box);
+    }
+    arrange(log, top);
+    for (const [key, box] of procs) if (!used.has(key)) { box.remove(); procs.delete(key); }
+  }
   function renderAll() {
     log.innerHTML = "";
     elements.clear();
+    procs.clear();
+    ended.clear();
+    keep.clear();
     for (const it of state.items) render(it);
+    layout();
     wholes?.observe();
     if (!state.items.length) log.innerHTML = '<div class="chat-empty">还没有消息：在下面输入，或在它的终端里输入</div>';
     scroller.scrollTop = scroller.scrollHeight;
@@ -166,6 +202,7 @@ export function liveView(peerId) {
     $("#lqueue", el).innerHTML = (status.queue || []).map((q) => `<div class="queue-row"><span class="queue-tag">排队中</span><span>${esc(String(q).replace(/\s+/g, " ").slice(0, 200))}</span></div>`).join("");
     renderDialog(status.dialog);
     renderStatus();
+    layout(near()); // (执行中 or 执行过程 on the last turn's steps)
   }
   function renderDialog(d) {
     const box = $("#ldialog", el);
@@ -222,6 +259,7 @@ export function liveView(peerId) {
       const stick = near();
       log.querySelector(".chat-empty")?.remove();
       for (const ev of msg.events || []) { const it = applyEvent(state, ev); if (it) render(it); }
+      layout(stick);
       if (stick) scroller.scrollTop = scroller.scrollHeight;
     }
   }
@@ -234,6 +272,7 @@ export function liveView(peerId) {
   const tick = setInterval(renderStatus, 250);
   const unquote = quoteSelection(log, (text) => c.quote(text));
   wireForks(log, () => status.sessionId);
+  wireProcToggle($("#lproc", el), log);
   const finder = findInConversation({ root: log, scroller, host: $(".chat-page", el), button: $("#lfind", el) });
   // opened from the sidebar's search by what was said in it: at the place the words are (once the conversation is
   // drawn; at once when it is this one)
