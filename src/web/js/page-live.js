@@ -278,7 +278,7 @@ export function liveView(peerId) {
   // drawn; at once when it is this one)
   function findAsked() {
     const q = status.sessionId && takePendingFind(status.sessionId);
-    if (q && !finder.show(q)) toast(`这里显示的是最近的对话，里面没有「${q}」：它在更早的部分，或在没有完整显示的工具输出里`);
+    if (q && !finder.show(q)) toast(`这里只显示最近的对话，里面没有「${q}」：它在更早的部分`);
   }
   const onFind = (e) => { if (e.detail?.sessionId && e.detail.sessionId === status.sessionId && state.items.length) findAsked(); };
   document.addEventListener("cp-find", onFind);

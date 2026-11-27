@@ -172,13 +172,11 @@ export function listAllSessions() {
 
 // ---------------------------------------------------------------- finding words in conversations
 
-// The conversations (not archived) whose messages hold `query` (case aside), newest first, each with a piece of text
-// around the first place: {hits: [{id, dir, snippet}], more}. What the model was given besides the messages (the
-// system prompt and tool descriptions kept in meta lines), JSON keys, pictures (base64) and thinking signatures are
-// not searched. ripgrep first picks the files the words are in at all (a tenth of a second for the whole store);
-// those are then read newest first, for a limited time.
+// The conversations (not archived) where `query` (case aside) is in what the user wrote or in an answer of the model,
+// newest first, each with a piece of that text around the first place: {hits: [{id, dir, snippet}], more}. ripgrep
+// first picks the files the words are in at all (a tenth of a second for the whole store); those are then read newest
+// first, for a limited time, and the messages of the lines the words are in parsed (see searchableTexts).
 const SEARCH_BUDGET_MS = 2500;
-const SKIPPED_KEYS = new Set(['data', 'signature', 'id', 'tool_use_id', 'media_type', 'type', 'role']);
 const reEscape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function filesWith(needle) {
@@ -200,38 +198,47 @@ function filesWith(needle) {
   });
 }
 
-// Where an unescaped quote is, looking from `i` towards `step` (-1: back, 1: on)
-function quoteAt(line, i, step) {
-  for (let j = i; j >= 0 && j < line.length; j += step) {
-    if (line[j] !== '"') continue;
-    let k = j - 1, slashes = 0;
-    while (k >= 0 && line[k] === '\\') { slashes++; k--; }
-    if (slashes % 2 === 0) return j;
+// What is searched in a message: what the user wrote (without the notes added for the model) and the model's answers,
+// the text of its messages without a tool call; not the steps between (tool calls and their output, thinking, what
+// was said between the calls), as the console folds them under 执行过程. The user asked for it (2026-11-27): a word
+// found only in a tool's output led to a conversation where it was nowhere to be seen.
+export function searchableTexts(message) {
+  const content = message?.content;
+  const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
+  const texts = blocks.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text);
+  if (message?.role === 'assistant') return blocks.some((b) => b?.type === 'tool_use') ? [] : texts;
+  if (message?.role !== 'user') return [];
+  const out = [];
+  for (const raw of texts) {
+    if (raw.startsWith('This session is being continued') || raw.startsWith('<system-reminder>')) continue;
+    const bash = /^<bash-input>([\s\S]*?)<\/bash-input>/.exec(raw); // `!command`: the command, not its output
+    if (bash) { out.push(`!${bash[1]}`); continue; }
+    const text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<\/?peer-message[^>]*>/g, '').trim();
+    if (text) out.push(text);
   }
-  return -1;
+  return out;
 }
-const unescapeJson = (t) => t.replace(/\\(u[0-9a-fA-F]{4}|.)/g, (m, c) => (c[0] === 'u' && c.length === 5 ? String.fromCharCode(parseInt(c.slice(1), 16)) : c === 'n' || c === 'r' || c === 't' ? ' ' : c));
 
-// The first place in a conversation file the words are in a message's text: a piece of that text around them
-function snippetIn(text, re) {
+// The first place in a conversation file the words are in what is searched: a piece of that text around them.
+// `raw`: the words as the file writes them (only the lines they are in are parsed), `re`: as they are.
+function snippetIn(text, raw, re) {
   let start = 0;
   while (start < text.length) {
     let end = text.indexOf('\n', start);
     if (end < 0) end = text.length;
     const isMessage = text.startsWith('{"type":"message"', start) || text.startsWith('{"type":"reset"', start);
-    if (isMessage) {
-      const line = text.slice(start, end);
-      re.lastIndex = 0;
-      for (let m; (m = re.exec(line));) {
-        const open = quoteAt(line, m.index - 1, -1);
-        const close = quoteAt(line, m.index + m[0].length, 1);
-        if (open < 0 || close < 0) continue;
-        if (line[close + 1] === ':') continue; // (a key)
-        const key = /"(\w+)":$/.exec(line.slice(Math.max(0, open - 40), open))?.[1];
-        if (key && SKIPPED_KEYS.has(key)) continue;
-        const before = unescapeJson(line.slice(Math.max(open + 1, m.index - 160), m.index)).replace(/\s+/g, ' ');
-        const after = unescapeJson(line.slice(m.index + m[0].length, Math.min(close, m.index + m[0].length + 240))).replace(/\s+/g, ' ');
-        return { snippet: (before.length > 40 ? `…${before.slice(-40)}` : before) + unescapeJson(m[0]) + (after.length > 80 ? `${after.slice(0, 80)}…` : after) };
+    const line = isMessage ? text.slice(start, end) : '';
+    if (line && raw.test(line)) {
+      let e = null;
+      try { e = JSON.parse(line); } catch { /* a torn line */ }
+      for (const message of e?.type === 'reset' ? (Array.isArray(e.messages) ? e.messages : []) : [e?.message]) {
+        for (const t of searchableTexts(message)) {
+          const m = re.exec(t);
+          if (!m) continue;
+          const before = t.slice(Math.max(0, m.index - 160), m.index).replace(/\s+/g, ' ');
+          const after = t.slice(m.index + m[0].length, m.index + m[0].length + 240).replace(/\s+/g, ' ');
+          return { snippet: (before.length > 40 ? `…${before.slice(-40)}` : before) + m[0] + (after.length > 80 ? `${after.slice(0, 80)}…` : after) };
+        }
       }
     }
     start = end + 1;
@@ -243,7 +250,7 @@ export async function searchSessionContent(query, { limit = 100 } = {}) {
   const q = String(query || '').trim();
   if (q.length < 2) return { hits: [], more: false };
   const needle = JSON.stringify(q).slice(1, -1); // (as the files write it)
-  const re = new RegExp(reEscape(needle), 'gi');
+  const raw = new RegExp(reEscape(needle), 'i'), re = new RegExp(reEscape(q), 'i');
   const inFiles = await filesWith(needle);
   const until = Date.now() + SEARCH_BUDGET_MS;
   const hits = [];
@@ -254,7 +261,7 @@ export async function searchSessionContent(query, { limit = 100 } = {}) {
     if (hits.length >= limit || Date.now() > until) { more = true; break; }
     let text;
     try { text = await fs.promises.readFile(s.file, 'utf8'); } catch { continue; }
-    const found = snippetIn(text, re);
+    const found = snippetIn(text, raw, re);
     if (found) hits.push({ id: s.id, dir: s.dir, snippet: found.snippet });
   }
   return { hits, more };

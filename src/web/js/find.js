@@ -2,7 +2,8 @@
 // is shown of the conversation: every place marked, the current one in a stronger colour and scrolled to, Enter and
 // Shift+Enter (or ↓ ↑) going from one to the next. The marks are the browser's own highlights (CSS.highlights), not
 // elements: the conversation goes on being drawn while it streams, and the places are found again as it changes.
-// A place inside something folded (thinking, a long tool output, 执行过程) unfolds when it becomes the current one.
+// Only what the user wrote and the model's answers are searched, not the steps between (执行过程: tool calls, their
+// output, thinking), as the sidebar's search (data.js searchableTexts): the user asked for it (2026-11-27).
 
 import { $ } from "./util.js";
 
@@ -45,7 +46,10 @@ export function findInConversation({ root, scroller, host, button }) {
       const nodes = [];
       let text = "";
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode: (n) => (n.parentElement?.closest("script, style, button, .fold-btn") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+        acceptNode: (n) => {
+          const el = n.parentElement;
+          return el?.closest(".it-user, .it-text") && !el.closest(".proc, button") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        },
       });
       for (let n; (n = walker.nextNode());) { nodes.push({ node: n, start: text.length }); text += n.data; }
       const lower = text.toLowerCase();
@@ -80,17 +84,10 @@ export function findInConversation({ root, scroller, host, button }) {
     CSS.highlights.delete("cp-find");
     CSS.highlights.delete("cp-find-current");
   }
-  // the current place on screen: what folds it unfolded, scrolled to the middle
+  // the current place on screen, scrolled to the middle
   function reveal() {
     const r = ranges[current];
     if (!r) return;
-    const el = r.startContainer.parentElement;
-    const proc = el?.closest(".proc");
-    if (proc && !proc.classList.contains("open")) proc.querySelector("[data-proc]")?.click();
-    const details = el?.closest("details");
-    if (details && !details.open) details.open = true;
-    const fold = el?.closest(".fold");
-    if (fold && !fold.classList.contains("open")) fold.querySelector("[data-fold]")?.click();
     const box = r.getBoundingClientRect(), view = scroller.getBoundingClientRect();
     if (box.top < view.top + 60 || box.bottom > view.bottom - 60) scroller.scrollTop += box.top - view.top - view.height / 2;
     if (!highlights) { const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
