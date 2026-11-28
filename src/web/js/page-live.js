@@ -2,7 +2,7 @@
 
 import { esc, api, toast, fail, fmtTokens, fmtUsd, fmtDuration, pathButton, ICON, $, $$ } from "./util.js";
 import { ansi, ansiLines, md } from "./markdown.js";
-import { applyEvent, hydrate, itemHtml, wireForks, wireCopies, processBlocks, procHtml, procOpen, updateProc, procToggleButton, wireProcToggle } from "./transcript.js";
+import { applyEvent, hydrate, itemHtml, wireForks, wireCopies, processBlocks, procHtml, procOpen, updateProc, setProcOpen, procToggleButton, wireProcToggle } from "./transcript.js";
 import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
 import { ws, loadWorkspace, archive, putAway } from "./workspace.js";
@@ -11,6 +11,19 @@ import { pendingFirstSends } from "./page-new.js";
 import { mobileLayout } from "./main.js";
 import { setDockWorkspace, dockButton } from "./dock.js";
 import { findInConversation, FIND_ICON, takePendingFind } from "./find.js";
+
+// Where each conversation was being read, so that it opens there again (the user's request, 2026-11-28: switching
+// to another conversation and back lost the place): the item at the top of the view and how far down it was, and
+// the 执行过程 the user opened or folded; or at the end, where a conversation opens anyway. Kept while the page is
+// open, by session id (a conversation put away and opened again is another live session) and by live session.
+const places = new Map(); // "s:<sessionId>" | "p:<peerId>" -> {atEnd, at, fp, offset, procs: [{at, fp, open}]}
+// an item told again in a new snapshot of the same conversation (the snapshot is new objects, and may start later)
+const fingerprint = (it) => `${it.k}:${it.id ?? it.n ?? ""}:${String(it.text ?? it.head ?? (it.lines || []).slice(0, 3).join("\n")).slice(0, 120)}`;
+function findItem(items, fp, near) {
+  let best = -1;
+  for (let i = 0; i < items.length; i++) if (fingerprint(items[i]) === fp && (best < 0 || Math.abs(i - near) < Math.abs(best - near))) best = i;
+  return best;
+}
 
 export function liveView(peerId) {
   const el = page(`<div class="chat-page">
@@ -31,6 +44,7 @@ export function liveView(peerId) {
   let statusAt = Date.now();
   let dialogShown = null;
   let subShown = "";
+  let placed = false;
   const post = (type, body = {}) => api(`/api/live/${peerId}/${type}`, { method: "POST", body });
   const near = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
   const c = composer($("#lcomp", el), {
@@ -244,11 +258,47 @@ export function liveView(peerId) {
     if (item) render(item);
   });
 
+  function savePlace() {
+    if (!state.items.length) return;
+    const top = scroller.getBoundingClientRect().top;
+    const place = { atEnd: near(), procs: [] };
+    for (const [key, box] of procs) {
+      const at = box.dataset.user === "1" ? state.items.indexOf(key) : -1;
+      if (at >= 0) place.procs.push({ at, fp: fingerprint(key), open: box.classList.contains("open") });
+    }
+    if (!place.atEnd) {
+      for (let i = 0; i < state.items.length; i++) {
+        const r = elements.get(state.items[i])?.firstElementChild?.getBoundingClientRect();
+        if (!r || !r.height || r.bottom <= top) continue; // (in a folded 执行过程, or above the view)
+        Object.assign(place, { at: i, fp: fingerprint(state.items[i]), offset: r.top - top });
+        break;
+      }
+    }
+    for (const key of [status.sessionId && `s:${status.sessionId}`, `p:${peerId}`]) if (key) places.set(key, place);
+  }
+  // once, when the conversation is first drawn
+  function restorePlace() {
+    if (placed) return;
+    placed = true;
+    const place = (status.sessionId && places.get(`s:${status.sessionId}`)) || places.get(`p:${peerId}`);
+    if (!place) return;
+    for (const p of place.procs) {
+      const i = findItem(state.items, p.fp, p.at);
+      const box = i >= 0 && procs.get(state.items[i]);
+      if (box) { setProcOpen(box, p.open); box.dataset.user = "1"; }
+    }
+    if (place.atEnd || place.fp == null) { scroller.scrollTop = scroller.scrollHeight; return; }
+    const i = findItem(state.items, place.fp, place.at);
+    const node = i >= 0 && elements.get(state.items[i])?.firstElementChild;
+    if (node) scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top - place.offset;
+  }
+
   function handle(msg) {
     if (msg.t === "snapshot") {
       state = hydrate(msg.items || []);
       renderAll();
       if (msg.status) setStatus(msg.status);
+      restorePlace();
       if (pendingFirstSends.delete(peerId)) {
         if (status.dialog) toast("消息已保留为草稿：请先完成会话的提示，再发送");
         else c.submit(); // only once; the composer holds the draft on any unacknowledged send
@@ -275,6 +325,22 @@ export function liveView(peerId) {
   const unquote = quoteSelection(log, (text) => c.quote(text));
   wireForks(log, () => status.sessionId);
   wireCopies(log, () => state.items);
+  // 执行 beside a command in an answer (markdown.js): sent as if it were typed in the message box
+  log.classList.add("can-run");
+  log.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-run]");
+    if (!b || b.disabled) return;
+    const text = b.dataset.run;
+    const busy = Boolean(status.turn ?? status.busy);
+    if (text.startsWith("/") && busy && !(status.rateWait && /^\/model(?:\s|$)/i.test(text))) { toast("会话正在工作：等它做完（或停止）再执行"); return; }
+    if (/^\/(clear|reset|new|compact)(?:\s|$)/i.test(text) && !confirm(`在这个会话里执行 ${text}？`)) return;
+    b.disabled = true;
+    try {
+      const r = await post("send", { text });
+      if (r?.queued) toast("会话正忙：已排队，当前任务结束后处理");
+      setTimeout(() => { scroller.scrollTop = scroller.scrollHeight; }, 50);
+    } catch (err) { fail(err); } finally { b.disabled = false; }
+  });
   wireProcToggle($("#lproc", el), log);
   const finder = findInConversation({ root: log, scroller, host: $(".chat-page", el), button: $("#lfind", el) });
   // opened from the sidebar's search by what was said in it: at the place the words are (once the conversation is
@@ -285,6 +351,6 @@ export function liveView(peerId) {
   }
   const onFind = (e) => { if (e.detail?.sessionId && e.detail.sessionId === status.sessionId && state.items.length) findAsked(); };
   document.addEventListener("cp-find", onFind);
-  view.cleanup = () => { es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); finder.dispose(); document.removeEventListener("cp-find", onFind); };
+  view.cleanup = () => { try { savePlace(); } catch { /* (the place is not kept) */ } es.close(); clearInterval(tick); c.dispose(); wholes.disconnect(); unquote(); finder.dispose(); document.removeEventListener("cp-find", onFind); };
   if (!mobileLayout.matches) c.input.focus();
 }

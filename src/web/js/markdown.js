@@ -1,6 +1,6 @@
 // Terminal output (ANSI colours) and Markdown as HTML, as the gateway's page draws them.
 
-import { esc } from "./util.js";
+import { esc, writeClipboard } from "./util.js";
 
 const BASIC = ["#0c0c0c", "#cd3131", "#0dbc79", "#b5a10a", "#2472c8", "#bc3fbc", "#11a8cd", "#a0a0a0", "#666666", "#f14c4c", "#23d18b", "#b5a10a", "#3b8eea", "#d670d6", "#29b8db", "#8a8a8a"];
 function color256(value) {
@@ -78,6 +78,46 @@ export function ansi(line) {
 export const ansiLines = (lines) => (Array.isArray(lines) ? lines : []).map(ansi).join("\n");
 export const plain = (s) => String(s || "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""); // eslint-disable-line no-control-regex
 
+// ---------------------------------------------------------------- commands in an answer
+// A command for the user (the model cannot run /commands, so it asks: "在输入框里输入 /cd D:\…") gets 执行 and 复制
+// beside it (the user's request, 2026-11-28): a fenced block of one line that is a /command or a !command, or such
+// a /command with its arguments in `code` within a sentence. 执行 is shown only where the page can send it to the
+// session (.can-run: the live view, which sends it as if typed); 复制 is on every fenced block.
+const TERMINAL_ONLY = /^\/(exit|quit|restart|reload|update)(?:\s|$)/i; // (the page may not send these: app-remote.js)
+const PLACEHOLDER = /[<>[\]{}|]|\.\.\.|…/; // "/model <name>", "/effort low|high": a form, not a command
+function runnable(code) {
+  const t = String(code).trim();
+  if (!t || t.includes("\n") || PLACEHOLDER.test(t)) return null;
+  if (/^\/[\w:-]+(?:\s|$)/.test(t)) return TERMINAL_ONLY.test(t) ? null : t; // (not a path: /usr/bin has a second /)
+  return /^!\S/.test(t) ? t : null;
+}
+const COPY_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/><path d="M15.5 8.5V6A2.5 2.5 0 0 0 13 3.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5"/></svg>';
+const COPIED_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
+const RUN_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M7 4.8v14.4a1 1 0 0 0 1.5.86l11.6-7.2a1 1 0 0 0 0-1.72L8.5 3.94A1 1 0 0 0 7 4.8z"/></svg>';
+const runButton = (cmd, label) => `<button type="button" class="code-act code-run" data-run="${esc(cmd)}" title="在这个会话里执行：${esc(cmd)}">${RUN_ICON}${label}</button>`;
+const copyButton = (text) => `<button type="button" class="code-act code-copy" data-copy-code="${text == null ? "" : esc(text)}" title="复制" aria-label="复制">${COPY_ICON}</button>`;
+function codeBlock(code) {
+  const run = runnable(code);
+  return `<div class="code${run ? " runnable" : ""}"><pre>${esc(code)}</pre><div class="code-acts">${run ? runButton(run, "执行") : ""}${copyButton(null)}</div></div>`;
+}
+function inlineCode(code) {
+  const run = runnable(code);
+  // (with its arguments: a /command alone in a sentence is named, not asked for: "`/cd` 是只能由你输入的命令")
+  if (!run || !run.startsWith("/") || !/\s\S/.test(run)) return `<code>${esc(code)}</code>`;
+  return `<code>${esc(code)}</code><span class="cmd-acts">${runButton(run, "")}${copyButton(run)}</span>`;
+}
+// 复制 (the block's text, or what the button holds): its icon says it was done
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-copy-code]");
+  if (!b) return;
+  const text = b.dataset.copyCode || b.closest(".code")?.querySelector("pre")?.textContent || "";
+  if (!(await writeClipboard(text))) { prompt("请手动复制", text); return; }
+  b.innerHTML = COPIED_ICON;
+  b.title = "已复制";
+  clearTimeout(b.copiedTimer);
+  b.copiedTimer = setTimeout(() => { b.innerHTML = COPY_ICON; b.title = "复制"; }, 1500);
+});
+
 function inline(source) {
   const codes = [];
   const text = String(source == null ? "" : source).replace(/\u0000/g, "").replace(/`([^`]+)`/g, (_, code) => { codes.push(code); return `\u0000${codes.length - 1}\u0000`; });
@@ -86,7 +126,7 @@ function inline(source) {
     .replace(/(^|[^*\w])\*([^*\s](?:[^*]*[^*\s])?)\*(?!\*)/g, "$1<em>$2</em>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${esc(codes[Number(i)])}</code>`);
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => inlineCode(codes[Number(i)]));
 }
 export function md(source) {
   const lines = String(source == null ? "" : source).replace(/\r\n/g, "\n").split("\n");
@@ -102,7 +142,7 @@ export function md(source) {
       i++;
       while (i < lines.length && !lines[i].trim().startsWith(fence[1])) body.push(lines[i++]);
       i++;
-      html += `<pre>${esc(body.join("\n"))}</pre>`;
+      html += codeBlock(body.join("\n"));
       continue;
     }
     if (row.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {

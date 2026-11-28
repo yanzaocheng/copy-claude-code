@@ -214,7 +214,7 @@ function procHead(p, running) {
 export function procHtml(p, inner, { open, running = false }) {
   return `<div class="proc${open ? " open" : ""}" data-complete="${p.complete ? 1 : 0}"><button type="button" class="proc-head" data-proc aria-expanded="${open}" title="${open ? "折叠执行过程" : "展开执行过程"}">${procHead(p, running)}</button><div class="proc-body">${inner}</div></div>`;
 }
-function setProcOpen(box, open) {
+export function setProcOpen(box, open) {
   box.classList.toggle("open", open);
   const head = box.firstElementChild;
   head.setAttribute("aria-expanded", String(open));

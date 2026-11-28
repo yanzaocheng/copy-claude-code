@@ -513,6 +513,21 @@ details.proj > div { padding: 0 0 6px 18px; }
 .md h1:first-child, .md h2:first-child, .md h3:first-child { margin-top: 0; }
 .md pre { background: var(--code-bg); border: 1px solid var(--line); padding: 11px 14px; border-radius: 10px; overflow-x: auto; margin: 8px 0; white-space: pre; line-height: 1.55; }
 .md pre code { padding: 0; border: 0; background: none; }
+/* a fenced block with 复制, and 执行 for a command of the session where the page can send it (markdown.js) */
+.md .code { position: relative; margin: 8px 0; }
+.md .code > pre { margin: 0; padding-right: 48px; }
+.can-run .md .code.runnable > pre { padding-right: 112px; }
+.code-acts { position: absolute; top: 7px; right: 7px; display: flex; gap: 4px; user-select: none; }
+.code-act { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 28px; height: 28px; padding: 0 6px; border: 1px solid transparent; border-radius: 7px; background: none; color: var(--faint); font: inherit; font-size: 12.5px; line-height: 1; cursor: pointer; }
+.code-act:hover { background: var(--hover); color: var(--text); }
+.code-act:disabled { opacity: .5; cursor: progress; }
+.code-run { display: none; padding: 0 10px; border-color: var(--line); background: var(--surface); color: var(--text-2); }
+.code-run:hover { border-color: var(--accent-line); background: var(--surface); color: var(--accent-text); }
+.can-run .code-run { display: inline-flex; }
+/* the same beside a /command in a sentence, smaller */
+.cmd-acts { display: inline-flex; gap: 1px; margin: 0 2px 0 3px; vertical-align: -5px; user-select: none; }
+.cmd-acts .code-act { min-width: 22px; height: 22px; padding: 0 4px; }
+.cmd-acts .code-run { padding: 0 5px; }
 .md table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
 .md th, .md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
 .md th { background: var(--surface-2); font-weight: 600; }
