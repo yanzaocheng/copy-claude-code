@@ -32,7 +32,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
   // Full access: nothing is ever asked.
   const checkpoints = new CheckpointStore(path.join(projectDir(cwd), 'checkpoints', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`));
 
-  const agents = loadAgents(cwd);
+  const agents = loadAgents(cwd, { decision: Boolean(config.decisionModelSpec) });
   const mcp = new McpManager(config.settings.mcpServers, { cwd });
   if (!flags.noMcp) await mcp.start((msg) => io.notice?.(msg, 'warn'));
   const shell = findShell(config);
@@ -132,9 +132,10 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
     return true;
   };
 
-  // Every agent uses the model selected for this session; effort may still be specific to the task.
+  // Every agent uses the model selected for this session, but those of the decision model when the user set one
+  // (Config.agentModelSpec); effort may still be specific to the task.
   runtime.spawnSubagent = async ({ def, prompt, description, ctx, effort }) => {
-    const spec = config.modelSpec;
+    const spec = config.agentModelSpec(def);
     const model = config.resolveModel(spec);
     const subIo = io.subagentIo ? io.subagentIo({ def, description, parentCtx: ctx }) : {};
     // The main agent is depth 0; an agent below the nesting limit may start sub-agents itself.
@@ -172,7 +173,7 @@ export async function createRuntime({ cwd, flags = {}, io, sessionId = '' }) {
       if (sub.editsThisRun > 0 && ctx.agent) ctx.agent.editsThisRun += sub.editsThisRun;
     }
     if (result.interrupted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-    return { text: result.text, toolUses: sub.toolUseCount, tokens: sub.usage.output + sub.lastContextTokens };
+    return { text: result.text, toolUses: sub.toolUseCount, tokens: sub.usage.output + sub.lastContextTokens, model, cost: sub.cost };
   };
 
   runtime.agent = new Agent({

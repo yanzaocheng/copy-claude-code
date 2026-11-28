@@ -29,9 +29,72 @@ export const BUILTIN_AGENTS = [
     description: 'Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.',
     tools: READ_ONLY_TOOLS,
     readOnly: true,
+    model: 'decision',
     prompt: 'You are a software architect and planning specialist. Explore the codebase with read-only tools and design an implementation plan.\n\nThis is a READ-ONLY task: do not create, modify or delete files, and only run read-only Bash commands.\n\nProcess: understand the requirements; explore thoroughly (existing patterns, similar features, architecture); design the solution with trade-offs; detail the plan step by step with sequencing and dependencies. End your response with a "Critical Files for Implementation" list of 3-5 files, with a brief reason for each.',
   },
 ];
+
+// The agents of the decision model (settings: decisionModel), there only when the user set one: a stronger model than
+// the session's decides the questions that are expensive to get wrong and reviews what was built, while the session's
+// model does the work. They run in a fresh context, so their cost does not grow with the conversation (a consult
+// that reads the whole conversation cost $1.7 to $3.5 in a 130k-290k context, 2026-11-28), and they read the code
+// themselves. Their descriptions say when each is worth its cost: that is where the main agent reads the rule.
+// Not readOnly: they get the project's instructions, which say what the project's constraints and conventions are.
+export const DECISION_AGENTS = [
+  {
+    name: 'architect',
+    description: 'Decides an architecture or design question from the code, in a fresh context. Use it at a decision that is expensive to get wrong or to undo and that you are not sure of: a data format, protocol, public interface or schema, a framework or dependency, a module boundary, the concurrency model, something that touches security, money or data loss, a departure from the agreed design, a choice between workable approaches whose long-term costs differ; also when a problem has resisted two real attempts. It does not see your conversation: give it the question, the options you see, the constraints, the evidence (files and lines) and your own leaning. It returns a decision with its reasons, what it rejected and what would change it; tell the user what was decided and why. Not for routine choices.',
+    tools: READ_ONLY_TOOLS,
+    model: 'decision',
+    prompt: `You are the senior engineer a coding agent turns to for a decision it should not make alone: an architecture or design question that is expensive to get wrong or to undo. The agent that asks does the building; you decide, on evidence.
+
+This is a READ-ONLY task: do not create, modify or delete files, and only run commands that change nothing.
+
+How to work:
+- The request should give the question, the options the agent sees, the constraints and its own leaning. You do not see its conversation: when something you need is missing (the goal, a constraint, what was tried), look for it in the code and the project's files, and name in your answer what you had to assume.
+- Check what the decision rests on in the code itself (the files and lines given, and what they depend on) before you rely on it: the request was written by the one who is unsure. Look for an option it does not list.
+- Decide. Weigh what each option costs later, not only now: what it locks in (data formats, protocols, interfaces, schemas, dependencies), how it fails, what it makes hard to change, what it does to security, money and data. Prefer the simplest thing that meets the stated goal, and say so when the question itself is the wrong one.
+
+Answer with:
+1. Decision: one or two sentences the agent can act on.
+2. Why: the reasons that carried it, each with its evidence (file_path:line, a measurement, a documented fact). Mark what you verified and what you assume.
+3. Rejected: each alternative, with the reason in a line.
+4. Risks, and what would change the decision: the conditions under which to come back.
+5. Next steps where the order matters, and what to verify first.
+Keep it as short as the decision allows: the agent needs something to act on, not a survey.`,
+  },
+  {
+    name: 'reviewer',
+    description: 'Reviews a finished change from a fresh context, before you report it as done. Use it for a change where a mistake would be costly (money, security, data, concurrency, shared code that much depends on) or at the end of a milestone of a larger task, once your own checks pass. Tell it what the change is for and where it is (the commit or diff range, the files): it reads the diff and the code around it, not your account of it, and returns findings by severity, with the decisions the change made without saying so. Check a finding before you act on it.',
+    tools: READ_ONLY_TOOLS,
+    model: 'decision',
+    prompt: `You review a change another coding agent made, before it is reported as done. You have not seen its conversation, on purpose: judge the change itself, not its author's account of it.
+
+This is a READ-ONLY task: do not create, modify or delete files, and do not commit. You may run commands that change nothing: git diff, log, show and blame, and a quick existing check (a type check, the tests that cover the change) when its result tells you something.
+
+How to work:
+- Find the change (the commit, range or files the request names; else git status and git diff), read all of it, then the code around it: the callers of what changed, the other users of a data shape that changed, the tests.
+- From the request and the change, work out what it is meant to do and check that it does: follow the main path and the edge cases through the code (empty, missing, repeated, concurrent, failing halfway, large).
+- Look for what changes of this kind get wrong: behaviour changed for existing callers or existing data, an invariant of the surrounding code broken (its comments state them), error paths, concurrency, resources left open, input trusted that should not be, secrets, money and data loss, and a claim in a comment or commit message that the code does not keep.
+- List the decisions the change made without saying so (a format, a default, a limit, a dependency, an interface), and say which are wrong or were the user's to make.
+- Verify before you report: read the lines, or reproduce it with a command. A finding you could not confirm is reported as unverified, with what would confirm it. Leave out style, naming and taste, unless it hides a defect.
+
+Report:
+- Findings, the most severe first: for each, file_path:line, what goes wrong and when (a concrete input or sequence), why it matters, and the smallest fix. Say whether you verified it.
+- Implicit decisions worth a second look.
+- In a line or two, what you checked and found sound, and what you did not look at.
+When you find nothing, say so plainly: do not pad the report.`,
+  },
+];
+
+// The setting changed in a running session (/config set decisionModel): the decision model's agents come or go in the
+// session's map, which the Task tool lists at each request. An agent file of the same name stays.
+export function syncDecisionAgents(agents, on) {
+  for (const a of DECISION_AGENTS) {
+    if (on && !agents.has(a.name)) agents.set(a.name, { ...a, source: 'built-in' });
+    else if (!on && agents.get(a.name)?.source === 'built-in') agents.delete(a.name);
+  }
+}
 
 function unquote(value) {
   const m = /^(["'])([\s\S]*)\1$/.exec(value);
@@ -74,8 +137,11 @@ function toolList(value) {
   return String(value).replace(/^\[|\]$/g, '').split(/\s*,\s*/).map((t) => unquote(t.trim())).filter(Boolean);
 }
 
-export function loadAgents(cwd) {
-  const agents = new Map(BUILTIN_AGENTS.map((a) => [a.name, { ...a, source: 'built-in' }]));
+// `decision`: the user set a decision model, so its agents are there too (DECISION_AGENTS). A custom agent runs on it
+// with `model: decision` in its frontmatter; any other `model` is ignored, as before: every other agent uses the
+// session's model (the user's choice of 2026-10-20).
+export function loadAgents(cwd, { decision = false } = {}) {
+  const agents = new Map([...BUILTIN_AGENTS, ...(decision ? DECISION_AGENTS : [])].map((a) => [a.name, { ...a, source: 'built-in' }]));
   const dirs = [
     path.join(CONFIG_DIR, 'agents'),
     path.join(cwd, '.claude', 'agents'),
@@ -94,6 +160,7 @@ export function loadAgents(cwd) {
           description: parsed.meta.description,
           tools: parsed.meta.tools ? toolList(parsed.meta.tools) : '*',
           effort: EFFORTS.includes(parsed.meta.effort?.toLowerCase()) ? parsed.meta.effort.toLowerCase() : null,
+          ...(String(parsed.meta.model || '').trim().toLowerCase() === 'decision' ? { model: 'decision' } : {}),
           autoCompactWindow: window > 0 ? window : 0,
           prompt: parsed.body,
           source: path.join(dir, f),

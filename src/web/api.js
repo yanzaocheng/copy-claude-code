@@ -598,7 +598,7 @@ function extensionsView(project) {
     tools: builtinTools(cwd === home ? null : cwd),
     selfRestart: SOURCE_CHECKOUT, // (a source checkout's sessions have Restart too)
     skills: [...loadSkills(cwd).values()].map((s) => ({ name: s.name, description: s.description, scope: s.scope, path: s.file })),
-    agents: [...loadAgents(cwd).values()].map((a) => ({ name: a.name, description: a.description, tools: a.tools, scope: scopeOf(a.source), path: a.source === 'built-in' ? null : a.source })),
+    agents: [...loadAgents(cwd, { decision: Boolean(config.decisionModelSpec) }).values()].map((a) => ({ name: a.name, description: a.description, tools: a.tools, scope: scopeOf(a.source), path: a.source === 'built-in' ? null : a.source })),
     mcp, hooks, settingsFiles: files,
     mcpLoaded: Object.keys(config.settings.mcpServers || {}),
   };

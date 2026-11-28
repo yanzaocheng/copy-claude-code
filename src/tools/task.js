@@ -20,14 +20,32 @@ function waitFor(promise, ms, signal) {
   });
 }
 
-export function makeTaskTool(agents) {
-  const list = [...agents.values()]
-    .map((a) => `- ${a.name}: ${a.description} (Tools: ${a.tools === '*' ? 'All tools' : a.tools.join(', ')})`)
-    .join('\n');
+// "fable-5-2" for claude-fable-5-2, as the footer names models.
+const shortModel = (id) => String(id || '').replace(/^claude-/, '');
+
+// `config`: to say which agents run on another model than the session's (those of the decision model, when the user
+// set one, see Config.agentModelSpec). The description is built at each request: it follows /model.
+export function makeTaskTool(agents, config = null) {
+  // The model an agent runs on when it is not the session's, else null.
+  const otherModel = (a) => {
+    if (!config || !a.model) return null;
+    const model = config.resolveModel(config.agentModelSpec(a));
+    const own = config.model;
+    return model.id === own.id && model.provider === own.provider ? null : model;
+  };
+  const tools = (a) => `(Tools: ${a.tools === '*' ? 'All tools' : a.tools.join(', ')})`;
   return {
     name: 'Task',
     readOnly: true, // sub-agents ask for their own permissions; multiple tasks may run in parallel
-    description: () => `Launch a new agent to handle complex, multi-step tasks autonomously.
+    description: () => {
+      const others = new Map([...agents.values()].map((a) => [a.name, otherModel(a)]));
+      const list = [...agents.values()]
+        .map((a) => `- ${a.name}: ${a.description} ${tools(a)}${others.get(a.name) ? ` (Model: ${others.get(a.name).id})` : ''}`)
+        .join('\n');
+      const models = [...others.values()].some(Boolean)
+        ? 'Every agent uses the model currently selected for this session, except those whose entry above names a model: they run on the model the user chose for decisions and reviews, and a run costs what that model costs.'
+        : 'Every agent uses the model currently selected for this session.';
+      return `Launch a new agent to handle complex, multi-step tasks autonomously.
 
 Available agent types and the tools they have access to:
 ${list}
@@ -44,9 +62,10 @@ Usage notes:
 - When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 - Each agent invocation is stateless. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message.
 - Once you have delegated a search or an investigation, do not also do it yourself: wait for the report, doing other work meanwhile. Never make up or predict the result of an agent that is still running; if the user asks before it is done, say that it is still running.
-- Every agent uses the model currently selected for this session. An agent may still use its own effort level when the task needs it. Use the agent's report to find your way, but before you build an answer or a change on one of its findings, check that finding yourself (read the lines it cites).
+- ${models} An agent may still use its own effort level when the task needs it. Use the agent's report to find your way, but before you build an answer or a change on one of its findings, check that finding yourself (read the lines it cites).
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-- Set run_in_background: true to start the agent and continue working while it runs (e.g. a long investigation, or several independent jobs). You get a task id back immediately, and the agent's final report arrives automatically in a <task-notification> once it finishes; you do not need to poll. Use TaskOutput to check on or wait for it early, and TaskStop to cancel it. Do not start background agents that edit the same files at the same time.`,
+- Set run_in_background: true to start the agent and continue working while it runs (e.g. a long investigation, or several independent jobs). You get a task id back immediately, and the agent's final report arrives automatically in a <task-notification> once it finishes; you do not need to poll. Use TaskOutput to check on or wait for it early, and TaskStop to cancel it. Do not start background agents that edit the same files at the same time.`;
+    },
     input_schema: {
       type: 'object',
       properties: {
@@ -86,12 +105,15 @@ Usage notes:
         };
       }
       const started = Date.now();
-      const { text, toolUses, tokens } = await ctx.spawnSubagent({ def, prompt: input.prompt, description: input.description, ctx, ...choice });
+      const { text, toolUses, tokens, model, cost } = await ctx.spawnSubagent({ def, prompt: input.prompt, description: input.description, ctx, ...choice });
       const secs = Math.round((Date.now() - started) / 100) / 10;
       const kTok = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
+      // An agent of another model than the session's (the decision model): which one, and what the run cost.
+      const other = otherModel(def) && model ? `${shortModel(model.id)} · ` : '';
+      const usd = other && cost > 0 ? ` · $${cost.toFixed(2)}` : '';
       return {
         content: text || '(the agent returned no text)',
-        display: { summary: `Done (${toolUses} tool use${toolUses === 1 ? '' : 's'} · ${kTok} tokens · ${secs}s)` },
+        display: { summary: `Done (${other}${toolUses} tool use${toolUses === 1 ? '' : 's'} · ${kTok} tokens · ${secs}s${usd})` },
       };
     },
   };

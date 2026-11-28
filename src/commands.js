@@ -11,7 +11,7 @@ import { GATEWAY_PROVIDER, PRESETS, providerInfo, connectedProviders, readConnec
 import { SessionStore, openElsewhere } from './session.js';
 import { memoryFiles, listAutoMemories } from './context.js';
 import { INIT_PROMPT } from './prompts.js';
-import { renderSkill } from './agents.js';
+import { renderSkill, syncDecisionAgents } from './agents.js';
 import { listBackgroundShells } from './tools/bash.js';
 import { estimateTokens } from './agent.js';
 import { quickQuery, cacheRefusals, defaultEffort, effortToSend, CLAUDE_EFFORTS } from './api.js';
@@ -209,6 +209,7 @@ export function buildCommands(app) {
     // different model is the exception: the prompt names it, and the new model has a cache of its own anyway.
     if (cfg.model.id !== model) app.runtime.invalidateSystemPrompt();
     else app.runtime.deferSystemPromptRefresh();
+    syncDecisionAgents(app.runtime.agents, Boolean(cfg.decisionModelSpec));
   };
 
   // Claude Code asks before something makes the next request read the whole conversation without the prompt
@@ -1347,9 +1348,11 @@ export function buildCommands(app) {
     run() {
       const lines = [];
       for (const a of app.runtime.agents.values()) {
-        lines.push(`${c.bold(a.name)} ${c.dim(`(${a.source === 'built-in' ? 'built-in' : a.source})`)}`, c.dim('  ' + truncate(a.description, app.width - 12)));
+        const model = a.model === 'decision' && app.config.decisionModelSpec ? ` · ${app.config.resolveModel(app.config.decisionModelSpec).label}` : '';
+        lines.push(`${c.bold(a.name)} ${c.dim(`(${a.source === 'built-in' ? 'built-in' : a.source}${model})`)}`, c.dim('  ' + truncate(a.description, app.width - 12)));
       }
       lines.push(c.dim(`Add custom agents as markdown files in .claude/agents/ or ${path.join(CONFIG_DIR, 'agents')}`));
+      if (!app.config.decisionModelSpec) lines.push(c.dim('Set decisionModel (/config set decisionModel <provider/model>) to have a stronger model plan, decide and review: the architect and reviewer agents'));
       out(lines);
     },
   });

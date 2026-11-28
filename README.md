@@ -121,12 +121,13 @@ Key 保存在 `~/.claude-pro/providers.json`（只有你自己能读）。`/disc
 
 各家的 key 只来自 `/connect`（7bit.fun 的在 `~/.claude-pro/gateway.json`，其他厂商的在 `~/.claude-pro/providers.json`），没有环境变量或 `.env` 文件可以设置它们。
 
-一般只需要 `/connect`、`/model`、`/effort` 和 settings。五个普通设置直接写在 `settings.json` 顶层（下面也是默认值；`model` 不写时跟随已连接的厂商，见上面的 `/connect`）：
+一般只需要 `/connect`、`/model`、`/effort` 和 settings。六个普通设置直接写在 `settings.json` 顶层（下面也是默认值；`model` 不写时跟随已连接的厂商，见上面的 `/connect`）：
 
 ```json
 {
   "model": "opus",
   "effort": "auto",
+  "decisionModel": "",
   "promptCacheTtl": "1h",
   "subagentPromptCacheTtl": "5m",
   "cleanupPeriodDays": 30
@@ -320,7 +321,9 @@ claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
 
 **Skills**：`<目录>/skills/<名字>/SKILL.md`，frontmatter 写 `name` 和 `description`，正文是指令。搜索 `~/.claude-pro/skills/`、`<项目>/.claude/skills/`、`<项目>/.claude-pro/skills/`（项目级覆盖用户级）。模型发现任务匹配某个 skill 的描述时会通过 `Skill` 工具自动加载它；你也可以直接用 `/<skill 名> [参数]` 调用，`/skills` 列出全部。
 
-**子 agent**：内置 `general-purpose`、`Explore`、`Plan`；自定义 agent 放在 `.claude/agents/*.md` 或 `~/.claude-pro/agents/*.md`（frontmatter：`name`、`description`、`tools`、`model`、`effort`（low/medium/high/xhigh/max）、`autoCompactWindow`（这个 agent 自己的自动压缩窗口，token 数））。模型调用 `Task` 时也可以给单个子 agent 指定 `model`（sonnet/opus/haiku 或完整 id）和 `effort`，优先于 agent 定义里的，定义里的又优先于会话的。
+**子 agent**：内置 `general-purpose`、`Explore`、`Plan`；自定义 agent 放在 `.claude/agents/*.md` 或 `~/.claude-pro/agents/*.md`（frontmatter：`name`、`description`、`tools`、`effort`（low/medium/high/xhigh/max）、`autoCompactWindow`（这个 agent 自己的自动压缩窗口，token 数）、`model: decision`（见下））。模型调用 `Task` 时可以给单个子 agent 指定 `effort`，优先于 agent 定义里的，定义里的又优先于会话的。子 agent 都用会话当前的模型，决策模型的那几个除外。
+
+**决策模型**：设置 `decisionModel`（如 `/config set decisionModel 7bit/claude-fable-5-2`，留空或 `off` 关闭）后，会话照常用自己的模型干活，三个子 agent 改用这个更强的模型：`Plan`（实现方案）、`architect`（难以撤销的架构/设计决策：数据格式、协议、接口、依赖、并发模型、涉及安全/钱/数据的选择，或同一个问题试了两次没解决）、`reviewer`（重要改动或一个里程碑做完后，从全新上下文读 diff 审查）。后两个只在设了决策模型时才有。它们不带主对话的上下文，自己读代码，所以花费不随对话变长而上涨；`Task` 那一行会显示所用模型和这次的花费（如 `Done (fable-5-2 · 14 tool uses · 61.2k tokens · 95.3s · $1.42)`）。自定义 agent 在 frontmatter 里写 `model: decision` 也用它；其他 `model` 值不起作用。
 
 **后台子 agent**：模型可以用 `Task` 的 `run_in_background: true` 把子 agent 放到后台，自己继续干别的。子 agent 完成后，结果会作为 `<task-notification>` 自动送回；如果当时主 agent 空闲，会自动开启新的一轮来处理结果。`TaskOutput` 用于提前等待结果，`TaskStop` 用于取消；`/tasks` 列出所有后台 agent，`/tasks kill agent_1` 停止其中一个。`-p` 模式会等所有后台 agent 结束后再退出。
 

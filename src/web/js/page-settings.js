@@ -8,6 +8,7 @@ const CHOICES = { effort: ["auto", "low", "medium", "high", "xhigh", "max"], pro
 const ZH = {
   model: "默认模型，写成 供应商/模型（如 deepseek/deepseek-v4-pro）或 opus、sonnet。没设置时：连了 Claude 就用 opus，否则用第一个连接的供应商的模型。会话里的 /model 和 --model 会覆盖它",
   effort: "推理强度：auto、low、medium、high、xhigh、max。会话里的 /effort 和 --effort 会覆盖它",
+  decisionModel: "决策模型，写成 供应商/模型（如 7bit/claude-fable-5-2）：会话照常用自己的模型干活，Plan、architect（关键架构决策）、reviewer（完成后审查）这三个子 agent 用它。留空或 off：不启用（没有 architect 和 reviewer，Plan 用会话模型）。改动在新会话或重启后生效",
   promptCacheTtl: "主对话的提示词缓存时长：5m 或 1h",
   subagentPromptCacheTtl: "子 agent、压缩和辅助请求的提示词缓存时长：5m 或 1h",
   cleanupPeriodDays: "会话最后一次使用后保留多少天（之后连同运行记录一起删除，和 Claude Code 一样；至少 1 天，想长期保留可以填 3650）",

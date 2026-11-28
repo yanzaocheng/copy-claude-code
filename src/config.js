@@ -77,6 +77,7 @@ export const BASIC_SETTINGS = {
   // (unset: see Config.defaultModelSpec, which follows the providers connected)
   model: { default: 'opus', legacy: 'CLAUDE_PRO_GATEWAY_MODEL', description: 'Default model, provider/model (unset: opus where Claude is connected, else a model of the first connected provider); /model and --model override it' },
   effort: { default: 'auto', legacy: 'CLAUDE_CODE_EFFORT_LEVEL', description: 'Reasoning effort; /effort and --effort override it' },
+  decisionModel: { default: '', description: 'Model for decisions and reviews, provider/model (e.g. 7bit/claude-fable-5-2): the Plan, architect and reviewer sub-agents run on it while the session works on its own model; empty or off: none (no architect and reviewer agents, Plan on the session model)' },
   promptCacheTtl: { default: '1h', legacy: 'CLAUDE_CODE_PROMPT_CACHE_TTL', description: 'Conversation prompt cache: 5m or 1h' },
   subagentPromptCacheTtl: { default: '5m', legacy: 'CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL', description: 'Sub-agent, compaction and side-query prompt cache: 5m or 1h' },
   // `userOnly`: read from ~/.claude-pro/settings.json only. It deletes the data of every project, so a project's
@@ -121,6 +122,7 @@ function basicValue(key, value) {
     if (!text) throw new Error('model must not be empty.');
     return text;
   }
+  if (key === 'decisionModel') return /^(off|none)$/i.test(text) ? '' : text;
   const normalized = text.toLowerCase();
   if (key === 'effort' && ['auto', 'default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(normalized)) return normalized;
   if ((key === 'promptCacheTtl' || key === 'subagentPromptCacheTtl') && normalizeTtl(normalized)) return normalized;
@@ -490,6 +492,11 @@ export class Config {
   }
   get modelSpec() { return this.modelOverride || this.configuredModelSpec; }
   get model() { return this.resolveModel(this.modelSpec); }
+  // The model the user set for decisions and reviews (decisionModel), which the sub-agents defined with
+  // `model: decision` run on (agents.js); null: none set, they run on the session's model like every other agent.
+  get decisionModelSpec() { return String(this.setting('decisionModel') || '').trim() || null; }
+  // The spec of the model a sub-agent definition runs on.
+  agentModelSpec(def) { return (def?.model === 'decision' && this.decisionModelSpec) || this.modelSpec; }
 
   get effort() {
     const v = (this.effortBoost ?? this.effortOverride ?? this.configuredEffort).trim().toLowerCase();
