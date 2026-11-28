@@ -115,7 +115,7 @@ Key 保存在 `~/.claude-pro/providers.json`（只有你自己能读）。`/disc
 /disconnect deepseek
 ```
 
-网关地址默认是 `https://7bit.fun`，也可以通过 `CLAUDE_PRO_GATEWAY_URL` 修改。账户余额和用量在网关用户页查看。
+网关地址是 `https://7bit.fun`。账户余额和用量在网关用户页查看。
 
 ## 配置
 
@@ -143,12 +143,12 @@ claude-pro config list                       # 普通设置，含默认值
 claude-pro config set model sonnet
 claude-pro config set promptCacheTtl 1h
 claude-pro config list --advanced            # 另外显示高级配置
-claude-pro config set CLAUDE_PRO_GATEWAY_URL https://7bit.fun
+claude-pro config set CLAUDE_PRO_CACHE_KEEPALIVE_HOURS 4
 ```
 
 会话中 `/config` 默认只显示这五项，`/config advanced` 查看高级项；`/config set model sonnet` 等同于 CLI 的 `config set`。普通设置写顶层，高级设置写 `env`。`/config set/unset` 保留 `--project`、`--local`，分别修改项目共享设置或本地设置。`/model`、`/effort` 仍会记住选择；`--model`、`--effort` 可覆盖本次启动。
 
-设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括网关地址、是否连网关、输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。没有 `--provider` 或 `CLAUDE_PRO_PROVIDER` 配置：用哪家由模型名决定（`/model`、`--model deepseek/deepseek-v4-pro`、设置 `model`）。
+设置文件从低到高：`~/.claude-pro/settings.json`、项目 `.claude-pro/settings.json`、`.claude-pro/settings.local.json`。高级项仍兼容进程环境变量（高于设置文件），包括输出/thinking 预算、缓存总开关、保活、网络重试、工具路径、验证、自动记忆/话题标题和 Trace 开关；普通设置不从进程环境读取。旧 `settings.json.env` 中的 `CLAUDE_PRO_GATEWAY_MODEL`、`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_PROMPT_CACHE_TTL`、`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` 只作为兼容别名读取，同文件顶层新字段优先；用 `config set` 或 `/config set` 设置旧别名，会改写顶层新字段并移除同文件旧别名。没有 `--provider` 或 `CLAUDE_PRO_PROVIDER` 配置：用哪家由模型名决定（`/model`、`--model deepseek/deepseek-v4-pro`、设置 `model`）。
 
 ## 系统提示词
 

@@ -12,8 +12,6 @@ const ZH = {
   promptCacheTtl: "主对话的提示词缓存时长：5m 或 1h",
   subagentPromptCacheTtl: "子 agent、压缩和辅助请求的提示词缓存时长：5m 或 1h",
   cleanupPeriodDays: "会话最后一次使用后保留多少天（之后连同运行记录一起删除，和 Claude Code 一样；至少 1 天，想长期保留可以填 3650）",
-  CLAUDE_PRO_GATEWAY_URL: "网关地址（默认 https://7bit.fun）",
-  CLAUDE_PRO_ONLINE: "设为 0：交互会话不连中转（也就不能和配对的电脑互发任务）",
   CLAUDE_PRO_MACHINE_NAME: "这台电脑在其他电脑的会话里显示的名字（如 公司、家里；默认是主机名）",
   CLAUDE_PRO_ATTACH: "设为 1（实验性）：终端里启动的会话也在控制台进程里运行，终端窗口只负责按键和画面（像 tmux）。所有会话共用一个进程，更新或改了源码时整体换新进程，终端自动重新接上",
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: "每次回复的 max_tokens（默认 48000；网关允许的更少时会自动降低）",

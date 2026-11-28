@@ -88,8 +88,6 @@ export const BASIC_SETTINGS = {
 // Advanced keys, shown only by /config advanced (or config list --advanced). Settings files may also carry
 // unrelated env entries; those are left alone, but are not advertised as configuration of this program.
 export const KNOWN_KEYS = {
-  CLAUDE_PRO_GATEWAY_URL: `Gateway address (default ${GATEWAY_DEFAULT_URL})`,
-  CLAUDE_PRO_ONLINE: 'Set to 0 to keep interactive sessions off the relay. Otherwise, once this computer is paired with another (/pair), each session connects to the relay so that the sessions there can send it tasks (@computer/name)',
   CLAUDE_PRO_MACHINE_NAME: 'This computer\'s name for sessions on your other computers (@公司 ...; default: the host name)',
   CLAUDE_PRO_ATTACH: 'Set to 1 (experimental) to run terminal sessions inside the web console\'s process, the window attached to it as with tmux: one process for all sessions, and an update or a change of the source restarts that one process (the windows attach again) instead of each session',
 
@@ -109,6 +107,11 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the current model for the current topic after each message (the tab title then shows the first message of the session)',
   CLAUDE_PRO_TRACE: 'Set to 0 to disable the privacy-preserving runtime JSONL trace (enabled by default)',
 };
+
+// Read from the process environment as the keys above are, but not offered as settings (the user's call, 2026-11-28:
+// nobody sets them; the gateway is connected with /connect, a computer pairs or does not): the tests and the
+// self-check point the gateway elsewhere (CLAUDE_PRO_GATEWAY_URL) and keep sessions off the relay (CLAUDE_PRO_ONLINE=0).
+const ENV_ONLY_KEYS = ['CLAUDE_PRO_GATEWAY_URL', 'CLAUDE_PRO_ONLINE'];
 
 function basicValue(key, value) {
   if (key === 'cleanupPeriodDays') {
@@ -320,7 +323,7 @@ export function loadConfig({ cwd = process.cwd(), flags = {} } = {}) {
   settings.projectTrust = risk && !trusted ? { needed: true, hash: risk.hash, items: risk.items } : null;
 
   const fromProcess = {};
-  for (const k of Object.keys(KNOWN_KEYS)) if (process.env[k] !== undefined && process.env[k] !== '') fromProcess[k] = process.env[k];
+  for (const k of [...Object.keys(KNOWN_KEYS), ...ENV_ONLY_KEYS]) if (process.env[k] !== undefined && process.env[k] !== '') fromProcess[k] = process.env[k];
   set(fromProcess, 'process environment');
 
   for (const key of ['model', 'effort']) {
