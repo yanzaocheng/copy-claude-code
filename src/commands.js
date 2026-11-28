@@ -1417,7 +1417,7 @@ export function buildCommands(app) {
       const lines = [
         `${c.green('✔')} Node ${process.versions.node}`,
         `${app.runtime.shell.kind === 'bash' ? c.green('✔') : c.yellow('!')} Shell: ${app.runtime.shell.name} (${app.runtime.shell.path})`,
-        `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; set CLAUDE_PRO_RIPGREP_PATH to use an rg.exe)'}`,
+        `${rg ? c.green('✔') : c.yellow('!')} ripgrep ${rg ? 'found' : 'not found (Grep uses the built-in JS scanner, which is slower; install ripgrep on PATH, e.g. winget install BurntSushi.ripgrep.MSVC on Windows)'}`,
         ...(gatewayLogin(cfg.gatewayUrl) ? [`${c.green('✔')} 7bit.fun connected ${c.dim(`(7bit/…, ${cfg.gatewayUrl})`)}`] : []),
         ...connectedProviders().map((p) => `${c.green('✔')} ${p.name} connected ${c.dim(`(${p.id}/…, ${normalizeBaseUrl(p.connection.baseUrl || p.baseUrl, p.protocol)})`)}`),
         ...(cfg.providerConnected(cfg.model.provider) ? [] : [`${c.red('✘')} ${cfg.model.label} is a model of ${cfg.providerName(cfg.model.provider)}, which is not connected (/connect)`]),
