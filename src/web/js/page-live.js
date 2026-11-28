@@ -7,7 +7,7 @@ import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
 import { ws, loadWorkspace, archive, putAway } from "./workspace.js";
 import { composer, quoteSelection, popMenu, modelMenuItems } from "./composer.js";
-import { pendingFirstSends } from "./page-new.js";
+import { pendingFirstSends, browseProjectDirectories } from "./page-new.js";
 import { mobileLayout } from "./main.js";
 import { setDockWorkspace, dockButton } from "./dock.js";
 import { findInConversation, FIND_ICON, takePendingFind } from "./find.js";
@@ -77,9 +77,11 @@ export function liveView(peerId) {
     const known = ws.sessions.find((s) => s.id === status.sessionId);
     popMenu(e.currentTarget, [{ key: "a", title: "", items: [
       { label: "导出 Markdown", value: "export" },
+      { label: "迁移到其他目录", description: "对话带过去，用那个目录的设置、CLAUDE.md 和记忆", value: "move" },
       { label: "归档", description: "从工作区收起，内容保留", value: "archive" },
       { label: "删除", description: "先进回收站，7 天内可以恢复", value: "delete" },
     ] }], async (key, value) => {
+      if (value === "move") return moveConversation();
       if (!known) return toast("这个对话还没有内容");
       const sessionId = status.sessionId;
       const busy = Boolean(status.busy || status.turn || status.dialog);
@@ -102,6 +104,17 @@ export function liveView(peerId) {
       } catch (err) { fail(err); }
     });
   });
+
+  // 迁移到其他目录: /cd to the folder chosen (the session starts again there, with the conversation; see
+  // App.changeDirectory), as the user would type it
+  function moveConversation() {
+    if (status.turn ?? status.busy) return toast("会话正在工作：等它做完（或停止）再迁移");
+    browseProjectDirectories(status.cwd || null, (dir) => {
+      const same = String(dir).replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase() === String(status.cwd || "").replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+      if (same) return toast("对话已经在这个目录里");
+      post("send", { text: `/cd ${dir}` }).then(() => toast(`正在迁移到 ${dir}`)).catch(fail);
+    }, { title: "迁移到其他目录", action: "迁移到这个目录" });
+  }
 
   function render(item) {
     let node = elements.get(item);
