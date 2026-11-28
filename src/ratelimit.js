@@ -145,7 +145,7 @@ function limitMessage(err, rl, state, budget, now, why) {
   }
   if (err.status !== 429) return `${base} (the server asked to wait ${humanDuration(rl.waitMs)} before retrying)`;
   const reset = `${capitalize(rl.label)} reached; it resets at ${formatClock(rl.resetAt, now)} (in ${humanDuration(rl.waitMs)})`;
-  if (why === 'budget') return `${base} (${reset}, beyond the ${humanDuration(budget)} this session may wait. CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS raises that.)`;
+  if (why === 'budget') return `${base} (${reset}, beyond the ${humanDuration(budget)} this session may wait.)`;
   return `${base} (${reset}${budget === 0 ? '. Set CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS above 0 to wait for it automatically' : ''}.)`;
 }
 

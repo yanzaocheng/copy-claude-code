@@ -92,13 +92,10 @@ export const KNOWN_KEYS = {
   CLAUDE_PRO_ATTACH: 'Set to 1 (experimental) to run terminal sessions inside the web console\'s process, the window attached to it as with tmux: one process for all sessions, and an update or a change of the source restarts that one process (the windows attach again) instead of each session',
 
   CLAUDE_PRO_CACHE_KEEPALIVE_HOURS: 'Claude models with the 1-hour TTL: while you are away, refresh the conversation\'s prompt cache shortly before it runs out (a read costs 1/40 of a rewrite), for a pause of up to this many hours (default 8; 0 turns it off)',
-  CLAUDE_PRO_MAX_RETRIES: 'Retries for failed API requests (0 = no retries at all, which also turns off the rate limit wait)',
-  CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: 'Longest total time to wait for a rate limit (e.g. the 5-hour window) to reset before continuing by itself (default 21600000 = 6 hours; 0 = report the error instead of waiting)',
   CLAUDE_PRO_BROWSER: 'The browser the Browser tool drives: auto (default: the first of Edge, Chrome, Brave, Chromium whose remote debugging is turned on, at edge://inspect/#remote-debugging and the like), edge, chrome, brave, chromium, own (claude-pro\'s own Chrome profile, nothing to allow), a DevTools address (ws://…, http://host:port, a port), or off (no Browser tool)',
   CLAUDE_PRO_PYTHON: 'The Python interpreter the REPL tool runs (default: python on Windows, python3 elsewhere, from PATH)',
   CLAUDE_PRO_VERIFY_COMMAND: 'Command run after the agent edits files (e.g. "npm test"); failures are sent back to fix',
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: 'Set to 1 to turn off the persistent per-project memory',
-  CLAUDE_PRO_DISABLE_TOPIC_TITLE: 'Set to 1 to stop asking the current model for the current topic after each message (the tab title then shows the first message of the session)',
   CLAUDE_PRO_TRACE: 'Set to 0 to disable the privacy-preserving runtime JSONL trace (enabled by default)',
 };
 
@@ -107,9 +104,11 @@ export const KNOWN_KEYS = {
 // sessions off the relay (CLAUDE_PRO_ONLINE=0); the gateway is connected with /connect, and a computer's sessions reach
 // the relay when it is paired. max_tokens is lowered by itself to what the gateway allows, the models of now refuse
 // thinking off (the effort sets it), Git Bash is found through the git on PATH and rg on PATH or in VS Code, and
-// prompt caching off only costs more (it is for looking into the cache); these stay read, Claude Code's spellings among
-// them, for whoever has them in a shell.
-const ENV_ONLY_KEYS = ['CLAUDE_PRO_GATEWAY_URL', 'CLAUDE_PRO_ONLINE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS', 'API_TIMEOUT_MS', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_PRO_RIPGREP_PATH', 'DISABLE_PROMPT_CACHING'];
+// prompt caching off only costs more (it is for looking into the cache). Then the agent's choice (the user left it
+// to it): the retries and the longest wait for a rate limit have defaults nobody tunes, and the topic titles name the
+// conversations in the console's sidebar. These stay read, Claude Code's spellings among them, for whoever has them
+// in a shell.
+const ENV_ONLY_KEYS = ['CLAUDE_PRO_GATEWAY_URL', 'CLAUDE_PRO_ONLINE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS', 'API_TIMEOUT_MS', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_PRO_RIPGREP_PATH', 'DISABLE_PROMPT_CACHING', 'CLAUDE_PRO_MAX_RETRIES', 'CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS', 'CLAUDE_PRO_DISABLE_TOPIC_TITLE'];
 
 function basicValue(key, value) {
   if (key === 'cleanupPeriodDays') {

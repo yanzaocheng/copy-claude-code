@@ -15,13 +15,10 @@ const ZH = {
   CLAUDE_PRO_MACHINE_NAME: "这台电脑在其他电脑的会话里显示的名字（如 公司、家里；默认是主机名）",
   CLAUDE_PRO_ATTACH: "设为 1（实验性）：终端里启动的会话也在控制台进程里运行，终端窗口只负责按键和画面（像 tmux）。所有会话共用一个进程，更新或改了源码时整体换新进程，终端自动重新接上",
   CLAUDE_PRO_CACHE_KEEPALIVE_HOURS: "Claude 模型用 1 小时缓存时：你离开期间在缓存过期前刷新它（读一次只要重写的 1/40），最多保持这么多小时（默认 8；0 关闭）",
-  CLAUDE_PRO_MAX_RETRIES: "API 请求失败时的重试次数（0 = 不重试，也不再等待限流恢复）",
-  CLAUDE_PRO_RATE_LIMIT_MAX_WAIT_MS: "遇到限流（比如 5 小时额度）时最多等多久再自动继续（默认 21600000 = 6 小时；0 = 直接报错不等）",
   CLAUDE_PRO_BROWSER: "Browser 工具操作哪个浏览器：auto（默认，Edge、Chrome、Brave、Chromium 中第一个打开了远程调试的）、edge、chrome、brave、chromium、own（claude-pro 自己的 Chrome 配置，无需允许）、DevTools 地址，或 off（不提供 Browser 工具）",
   CLAUDE_PRO_PYTHON: "REPL 工具用的 Python（默认：Windows 上 python，其他系统 python3）",
   CLAUDE_PRO_VERIFY_COMMAND: "agent 改完文件后运行的命令（如 npm test），失败会发回给它修",
   CLAUDE_PRO_DISABLE_AUTO_MEMORY: "设为 1：关闭每个项目的自动记忆",
-  CLAUDE_PRO_DISABLE_TOPIC_TITLE: "设为 1：不再每条消息后让模型总结话题（标签页标题改为显示第一条消息）",
   CLAUDE_PRO_TRACE: "设为 0：关闭运行记录（默认开启，只记结构和用量，不记内容；用量页的数据来自它）",
 };
 const SCOPE_NAMES = { user: "用户（所有项目）", project: "项目（随仓库提交）", local: "项目本地（不提交）" };
