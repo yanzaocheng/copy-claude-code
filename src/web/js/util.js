@@ -41,6 +41,25 @@ export function toast(message, kind = "ok") {
 }
 export const fail = (e) => toast(e?.message || String(e), "error");
 
+// `text` to the clipboard; false when the browser refused
+export async function writeClipboard(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* no clipboard API off a secure page (http from another computer): the old way */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* refused */ }
+  ta.remove();
+  return ok;
+}
+export async function copyText(text, what = "路径") {
+  if (await writeClipboard(text)) toast(`已复制${what}`);
+  else prompt(`请手动复制${what}`, text);
+}
+
 export const fmtBytes = (n) => {
   n = Number(n) || 0;
   if (n < 1024) return `${n} B`;
@@ -62,6 +81,21 @@ export function ago(ms) {
 }
 export const fmtDuration = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); if (s < 60) return `${s}s`; const m = Math.floor(s / 60); return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`; };
 export const shortPath = (p) => String(p || "").replace(/\\/g, "/");
+// a folder's path as a conversation's header shows it, copied when clicked as the console's computer writes it (for
+// a terminal, /cd, an editor: a live session's status has it with forward slashes)
+export const pathButton = (p) => {
+  const native = /^[a-z]:[\\/]/i.test(p) ? String(p).replace(/\//g, "\\") : String(p);
+  // (inline, not a <button>: a header too narrow for it cuts the path with an ellipsis instead of hiding it whole)
+  return `<span class="path-copy" role="button" tabindex="0" data-copy-path="${esc(native)}" title="复制路径：${esc(native)}">${esc(shortPath(p))}${ICON.copy}</span>`;
+};
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-copy-path]");
+  if (b) copyText(b.dataset.copyPath);
+});
+document.addEventListener("keydown", (e) => {
+  const b = (e.key === "Enter" || e.key === " ") && e.target.closest?.("[data-copy-path]");
+  if (b) { e.preventDefault(); copyText(b.dataset.copyPath); }
+});
 
 function showLoggedOut(message) {
   main.innerHTML = `<div class="page"><div class="panel panel-pad" style="max-width:560px;margin:60px auto"><h1>需要从 claude-pro 打开</h1><p class="sub">${esc(message)}</p><p>在任意 claude-pro 会话里输入 <code>/web</code>，或在终端运行 <code>claude-pro web</code>，会自动打开并登录这个页面。</p></div></div>`;
@@ -87,4 +121,5 @@ export const ICON = {
   todoNow: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>',
   todoDone: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="m8 12.3 2.8 2.8L16.2 9.6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   more: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/><path d="M15.5 8.5V6A2.5 2.5 0 0 0 13 3.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5"/></svg>',
 };

@@ -1,7 +1,7 @@
 // The transcript model of a live session: a copy of the reducer in src/remote.js (applyEvent), and how its items are
 // drawn.
 
-import { esc, api, toast, fail } from "./util.js";
+import { esc, api, toast, fail, writeClipboard } from "./util.js";
 import { ansi, ansiLines, plain, md } from "./markdown.js";
 import { folded } from "./images.js";
 import { truncated } from "./dialogs.js";
@@ -139,7 +139,7 @@ export function wireCopies(log, itemsOf) {
     const nth = [...log.querySelectorAll(".turn-meta")].indexOf(b.closest(".turn-meta"));
     const text = answers(itemsOf() || [])[nth];
     if (!text) { toast("这一轮没有文字回答"); return; }
-    if (!(await copy(text))) { prompt("请手动复制", text); return; }
+    if (!(await writeClipboard(text))) { prompt("请手动复制", text); return; }
     b.innerHTML = COPIED;
     b.title = "已复制";
     clearTimeout(b.copiedTimer);
@@ -157,19 +157,6 @@ function answers(items) {
     else if (b.k === "output") for (const line of b.lines || []) if (DONE_LINE.test(plain(line).trim())) { out.push(texts.join("\n\n")); texts = []; }
   }
   return out;
-}
-async function copy(text) {
-  try { await navigator.clipboard.writeText(text); return true; } catch { /* no clipboard API off a secure page (http from another computer): the old way */ }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand("copy"); } catch { /* refused */ }
-  ta.remove();
-  return ok;
 }
 
 // ---------------------------------------------------------------- 执行过程

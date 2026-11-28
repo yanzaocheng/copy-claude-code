@@ -1,6 +1,6 @@
 // A running session, live: its transcript as it streams, its status, its dialogs, and the message box.
 
-import { esc, api, toast, fail, fmtTokens, fmtUsd, fmtDuration, shortPath, ICON, $, $$ } from "./util.js";
+import { esc, api, toast, fail, fmtTokens, fmtUsd, fmtDuration, pathButton, ICON, $, $$ } from "./util.js";
 import { ansi, ansiLines, md } from "./markdown.js";
 import { applyEvent, hydrate, itemHtml, wireForks, wireCopies, processBlocks, procHtml, procOpen, updateProc, procToggleButton, wireProcToggle } from "./transcript.js";
 import { wholeOutputs } from "./dialogs.js";
@@ -30,6 +30,7 @@ export function liveView(peerId) {
   let status = {};
   let statusAt = Date.now();
   let dialogShown = null;
+  let subShown = "";
   const post = (type, body = {}) => api(`/api/live/${peerId}/${type}`, { method: "POST", body });
   const near = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
   const c = composer($("#lcomp", el), {
@@ -188,7 +189,8 @@ export function liveView(peerId) {
     statusAt = Date.now();
     if (status.cwd) setDockWorkspace(status.cwd);
     $("#ltitle", el).textContent = status.title || status.name || "claude-pro";
-    $("#lsub", el).textContent = `@${status.name || ""} · ${shortPath(status.cwd || "")}${status.hidden ? "" : " · 在终端窗口里运行"}`;
+    const sub = `@${esc(status.name || "")}${status.cwd ? ` · ${pathButton(status.cwd)}` : ""}${status.hidden ? "" : " · 在终端窗口里运行"}`;
+    if (sub !== subShown) { $("#lsub", el).innerHTML = sub; subShown = sub; }
     $("#lmodel span", el).textContent = status.model || "模型";
     $("#leffort span", el).textContent = status.effort || "推理强度";
     $("#leffort", el).hidden = !status.effort;

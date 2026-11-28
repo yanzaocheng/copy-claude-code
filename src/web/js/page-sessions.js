@@ -1,6 +1,6 @@
 // 会话: all conversations, the trash, and one conversation as history.
 
-import { esc, api, toast, fail, fmtBytes, fmtUsd, fmtTime, ago, shortPath, ICON, $ } from "./util.js";
+import { esc, api, toast, fail, fmtBytes, fmtUsd, fmtTime, ago, shortPath, pathButton, ICON, $ } from "./util.js";
 import { itemHtml, wireForks, wireCopies, processBlocks, procHtml, procOpen, procToggleButton, wireProcToggle } from "./transcript.js";
 import { folded } from "./images.js";
 import { wholeOutputs } from "./dialogs.js";
@@ -92,7 +92,7 @@ export async function sessionView(dir, id) {
   const base = `/api/sessions/${encodeURIComponent(dir)}/${encodeURIComponent(id)}`;
   if (d.cwd) setDockWorkspace(d.cwd);
   el.innerHTML = `<div class="chat-page">
-      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${esc(shortPath(d.cwd || dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div>${procToggleButton("hproc")}${dockButton()}<button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
+      <header class="chat-head"><div class="chat-titles"><h2>${esc(d.title)}</h2><div class="chat-sub">${d.cwd ? pathButton(d.cwd) : esc(shortPath(dir))} · ${d.count} 条消息 · ${fmtBytes(d.size)}${d.cost ? ` · ${fmtUsd(d.cost)}` : ""} · 最后使用 ${esc(fmtTime(d.mtime))}</div></div>${procToggleButton("hproc")}${dockButton()}<button type="button" class="icon-btn" id="hmenu" title="更多">${ICON.more}</button></header>
       <div class="chat-scroll" id="hscroll"><div class="chat-log" id="log"></div></div>
       <div class="chat-foot"><div class="chat-composer" id="hcomp"></div></div></div>`;
   const log = $("#log", el);

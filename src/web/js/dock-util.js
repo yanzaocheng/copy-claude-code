@@ -1,7 +1,7 @@
 // What the parts of the panel (dock*.js) share: paths as the console's computer writes them, file icons, copying,
 // a menu where the pointer is.
 
-import { toast, shortPath } from "./util.js";
+import { shortPath } from "./util.js";
 import { popMenu } from "./composer.js";
 
 const EXT_COLORS = {
@@ -46,12 +46,7 @@ export function relativeTo(root, p) {
   return f.toLowerCase().startsWith(`${r.toLowerCase()}/`) ? f.slice(r.length + 1) : f;
 }
 
-export async function copyText(text, what = "路径") {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast(`已复制${what}`);
-  } catch { prompt(`请手动复制${what}`, text); }
-}
+export { copyText } from "./util.js";
 
 // A menu where the pointer is (popMenu places it by an element: one made there for it).
 export function menuAt(x, y, items, onPick) {
