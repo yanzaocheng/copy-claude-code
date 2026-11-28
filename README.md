@@ -158,7 +158,7 @@ claude-pro config set CLAUDE_PRO_CACHE_KEEPALIVE_HOURS 4
 
 每次请求都要把整个对话发给模型，用 Anthropic 的提示词缓存，重复的历史按缓存价（十分之一）计费，不用配置：
 
-- 网关对话默认用 1 小时缓存（停顿一会儿回来不用整段重写）；子 agent、压缩等默认用 5 分钟。顶层 `promptCacheTtl`、`subagentPromptCacheTtl` 修改时长；`DISABLE_PROMPT_CACHING` 总开关见 `claude-pro config list --advanced`。旧的强制 5 分钟、启用 1 小时和按模型关闭缓存的变量不再生效。
+- 网关对话默认用 1 小时缓存（停顿一会儿回来不用整段重写）；子 agent、压缩等默认用 5 分钟。顶层 `promptCacheTtl`、`subagentPromptCacheTtl` 修改时长。旧的强制 5 分钟、启用 1 小时和按模型关闭缓存的变量不再生效。
 - `/cost` 显示缓存还能保留多久、命中率和没命中的原因；缓存过期后发下一条消息会把整个对话重新写入缓存。
 - 缓存还热时 `/model`、`/effort` 会先确认（切换会让缓存失效）；离开一个多小时回来时，清掉较早的工具结果，少重写一些。
 - 人不在时自动保温（Claude 模型）：缓存到期前 5 分钟把上一个请求重发一次，只要 1 个输出 token。读缓存会让它再保留一小时，花费是整段重写的 1/40（Opus 上 15 万 token 的对话：约 $0.03，重写约 $1.20）。一次停顿最多保温 8 小时，`CLAUDE_PRO_CACHE_KEEPALIVE_HOURS` 可以改（0 关闭）。`/cost` 显示刷新次数和花费。GPT 模型不需要：网关上的 GPT 缓存停顿几个小时后通常还在。
