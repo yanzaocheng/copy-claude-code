@@ -10,7 +10,7 @@ import { GATEWAY_PROVIDER, providerEndpoint, priceCost } from './providers.js';
 import { chatFetch } from './openai-chat.js';
 import { fitImagesIn } from './utils/images.js';
 import { wellFormed } from './utils/text.js';
-import { costOf } from './pricing.js';
+import { costOf, costAt, listedPrice } from './pricing.js';
 
 const SIGNATURE_PREFIX = 'cgw1:';
 
@@ -291,7 +291,9 @@ export function isAbort(err) {
 // null when neither has a price. A cost goes to config.onCost.
 function charge(config, requested, served, usage, model = null) {
   // A provider's model at the price models.dev gives it; the gateway's (and a Claude model anywhere) at pricing.js's.
-  const cost = (model?.price ? priceCost(model.price, usage) : null) ?? costOf(served, usage) ?? costOf(requested, usage);
+  // The gateway's own models at the price its model list gives them (what it charges), once that list has come.
+  const listed = providerOf(model) === GATEWAY_PROVIDER ? listedPrice((gatewayModelInfo(config, served) || gatewayModelInfo(config, requested))?.pricing) : null;
+  const cost = (model?.price ? priceCost(model.price, usage) : null) ?? costAt(listed, usage) ?? costOf(served, usage) ?? costOf(requested, usage);
   if (cost > 0) config.onCost?.(cost);
   return cost;
 }

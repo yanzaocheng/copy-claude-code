@@ -285,7 +285,7 @@ function toolsFor(cwd) {
   try {
     const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
     const config = loadConfig({ cwd: dir });
-    tools = buildTools(config, { agents: loadAgents(dir), skills: loadSkills(dir), peers: true });
+    tools = buildTools(config, { agents: loadAgents(dir, { decision: Boolean(config.decisionModelSpec) }), skills: loadSkills(dir), peers: true });
   } catch { /* headers with the tools' names only */ }
   toolsMemo.set(key, tools);
   return tools;
@@ -522,7 +522,7 @@ function traceRows(file) {
     try { e = JSON.parse(line); } catch { continue; }
     if (!e.ok && !e.output_tokens) continue;
     const usage = { input_tokens: e.input_tokens, output_tokens: e.output_tokens, cache_read_input_tokens: e.cache_read_tokens, cache_creation_input_tokens: e.cache_write_tokens };
-    rows.push({ day: localDay(e.time), hour: new Date(e.time).getHours(), model: e.model || '?', session: e.session_id, input: e.input_tokens || 0, output: e.output_tokens || 0, cacheRead: e.cache_read_tokens || 0, cacheWrite: e.cache_write_tokens || 0, cost: costOf(e.model, usage) });
+    rows.push({ day: localDay(e.time), hour: new Date(e.time).getHours(), model: e.model || '?', session: e.session_id, input: e.input_tokens || 0, output: e.output_tokens || 0, cacheRead: e.cache_read_tokens || 0, cacheWrite: e.cache_write_tokens || 0, cost: e.cost_usd ?? costOf(e.model, usage) });
   }
   usageMemo.set(file, { mtime: st.mtimeMs, size: st.size, rows });
   return rows;

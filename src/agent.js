@@ -422,6 +422,7 @@ export class Agent {
     this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0, keepalives: 0 };
     // What the sub-agents this agent started used (they bill like everything else); only the main agent has any.
     this.subUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, requests: 0, compactions: 0, runs: 0 };
+    this.cost = 0; // USD of this agent's own finished requests, at list prices (a sub-agent's run shows it)
     this.cache = new CacheStats(); // how much of the input came from the prompt cache, and why a request missed
     this.refreshSystemPrompt = refreshSystemPrompt; // called when the conversation starts over from a summary
     this.beforeTurn = beforeTurn; // called at the start of each of the main agent's turns (the date note, see runtime.js)
@@ -538,6 +539,7 @@ export class Agent {
         stopReason: res.stopReason,
         context_tokens: contextTokens(res.usage),
         cacheMiss: recorded?.cacheMiss,
+        cost: res.cost,
       });
       return res;
     } catch (err) {
@@ -580,6 +582,7 @@ export class Agent {
     this.usage.cacheRead += u.cache_read_input_tokens || 0;
     this.usage.cacheWrite += u.cache_creation_input_tokens || 0;
     this.usage.cacheWrite1h += u.cache_creation?.ephemeral_1h_input_tokens || 0;
+    this.cost += res.cost || 0;
     if (kind === 'summary') this.usage.compactions++;
     else if (kind === 'keepalive') this.usage.keepalives++;
     else {

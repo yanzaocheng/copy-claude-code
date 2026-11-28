@@ -1,11 +1,12 @@
 // What a request costs, in USD, for the running total of a conversation (the footer, /cost). The prices are the
-// official per-million-token ones the gateway bills at (its pricing.mjs); a gateway upstream group's multiplier
-// (1 unless the account is set otherwise) is not known here. A Claude model that is not in the table is priced
+// official per-million-token ones (the gateway's pricing.mjs), used where the gateway's model list gives none (see
+// listedPrice, which comes first: it is what the gateway charges); a gateway upstream group's multiplier (1 unless
+// the account is set otherwise) is not known here. A Claude model that is not in the table is priced
 // as the current model of its family, as the gateway serves it. longContext: a prompt (input + cache reads +
 // cache writes) above `threshold` tokens is billed at those prices.
 
 const PRICES = [
-  { id: 'claude-fable-5-1', family: 'fable', input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25 },
+  { id: 'claude-fable-5-2', family: 'fable', input: 8, output: 40, cacheWrite5m: 10, cacheWrite1h: 16, cacheRead: 0.2 },
   { id: 'claude-opus-5-5', family: 'opus', input: 4, output: 20, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2 },
   { id: 'claude-sonnet-5-5', family: 'sonnet', input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.1 },
   {
@@ -45,9 +46,27 @@ export function priceOf(model) {
   return (family && PRICES.find((p) => p.family === family)) || null;
 }
 
+// The price a gateway's model list gives a model (its `pricing`, per million tokens, with the gateway's own price where
+// its admin set one), in this table's form; null when the entry has none. It is what the gateway charges, so it comes
+// before the table (2026-11-28: 7bit.fun charged Fable 5.2 at $12/$60 while the table said $10/$50).
+export function listedPrice(pricing) {
+  const tier = (t) => {
+    const p = { input: t?.input_per_million_usd, output: t?.output_per_million_usd, cacheRead: t?.cache_read_per_million_usd, cacheWrite5m: t?.cache_write_5m_per_million_usd, cacheWrite1h: t?.cache_write_1h_per_million_usd };
+    return Object.values(p).every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0) ? p : null;
+  };
+  const base = tier(pricing);
+  if (!base) return null;
+  const long = pricing.long_context && Number(pricing.long_context.threshold_tokens) > 0 ? tier(pricing.long_context) : null;
+  return long ? { ...base, longContext: { threshold: Number(pricing.long_context.threshold_tokens), ...long } } : base;
+}
+
 // USD for one request's usage as the API reports it; null for a model with no price.
 export function costOf(model, usage = {}) {
-  const price = priceOf(model);
+  return costAt(priceOf(model), usage);
+}
+
+// The same at a given price (a row of the table, or listedPrice's).
+export function costAt(price, usage = {}) {
   if (!price) return null;
   const n = (v) => Math.max(0, Number(v) || 0);
   const input = n(usage.input_tokens);

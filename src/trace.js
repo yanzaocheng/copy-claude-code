@@ -282,7 +282,7 @@ export class RuntimeTrace {
     }
   }
 
-  requestEnd(handle, { usage = {}, cache = null, model = '', stopReason = null, context_tokens = 0, error = null, cacheMiss = null } = {}) {
+  requestEnd(handle, { usage = {}, cache = null, model = '', stopReason = null, context_tokens = 0, error = null, cacheMiss = null, cost = null } = {}) {
     if (!this.enabled || !handle) return null;
     const u = usage || {};
     const ok = !error;
@@ -311,6 +311,8 @@ export class RuntimeTrace {
       cache_read_tokens: read,
       cache_write_tokens: write,
       cache_hit: read > 0,
+      // USD at the price the request was charged at here (api.js charge): what a model cost, per agent, is read from this
+      cost_usd: cost > 0 ? Math.round(cost * 1e6) / 1e6 : null,
       cache_miss: miss,
       cache: cache && typeof cache === 'object' ? {
         caching: Boolean(cache.caching),
