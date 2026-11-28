@@ -2,7 +2,7 @@
 
 import { esc, api, toast, fail, fmtTokens, fmtUsd, fmtDuration, shortPath, ICON, $, $$ } from "./util.js";
 import { ansi, ansiLines, md } from "./markdown.js";
-import { applyEvent, hydrate, itemHtml, wireForks, processBlocks, procHtml, procOpen, updateProc, procToggleButton, wireProcToggle } from "./transcript.js";
+import { applyEvent, hydrate, itemHtml, wireForks, wireCopies, processBlocks, procHtml, procOpen, updateProc, procToggleButton, wireProcToggle } from "./transcript.js";
 import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
 import { ws, loadWorkspace, archive, putAway } from "./workspace.js";
@@ -272,6 +272,7 @@ export function liveView(peerId) {
   const tick = setInterval(renderStatus, 250);
   const unquote = quoteSelection(log, (text) => c.quote(text));
   wireForks(log, () => status.sessionId);
+  wireCopies(log, () => state.items);
   wireProcToggle($("#lproc", el), log);
   const finder = findInConversation({ root: log, scroller, host: $(".chat-page", el), button: $("#lfind", el) });
   // opened from the sidebar's search by what was said in it: at the place the words are (once the conversation is

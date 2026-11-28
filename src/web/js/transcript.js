@@ -102,8 +102,10 @@ function turnMeta(text) {
     return esc(p);
   });
   const check = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
-  return `<div class="turn-meta" title="${esc(text)}" data-turn="${esc(text)}"><span class="tm-done"><span class="tm-check">${check}</span>${esc(at)} 完成</span>${parts.map((p) => `<span>${p}</span>`).join("")}<span class="tm-acts"><button type="button" class="tm-act" data-fork title="在新对话中分支：从这里接着聊，这个对话不受影响" aria-label="在新对话中分支">${BRANCH}</button></span></div>`;
+  return `<div class="turn-meta" title="${esc(text)}" data-turn="${esc(text)}"><span class="tm-done"><span class="tm-check">${check}</span>${esc(at)} 完成</span>${parts.map((p) => `<span>${p}</span>`).join("")}<span class="tm-acts"><button type="button" class="tm-act" data-copy-answer title="复制回答（Markdown）" aria-label="复制回答">${COPY}</button><button type="button" class="tm-act" data-fork title="在新对话中分支：从这里接着聊，这个对话不受影响" aria-label="在新对话中分支">${BRANCH}</button></span></div>`;
 }
+const COPY = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/><path d="M15.5 8.5V6A2.5 2.5 0 0 0 13 3.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5"/></svg>';
+const COPIED = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
 const BRANCH = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="12" r="2.2"/><circle cx="18" cy="5.5" r="2.2"/><circle cx="18" cy="18.5" r="2.2"/><path d="M8 11 16 6.6M8 13l8 4.4"/></svg>';
 
 // 在新对话中分支 under an answer: a new conversation with this one up to there (data.js forkSession), run by the console
@@ -126,6 +128,48 @@ export function wireForks(log, sessionIdOf) {
       else if (r.dir && r.sessionId) location.hash = `#/session/${r.dir}/${r.sessionId}`;
     } catch (err) { fail(err); } finally { b.disabled = false; }
   });
+}
+
+// 复制 under an answer: the answer as the model wrote it (Markdown), that is what is drawn outside its turn's
+// 执行过程. The answer is told by the place of its done line among those of the page (they are drawn in order).
+export function wireCopies(log, itemsOf) {
+  log.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-copy-answer]");
+    if (!b) return;
+    const nth = [...log.querySelectorAll(".turn-meta")].indexOf(b.closest(".turn-meta"));
+    const text = answers(itemsOf() || [])[nth];
+    if (!text) { toast("这一轮没有文字回答"); return; }
+    if (!(await copy(text))) { prompt("请手动复制", text); return; }
+    b.innerHTML = COPIED;
+    b.title = "已复制";
+    clearTimeout(b.copiedTimer);
+    b.copiedTimer = setTimeout(() => { b.innerHTML = COPY; b.title = "复制回答（Markdown）"; }, 1500);
+  });
+}
+// The answer of each done line, in order: what the model wrote after its turn's last tool call or thinking (all it
+// wrote in a turn without tool calls), as processBlocks lays a turn out.
+function answers(items) {
+  const out = [];
+  let texts = [];
+  for (const b of processBlocks(items)) {
+    if (b.proc || BOUNDARY.has(b.k)) texts = [];
+    else if (b.k === "text") { if (b.text.trim()) texts.push(b.text.trim()); }
+    else if (b.k === "output") for (const line of b.lines || []) if (DONE_LINE.test(plain(line).trim())) { out.push(texts.join("\n\n")); texts = []; }
+  }
+  return out;
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* no clipboard API off a secure page (http from another computer): the old way */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* refused */ }
+  ta.remove();
+  return ok;
 }
 
 // ---------------------------------------------------------------- 执行过程

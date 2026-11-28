@@ -1,7 +1,7 @@
 // 会话: all conversations, the trash, and one conversation as history.
 
 import { esc, api, toast, fail, fmtBytes, fmtUsd, fmtTime, ago, shortPath, ICON, $ } from "./util.js";
-import { itemHtml, wireForks, processBlocks, procHtml, procOpen, procToggleButton, wireProcToggle } from "./transcript.js";
+import { itemHtml, wireForks, wireCopies, processBlocks, procHtml, procOpen, procToggleButton, wireProcToggle } from "./transcript.js";
 import { folded } from "./images.js";
 import { wholeOutputs } from "./dialogs.js";
 import { view, page } from "./router.js";
@@ -101,6 +101,7 @@ export async function sessionView(dir, id) {
   const blocks = processBlocks(d.items);
   let i = 0;
   wireForks(log, () => id);
+  wireCopies(log, () => d.items);
   wireProcToggle($("#hproc", el), log);
   const wholes = wholeOutputs(log, async (tool) => (await api(`${base}/output/${encodeURIComponent(tool)}`)).text, (tool, text) => {
     const node = log.querySelector(`[data-cut="${CSS.escape(tool)}"]`);
